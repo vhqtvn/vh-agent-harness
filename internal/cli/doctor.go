@@ -49,7 +49,7 @@ var doctorCmd = &cobra.Command{
   armed-schema  every platform_armed file schema-conformant          FAIL if schema-invalid
   managed-drift every platform_managed file matches re-rendered bytes FAIL if drifted/missing
   environment   node on PATH + shell-guard eval.js present            FAIL if missing
-  gitignore     runtime-state dirs (.opencode/state|sessions|…) ignored WARN if not ignored
+  gitignore     harness-written dirs (.opencode/state…, __pycache__) ignored WARN if not ignored
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -128,9 +128,9 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	fmt.Fprintln(out, "    "+cr.String())
 	applyTier(cr.tier, &problems, &warns)
 
-	// 6. Runtime-state dirs must be gitignored (WARN). .gitignore is
-	//    project_owned, so an adopted/edited repo can silently commit agent
-	//    scratch; this surfaces it without failing the command.
+	// 6. Harness-written dirs must be gitignored (WARN): runtime scratch +
+	//    Python __pycache__. .gitignore is project_owned, so an adopted/edited
+	//    repo can silently commit them; this surfaces it without failing.
 	fmt.Fprintln(out, "  gitignore:")
 	gr := checkRuntimeStateGitignored(abs)
 	fmt.Fprintln(out, "    "+gr.String())
@@ -361,27 +361,35 @@ func checkManagedDrift(target string) checkResult {
 	}
 }
 
-// runtimeStateDirs are the per-project scratch subtrees the harness writes and
-// NEVER tracks. They must be gitignored or agent run-state gets committed. Kept
-// in sync with the seamUnexpectedSkip set used by the drift "unexpected" scan.
-var runtimeStateDirs = []string{
+// harnessWrittenIgnorableDirs are subtrees the harness's own runtime and scripts
+// create that must be gitignored or they get committed:
+//   - per-project agent scratch (.opencode/state|sessions|plans|runs), kept in
+//     sync with seamUnexpectedSkip (the drift "unexpected" scan);
+//   - the __pycache__ dirs Python leaves next to every shipped .py script dir
+//     (.opencode/scripts, .opencode/sys-scripts, and the skill script dirs).
+//
+// The shipped .gitignore covers all of them (a global __pycache__/ plus the
+// runtime-state entries), but .gitignore is project_owned (seeded on greenfield,
+// PRESERVED on adopt and freely hand-editable), so an adopted repo can silently
+// start committing them. checkRuntimeStateGitignored WARNs in that case.
+var harnessWrittenIgnorableDirs = []string{
 	".opencode/state",
 	".opencode/sessions",
 	".opencode/plans",
 	".opencode/runs",
+	".opencode/scripts/__pycache__",
+	".opencode/sys-scripts/__pycache__",
+	".opencode/skills/bgshell-job/scripts/__pycache__",
+	".opencode/skills/skill-creator/scripts/__pycache__",
 }
 
-// checkRuntimeStateGitignored WARNs when any runtime-state dir is not ignored by
-// git. The shipped .gitignore lists all of them, but .gitignore is project_owned
-// (seeded on a greenfield install, PRESERVED on adopt and freely hand-editable),
-// so an adopted repo — or one whose ignore entries were removed — can silently
-// start committing agent scratch while doctor otherwise reads HEALTHY.
-//
-// It shells to `git check-ignore` (the authoritative resolver: honors nested
-// ignores, negations, core.excludesFile) against a probe path UNDER each dir so
-// a `dir/` rule matches whether or not the dir currently exists. The check is a
-// no-op (SKIP) outside a git work tree or when git is unavailable, and is WARN
-// (never FAIL) so it never blocks a command.
+// checkRuntimeStateGitignored WARNs when any harness-written dir is not ignored
+// by git (runtime scratch + Python __pycache__). It shells to `git check-ignore`
+// (the authoritative resolver: honors nested ignores, negations,
+// core.excludesFile) against a probe path UNDER each dir so a `dir/` rule matches
+// whether or not the dir currently exists. The check is a no-op (SKIP) outside a
+// git work tree or when git is unavailable, and is WARN (never FAIL) so it never
+// blocks a command.
 func checkRuntimeStateGitignored(target string) checkResult {
 	const name = "gitignore"
 	if _, err := exec.LookPath("git"); err != nil {
@@ -392,7 +400,7 @@ func checkRuntimeStateGitignored(target string) checkResult {
 		return checkResult{name: name, tier: tierSkip, detail: "not a git work tree"}
 	}
 	var notIgnored []string
-	for _, d := range runtimeStateDirs {
+	for _, d := range harnessWrittenIgnorableDirs {
 		// Probe a path UNDER the dir so a `dir/` ignore rule matches even when
 		// the dir does not yet exist on disk.
 		runErr := exec.Command("git", "-C", target, "check-ignore", "-q", d+"/.probe").Run()
@@ -409,11 +417,11 @@ func checkRuntimeStateGitignored(target string) checkResult {
 	}
 	if len(notIgnored) > 0 {
 		return checkResult{name: name, tier: tierWarn, detail: fmt.Sprintf(
-			"%d runtime-state dir(s) NOT gitignored (e.g. %s/) — add to .gitignore so agent scratch isn't committed",
+			"%d harness-written dir(s) NOT gitignored (e.g. %s/) — add to .gitignore so agent scratch / __pycache__ isn't committed",
 			len(notIgnored), notIgnored[0])}
 	}
 	return checkResult{name: name, tier: tierPass,
-		detail: fmt.Sprintf("%d runtime-state dir(s) gitignored", len(runtimeStateDirs))}
+		detail: fmt.Sprintf("%d harness-written dir(s) gitignored", len(harnessWrittenIgnorableDirs))}
 }
 
 // fieldErrs renders a slice of schema.FieldError into a compact string.

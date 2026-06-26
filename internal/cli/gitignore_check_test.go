@@ -33,14 +33,35 @@ func writeGitignore(t *testing.T, dir, body string) {
 func TestRuntimeStateGitignored_PassWhenIgnored(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
-	writeGitignore(t, dir, ".opencode/state/\n.opencode/sessions/\n.opencode/plans/\n.opencode/runs/\n")
+	// Ignore the runtime-state dirs AND __pycache__ (the global pattern covers
+	// every Python script dir the harness ships).
+	writeGitignore(t, dir, ".opencode/state/\n.opencode/sessions/\n.opencode/plans/\n.opencode/runs/\n__pycache__/\n")
 
 	r := checkRuntimeStateGitignored(dir)
 	if r.tier == tierSkip {
 		t.Skipf("check unavailable in env: %s", r.detail)
 	}
 	if r.tier != tierPass {
-		t.Fatalf("want PASS when all runtime-state dirs ignored, got %s: %s", r.tier, r.detail)
+		t.Fatalf("want PASS when all harness-written dirs ignored, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestRuntimeStateGitignored_WarnWhenPycacheMissing: runtime-state dirs ignored
+// but __pycache__ not — the check must WARN and name a __pycache__ dir.
+func TestRuntimeStateGitignored_WarnWhenPycacheMissing(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeGitignore(t, dir, ".opencode/state/\n.opencode/sessions/\n.opencode/plans/\n.opencode/runs/\n")
+
+	r := checkRuntimeStateGitignored(dir)
+	if r.tier == tierSkip {
+		t.Skipf("check unavailable in env: %s", r.detail)
+	}
+	if r.tier != tierWarn {
+		t.Fatalf("want WARN when __pycache__ is not ignored, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "__pycache__") {
+		t.Errorf("WARN should name a __pycache__ dir; got %q", r.detail)
 	}
 }
 

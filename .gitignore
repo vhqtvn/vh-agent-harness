@@ -53,7 +53,8 @@ tmp/
 .opencode/sessions/
 .opencode/plans/
 .opencode/runs/
-.opencode/scripts/__pycache__/
+__pycache__/
+*.pyc
 .local/coordinator/
 .local/config/
 .opencode/node_modules/
