@@ -25,7 +25,7 @@ var execFl *execFlags
 // execCmd runs a command inside the configured runtime backend AFTER the
 // permission gate evaluates it. It replaces the slice-1/2/3 stub.
 var execCmd = &cobra.Command{
-	Use:   "exec [--service <name>] [--workdir <dir>] [--tty] -- <cmd> [args...]",
+	Use:   "exec [--service <name>] [--workdir <dir>] [--tty] [--] <cmd> [args...]",
 	Short: "Run a command inside the harness runtime",
 	Long: `Run a command inside the configured runtime backend (manifest.runtime.backend).
 
@@ -38,8 +38,13 @@ By default exec is NON-interactive (docker compose: -T) so output streams
 cleanly to stdout — this matches the canonical ` + "`vh-agent-harness exec bash -c '...'`" + `
 usage. Pass --tty/-t to allocate a TTY.
 
-Use ` + "`--`" + ` to separate harness flags from the command when needed, e.g.
-   vh-agent-harness exec --service dev -- echo hello
+Flag parsing STOPS at the first positional (the command), so the command's own
+flags pass straight through and you do NOT need ` + "`--`" + `:
+   vh-agent-harness exec bash -c 'echo hi'      # -c goes to bash
+   vh-agent-harness exec pytest -k mytest       # -k goes to pytest
+Put any harness flags (--service/--workdir/--tty) BEFORE the command. Use ` + "`--`" + `
+only when the command's FIRST token would otherwise look like a flag:
+   vh-agent-harness exec --service dev -- my-cmd
 
 Requires a governing manifest (run ` + "`vh-agent-harness install`" + ` first).`,
 	Args: cobra.MinimumNArgs(1),
@@ -48,6 +53,12 @@ Requires a governing manifest (run ` + "`vh-agent-harness install`" + ` first).`
 
 func init() {
 	execFl = &execFlags{}
+	// Stop flag parsing at the first positional so the wrapped command's own
+	// flags (`bash -c …`, `pytest -k …`, `node --check …`) pass through to it
+	// instead of being parsed as exec flags. This makes `--` optional: it is only
+	// needed when the command's FIRST token itself looks like a flag. Harness
+	// flags must precede the command.
+	execCmd.Flags().SetInterspersed(false)
 	execCmd.Flags().StringVar(&execFl.service, "service", "", "target service (default: manifest runtime.default_service)")
 	execCmd.Flags().StringVarP(&execFl.workdir, "workdir", "w", "", "working directory inside the runtime")
 	execCmd.Flags().BoolVarP(&execFl.tty, "tty", "t", false, "allocate a TTY (interactive)")
@@ -96,7 +107,15 @@ func runExec(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("pre_exec hook: %w", err)
 	}
 
-	action, reason, err := evaluateGate(lm.dir, args)
+	// Evaluate the command AS INVOKED — wrapped in `vh-agent-harness exec` — so
+	// the shell-guard "harness branch" applies: it trusts the exec boundary and
+	// guards the payload via the forbidden-patterns scan + the commit-gate rule.
+	// Passing the BARE payload would route it into the raw-command read-only
+	// allowlist (grep/cat/ls/…) and falsely deny every mutating command exec
+	// exists to run (mkdir, pytest, npm, bash -c …). This mirrors what the
+	// OpenCode shell-guard plugin sees for the same invocation.
+	gateArgs := append([]string{"vh-agent-harness", "exec"}, args...)
+	action, reason, err := evaluateGate(lm.dir, gateArgs)
 	if err != nil {
 		// Hook itself failed: deny-by-default for safety.
 		fmt.Fprintf(os.Stderr, "permission hook error: %v\n", err)

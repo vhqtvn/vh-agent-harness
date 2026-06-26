@@ -80,7 +80,7 @@ export function inspectorAllowIf(inspectorGroup) {
         "(?![\\s\\S]*(?:&&|\\|\\||[;&|`]|\\$\\())" +
         "(?:^\\s*" +
             "(?:[A-Z_][A-Z0-9_]*=\\S*\\s+)*" + // leading env-var assignments
-            "(?:vh-agent-harness\\s+(?:[A-Za-z]+\\s+)*exec\\s+)?" + // vh-agent-harness [subcmd] exec
+            "(?:vh-agent-harness\\s+(?:[A-Za-z]+\\s+)*exec\\s+(?:--\\s+)?)?" + // vh-agent-harness [subcmd] exec [--]
             "(?:" + inspectorGroup + ")(?=\\s|$)" + // inspector verb in command position
         "|\\b(?:bash|sh|zsh)\\s+-[a-z]*c\\s+['\"]\\s*" + // inside shell -c '...'
             "(?:[A-Z_][A-Z0-9_]*=\\S*\\s+)*" +
