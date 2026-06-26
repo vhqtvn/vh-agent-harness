@@ -38,16 +38,32 @@ ambiguous/unsafe plan aborts before writing.
    The `.opencode/` tree is generated; your inputs live in `.vh-agent-harness/`.
 4. **Prefer `--json`** where offered (`guide --json`) for reliable parsing.
 
-## Files you edit (all under `.vh-agent-harness/` unless noted)
+## Configurable files
 
-| File | Purpose |
+The harness does **not** scatter `*.example` scaffolds into the repo. Discover
+and print any file's doc/template on demand:
+
+```
+vh-agent-harness example                 # list every configurable file
+vh-agent-harness example <path>          # print one file's doc/template
+vh-agent-harness example <path> > <path> # create it, then edit
+```
+
+This list is authoritative (it mirrors `vh-agent-harness example`). Paths are
+real target locations.
+
+| File | What to do |
 | --- | --- |
-| `vh-harness-profile.yml` | select features + `overlays: [<pack>]` (S3, armed) |
-| `run-shape.yml` | runtime `backend:` (`host-shell`/`docker_compose`/`proxy`) + `proxy_command` (S4) |
-| `AGENTS.mission.md` | your project's domain mission; composed into root `AGENTS.md` |
-| `overlays/<pack>/` | project overlay: `agents/`, `commands/`, `skills/`, `opencode-append.jsonc`, `permission-pack.jsonc`, `callable-graph-snippet.md` |
-| `harness-ownership.yml` | raise-only ownership overrides (take a managed file to `project_owned`) |
-| `.opencode/repo-configs/forbidden-patterns.project.js` | project deny-rules (import builders from `forbidden-patterns.core.js`; each rule needs a `why`) |
+| `.vh-agent-harness/project.config.json` | Fill `project.mission_summary` + `architecture_summary` (and `db_user`/`db_name` if used). Resolved into the seeded `CLAUDE.md`/`Makefile` at install — **create + fill it BEFORE `install`** (those seeds are written once). |
+| `.vh-agent-harness/AGENTS.mission.md` | Write the project's domain mission/architecture/rules; composed into root `AGENTS.md` on `update`. |
+| `.vh-agent-harness/vh-harness-profile.yml` | (armed, seeded) Select features + `overlays: [<pack>]` (S3). |
+| `.vh-agent-harness/run-shape.yml` | (seeded host-shell) Set runtime `backend:` (`host-shell`/`docker_compose`/`proxy`) + `compose_file`/`default_service` or `proxy_command`; lifecycle hooks/verbs (S4). |
+| `.vh-agent-harness/harness-ownership.yml` | (optional; not seeded) Raise-only ownership overrides — create only to take a managed file to `project_owned`. |
+| `.vh-agent-harness/overlays/<pack>/` | Project overlay: `agents/`, `commands/`, `skills/`, `opencode-append.jsonc`, `permission-pack.jsonc`, `callable-graph-snippet.md`. |
+| `.opencode/repo-configs/forbidden-patterns.project.js` | (seeded blank) Project deny-rules (import builders from `forbidden-patterns.core.js`; each rule needs a `why`). |
+| `.opencode/plugins/compaction-primitives.project.md` | Project compaction-recovery block (operational primitives an agent needs after context loss). |
+| `docs/coordination/LANES.yaml`, `docs/coordination/ROLES.md` | Coordination lanes/roles — define project-specific ones or keep the generic set. |
+| `.local/cleared-assumptions.yaml` | Operator-state ledger of cleared assumptions (usually operator-maintained). |
 
 Do **not** edit: `lineage.yml` (binary-owned), `AGENTS.core.md` (managed
 compose source), or anything under `.opencode/` that is platform_managed.
@@ -62,6 +78,12 @@ compose source), or anything under `.opencode/` that is platform_managed.
   > .vh-agent-harness/AGENTS.mission.md`, fill it in, `update` (composes `AGENTS.md`).
 - **Configure any file:** `vh-agent-harness example <path>` prints its doc/template
   (no `*.example` files are shipped into the repo). `vh-agent-harness example` lists all.
+- **Run a command in the runtime:** `vh-agent-harness exec -- <cmd>` (the `--` is
+  optional — the command's own flags pass through, e.g. `exec bash -c '…'`,
+  `exec pytest -k x`; put any harness flags BEFORE the command). Mutating
+  commands are allowed; only forbidden-patterns and the commit-gate are blocked.
+  Put env vars / `timeout` INSIDE the command (`exec bash -c 'FOO=1 cmd'`), never
+  as a host prefix.
 - **Use an existing wrapper for execution:** in `run-shape.yml` set
   `backend: proxy` and `proxy_command: ["./dev.sh", "exec"]`.
 - **Refresh after a new binary or config change:** `vh-agent-harness update`

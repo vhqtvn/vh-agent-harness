@@ -29,6 +29,10 @@ develop the harness.
   preserved / seeded-once / schema-reconciled. Always preview with `--dry-run`.
 - **Agent-operability is a feature.** `guide`, `--dry-run`, and the next-steps
   footers must stay accurate to the real command surface.
+- **`README.agent.md` must always be up-to-date.** It is the agent operating
+  manual; any change to the command surface, the configurable-file set
+  (`vh-agent-harness example`), ownership, or the runtime/exec contract MUST be
+  reflected there in the same change. Treat a stale `README.agent.md` as a bug.
 
 ## Dogfood loop
 
