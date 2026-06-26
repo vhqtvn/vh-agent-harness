@@ -92,6 +92,7 @@ func runPreflight(cmd *cobra.Command, _ []string) error {
 			checkSeamLineage(cwd),
 			checkRuntimeSeam(),
 			checkManagedDrift(cwd),
+			checkRuntimeStateGitignored(cwd),
 		}
 	} else {
 		root, lm, manifestErr := resolveHarnessRoot()
