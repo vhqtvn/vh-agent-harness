@@ -268,7 +268,7 @@ func checkDrift(lm *loadedManifest) checkResult {
 	}
 	if report.HasProblems() {
 		return checkResult{name: "drift", tier: tierFail,
-			detail: fmt.Sprintf("%d drifted, %d missing, %d unexpected — run `harness upgrade`",
+			detail: fmt.Sprintf("%d drifted, %d missing, %d unexpected — run `vh-agent-harness update`",
 				report.Counts[drift.Drifted], report.Counts[drift.Missing], report.Counts[drift.Unexpected])}
 	}
 	return checkResult{name: "drift", tier: tierPass,

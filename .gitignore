@@ -18,7 +18,7 @@ coverage.*
 go.work
 go.work.sum
 
-# Dev installs — a `harness install` into a scratch dir inside the repo during
+# Dev installs — a `vh-agent-harness install` into a scratch dir inside the repo during
 # dev pulls npm deps under <target>/.opencode/node_modules. Ignore them so they
 # never leak into commits.
 node_modules/

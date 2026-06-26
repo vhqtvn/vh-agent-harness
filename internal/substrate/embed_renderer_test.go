@@ -5,12 +5,61 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
 
 	corpus "github.com/vhqtvn/vh-agent-harness" // root package: embed vars corpus.CoreFS etc.
 )
+
+// bareHarnessCommandRe matches the binary/command name written as the bare,
+// generic `harness <subcommand>` instead of the canonical `vh-agent-harness`.
+// The leading (^|[^\w-]) ensures the `harness` of `vh-agent-harness` (preceded
+// by `-`) is NOT matched, and the verb list is restricted to UNAMBIGUOUS
+// subcommands that never occur as the English noun "harness <word>" (so e.g.
+// "the harness version" / "a harness install" / "harness state" stay legal).
+var bareHarnessCommandRe = regexp.MustCompile(
+	`(^|[^\w-])harness[ \t]+(exec|shell|doctor|guide|diff|uninstall|preflight|proposals|self-update|ssh-trust|smoke|upgrade|git )`)
+
+// jsBareHarnessPrefixRe catches the shell-guard gate recognizing the wrapper by
+// the bare `"harness "` / `'harness '` prefix (startsWith/includes) — the exact
+// defect that surfaced the bare generic command form to agents because the gate's notion
+// of the command name diverged from the installed binary (vh-agent-harness).
+var jsBareHarnessPrefixRe = regexp.MustCompile(`["'` + "`" + `]harness `)
+
+// TestCorpus_NoBareHarnessCommandReferences is the durable regression guard for
+// the command-name contract: the binary is `vh-agent-harness`, never the generic
+// `harness`. Agent-facing corpus files (commands, skills, the shell-guard gate,
+// deny-rules) that say bare `harness <verb>` teach agents to invoke a command
+// that does not exist on PATH — exactly the failure a human reported. This walks
+// the FULL embedded corpus and fails on any bare-`harness` command form.
+func TestCorpus_NoBareHarnessCommandReferences(t *testing.T) {
+	coreSub, err := fs.Sub(corpus.CoreFS, corpus.CoreDir)
+	if err != nil {
+		t.Fatalf("fs.Sub(core): %v", err)
+	}
+	var violations []string
+	_ = fs.WalkDir(coreSub, ".", func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil || d.IsDir() {
+			return nil
+		}
+		body, rerr := fs.ReadFile(coreSub, p)
+		if rerr != nil {
+			return nil
+		}
+		for i, line := range strings.Split(string(body), "\n") {
+			if bareHarnessCommandRe.MatchString(line) || jsBareHarnessPrefixRe.MatchString(line) {
+				violations = append(violations, fmt.Sprintf("%s:%d: %s", p, i+1, strings.TrimSpace(line)))
+			}
+		}
+		return nil
+	})
+	if len(violations) > 0 {
+		t.Fatalf("bare `harness <cmd>` in corpus (must be `vh-agent-harness`): %d:\n%s",
+			len(violations), strings.Join(violations, "\n"))
+	}
+}
 
 // TestEmbedFSRenderer_SubstitutesAndStripsSuffix proves the embed-backed
 // renderer performs the same {{ .var }} substitution and .tmpl suffix stripping

@@ -39,7 +39,7 @@ func (e *DowngradeError) Error() string {
 		"ownership downgrade rejected for path %q: %s -> %s (%s).\n"+
 			"Ordinary harness-ownership.yml overrides are raise-only (D2-A). "+
 			"Weakening protection requires the reviewed, logged downgrade workflow:\n"+
-			"    harness ownership downgrade --path %q\n"+
+			"    vh-agent-harness ownership downgrade --path %q\n"+
 			"  or\n"+
 			"    vh-agent-harness update --propose\n"+
 			"(Not implemented in v0; tracked as the only future escape hatch.)",

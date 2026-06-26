@@ -108,7 +108,7 @@ func managedBodyWithAnchor(anchor string) string {
 // the body lands on the line(s) immediately after the anchor line.
 func TestInjectSlots_AtAnchor(t *testing.T) {
 	body := managedBodyWithAnchor(testAnchor)
-	snippet := "- harness ssh-trust <host> : trust a VPS host key."
+	snippet := "- vh-agent-harness ssh-trust <host> : trust a VPS host key."
 	injected, orphans := InjectSlots(body, []SlotInjection{
 		{TargetRel: "agents/build.md", Slot: "custom-verbs", Body: snippet},
 	})
@@ -258,7 +258,7 @@ func TestInjectExtensionSnippets_InjectsAtAnchor(t *testing.T) {
 		Name: "acme",
 		FS: fstest.MapFS{
 			"agents/build.extend.custom-verbs.md": {
-				Data: []byte("- harness ssh-trust <host> : trust a VPS host key."),
+				Data: []byte("- vh-agent-harness ssh-trust <host> : trust a VPS host key."),
 			},
 		},
 	}
@@ -276,7 +276,7 @@ func TestInjectExtensionSnippets_InjectsAtAnchor(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("read back target: %v", rerr)
 	}
-	want := managedHead + testAnchor + "\n" + "- harness ssh-trust <host> : trust a VPS host key." + "\n" + managedTail
+	want := managedHead + testAnchor + "\n" + "- vh-agent-harness ssh-trust <host> : trust a VPS host key." + "\n" + managedTail
 	if string(got) != want {
 		t.Errorf("target not injected at anchor:\nwant=%q\ngot =%q", want, string(got))
 	}

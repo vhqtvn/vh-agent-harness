@@ -170,7 +170,7 @@ func TestDowngradeError_MessageAndGuidance(t *testing.T) {
 		`platform_managed`,
 		`downgrade rejected`,
 		`raise-only (D2-A)`,
-		`harness ownership downgrade --path`,
+		`vh-agent-harness ownership downgrade --path`,
 		`vh-agent-harness update --propose`,
 		`Not implemented in v0`,
 	} {

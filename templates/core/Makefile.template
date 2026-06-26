@@ -2,8 +2,8 @@
 # Rendered from this file + project.config.json at install time.
 # Tokens: {{PROJECT_SLUG}}, {{DB_USER}}, {{DB_NAME}}.
 # Lines starting with `##` are author notes; strip on render.
-## The Makefile is a thin convenience wrapper over harness. It is NOT the
-## primary interface — harness is. Keep targets delegating to harness.
+## The Makefile is a thin convenience wrapper over vh-agent-harness. It is NOT
+## the primary interface — vh-agent-harness is. Keep targets delegating to it.
 
 .PHONY: env dev-up dev-down dev-logs clean smoke test lint fmt migrate shell
 
@@ -55,7 +55,7 @@ migrate:
 ## .vh-agent-harness/run-shape.yml under verbs: (e.g. a hook leaf). The harness
 ## core ships no project-specific smoke runner; declare your own.
 smoke:
-	harness smoke
+	vh-agent-harness smoke
 
 ## Remove build artifacts and repo-scoped tmp/.
 clean:

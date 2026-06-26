@@ -49,8 +49,8 @@ func TestRunUpdate_DowngradeRejectionPrintsReasonToStderr(t *testing.T) {
 	for _, want := range []string{
 		"error:", // the prefixed stderr line
 		".vh-agent-harness/vh-harness-profile.yml", // the rejected path
-		"raise-only",                  // the rule name + guidance
-		"harness ownership downgrade", // the future reviewed-downgrade hint
+		"raise-only",                           // the rule name + guidance
+		"vh-agent-harness ownership downgrade", // the future reviewed-downgrade hint
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("runUpdate output missing %q\n--- output ---\n%s", want, out)
