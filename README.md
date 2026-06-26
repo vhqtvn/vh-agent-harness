@@ -78,8 +78,7 @@ project's own identity files.
   harness-ownership.yml       S2 — raise-only ownership overrides (operator-authored; not seeded)
   overlays/<pack>/            project-supplied overlay packs (agents/commands/skills)
   AGENTS.core.md              compose source — generic rules (managed)
-  AGENTS.mission.md.example   compose source seed — copy to AGENTS.mission.md and edit
-  AGENTS.mission.md           compose source — project domain (project_owned; you create it)
+  AGENTS.mission.md           compose source — project domain (you create it; see `example` below)
 .opencode/                    rendered agent corpus (agents, commands, skills, plugins)
 opencode.jsonc                OpenCode entrypoint config (root)
 AGENTS.md                     composed = AGENTS.core.md + AGENTS.mission.md (written by `update` once a mission exists)
@@ -88,6 +87,15 @@ AGENTS.md                     composed = AGENTS.core.md + AGENTS.mission.md (wri
 Project-identity files (`.gitignore`, `README.md`, `CLAUDE.md`, `Makefile`) are
 `project_owned`: the harness seeds a scaffold once on a greenfield install and
 **never clobbers** them on update, so installing into an existing repo is safe.
+
+The harness does **not** scatter `*.example` scaffolds into your repo. To create
+or configure a file, print its embedded doc/template on demand and redirect it:
+
+```
+vh-agent-harness example                                          # list configurable files
+vh-agent-harness example .vh-agent-harness/AGENTS.mission.md      # print one
+vh-agent-harness example .vh-agent-harness/project.config.json > .vh-agent-harness/project.config.json
+```
 
 ## Command surface
 

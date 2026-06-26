@@ -17,7 +17,7 @@
 // on-VPS bans) belong in the PROJECT overlay file
 // `forbidden-patterns.project.js` (project_owned), NOT here. The harness
 // scaffolds a blank `forbidden-patterns.project.js` on install; the project
-// fills it. See forbidden-patterns.project.example.js for the pattern.
+// fills it. Run `vh-agent-harness example .opencode/repo-configs/forbidden-patterns.project.js` for the pattern.
 //
 // These rules apply to the full command string, including everything wrapped
 // inside `vh-agent-harness exec ...`, `bash -c '...'`, or ssh remote payloads. Each

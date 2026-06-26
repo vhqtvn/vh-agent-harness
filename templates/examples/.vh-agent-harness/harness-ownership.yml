@@ -1,0 +1,21 @@
+# .vh-agent-harness/harness-ownership.yml  —  S2 raise-only ownership overrides
+#
+# HOW TO CONFIGURE
+# This file is OPTIONAL and operator-authored — the harness never seeds it.
+# Create it only when you want to take over a platform-managed file so updates
+# stop overwriting it. Overrides are RAISE-ONLY (the D2-A lattice): you may
+# strengthen protection (e.g. platform_managed -> project_owned), never weaken it
+# (project_owned -> platform_managed is rejected at apply time).
+#
+# Ownership classes (weakest -> strongest protection from platform writes):
+#   platform_managed    overwritten on every update (the default for corpus files)
+#   platform_armed      schema-reconciled (structural merge, never clobbered)
+#   overlay_extension   contributed by an overlay pack
+#   external_generated  seeded once, then owned by a generator/skill
+#   project_owned       seeded once, then never touched by the platform
+#
+# Example: take over a managed agent prompt so your edits survive updates.
+overrides:
+  # .opencode/agents/build.md:
+  #   class: project_owned
+  #   reason: "we maintain a project-specific build agent prompt"

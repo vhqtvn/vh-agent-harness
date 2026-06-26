@@ -1,0 +1,30 @@
+# .vh-agent-harness/vh-harness-profile.yml  —  S3 feature + overlay selection
+#
+# HOW TO CONFIGURE
+# This file is platform_armed: the platform owns the schema and the default; you
+# edit within the envelope. On `vh-agent-harness update` the substrate does a
+# schema-aware STRUCTURAL reconcile (append-only arrays are unioned, keyed
+# features are project-wins, `profile` stays a project-selectable enum). It is
+# NEVER wholesale-overwritten, so your selections survive updates.
+#
+# You normally do NOT create this file by hand — `install` seeds it. Edit the
+# seeded copy. This document explains each field.
+
+# profile: the feature bundle. Enum; the core ships "minimal".
+profile: minimal
+
+# modules: harness modules to render. "core" is always present.
+modules:
+  - core
+
+# features: per-feature toggles (keyed; your value wins on reconcile).
+features:
+  backlog: false        # enable the backlog/planning command surface
+
+# overlays: project overlay packs to load, by name. Each must exist at
+# .vh-agent-harness/overlays/<name>/ (agents/, commands/, skills/,
+# opencode-append.jsonc, …). Packs load from the project first, then embedded.
+overlays: []
+
+# policy_packs: named permission packs contributed by overlays (advanced).
+policy_packs: []

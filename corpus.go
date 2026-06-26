@@ -23,7 +23,7 @@ import "embed"
 // corpus (Slice 2). This is the canonical corpus the seam renders into target
 // projects: every file under here is platform_managed except the documented
 // armed/owned exceptions (vh-harness-profile.yml=platform_armed,
-// project.config.example.json=project_owned). It replaces the prototype
+// the project-identity files=project_owned). It replaces the prototype
 // harness-root corpus as the install source. The Overlay packs (Slice 4) layer
 // additively on top of this base.
 const CoreDir = "templates/core"
@@ -62,3 +62,20 @@ const OverlaysDir = "templates/overlays"
 //
 //go:embed all:templates/overlays
 var OverlaysFS embed.FS
+
+// ExamplesDir is the embed.FS sub-directory holding configuration DOCS/TEMPLATES
+// for every project-configurable file, mirroring the real target path of each
+// (e.g. templates/examples/.vh-agent-harness/project.config.json documents
+// .vh-agent-harness/project.config.json). These files are EMBED-ONLY: they are
+// NOT under templates/core, so the seam never renders them into a target repo.
+// Instead `vh-agent-harness example <path>` prints them on demand, so the target
+// tree stays free of *.example scaffolds. Covers both the project_owned seeds
+// (mission, forbidden-patterns.project, project.config, …) and the schema'd
+// authorities (vh-harness-profile.yml, run-shape.yml, harness-ownership.yml).
+const ExamplesDir = "templates/examples"
+
+// ExamplesFS is the read-only embedded configuration-docs tree. The `example`
+// command reads from the ExamplesDir sub-directory.
+//
+//go:embed all:templates/examples
+var ExamplesFS embed.FS

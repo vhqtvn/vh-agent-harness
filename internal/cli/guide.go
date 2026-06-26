@@ -32,7 +32,6 @@ type harnessState struct {
 	Overlays       []string `json:"overlays,omitempty"`
 	RuntimeBackend string   `json:"runtime_backend,omitempty"`
 	HasMission     bool     `json:"has_mission"`
-	MissionExample bool     `json:"mission_example_available"`
 }
 
 const (
@@ -89,7 +88,6 @@ func detectHarnessState(cwd string) harnessState {
 		}
 		st.Overlays = activeOverlays(root)
 		st.HasMission = isRegularFile(filepath.Join(root, runshape.DirName, "AGENTS.mission.md"))
-		st.MissionExample = isRegularFile(filepath.Join(root, runshape.DirName, "AGENTS.mission.md.example"))
 		return st
 	}
 	if isExistingDir(filepath.Join(cwd, ".opencode")) {
@@ -127,12 +125,9 @@ func nextSteps(st harnessState) []string {
 	default: // installed
 		var steps []string
 		if !st.HasMission {
-			seed := "copy .vh-agent-harness/AGENTS.mission.md.example → .vh-agent-harness/AGENTS.mission.md"
-			if !st.MissionExample {
-				seed = "create .vh-agent-harness/AGENTS.mission.md"
-			}
-			steps = append(steps, "Describe this project: "+seed+
-				", fill in mission/architecture/product rules, then `vh-agent-harness update` "+
+			steps = append(steps, "Describe this project: "+
+				"`vh-agent-harness example .vh-agent-harness/AGENTS.mission.md > .vh-agent-harness/AGENTS.mission.md`, "+
+				"fill in mission/architecture/product rules, then `vh-agent-harness update` "+
 				"(composes the agent-facing AGENTS.md = AGENTS.core.md + your mission).")
 		}
 		if len(st.Overlays) == 0 {

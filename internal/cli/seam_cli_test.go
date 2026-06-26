@@ -86,12 +86,12 @@ func TestSeamInstall_WritesLineage(t *testing.T) {
 
 // TestSeamInstall_SeedsArmedAndOwned confirms the first seam install seeds the
 // platform_armed (vh-harness-profile.yml) and project_owned
-// (project.config.example.json) files from the platform defaults, and that both
+// (forbidden-patterns.project.js) files from the platform defaults, and that both
 // are present on disk.
 func TestSeamInstall_SeedsArmedAndOwned(t *testing.T) {
 	root := t.TempDir()
 	seamInstallInto(t, root)
-	for _, rel := range []string{".vh-agent-harness/vh-harness-profile.yml", ".vh-agent-harness/project.config.example.json"} {
+	for _, rel := range []string{".vh-agent-harness/vh-harness-profile.yml", ".opencode/repo-configs/forbidden-patterns.project.js"} {
 		abs := filepath.Join(root, rel)
 		if _, err := os.Stat(abs); err != nil {
 			t.Errorf("seam install did not seed %s: %v", rel, err)
@@ -216,8 +216,8 @@ func TestSeamUpdate_PreservesOwnedReconcilesArmed(t *testing.T) {
 	root := t.TempDir()
 	seamInstallInto(t, root)
 
-	// Snapshot the seeded owned file bytes (project.config.example.json).
-	ownedRel := ".vh-agent-harness/project.config.example.json"
+	// Snapshot the seeded owned file bytes (forbidden-patterns.project.js).
+	ownedRel := ".opencode/repo-configs/forbidden-patterns.project.js"
 	ownedBefore, err := os.ReadFile(filepath.Join(root, ownedRel))
 	if err != nil {
 		t.Fatalf("read owned before: %v", err)
@@ -358,7 +358,7 @@ func TestSeamClassifier_ReadsCoreOwnership(t *testing.T) {
 		want ownership.Class
 	}{
 		{".vh-agent-harness/vh-harness-profile.yml", ownership.ClassPlatformArmed},
-		{".vh-agent-harness/project.config.example.json", ownership.ClassProjectOwned},
+		{".opencode/repo-configs/forbidden-patterns.project.js", ownership.ClassProjectOwned},
 		{".vh-agent-harness/AGENTS.core.md", ownership.ClassPlatformManaged},
 		{".opencode/agents/build.md", ownership.ClassPlatformManaged},
 		{".opencode/skills/gated-commit/SKILL.md", ownership.ClassPlatformManaged},

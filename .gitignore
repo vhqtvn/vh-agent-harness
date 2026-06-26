@@ -57,12 +57,3 @@ tmp/
 .local/coordinator/
 .local/config/
 .opencode/node_modules/
-
-# --- vh-agent-harness: rendered reference scaffolds (reproducible, not committed) ---
-/.vh-agent-harness/AGENTS.mission.md.example
-/.vh-agent-harness/project.config.example.json
-/.local/cleared-assumptions.example.yaml
-/docs/coordination/LANES.yaml.example
-/docs/coordination/ROLES.md.example
-/.opencode/repo-configs/forbidden-patterns.project.example.js
-/.opencode/plugins/compaction-primitives.project.example.md

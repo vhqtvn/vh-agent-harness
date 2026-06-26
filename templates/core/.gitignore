@@ -47,19 +47,10 @@ dist/
 !*.env.example
 !*.env.*.example
 
-# --- Harness reference scaffolds (rendered by the harness; reproducible) ---
-# These *.example* files are platform-managed authoring seeds: the harness
-# renders them on every install/update so you can copy each to its real
-# counterpart (forbidden-patterns.project.js, AGENTS.mission.md,
-# project.config.json, …). They are regenerated, so they are NOT committed.
-# Listed by exact path so a project's OWN examples (e.g. .env.example) stay tracked.
-/.vh-agent-harness/AGENTS.mission.md.example
-/.vh-agent-harness/project.config.example.json
-/.local/cleared-assumptions.example.yaml
-/docs/coordination/LANES.yaml.example
-/docs/coordination/ROLES.md.example
-/.opencode/repo-configs/forbidden-patterns.project.example.js
-/.opencode/plugins/compaction-primitives.project.example.md
+# --- Harness config docs ---
+# The harness does NOT scatter *.example scaffolds here. Run
+# `vh-agent-harness example <path>` to print a file's doc/template on demand
+# (e.g. `vh-agent-harness example .vh-agent-harness/AGENTS.mission.md`).
 
 # --- Editor / OS ---
 .DS_Store

@@ -1,9 +1,6 @@
-# Makefile.template
-# Rendered from this file + project.config.json at install time.
-# Tokens: {{PROJECT_SLUG}}, {{DB_USER}}, {{DB_NAME}}.
-# Lines starting with `##` are author notes; strip on render.
-## The Makefile is a thin convenience wrapper over vh-agent-harness. It is NOT
-## the primary interface — vh-agent-harness is. Keep targets delegating to it.
+# Makefile — thin convenience wrapper over vh-agent-harness (NOT the primary
+# interface; vh-agent-harness is). Keep targets delegating to it. Project values
+# (slug, db_user, db_name) come from .vh-agent-harness/project.config.json.
 
 .PHONY: env dev-up dev-down dev-logs clean smoke test lint fmt migrate shell
 

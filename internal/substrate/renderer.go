@@ -293,6 +293,14 @@ const (
 	harnessTokenProjectName    = "{{PROJECT_NAME}}"
 	harnessTokenProjectSlug    = "{{PROJECT_SLUG}}"
 	harnessTokenCoordinatorDir = "{{COORDINATOR_DIR}}"
+	// project.config.json-sourced sentinels (resolved verbatim from answers,
+	// empty when project.config.json is absent or the field is unset). The seam
+	// reads .vh-agent-harness/project.config.json at render time and folds these
+	// into the answers map (see cli.projectConfigAnswers).
+	harnessTokenMissionSummary = "{{MISSION_SUMMARY}}"
+	harnessTokenArchSummary    = "{{ARCHITECTURE_SUMMARY}}"
+	harnessTokenDBUser         = "{{DB_USER}}"
+	harnessTokenDBName         = "{{DB_NAME}}"
 )
 
 // SubstituteHarnessTokens resolves the canonical {{UPPER_TOKEN}} sentinels in
@@ -340,6 +348,11 @@ func SubstituteHarnessTokens(body []byte, answers map[string]string) []byte {
 	body = bytes.ReplaceAll(body, []byte(harnessTokenProjectName), []byte(projectName))
 	body = bytes.ReplaceAll(body, []byte(harnessTokenCoordinatorDir), []byte(coordinatorDir))
 	body = substituteProjectSlugSentinel(body, slug)
+	// project.config.json-sourced sentinels: verbatim, empty when unset.
+	body = bytes.ReplaceAll(body, []byte(harnessTokenMissionSummary), []byte(answers["mission_summary"]))
+	body = bytes.ReplaceAll(body, []byte(harnessTokenArchSummary), []byte(answers["architecture_summary"]))
+	body = bytes.ReplaceAll(body, []byte(harnessTokenDBUser), []byte(answers["db_user"]))
+	body = bytes.ReplaceAll(body, []byte(harnessTokenDBName), []byte(answers["db_name"]))
 	return body
 }
 
@@ -348,7 +361,11 @@ func SubstituteHarnessTokens(body []byte, answers map[string]string) []byte {
 func bodyContainsHarnessToken(body []byte) bool {
 	return bytes.Contains(body, []byte(harnessTokenProjectName)) ||
 		bytes.Contains(body, []byte(harnessTokenProjectSlug)) ||
-		bytes.Contains(body, []byte(harnessTokenCoordinatorDir))
+		bytes.Contains(body, []byte(harnessTokenCoordinatorDir)) ||
+		bytes.Contains(body, []byte(harnessTokenMissionSummary)) ||
+		bytes.Contains(body, []byte(harnessTokenArchSummary)) ||
+		bytes.Contains(body, []byte(harnessTokenDBUser)) ||
+		bytes.Contains(body, []byte(harnessTokenDBName))
 }
 
 // substituteProjectSlugSentinel performs the case-aware {{PROJECT_SLUG}}

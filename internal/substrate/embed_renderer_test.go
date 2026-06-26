@@ -206,7 +206,7 @@ func TestEmbedFSRenderer_RendersRealEmbeddedCoreCorpus(t *testing.T) {
 	for _, rel := range []string{
 		filepath.FromSlash(".vh-agent-harness/AGENTS.core.md"),
 		filepath.FromSlash(".vh-agent-harness/vh-harness-profile.yml"),
-		filepath.FromSlash(".vh-agent-harness/project.config.example.json"),
+		filepath.FromSlash(".opencode/repo-configs/forbidden-patterns.project.js"),
 		filepath.FromSlash(".opencode/agents/build.md"),
 		filepath.FromSlash(".opencode/commands/coordination.md"),
 		filepath.FromSlash(".opencode/skills/gated-commit/SKILL.md"),
@@ -257,6 +257,10 @@ func TestEmbedFSRenderer_RealCoreCorpusResolvesHarnessTokens(t *testing.T) {
 		harnessTokenProjectName,
 		harnessTokenProjectSlug,
 		harnessTokenCoordinatorDir,
+		harnessTokenMissionSummary,
+		harnessTokenArchSummary,
+		harnessTokenDBUser,
+		harnessTokenDBName,
 	}
 	var violations []string
 	_ = filepath.Walk(staging, func(p string, info os.FileInfo, werr error) error {

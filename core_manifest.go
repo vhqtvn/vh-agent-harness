@@ -31,7 +31,6 @@ const (
 // (every exception below is mirrored exactly in the switch + coreExceptionsForDoc):
 //
 //   - .vh-agent-harness/vh-harness-profile.yml             -> platform_armed     (provenance "core.profile")
-//   - .vh-agent-harness/project.config.example.json        -> project_owned      (provenance "core.config")
 //   - .opencode/repo-configs/forbidden-patterns.project.js -> project_owned      (provenance "core.deny.project")
 //   - .opencode/repo-configs/repo-recon-data.yml           -> external_generated (provenance "core.repo-recon.data")
 //   - .gitignore, README.md, CLAUDE.md, Makefile           -> project_owned      (provenance "core.project-identity")
@@ -82,9 +81,6 @@ func CoreOwnershipDefaults() (ownership.ModuleDefaults, error) {
 		case ".vh-agent-harness/vh-harness-profile.yml":
 			rule.Class = ownership.ClassPlatformArmed
 			rule.Provenance = "core.profile"
-		case ".vh-agent-harness/project.config.example.json":
-			rule.Class = ownership.ClassProjectOwned
-			rule.Provenance = "core.config"
 		case ".gitignore", "README.md", "CLAUDE.md", "Makefile":
 			// Project-identity files: the harness ships a generic scaffold, but
 			// these belong to the consuming project (its ignores, its readme, its
@@ -149,7 +145,6 @@ func CorePaths() ([]string, error) {
 // constant for reference and for tests that assert the exception surface.
 var coreExceptionsForDoc = map[string]ownership.Class{
 	".vh-agent-harness/vh-harness-profile.yml":             ownership.ClassPlatformArmed,
-	".vh-agent-harness/project.config.example.json":        ownership.ClassProjectOwned,
 	".opencode/repo-configs/forbidden-patterns.project.js": ownership.ClassProjectOwned,
 	".opencode/repo-configs/repo-recon-data.yml":           ownership.ClassExternalGenerated,
 	// Project-identity files: generic scaffold seeded once, then project-owned.

@@ -251,11 +251,20 @@ func TestSubstituteHarnessTokens(t *testing.T) {
 			t.Fatalf("derived slug failed; got=%q", got)
 		}
 	})
-	t.Run("soft_tokens_and_literal_braces_untouched", func(t *testing.T) {
-		in := []byte("db={{DB_USER}}/{{DB_NAME}} story={{MISSION_SUMMARY}} literal {{ looks }} like a template")
+	t.Run("non_allowlist_tokens_and_literal_braces_untouched", func(t *testing.T) {
+		in := []byte("custom={{CUSTOM_TOKEN}} other={{SOMETHING_ELSE}} literal {{ looks }} like a template")
 		got := SubstituteHarnessTokens(in, map[string]string{"project_name": "Toy"})
 		if string(got) != string(in) {
 			t.Fatalf("non-allowlist tokens must survive byte-identical;\ngot =%q\nwant=%q", got, in)
+		}
+	})
+	t.Run("project_config_tokens_resolve", func(t *testing.T) {
+		in := []byte("m={{MISSION_SUMMARY}} a={{ARCHITECTURE_SUMMARY}} u={{DB_USER}} n={{DB_NAME}}")
+		got := SubstituteHarnessTokens(in, map[string]string{
+			"mission_summary": "M", "architecture_summary": "A", "db_user": "U", "db_name": "N",
+		})
+		if want := "m=M a=A u=U n=N"; string(got) != want {
+			t.Fatalf("project.config tokens must resolve;\ngot =%q\nwant=%q", got, want)
 		}
 	})
 	t.Run("fast_path_noop_when_no_sentinel", func(t *testing.T) {
@@ -282,7 +291,7 @@ func TestGoTemplateRenderer_ResolvesHarnessTokenSentinels(t *testing.T) {
 			"secret: {{PROJECT_SLUG}}_JWT_SECRET\n"+
 			"image: {{PROJECT_SLUG}}-dev-1\n"+
 			"state: .local/{{COORDINATOR_DIR}}/\n"+
-			"db={{DB_USER}} (fill in by hand)\n"+
+			"note={{CUSTOM_NOTE}} (fill in by hand)\n"+
 			"literal {{ looks }} like a template\n")
 
 	r := GoTemplateRenderer{TemplateRoot: root}
@@ -308,8 +317,8 @@ func TestGoTemplateRenderer_ResolvesHarnessTokenSentinels(t *testing.T) {
 		"secret: TOY-PROJECT_JWT_SECRET", // '_' after -> UPPER
 		"image: toy-project-dev-1",       // '-' after -> lower
 		"state: .local/toy-coord/",
-		"db={{DB_USER}} (fill in by hand)",    // soft placeholder preserved
-		"literal {{ looks }} like a template", // literal braces preserved
+		"note={{CUSTOM_NOTE}} (fill in by hand)", // non-harness token preserved
+		"literal {{ looks }} like a template",    // literal braces preserved
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected %q in rendered output; got:\n%s", want, got)

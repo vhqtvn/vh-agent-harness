@@ -1,4 +1,4 @@
-# compaction-primitives.project.example.md (OVERLAY)
+# compaction-primitives.project.md (project compaction-recovery block)
 
 This note documents a project-specific block that the generic
 `compaction-primitives.js` deliberately OMITS, so a consuming project can

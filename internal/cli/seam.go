@@ -375,6 +375,11 @@ func seedRunShapeDefault(target string) error {
 // aborting the apply (a stale profile entry should not block install). Returns
 // the sorted LIVE .opencode-relative paths contributed by overlays.
 func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswers map[string]string, target string) ([]string, error) {
+	// Fold in the project.config.json-sourced tokens (mission/architecture/db).
+	// project.config.json is project_owned and read LIVE from the target so the
+	// seeded CLAUDE.md/Makefile resolve {{MISSION_SUMMARY}} etc. The config keys
+	// never clobber install identity (project_name/slug) — they are disjoint.
+	renderAnswers = mergeRenderAnswers(renderAnswers, projectConfigAnswers(target))
 	if err := renderer.Render(staging, substrate.RenderSpec{
 		TemplateSource: corpus.CoreDir,
 		Answers:        renderAnswers,

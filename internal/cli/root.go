@@ -60,6 +60,7 @@ func init() {
 		uninstallCmd,
 		// orientation (agent-facing entry point)
 		guideCmd,
+		exampleCmd,
 		// binary self-management
 		selfUpdateCmd,
 		versionCmd,

@@ -55,8 +55,11 @@ plans all per-class outcomes fail-closed BEFORE any write, then applies:
   - platform_managed files are written (free-overwrite on update);
   - platform_armed files (vh-harness-profile.yml) are seeded from the validated
     platform default, then schema-reconciled on subsequent runs;
-  - project_owned files (.vh-agent-harness/project.config.example.json) are seeded once and
-    preserved byte-for-byte thereafter.
+  - project_owned files (.gitignore, README.md, CLAUDE.md, Makefile,
+    forbidden-patterns.project.js) are seeded once and preserved thereafter.
+
+Config docs/templates are NOT scattered into the tree as *.example files; run
+` + "`vh-agent-harness example <path>`" + ` to print one on demand.
 
 Re-running install over the same target is idempotent for managed files and a
 no-op reconcile for armed files that already match. It also seeds a default

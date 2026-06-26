@@ -20,7 +20,7 @@ const corpusRoot = "../../templates/core"
 // the real ownership.Resolve (exact-path, raise-only) path. The defaults are
 // derived by walking the EMBEDDED core corpus (corpus.CoreOwnershipDefaults): every
 // path is platform_managed except the documented armed/owned exceptions
-// (vh-harness-profile.yml=platform_armed, project.config.example.json=project_owned).
+// (vh-harness-profile.yml=platform_armed, forbidden-patterns.project.js=project_owned).
 // This makes the seam tests robust to corpus growth (Slice 2 widened the corpus
 // from 3 files to the full curated set) and proves the S2 manifest mechanism.
 func corpusClassifier(t *testing.T) *Classifier {
@@ -68,7 +68,7 @@ func TestApply_ManagedUpdatedOwnedPreservedArmedReconciled(t *testing.T) {
 	// managed: OLD platform content (must be overwritten by staging).
 	writeFile(t, live, ".vh-agent-harness/AGENTS.core.md", "# AGENTS.core.md\nOLD managed content v1\n")
 	// owned: USER content (must be PRESERVED across update, never clobbered).
-	writeFile(t, live, ".vh-agent-harness/project.config.example.json",
+	writeFile(t, live, ".opencode/repo-configs/forbidden-patterns.project.js",
 		`{"_comment":"USER-EDITED owned content; must survive update","profile":"supervised","operator":"alice"}`)
 	// armed: USER-EDITED profile (project added a module + flipped backlog).
 	// Platform default (in corpus) is profile=minimal, modules=[core], backlog=false.
@@ -130,7 +130,7 @@ func TestApply_ManagedUpdatedOwnedPreservedArmedReconciled(t *testing.T) {
 	if pres.Class != ownership.ClassProjectOwned {
 		t.Fatalf("preserved file class: want project_owned, got %s", pres.Class)
 	}
-	gotOwned := readFile(t, live, ".vh-agent-harness/project.config.example.json")
+	gotOwned := readFile(t, live, ".opencode/repo-configs/forbidden-patterns.project.js")
 	if !strings.Contains(gotOwned, "USER-EDITED owned content; must survive update") {
 		t.Fatalf("project_owned file was clobbered! got:\n%s", gotOwned)
 	}
@@ -248,7 +248,7 @@ func TestApply_ArmedConflictEmitsStructuredProposal(t *testing.T) {
 }
 
 func TestApply_ProjectOwnedSeededWhenAbsent(t *testing.T) {
-	live := t.TempDir() // empty: no project.config.example.json yet
+	live := t.TempDir() // empty: no forbidden-patterns.project.js yet
 	staging := t.TempDir()
 
 	r := FixtureRenderer{TemplateRoot: corpusRoot}
@@ -265,7 +265,7 @@ func TestApply_ProjectOwnedSeededWhenAbsent(t *testing.T) {
 	}
 	seeded := false
 	for _, o := range report.Outcomes {
-		if o.Path == ".vh-agent-harness/project.config.example.json" && o.Action == ActionProjectSeeded {
+		if o.Path == ".opencode/repo-configs/forbidden-patterns.project.js" && o.Action == ActionProjectSeeded {
 			seeded = true
 		}
 	}
@@ -274,9 +274,9 @@ func TestApply_ProjectOwnedSeededWhenAbsent(t *testing.T) {
 	}
 	// Seeded content must equal the platform default (staged copy). Content-
 	// agnostic: proves the owned file was seeded FROM staging, regardless of what
-	// the real project.config.example.json happens to contain.
-	stagedOwned, _ := os.ReadFile(filepath.Join(staging, ".vh-agent-harness/project.config.example.json"))
-	got := readFile(t, live, ".vh-agent-harness/project.config.example.json")
+	// the real forbidden-patterns.project.js happens to contain.
+	stagedOwned, _ := os.ReadFile(filepath.Join(staging, ".opencode/repo-configs/forbidden-patterns.project.js"))
+	got := readFile(t, live, ".opencode/repo-configs/forbidden-patterns.project.js")
 	if string(stagedOwned) != got {
 		t.Fatalf("owned file not seeded from staging; staged!=live")
 	}
@@ -314,7 +314,7 @@ func TestApply_AtomicityOwnedNeverTransientlyClobbered(t *testing.T) {
 	live := t.TempDir()
 	staging := t.TempDir()
 	const sentinel = `{"sentinel":"owned-must-not-change"}`
-	writeFile(t, live, ".vh-agent-harness/project.config.example.json", sentinel)
+	writeFile(t, live, ".opencode/repo-configs/forbidden-patterns.project.js", sentinel)
 	writeFile(t, live, ".vh-agent-harness/AGENTS.core.md", "old managed")
 	writeFile(t, live, ".vh-agent-harness/vh-harness-profile.yml", "profile: minimal\nmodules: [core]\n")
 
@@ -329,7 +329,7 @@ func TestApply_AtomicityOwnedNeverTransientlyClobbered(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if got := readFile(t, live, ".vh-agent-harness/project.config.example.json"); got != sentinel {
+	if got := readFile(t, live, ".opencode/repo-configs/forbidden-patterns.project.js"); got != sentinel {
 		t.Fatalf("owned file changed across atomic apply; before=%q after=%q", sentinel, got)
 	}
 }

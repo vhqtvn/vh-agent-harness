@@ -1,0 +1,35 @@
+# .vh-agent-harness/run-shape.yml  —  S4 runtime backend + lifecycle hooks
+#
+# HOW TO CONFIGURE
+# This is the runtime authority the runtime verbs (exec/shell/up/down/logs/ps)
+# read FIRST (before any legacy manifest). `install` seeds it with
+# backend: host-shell. It is project_owned — edit it freely; update never
+# clobbers it. Pick ONE backend:
+
+runtime:
+  # backend: host-shell | docker_compose | bare | proxy
+  #   host-shell     commands run directly on the host (default; no isolation).
+  #   docker_compose commands run via `docker compose exec` in a service.
+  #   bare           no runtime; up/down are no-ops.
+  #   proxy          delegate exec/shell to your own wrapper (after the gate).
+  backend: host-shell
+
+  # docker_compose only:
+  # compose_file: docker-compose.yml      # optional; default compose discovery
+  # default_service: dev                  # service exec/shell target
+
+  # proxy only — argv prefix that exec/shell delegate to (the shell-guard gate
+  # still runs first, so the proxy is not a side door):
+  # proxy_command: ["./dev.sh", "exec"]
+
+# Lifecycle hook leaves: project-owned scripts fired at fixed points, gate-checked
+# through the SAME policy pack as user commands. Keys: pre_exec, post_exec,
+# pre_up, post_up, pre_down, post_down. Value = repo-relative script path.
+# lifecycle:
+#   pre_exec: scripts/pre-exec.sh
+#   post_exec: scripts/post-exec.sh
+
+# Project-defined runtime verbs (e.g. `vh-agent-harness smoke`) map a verb name
+# to a lifecycle leaf here:
+# verbs:
+#   smoke: scripts/smoke.sh

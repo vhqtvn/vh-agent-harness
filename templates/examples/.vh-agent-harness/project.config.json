@@ -1,6 +1,6 @@
 {
-  "//": "vh-agent-harness :: project.config.example.json. THE config seed.",
-  "//_purpose": "Copy to project.config.json. The (future) installer reads this to resolve tokens, render templates, and decide which overlays to apply. Until the CLI exists, use it as the substitution reference for a manual install.",
+  "//": "vh-agent-harness :: project.config.json — the project config the seam reads at render time.",
+  "//_purpose": "Save this to .vh-agent-harness/project.config.json and fill it in BEFORE `install` (or before an `update` that re-seeds). install/update resolve {{MISSION_SUMMARY}}, {{ARCHITECTURE_SUMMARY}}, {{DB_USER}}, {{DB_NAME}} from project.* into the seeded CLAUDE.md/Makefile. Get this template with: vh-agent-harness example .vh-agent-harness/project.config.json",
 
   "project": {
     "name": "My Project",

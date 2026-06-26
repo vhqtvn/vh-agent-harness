@@ -58,8 +58,10 @@ compose source), or anything under `.opencode/` that is platform_managed.
   (run with `--dry-run` first). Then `vh-agent-harness guide` for config steps.
 - **Add domain agents/commands/skills:** create `.vh-agent-harness/overlays/<pack>/`,
   list `<pack>` under `overlays:` in `vh-harness-profile.yml`, then `update`.
-- **Describe the project:** copy `AGENTS.mission.md.example` →
-  `AGENTS.mission.md`, fill it in, `update` (composes `AGENTS.md`).
+- **Describe the project:** `vh-agent-harness example .vh-agent-harness/AGENTS.mission.md
+  > .vh-agent-harness/AGENTS.mission.md`, fill it in, `update` (composes `AGENTS.md`).
+- **Configure any file:** `vh-agent-harness example <path>` prints its doc/template
+  (no `*.example` files are shipped into the repo). `vh-agent-harness example` lists all.
 - **Use an existing wrapper for execution:** in `run-shape.yml` set
   `backend: proxy` and `proxy_command: ["./dev.sh", "exec"]`.
 - **Refresh after a new binary or config change:** `vh-agent-harness update`
