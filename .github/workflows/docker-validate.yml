@@ -1,0 +1,108 @@
+# docker-validate — first-ever LIVE validation of the docker_compose runtime backend.
+#
+# The docker_compose backend (internal/runtime/docker_compose.go) was only unit-
+# tested in slice 4a because the devcontainer has no docker daemon. This workflow
+# runs the full lifecycle (up → ps → exec → logs → down) against a real docker
+# daemon on a GitHub-hosted ubuntu runner.
+#
+# The workflow exercises:
+#   1. `vh-agent-harness install` with default docker_compose backend
+#   2. A trivial docker-compose.yml (alpine sleep)
+#   3. run-shape runtime.default_service config (so exec resolves the service)
+#   4. shell-guard npm deps (so the permission gate parser works for `vh-agent-harness exec`)
+#   5. The full live cycle through the harness CLI
+#
+# continue-on-error is FALSE: a real docker_compose bug fails the build visibly.
+
+name: docker-validate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  docker-cycle:
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      - name: Build harness binary
+        run: go build -o /tmp/vh-agent-harness ./cmd/vh-agent-harness
+
+      - name: Install project (docker_compose backend)
+        run: |
+          /tmp/vh-agent-harness install \
+            --target /tmp/proj \
+            --name "Docker Validate" \
+            --slug dockerval
+
+      - name: Write trivial docker-compose.yml
+        run: |
+          cat > /tmp/proj/docker-compose.yml <<'COMPOSE'
+          services:
+            app:
+              image: alpine:latest
+              command: ["sleep", "3600"]
+          COMPOSE
+
+      - name: Configure docker_compose backend (S4 run-shape)
+        run: |
+          # install seeds .vh-agent-harness/run-shape.yml with backend: host-shell
+          # (the legacy .opencode/harness-manifest.json is no longer written). The
+          # runtime verbs read run-shape FIRST, so point it at docker_compose +
+          # the app service for this live cycle. run-shape is project_owned, so
+          # overwriting our own scratch copy is fine.
+          cat > /tmp/proj/.vh-agent-harness/run-shape.yml <<'RUNSHAPE'
+          run_shape_version: "0.1"
+          runtime:
+            backend: docker_compose
+            compose_file: docker-compose.yml
+            default_service: app
+          RUNSHAPE
+          echo "run-shape:"; cat /tmp/proj/.vh-agent-harness/run-shape.yml
+
+      # shell-guard core (shell-guard-core.js) imports web-tree-sitter and
+      # tree-sitter-bash from node_modules. Without `npm install`, the parser
+      # throws and evaluate() denies every command. The corpus ships
+      # .opencode/package.json with these deps, so install them.
+      - name: Install shell-guard npm dependencies
+        run: |
+          cd /tmp/proj/.opencode
+          npm install --no-audit --no-fund
+
+      - name: Live cycle — up
+        working-directory: /tmp/proj
+        run: /tmp/vh-agent-harness up
+
+      - name: Live cycle — ps
+        working-directory: /tmp/proj
+        run: /tmp/vh-agent-harness ps
+
+      # `echo harness-ok` matches the `echo *` readonly allowlist entry in
+      # .opencode/repo-configs/allowed-commands.js, so the permission gate
+      # allows it. The gate runs BEFORE the backend (evaluateGate → be.Exec).
+      - name: Live cycle — exec
+        working-directory: /tmp/proj
+        run: /tmp/vh-agent-harness exec --service app -- echo harness-ok
+
+      - name: Live cycle — logs
+        working-directory: /tmp/proj
+        run: /tmp/vh-agent-harness logs app
+
+      - name: Live cycle — down
+        working-directory: /tmp/proj
+        run: /tmp/vh-agent-harness down

@@ -1,0 +1,91 @@
+# render-check — PR gate.
+#
+# Builds the binary, installs the embedded corpus into a clean scratch directory
+# with default tokens, then runs `vh-agent-harness doctor` to verify install and
+# the re-rendered corpus agree (idempotency / no drift). Posts a best-effort PR
+# comment summarising the output. The gate FAILS if drift is detected (doctor
+# exits non-zero on UNHEALTHY), independent of whether the comment posts.
+#
+# No bot commits are made to the PR branch.
+
+name: render-check
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  render-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build harness binary
+        run: go build -o /tmp/vh-agent-harness ./cmd/vh-agent-harness
+
+      - name: Install to scratch dir (default tokens)
+        run: |
+          /tmp/vh-agent-harness install \
+            --target /tmp/scratch \
+            --name "CI Render Check" \
+            --slug render-check
+
+      # doctor's managed-drift check re-renders every managed path and compares it
+      # to the installed tree WITHOUT writing anything. Exit 0 = HEALTHY (clean),
+      # non-zero = UNHEALTHY (drift). We capture the output for the PR comment and
+      # defer the fail decision to the last step.
+      - name: Doctor (idempotency / drift check)
+        id: dryrun
+        working-directory: /tmp/scratch
+        continue-on-error: true
+        run: |
+          /tmp/vh-agent-harness doctor 2>&1 | tee /tmp/render-output.txt
+
+      - name: Post PR comment (best-effort)
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let output = '(no output captured)';
+            try { output = fs.readFileSync('/tmp/render-output.txt', 'utf8').trim(); } catch {}
+            const outcome = '${{ steps.dryrun.outcome }}';
+            const icon = outcome === 'success' ? '✅' : '❌';
+            const label = outcome === 'success' ? 'clean — no drift' : 'DRIFT DETECTED';
+            const body = [
+              `## Render Check ${icon}`,
+              '',
+              `**Result:** ${label}`,
+              '',
+              '<details><summary>Dry-run output</summary>',
+              '',
+              '```',
+              output,
+              '```',
+              '',
+              '</details>',
+            ].join('\n');
+            try {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            } catch (e) {
+              core.warning(`Could not post PR comment: ${e.message}`);
+            }
+
+      - name: Fail on drift
+        if: steps.dryrun.outcome != 'success'
+        run: |
+          echo "::error::Render drift detected — install and render disagree. Check the dry-run output above."
+          exit 1

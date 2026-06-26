@@ -1,0 +1,68 @@
+# Binaries
+bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test / coverage
+*.test
+*.out
+coverage.txt
+coverage.html
+coverage.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dev installs — a `harness install` into a scratch dir inside the repo during
+# dev pulls npm deps under <target>/.opencode/node_modules. Ignore them so they
+# never leak into commits.
+node_modules/
+
+# Dev junk
+*.log
+*.tmp
+*.bak
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Built binary at repo root (local `go build` output; never commit)
+/vh-agent-harness
+
+# Dev scratch / virtualenvs (build-root local; never commit)
+.venv/
+venv/
+tmp/
+
+# Throwaway dev tooling at repo root (e.g. tmp-tools/ proof harnesses). Kept on
+# disk for local use but never committed / never part of the public module.
+/tmp-*
+
+# --- vh-agent-harness (self-hosted): runtime state (never commit) ---
+.opencode/state/
+.opencode/sessions/
+.opencode/plans/
+.opencode/runs/
+.opencode/scripts/__pycache__/
+.local/coordinator/
+.local/config/
+.opencode/node_modules/
+
+# --- vh-agent-harness: rendered reference scaffolds (reproducible, not committed) ---
+/.vh-agent-harness/AGENTS.mission.md.example
+/.vh-agent-harness/project.config.example.json
+/.local/cleared-assumptions.example.yaml
+/docs/coordination/LANES.yaml.example
+/docs/coordination/ROLES.md.example
+/.opencode/repo-configs/forbidden-patterns.project.example.js
+/.opencode/plugins/compaction-primitives.project.example.md

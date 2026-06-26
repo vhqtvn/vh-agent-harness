@@ -1,0 +1,15 @@
+# Operator-state ledger: cleared assumptions (example template)
+# Copy to cleared-assumptions.yaml and fill in real entries.
+# This file IS tracked in git; the real file is gitignored.
+#
+# Format: array of objects with required fields: scope, claim, cleared_at
+# Optional field: note
+#
+# `scope` is a dotted path into your project's domain (you choose the taxonomy).
+# `cleared_at` is an ISO date (YYYY-MM-DD).
+# Agents read this ledger but do not modify it; operators edit it directly.
+
+# - scope: "component.area.topic"
+#   claim: "Description of the cleared assumption"
+#   cleared_at: "YYYY-MM-DD"
+#   note: "Why this was cleared and what not to re-raise"

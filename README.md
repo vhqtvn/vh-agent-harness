@@ -1,0 +1,167 @@
+# vh-agent-harness
+
+> **Term contract (sacred — this definition travels with the handle everywhere).**
+>
+> **"Agent harness" is a HANDLE ONLY.** Whenever the term is used, it MUST carry this definition:
+>
+> > An **agent harness** is a repo-resident system of rules, memory, coordination, safety gates, and reusable workflows that makes AI coding agents — and the humans operating them — behave predictably and keep working across context resets and session boundaries.
+>
+> It has **six layers**: (1) **Prescriptive** — codified must/must-not rules; (2) **Cognitive** — state surviving context resets; (3) **Coordination** — routing/tracking/handoff of work; (4) **Safety** — hard guarantees enforced regardless of agent intent; (5) **Capability** — reusable roles & workflows; (6) **Environment** — the runtime they execute in.
+
+`vh-agent-harness` is a single static Go binary that installs, manages, and runs
+a repo-resident AI agent harness. Module `github.com/vhqtvn/vh-agent-harness`.
+
+**Operating it from an agent?** See [`README.agent.md`](./README.agent.md) — a
+concise operating manual written for an AI agent driving the binary.
+
+## Quick start
+
+```sh
+# install the binary (see Install below), then, in any repo:
+vh-agent-harness guide          # detects state, prints the exact next steps
+vh-agent-harness install --name "My Project" --slug my-project --dry-run   # preview
+vh-agent-harness install --name "My Project" --slug my-project             # apply
+vh-agent-harness doctor         # verify health
+```
+
+`guide` is the entry point: point a fresh agent (or yourself) at a repo and it
+reports the harness phase — **greenfield**, **adoptable** (an existing
+`.opencode` not yet managed), or **installed** — and the concrete next steps.
+Add `--json` for machine-readable output.
+
+## Architecture
+
+- **One static Go binary** (`vh-agent-harness`): installer + manager + executor.
+- **Config-driven render** of an embedded, domain-free core corpus
+  (`templates/core/`, `go:embed`) through the **substrate seam**:
+  render-into-staging → classify by ownership → plan per-class (fail-closed
+  before any write) → apply → write lineage.
+- **Ownership classes** decide what a re-render may touch: `platform_managed`
+  (force-overwritten), `platform_armed` (schema-reconciled), `project_owned`
+  (seeded once, then preserved forever), `overlay_extension`, `external_generated`.
+- **Runtime backend abstraction** (`host-shell`, `docker_compose`, `bare`,
+  `proxy`) selected by `.vh-agent-harness/run-shape.yml`; `exec`/`shell` run the
+  shell-guard permission gate first.
+- **Lineage-governed, repo-relative state**: `.vh-agent-harness/lineage.yml` is
+  the S1 install authority.
+
+## Install
+
+Grab the latest release binary with the install script:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/vhqtvn/vh-agent-harness/main/install.sh | bash
+```
+
+It downloads the release archive for your OS/arch, verifies it against
+`checksums.txt`, and installs the `vh-agent-harness` binary to `/usr/local/bin`
+when writable; otherwise it asks whether to install to the system path (via
+`sudo`) or your user path (`$XDG_BIN_HOME` or `~/.local/bin`, no sudo). Override
+the system target with `INSTALL_DIR=...`.
+
+`vh-agent-harness self-update` upgrades the binary in place using the same
+verified-download flow. (That is distinct from `vh-agent-harness update`, which
+re-renders the harness *inside a project*.)
+
+## Where harness state lives
+
+All harness configuration and sources live under `.vh-agent-harness/`, keeping
+the repo root clean. The agent-facing files at the root are the composed
+`AGENTS.md`, `CLAUDE.md`, and the OpenCode entrypoint `opencode.jsonc`, plus the
+project's own identity files.
+
+```
+.vh-agent-harness/
+  lineage.yml                 S1 — install/render authority (binary-owned)
+  vh-harness-profile.yml      S3 — feature + overlay selection (platform_armed)
+  run-shape.yml               S4 — runtime backend + verbs (seeded host-shell; edit freely)
+  harness-ownership.yml       S2 — raise-only ownership overrides (operator-authored; not seeded)
+  overlays/<pack>/            project-supplied overlay packs (agents/commands/skills)
+  AGENTS.core.md              compose source — generic rules (managed)
+  AGENTS.mission.md.example   compose source seed — copy to AGENTS.mission.md and edit
+  AGENTS.mission.md           compose source — project domain (project_owned; you create it)
+.opencode/                    rendered agent corpus (agents, commands, skills, plugins)
+opencode.jsonc                OpenCode entrypoint config (root)
+AGENTS.md                     composed = AGENTS.core.md + AGENTS.mission.md (written by `update` once a mission exists)
+```
+
+Project-identity files (`.gitignore`, `README.md`, `CLAUDE.md`, `Makefile`) are
+`project_owned`: the harness seeds a scaffold once on a greenfield install and
+**never clobbers** them on update, so installing into an existing repo is safe.
+
+## Command surface
+
+| Group | Commands |
+| --- | --- |
+| Orientation | `guide` (state + next steps; `--json`) |
+| Install lifecycle | `install`, `update`, `uninstall` (`install`/`update` take `--dry-run`) |
+| Health | `preflight`, `doctor`, `proposals` |
+| Render inspection | `diff` |
+| Runtime | `exec`, `shell`, `up`, `down`, `logs`, `ps` |
+| Status | `status` |
+| Binary | `version`, `self-update` |
+
+`--dry-run` on `install`/`update` prints the full per-file plan
+(would-overwrite / seed / preserve / reconcile / conflict) **without writing
+anything** — a safe preview before applying.
+
+## Adoption & extension
+
+A consuming project extends the managed core without editing managed files:
+
+- **Overlays** — drop a pack at `.vh-agent-harness/overlays/<name>/` (its
+  `agents/`, `commands/`, `skills/`, plus `opencode-append.jsonc` /
+  `permission-pack.jsonc` / `callable-graph-snippet.md`) and select it under
+  `overlays:` in `vh-harness-profile.yml`. Packs load from the **project** first,
+  then the embedded FS, so the binary stays domain-free.
+- **Runtime** — set the backend in `run-shape.yml`. `backend: proxy` +
+  `proxy_command: ["./dev.sh", "exec"]` delegates `exec`/`shell` to an existing
+  wrapper script (the shell-guard gate still runs first), so a project keeps its
+  domain runtime knowledge instead of re-encoding it.
+- **Mission** — write `.vh-agent-harness/AGENTS.mission.md` (copy the `.example`);
+  the seam composes `AGENTS.md = AGENTS.core.md + AGENTS.mission.md`.
+- **Deny-rules** — add project rules to
+  `.opencode/repo-configs/forbidden-patterns.project.js` (import the shared
+  inspector builders from `forbidden-patterns.core.js`).
+- **Take over a managed file** — raise it to `project_owned` in
+  `harness-ownership.yml` (raise-only).
+- **Operational docs (`docs/ai/`)** — several managed agent prompts and commands
+  tell agents to consult project operational primitives under `docs/ai/` (e.g.
+  `docs/ai/codebase-operational-primitives.md`, `shell-execution.md`,
+  `dev-environment.md`): canonical paths, helper functions, container/service
+  names, env conventions, API shapes. These are **domain knowledge the harness
+  cannot ship** (the core stays domain-free), so the harness does **not** seed
+  them — authoring them is the adopting project's job. Until you create them the
+  references are simply forward pointers; create the ones your agents need so
+  they stop rediscovering project facts from scratch.
+
+Adopting an existing hand-maintained harness is the **adoptable** path: run
+`install` (preview with `--dry-run`); managed files are refreshed and your
+project-owned files preserved. Move domain agents/commands/skills into an
+overlay pack so they survive future updates.
+
+## Build from source
+
+```sh
+go build -o bin/vh-agent-harness ./cmd/vh-agent-harness
+./bin/vh-agent-harness version
+go test ./...
+```
+
+Version/build metadata are injected via `-ldflags` into `internal/cli` at
+release time (see `.goreleaser.yml`); the default dev label is `0.1.0-dev`.
+
+## Repository layout
+
+```
+cmd/vh-agent-harness/    main entrypoint
+core_manifest.go         core-corpus ownership classification (embed walk)
+corpus.go                go:embed roots: templates/{core,overlays}
+internal/                substrate seam, ownership, schema, lineage, runshape,
+                         runtime, hooks, overlay, proposals, drift, permission, cli
+templates/core/          canonical domain-free corpus (rendered into projects)
+templates/overlays/      shipped overlay packs (empty by default; projects ship
+                         their own under <project>/.vh-agent-harness/overlays/)
+docs/coordination/       coordination templates + report schemas (rendered into projects)
+docs/adoption-examples/  non-shipped adoption reference (web/)
+```

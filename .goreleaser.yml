@@ -1,0 +1,56 @@
+# GoReleaser config for the vh-agent-harness binary.
+# Docs: https://goreleaser.com
+#
+# Builds a single static binary (`vh-agent-harness`) from ./cmd/vh-agent-harness for
+# linux/amd64, linux/arm64, darwin/amd64, darwin/arm64 with CGO disabled.
+# Version metadata is injected via -ldflags into the cli package vars.
+
+version: 2
+
+project_name: vh-agent-harness
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: vh-agent-harness
+    main: ./cmd/vh-agent-harness
+    binary: vh-agent-harness
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # Inject the release version + commit SHA into the version vars.
+    # cli.Version and cli.BuildLabel are `var` (not const) so -X can override.
+    ldflags:
+      - -s -w
+      - -X github.com/vhqtvn/vh-agent-harness/internal/cli.Version={{.Version}}
+      - -X github.com/vhqtvn/vh-agent-harness/internal/cli.BuildLabel={{.ShortCommit}}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  draft: false
+  prerelease: auto

@@ -1,0 +1,70 @@
+# .gitignore
+# Platform-managed starter .gitignore. project_owned in practice — edit freely.
+
+# --- Agent / harness local state (never commit) ---
+.opencode/state/
+.opencode/sessions/
+.opencode/plans/
+.opencode/runs/
+.opencode/scripts/__pycache__/
+.local/coordinator/
+.local/config/
+.local/ssh/
+.local/demo-server/
+
+# --- Local operator coordination / task registry (private) ---
+.local/{{COORDINATOR_DIR}}/
+
+# --- Repo-scoped scratch (agent runs, logs, temp) ---
+tmp/
+*.log
+*.tmp
+*.bak
+
+# --- Python caches / test artifacts ---
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+coverage.*
+*.egg-info/
+
+# --- Node (web/admin) ---
+node_modules/
+.next/
+.turbo/
+dist/
+
+# --- Env files (never commit secrets) ---
+.env
+.env.local
+.env.*.local
+*.env
+# (env EXAMPLES are tracked)
+!*.env.example
+!*.env.*.example
+
+# --- Harness reference scaffolds (rendered by the harness; reproducible) ---
+# These *.example* files are platform-managed authoring seeds: the harness
+# renders them on every install/update so you can copy each to its real
+# counterpart (forbidden-patterns.project.js, AGENTS.mission.md,
+# project.config.json, …). They are regenerated, so they are NOT committed.
+# Listed by exact path so a project's OWN examples (e.g. .env.example) stay tracked.
+/.vh-agent-harness/AGENTS.mission.md.example
+/.vh-agent-harness/project.config.example.json
+/.local/cleared-assumptions.example.yaml
+/docs/coordination/LANES.yaml.example
+/docs/coordination/ROLES.md.example
+/.opencode/repo-configs/forbidden-patterns.project.example.js
+/.opencode/plugins/compaction-primitives.project.example.md
+
+# --- Editor / OS ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/

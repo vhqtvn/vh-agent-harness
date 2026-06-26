@@ -1,0 +1,1 @@
+# go:embed root for rendered templates. Populated in slice 2.

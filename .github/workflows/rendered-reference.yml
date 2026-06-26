@@ -1,0 +1,50 @@
+# rendered-reference — push-to-main publisher.
+#
+# On every push to main, builds the binary, runs a full `vh-agent-harness install` into a
+# clean temp dir with default tokens, then force-pushes the rendered tree to an
+# orphan branch named `rendered-reference`. This branch is the flat, default-token
+# render that consumers can inspect without running the harness locally.
+#
+# The orphan branch has NO commit history from main — it is a standalone snapshot
+# of the rendered output, overwritten on every push.
+
+name: rendered-reference
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  publish-rendered-reference:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build harness binary
+        run: go build -o /tmp/vh-agent-harness ./cmd/vh-agent-harness
+
+      - name: Install to clean temp dir (full default-token render)
+        run: |
+          /tmp/vh-agent-harness install \
+            --target /tmp/rendered \
+            --name "Agent Harness" \
+            --slug agent-harness
+
+      - name: Publish rendered tree to orphan branch
+        run: |
+          cd /tmp/rendered
+          git init
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan rendered-reference
+          git add -A
+          git commit -m "rendered-reference: default-token render @ ${GITHUB_SHA::7}"
+          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin rendered-reference

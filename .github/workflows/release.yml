@@ -1,0 +1,38 @@
+# release — tag-triggered binary release.
+#
+# On push of a tag matching `v*` (e.g. v1.0.0), GoReleaser builds and publishes
+# static binaries for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64 to the
+# GitHub Release. CGO is disabled so all four targets are pure static builds.
+# Version metadata is injected via -ldflags (see .goreleaser.yml).
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history is needed for GoReleaser changelog generation.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

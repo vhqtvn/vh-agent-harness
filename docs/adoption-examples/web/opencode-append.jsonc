@@ -1,0 +1,137 @@
+// web-overlay — opencode append content.
+// Ownership: overlay_extension. Deep-merged into the rendered opencode.jsonc
+// when this overlay pack is active (vh-harness-profile.yml: overlays:[web-overlay]).
+// The merge recurses nested maps: new agent blocks are inserted into `agent`,
+// and the partial build/coordination/project-coordinator blocks below ADD their
+// `task` allow entries to those agents' existing task maps (no other fields touched).
+{
+    "agent": {
+        "web-builder": {
+            "description": "Implements focused apps/web slices plus browser-smoke wiring",
+            "mode": "subagent",
+            "color": "success",
+            "prompt": "{file:.opencode/agents/web-builder.md}",
+            "permission": {
+                "edit": "allow",
+                "webfetch": "allow",
+                "task": {
+                    "*": "deny",
+                    "committer": "allow"
+                },
+                "bash": {
+                    "*": "ask",
+                    "jq *": "allow",
+                    "ls *": "allow",
+                    "rg *": "allow",
+                    "wc *": "allow",
+                    "cat *": "allow",
+                    "cut *": "allow",
+                    "date *": "allow",
+                    "echo *": "allow",
+                    "find *": "allow",
+                    "grep *": "allow",
+                    "head *": "allow",
+                    "sort *": "allow",
+                    "tail *": "allow",
+                    "true *": "allow",
+                    "uniq *": "allow",
+                    "sleep *": "allow",
+                    "sed -n *": "allow",
+                    "git log *": "allow",
+                    "git diff *": "allow",
+                    "git grep *": "allow",
+                    "git show *": "allow",
+                    "git blame *": "allow",
+                    "git status *": "allow",
+                    "git ls-tree *": "allow",
+                    "git cat-file *": "allow",
+                    "git ls-files *": "allow",
+                    "git show-ref *": "allow",
+                    "git rev-parse *": "allow",
+                    "git check-ignore *": "allow",
+                    ".opencode/scripts/readonly-scripts.sh *": "allow",
+                    "./dev.sh *": "allow"
+                }
+            }
+        },
+        "browser-qa": {
+            "description": "Read-only frontend browser QA for traces, screenshots, and regression suggestions",
+            "mode": "subagent",
+            "color": "warning",
+            "prompt": "{file:.opencode/agents/browser-qa.md}",
+            "permission": {
+                "edit": "deny",
+                "webfetch": "deny",
+                "task": {
+                    "*": "deny"
+                },
+                "bash": {
+                    "*": "deny",
+                    "jq *": "allow",
+                    "ls *": "allow",
+                    "rg *": "allow",
+                    "wc *": "allow",
+                    "cat *": "allow",
+                    "cut *": "allow",
+                    "date *": "allow",
+                    "echo *": "allow",
+                    "find *": "allow",
+                    "grep *": "allow",
+                    "head *": "allow",
+                    "sort *": "allow",
+                    "tail *": "allow",
+                    "true *": "allow",
+                    "uniq *": "allow",
+                    "sleep *": "allow",
+                    "uuidgen": "deny",
+                    "sed -n *": "allow",
+                    "git log *": "allow",
+                    "git diff *": "allow",
+                    "git grep *": "allow",
+                    "git show *": "allow",
+                    "git blame *": "allow",
+                    "git status *": "allow",
+                    "git ls-tree *": "allow",
+                    "git cat-file *": "allow",
+                    "git ls-files *": "allow",
+                    "git show-ref *": "allow",
+                    "git rev-parse *": "allow",
+                    "git check-ignore *": "allow",
+                    ".opencode/scripts/commit-gate.sh status": "deny",
+                    ".opencode/scripts/readonly-scripts.sh *": "allow",
+                    ".opencode/scripts/commit-gate.sh commit *": "deny",
+                    ".opencode/scripts/commit-gate.sh revert *": "deny",
+                    ".opencode/scripts/commit-gate.sh acquire *": "deny",
+                    ".opencode/scripts/commit-gate.sh release *": "deny",
+                    ".opencode/scripts/commit-gate.sh heartbeat *": "deny",
+                    ".opencode/scripts/commit-gate.sh stage-message *": "deny",
+                    "./dev.sh *": "allow"
+                }
+            }
+        },
+        "build": {
+            "permission": {
+                "task": {
+                    "browser-qa": "allow",
+                    "web-builder": "allow"
+                }
+            }
+        },
+        "coordination": {
+            "permission": {
+                "task": {
+                    "browser-qa": "allow",
+                    "web-builder": "allow"
+                }
+            }
+        },
+        "project-coordinator": {
+            "permission": {
+                "task": {
+                    "browser-qa": "allow",
+                    "web-builder": "allow"
+                }
+            }
+        }
+    }
+}

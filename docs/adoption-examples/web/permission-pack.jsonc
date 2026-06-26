@@ -1,0 +1,51 @@
+{
+  // Permission contribution of the `web-overlay` pack.
+  //
+  // This file is the pack's SELF-DESCRIPTION of the permission entries it
+  // contributes when active. It is NOT rendered verbatim under .opencode/; the
+  // seam installer materializes it to
+  //   .opencode/sys-scripts/permission-packs/web-overlay.jsonc
+  // and update-opencode-config.js reads every file in that directory
+  // DYNAMICALLY (by directory listing, never by hardcoded pack name) to resolve
+  // the active agent roster.
+  //
+  // Per-agent fields:
+  //   location    -> permission.bash location decisions for the agent
+  //   task        -> permission.task allowlist for the agent
+  //   gateExempt  -> true registers the agent as a committer-delegator that must
+  //                  omit a `gate` decision (see GATE_EXEMPT_AGENTS in the script)
+  //   delegateFrom -> core orchestrators whose task allowlist gets an auto-
+  //                  injected allow entry for this agent while the pack is active
+  "agents": {
+    "browser-qa": {
+      "location": {
+        "wildcard": "deny",
+        "readonly": "allow",
+        "git_readonly": "allow",
+        "gate": "deny",
+        "devSh": "allow"
+      },
+      "task": { "*": "deny" },
+      "delegateFrom": [
+        "build",
+        "coordination",
+        "project-coordinator"
+      ]
+    },
+    "web-builder": {
+      "location": {
+        "wildcard": "ask",
+        "readonly": "allow",
+        "git_readonly": "allow",
+        "devSh": "allow"
+      },
+      "task": { "*": "deny", "committer": "allow" },
+      "gateExempt": true,
+      "delegateFrom": [
+        "build",
+        "coordination",
+        "project-coordinator"
+      ]
+    }
+  }
+}
