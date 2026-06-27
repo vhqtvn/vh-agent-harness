@@ -131,13 +131,16 @@ func nextSteps(st harnessState) []string {
 				"(composes the agent-facing AGENTS.md = AGENTS.core.md + your mission).")
 		}
 		if len(st.Overlays) == 0 {
-			steps = append(steps, "Add project-specific agents/commands/skills: create an overlay pack at "+
-				".vh-agent-harness/overlays/<name>/ (agents/, commands/, skills/, opencode-append.jsonc) and "+
-				"list `<name>` under `overlays:` in .vh-agent-harness/vh-harness-profile.yml, then "+
-				"`vh-agent-harness update`.")
+			steps = append(steps, "Add project-specific agents/commands/skills via an overlay pack: "+
+				"create .vh-agent-harness/overlays/<name>/ with agents/<name>.md + opencode-append.jsonc "+
+				"(and optional permission-pack.jsonc), list `<name>` under `overlays:` in "+
+				".vh-agent-harness/vh-harness-profile.yml, then `vh-agent-harness update` "+
+				"(see `/harness` for the full recipe; `vh-agent-harness example` for a pack skeleton).")
 		} else {
 			steps = append(steps, "Active overlays: "+strings.Join(st.Overlays, ", ")+
-				" (pack sources under .vh-agent-harness/overlays/). Edit the pack and run `vh-agent-harness update` to apply.")
+				" (pack sources under .vh-agent-harness/overlays/). Edit the pack "+
+				"(agents/<name>.md, opencode-append.jsonc, optional permission-pack.jsonc) and run "+
+				"`vh-agent-harness update` to apply. See `/harness` for the full recipe.")
 		}
 		if st.RuntimeBackend == "host-shell" || st.RuntimeBackend == "" {
 			steps = append(steps, "Runtime is host-shell (commands run on the host). To run in a container or via "+
@@ -189,6 +192,10 @@ func writeGuide(out io.Writer, st harnessState, steps []string) {
 	for i, s := range steps {
 		fmt.Fprintf(out, "  %d. %s\n", i+1, s)
 	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Extending the harness? `/harness` is the full add-an-agent / add-command /")
+	fmt.Fprintln(out, "add-skill recipe and overlay anatomy; `vh-agent-harness example` lists")
+	fmt.Fprintln(out, "configurable files plus a pack skeleton.")
 }
 
 func yesNo(b bool, yes, no string) string {

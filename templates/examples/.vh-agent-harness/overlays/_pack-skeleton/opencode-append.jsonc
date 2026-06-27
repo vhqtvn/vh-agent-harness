@@ -1,0 +1,40 @@
+// _pack-skeleton/opencode-append.jsonc — minimal pack contribution (ownership overlay_extension)
+//
+// Copy this pack to .vh-agent-harness/overlays/<pack>/ and edit. This file is
+// deep-merged into the rendered opencode.jsonc when the pack is listed under
+// `overlays:` in vh-harness-profile.yml. The merge recurses nested maps: the new
+// agent block is INSERTED into `agent`, and the partial build/coordination/
+// project-coordinator blocks ADD their `task` allow entries to those existing
+// orchestrators (no other fields touched).
+//
+// Replace <name>, <description>, and the prompt file path to match your
+// agents/<name>.md. Tokens like {{PROJECT_NAME}} resolve at render time.
+{
+  "agent": {
+    "<name>": {
+      "description": "<description: what this specialist does and when to use it>",
+      "mode": "subagent",
+      "prompt": "{file:.opencode/agents/<name>.md}",
+      "permission": {
+        "edit": "allow",
+        "webfetch": "deny",
+        "task": { "*": "deny", "committer": "allow" },
+        "bash": {
+          "*": "ask",
+          "rg *": "allow",
+          "ls *": "allow",
+          "git diff *": "allow"
+        }
+      }
+    },
+    "build": {
+      "permission": { "task": { "<name>": "allow" } }
+    },
+    "coordination": {
+      "permission": { "task": { "<name>": "allow" } }
+    },
+    "project-coordinator": {
+      "permission": { "task": { "<name>": "allow" } }
+    }
+  }
+}

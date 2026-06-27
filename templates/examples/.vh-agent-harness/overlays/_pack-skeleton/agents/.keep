@@ -1,0 +1,19 @@
+# _pack-skeleton/agents/.keep — copy this pack to .vh-agent-harness/overlays/<pack>/
+#
+# Drop new agent files here as agents/<name>.md. A pack agent is a normal
+# OpenCode subagent prompt with YAML frontmatter; it renders into
+# .opencode/agents/<name>.md (ownership overlay_extension) while the pack is
+# active. Minimal shape (copy and edit):
+#
+#   ---
+#   description: One line: what this specialist does and when to use it
+#   mode: subagent
+#   ---
+#
+#   You are the {{PROJECT_NAME}} <name> specialist.
+#
+#   - scope: <files/areas this agent owns>
+#   - hand off: <what to route elsewhere>
+#
+# The agent roster + task allow-injections are wired in ../opencode-append.jsonc.
+# See `/harness` for the full recipe.

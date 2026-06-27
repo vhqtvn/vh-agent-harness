@@ -1,0 +1,40 @@
+// _pack-skeleton/permission-pack.jsonc — optional pack permission self-description
+//
+// OPTIONAL. This file is the pack's SELF-DESCRIPTION of the permission entries
+// it contributes when active. It is NOT rendered verbatim under .opencode/; the
+// seam installer materializes it to
+//   .opencode/sys-scripts/permission-packs/<pack>.jsonc
+// and update-opencode-config.js reads every file in that directory DYNAMICALLY
+// (by directory listing, never by hardcoded pack name) to resolve the active
+// agent roster.
+//
+// Per-agent fields:
+//   location     -> permission.bash location decisions for the agent
+//   task         -> permission.task allowlist for the agent
+//   gateExempt   -> true registers the agent as a committer-delegator that must
+//                   omit a `gate` decision
+//   delegateFrom -> core orchestrators whose task allowlist gets an auto-
+//                   injected allow entry for this agent while the pack is active
+//
+// If you omit this file entirely, declare the agent + task allow-injections in
+// opencode-append.jsonc instead (the minimal path).
+{
+  "agents": {
+    "<name>": {
+      "location": {
+        "wildcard": "ask",
+        "readonly": "allow",
+        "git_readonly": "allow",
+        "gate": "deny",
+        "devSh": "allow"
+      },
+      "task": { "*": "deny", "committer": "allow" },
+      "gateExempt": true,
+      "delegateFrom": [
+        "build",
+        "coordination",
+        "project-coordinator"
+      ]
+    }
+  }
+}

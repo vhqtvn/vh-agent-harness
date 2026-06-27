@@ -72,8 +72,12 @@ compose source), or anything under `.opencode/` that is platform_managed.
 
 - **Install / adopt:** `vh-agent-harness install --name <Name> --slug <slug>`
   (run with `--dry-run` first). Then `vh-agent-harness guide` for config steps.
-- **Add domain agents/commands/skills:** create `.vh-agent-harness/overlays/<pack>/`,
-  list `<pack>` under `overlays:` in `vh-harness-profile.yml`, then `update`.
+- **Add domain agents/commands/skills:** run `/harness` for the full recipe, then
+  create `.vh-agent-harness/overlays/<pack>/` (`agents/`, `commands/`, `skills/`,
+  `opencode-append.jsonc`, optional `permission-pack.jsonc`), list `<pack>` under
+  `overlays:` in `vh-harness-profile.yml`, then `update`. Do NOT edit the
+  generated `.opencode/` tree or `opencode.jsonc` — those regenerate on `update`.
+  A commented pack skeleton is under `vh-agent-harness example`.
 - **Describe the project:** `vh-agent-harness example .vh-agent-harness/AGENTS.mission.md
   > .vh-agent-harness/AGENTS.mission.md`, fill it in, `update` (composes `AGENTS.md`).
 - **Configure any file:** `vh-agent-harness example <path>` prints its doc/template
@@ -96,6 +100,35 @@ compose source), or anything under `.opencode/` that is platform_managed.
   `vh-agent-harness proposals`.
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   environment). `vh-agent-harness diff` shows drift vs. the corpus.
+
+## Extending the harness (`/harness`)
+
+`/harness` is the OpenCode slash command that carries the full
+add-an-agent / add-command / add-skill recipe and the overlay anatomy. Use it
+**whenever you are asked to extend the harness** — add a subagent, a `/command`,
+or a skill — instead of editing the generated tree.
+
+The `.opencode/` tree and `opencode.jsonc` are **generated**; they regenerate on
+every `update`, so edits there vanish. The extension unit is an **overlay pack**
+at `.vh-agent-harness/overlays/<pack>/` (agents/commands/skills + merge-content
+files), selected under `overlays:` in `vh-harness-profile.yml`. Do NOT use
+OpenCode's built-in `customize-opencode` skill to change the harness — use an
+overlay pack (only `customize-opencode` for a reason unrelated to the generated
+tree).
+
+What `/harness` gives you:
+- the **golden path** (numbered): `guide` → create pack → `agents/<name>.md` →
+  `opencode-append.jsonc` (agent block + task allow-injections into
+  `build`/`coordination`/`project-coordinator`) → optional
+  `permission-pack.jsonc` / `callable-graph-snippet.md` / `commands/<name>.md` →
+  list under `overlays:` → `update --dry-run` then `update` → `doctor` + restart.
+- the **overlay anatomy** (unit files vs merge-content files vs extend snippets).
+- the **shadowing rule**: to REPLACE a core builtin, don't shadow from a pack
+  (it fails closed) — raise the path to `project_owned` in
+  `harness-ownership.yml` and edit the live file.
+
+Reference: `docs/adoption-examples/web/` is a worked (non-shipped) overlay.
+Skeleton files: `vh-agent-harness example` lists `_pack-skeleton`.
 
 ## What is safe
 
