@@ -117,6 +117,55 @@ func (HarnessProfile) Validate(raw []byte) []FieldError {
 	return errs
 }
 
+// AppendOverlay returns a vh-harness-profile.yml instance with name added to the
+// overlays list, serialized through the SAME load/marshal path the Reconciler
+// uses (loadHarnessProfile + marshalHarnessProfile). It is the safe, schema-
+// shaped mutation site for tooling that must edit the live overlays selection
+// (e.g. the `vh-agent-harness overlay new` scaffolder) WITHOUT a naive
+// text/regex edit on the platform_armed file.
+//
+// raw may be empty/nil — a fresh conformant instance carrying only
+// `overlays: [name]` is built. When raw is non-empty it is Validated FIRST; a
+// schema-invalid instance is returned as an error (never silently re-serialized
+// into a different shape). name must be non-empty.
+//
+// The marshaled output is normalized exactly the way an applied reconcile would
+// normalize it (arrays sorted + deduped), so a subsequent `update` reconcile
+// treats the file as clean (no spurious drift / proposal).
+//
+// added is false when name was already present in overlays — merged is then the
+// re-serialized current state and the caller may skip the write (no change).
+// added is true when name was appended.
+func (HarnessProfile) AppendOverlay(raw []byte, name string) (merged []byte, added bool, err error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, false, fmt.Errorf("append-overlay: name must be non-empty")
+	}
+	if len(strings.TrimSpace(string(raw))) > 0 {
+		if errs := (HarnessProfile{}).Validate(raw); len(errs) > 0 {
+			return nil, false, fmt.Errorf("append-overlay: refusing to mutate a schema-invalid vh-harness-profile.yml: %v", errs)
+		}
+	}
+	d, lerr := loadHarnessProfile(raw)
+	if lerr != nil {
+		return nil, false, fmt.Errorf("append-overlay: parse vh-harness-profile.yml: %w", lerr)
+	}
+	for _, existing := range d.Overlays {
+		if existing == name {
+			out, merr := marshalHarnessProfile(d)
+			if merr != nil {
+				return nil, false, fmt.Errorf("append-overlay: marshal: %w", merr)
+			}
+			return out, false, nil
+		}
+	}
+	d.Overlays = append(d.Overlays, name)
+	out, merr := marshalHarnessProfile(d)
+	if merr != nil {
+		return nil, false, fmt.Errorf("append-overlay: marshal: %w", merr)
+	}
+	return out, true, nil
+}
+
 // appendStringArrayErrors adds per-element errors for empty/duplicate entries.
 func appendStringArrayErrors(errs []FieldError, field string, vals []string) []FieldError {
 	seen := make(map[string]bool, len(vals))

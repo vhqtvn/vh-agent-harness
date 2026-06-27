@@ -79,3 +79,21 @@ const ExamplesDir = "templates/examples"
 //
 //go:embed all:templates/examples
 var ExamplesFS embed.FS
+
+// OverlaySkeletonDir is the embed.FS sub-directory holding the per-unit
+// skeleton BODIES written by `vh-agent-harness overlay new` (one file per unit
+// type: agent.md / command.md / skill.md). These are EMBED-ONLY: they are NOT
+// under templates/core, so the seam never renders them into a target repo. The
+// scaffolder reads a body, substitutes its __UNIT_NAME__ placeholder with the
+// caller-supplied unit name, and writes it into a project's
+// .vh-agent-harness/overlays/<pack>/ tree. Only the 3 canonical identity tokens
+// ({{PROJECT_NAME}} / {{PROJECT_SLUG}} / {{COORDINATOR_DIR}}) and the
+// __UNIT_NAME__ placeholder may appear — no brand/domain literals (the binary
+// stays domain-free).
+const OverlaySkeletonDir = "templates/overlay-skeleton"
+
+// OverlaySkeletonFS is the read-only embedded unit-skeleton tree. The
+// `overlay new` command reads from the OverlaySkeletonDir sub-directory.
+//
+//go:embed all:templates/overlay-skeleton
+var OverlaySkeletonFS embed.FS

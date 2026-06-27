@@ -61,6 +61,8 @@ func init() {
 		// orientation (agent-facing entry point)
 		guideCmd,
 		exampleCmd,
+		// overlay pack management (scaffolding)
+		overlayCmd,
 		// binary self-management
 		selfUpdateCmd,
 		versionCmd,

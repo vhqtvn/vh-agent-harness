@@ -72,12 +72,13 @@ compose source), or anything under `.opencode/` that is platform_managed.
 
 - **Install / adopt:** `vh-agent-harness install --name <Name> --slug <slug>`
   (run with `--dry-run` first). Then `vh-agent-harness guide` for config steps.
-- **Add domain agents/commands/skills:** run `/harness` for the full recipe, then
-  create `.vh-agent-harness/overlays/<pack>/` (`agents/`, `commands/`, `skills/`,
-  `opencode-append.jsonc`, optional `permission-pack.jsonc`), list `<pack>` under
-  `overlays:` in `vh-harness-profile.yml`, then `update`. Do NOT edit the
-  generated `.opencode/` tree or `opencode.jsonc` — those regenerate on `update`.
-  A commented pack skeleton is under `vh-agent-harness example`.
+- **Add domain agents/commands/skills:** `vh-agent-harness overlay new <pack>
+  --agent <n> [--command <n>] [--skill <n>]` scaffolds the pack and wires it into
+  `vh-harness-profile.yml` in one command (see "Scaffolding an overlay pack"
+  below). Then `update --dry-run` and `update`. Or run `/harness` for the full
+  manual recipe; a commented pack skeleton is under `vh-agent-harness example`.
+  Do NOT edit the generated `.opencode/` tree or `opencode.jsonc` — those
+  regenerate on `update`.
 - **Describe the project:** `vh-agent-harness example .vh-agent-harness/AGENTS.mission.md
   > .vh-agent-harness/AGENTS.mission.md`, fill it in, `update` (composes `AGENTS.md`).
 - **Configure any file:** `vh-agent-harness example <path>` prints its doc/template
@@ -129,6 +130,63 @@ What `/harness` gives you:
 
 Reference: `docs/adoption-examples/web/` is a worked (non-shipped) overlay.
 Skeleton files: `vh-agent-harness example` lists `_pack-skeleton`.
+
+## Scaffolding an overlay pack (`overlay new`)
+
+`vh-agent-harness overlay new <pack> [--agent <n>] [--command <n>] [--skill <n>]
+[--dry-run] [-o/--target <dir>]` is the one-command path from "I need a new agent /
+command / skill" to a renderable overlay pack. It writes the pack and wires it
+into the profile for you.
+
+What it creates (under `.vh-agent-harness/overlays/<pack>/`):
+- `agents/<n>.md` when `--agent <n>` is given (subagent skeleton; frontmatter
+  `description` + `mode: subagent`).
+- `commands/<n>.md` when `--command <n>` is given (slash-command skeleton;
+  frontmatter `description` + `agent` + `subtask`).
+- `skills/<n>/SKILL.md` when `--skill <n>` is given (skill skeleton; frontmatter
+  `name` + `description` + `compatibility`).
+- `opencode-append.jsonc` (always) — when `--agent` is given this is ACTIVE: the
+  agent block + `task: { <n>: "allow" }` injections into
+  `build`/`coordination`/`project-coordinator` (so the pack is immediately
+  functional after `update`). With no `--agent` it is a commented no-op shell.
+- `permission-pack.jsonc` (always) — a LIVE self-descriptor: effective on the
+  next `update` once the pack is listed under `overlays:`. The scaffolded agent
+  is a committer-delegator (`gateExempt: true`), so its `location` block omits
+  `gate` by contract (see the file header).
+- `callable-graph-snippet.md` (always) — fully HTML-commented, inert until you
+  uncomment it.
+
+If you omit ALL of `--agent`/`--command`/`--skill`, the command still creates
+the pack (the three always-on files above) and prints a stderr warning: it is a
+minimal pack with no `.md` unit skeletons. Add a unit later and re-run with a
+new pack name (existing packs are never overwritten).
+
+Profile wiring (the high-risk part — done safely): `<pack>` is appended to the
+`overlays:` list in `.vh-agent-harness/vh-harness-profile.yml` through the
+schema's own load/marshal path (the same one `update` reconciles with) — **not**
+a text/regex edit. The file is `platform_armed`; the append is structural, so a
+subsequent `update` raises no conflict/proposal on it. ("Clean" here means no
+armed-file conflict — not that the whole `update` is a no-op; a first `update`
+still emits normal platform-seed/managed applies for the new pack.) If `<pack>`
+is already selected, it is not duplicated.
+
+Fail-closed behavior:
+- `--dry-run` prints the full file-creation manifest AND the exact `overlays:`
+  diff (before → after) and writes **nothing**.
+- If the pack dir already exists, or any target file already exists, the command
+  errors with a clear message and writes nothing (never overwrites).
+- Pack + unit names must be filesystem-safe (lowercase alphanumerics, internal
+  `.`/`-`/`_`, starting/ending alphanumeric).
+- Requires `.vh-agent-harness/` to exist at `--target` (default: cwd) — run
+  `vh-agent-harness install` first.
+
+Golden path: `overlay new <pack> --agent <n> --dry-run` (preview) →
+`overlay new <pack> --agent <n>` (apply) → `update --dry-run` (expect 0
+conflicts) → `update` (renders the pack into `.opencode/` and materializes the
+permission-pack) → render permission blocks:
+`vh-agent-harness exec node .opencode/sys-scripts/update-opencode-config.js`
+(this is what validates + writes the new agent's `permission.bash`/`permission.task`
+blocks; `update`/`doctor` do not run it automatically) → `doctor` (healthy).
 
 ## What is safe
 
