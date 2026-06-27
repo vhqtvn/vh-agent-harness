@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
+	corpus "github.com/vhqtvn/vh-agent-harness"
 	"github.com/vhqtvn/vh-agent-harness/internal/schema"
 )
 
@@ -32,15 +34,35 @@ const harnessProfileName = ".vh-agent-harness/vh-harness-profile.yml"
 // A missing OR invalid profile yields an empty map (defaults). Doctor reports the
 // real validation error separately; render never aborts on a malformed profile.
 func readProfileAnswers(target string) map[string]string {
-	out := map[string]string{}
 	raw, err := os.ReadFile(filepath.Join(target, harnessProfileName))
 	if err != nil {
-		return out
+		// Greenfield: the live profile is being SEEDED this same run and isn't on
+		// disk yet, so fall back to the EMBEDDED platform-default profile. This
+		// keeps the render (e.g. opencode.jsonc's `features.backlog` block)
+		// consistent with the profile install is about to seed — otherwise install
+		// renders with hardcoded defaults while a later doctor/update re-renders
+		// from the seeded profile and reports spurious drift on opencode.jsonc.
+		return corpusDefaultProfileAnswers()
 	}
 	// Lint via the schema registry before trusting the projection. A malformed
 	// profile cannot drive a render; fall back to defaults and let doctor flag it.
 	if errs := (schema.HarnessProfile{}).Validate(raw); len(errs) > 0 {
-		return out
+		return map[string]string{}
+	}
+	return projectProfileAnswers(raw)
+}
+
+// corpusDefaultProfileAnswers projects the embedded platform-default
+// vh-harness-profile.yml (templates/core), used on a greenfield install when the
+// target has no live profile yet. Empty map on any read/parse failure.
+func corpusDefaultProfileAnswers() map[string]string {
+	sub, err := fs.Sub(corpus.CoreFS, corpus.CoreDir)
+	if err != nil {
+		return map[string]string{}
+	}
+	raw, err := fs.ReadFile(sub, harnessProfileName)
+	if err != nil {
+		return map[string]string{}
 	}
 	return projectProfileAnswers(raw)
 }

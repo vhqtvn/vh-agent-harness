@@ -33,6 +33,7 @@ const (
 //   - .vh-agent-harness/vh-harness-profile.yml             -> platform_armed     (provenance "core.profile")
 //   - .opencode/repo-configs/forbidden-patterns.project.js -> project_owned      (provenance "core.deny.project")
 //   - .opencode/repo-configs/repo-recon-data.yml           -> external_generated (provenance "core.repo-recon.data")
+//   - docs/planning/backlog.md, docs/planning/roadmap.md   -> project_owned      (provenance "core.planning")
 //   - .gitignore, README.md, CLAUDE.md, Makefile           -> project_owned      (provenance "core.project-identity")
 //
 // This is the canonical ownership manifest for the core corpus. The seam's
@@ -81,6 +82,12 @@ func CoreOwnershipDefaults() (ownership.ModuleDefaults, error) {
 		case ".vh-agent-harness/vh-harness-profile.yml":
 			rule.Class = ownership.ClassPlatformArmed
 			rule.Provenance = "core.profile"
+		case "docs/planning/backlog.md", "docs/planning/roadmap.md":
+			// Planning docs: the harness seeds a canonical starter on a greenfield
+			// install, then NEVER clobbers — the backlog is the project's living
+			// source of task truth that agents edit constantly. project_owned.
+			rule.Class = ownership.ClassProjectOwned
+			rule.Provenance = "core.planning"
 		case ".gitignore", "README.md", "CLAUDE.md", "Makefile":
 			// Project-identity files: the harness ships a generic scaffold, but
 			// these belong to the consuming project (its ignores, its readme, its
@@ -147,6 +154,9 @@ var coreExceptionsForDoc = map[string]ownership.Class{
 	".vh-agent-harness/vh-harness-profile.yml":             ownership.ClassPlatformArmed,
 	".opencode/repo-configs/forbidden-patterns.project.js": ownership.ClassProjectOwned,
 	".opencode/repo-configs/repo-recon-data.yml":           ownership.ClassExternalGenerated,
+	// Planning docs: canonical starter seeded once, then project-owned (living backlog).
+	"docs/planning/backlog.md": ownership.ClassProjectOwned,
+	"docs/planning/roadmap.md": ownership.ClassProjectOwned,
 	// Project-identity files: generic scaffold seeded once, then project-owned.
 	".gitignore": ownership.ClassProjectOwned,
 	"README.md":  ownership.ClassProjectOwned,

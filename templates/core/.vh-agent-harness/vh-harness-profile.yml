@@ -13,6 +13,6 @@ profile: minimal
 modules:
   - core
 features:
-  backlog: false
+  backlog: true
 overlays: []
 policy_packs: []

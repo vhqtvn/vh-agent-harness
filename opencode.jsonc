@@ -86,6 +86,13 @@
             ".opencode/scripts/commit-gate.sh release *": "deny",
             ".opencode/scripts/commit-gate.sh heartbeat *": "deny",
             ".opencode/scripts/commit-gate.sh stage-message *": "deny",
+            // backlog feature surface: active when vh-harness-profile.yml
+            // features.backlog is true. The normalize-backlog.js maintainer and
+            // backlog-cleanup command are registered; dormant otherwise (script
+            // remains on disk but unregistered). Gated by the S3 profile so the
+            // harness ships a single core corpus and the project opts in via
+            // configuration, not a separate template variant.
+            "vh-agent-harness exec node .opencode/scripts/normalize-backlog.js": "allow",
             "vh-agent-harness *": "allow",
         },
     },

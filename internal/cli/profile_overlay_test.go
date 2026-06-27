@@ -139,12 +139,15 @@ func TestProjectProfileAnswers_NoOverlaysOmitsKey(t *testing.T) {
 	}
 }
 
-// TestReadProfileAnswers_MissingFileReturnsEmpty confirms a missing profile
-// returns an empty (non-nil) answer map so render falls back to defaults.
-func TestReadProfileAnswers_MissingFileReturnsEmpty(t *testing.T) {
+// TestReadProfileAnswers_MissingFileFallsBackToCorpusDefault confirms that on a
+// greenfield install (no live profile yet) readProfileAnswers projects the
+// EMBEDDED platform-default profile, so the render matches the profile install is
+// about to seed (e.g. features.backlog defaults true). This prevents spurious
+// opencode.jsonc drift between install and the first doctor/update.
+func TestReadProfileAnswers_MissingFileFallsBackToCorpusDefault(t *testing.T) {
 	target := t.TempDir()
 	ans := readProfileAnswers(target)
-	if len(ans) != 0 {
-		t.Errorf("missing profile: got %d answers, want 0", len(ans))
+	if got := ans["features.backlog"]; got != "true" {
+		t.Errorf("missing profile should fall back to corpus default (features.backlog=true), got %q", got)
 	}
 }

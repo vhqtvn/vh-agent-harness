@@ -86,6 +86,11 @@ compose source), or anything under `.opencode/` that is platform_managed.
   as a host prefix.
 - **Use an existing wrapper for execution:** in `run-shape.yml` set
   `backend: proxy` and `proxy_command: ["./dev.sh", "exec"]`.
+- **Track work:** the backlog at `docs/planning/backlog.md` is seeded on install
+  (source of task truth). Before/after work, update the matching row's status;
+  run `/backlog-cleanup` (or `vh-agent-harness exec node
+  .opencode/scripts/normalize-backlog.js`) to tidy/archive. Roadmap intent lives
+  in `docs/planning/roadmap.md`. Both are `project_owned` (never clobbered).
 - **Refresh after a new binary or config change:** `vh-agent-harness update`
   (preview with `--dry-run`). Armed-file conflicts are recorded — list them with
   `vh-agent-harness proposals`.
