@@ -54,8 +54,7 @@ real target locations.
 
 | File | What to do |
 | --- | --- |
-| `.vh-agent-harness/project.config.json` | Fill `project.mission_summary` + `architecture_summary` (and `db_user`/`db_name` if used). Resolved into the seeded `CLAUDE.md`/`Makefile` at install — **create + fill it BEFORE `install`** (those seeds are written once). |
-| `.vh-agent-harness/AGENTS.mission.md` | Write the project's domain mission/architecture/rules; composed into root `AGENTS.md` on `update`. |
+| `.vh-agent-harness/project.config.json` | Fill `project.mission_summary` + `architecture_summary` (and `db_user`/`db_name` if used). Resolved into the seeded `CLAUDE.md`/`Makefile` at install — **create + fill it BEFORE `install`** (those seeds are written once). || `.vh-agent-harness/AGENTS.mission.md` | Write the project's domain mission/architecture/rules; composed into root `AGENTS.md` on `update`. |
 | `.vh-agent-harness/vh-harness-profile.yml` | (armed, seeded) Select features + `overlays: [<pack>]` (S3). |
 | `.vh-agent-harness/run-shape.yml` | (seeded host-shell) Set runtime `backend:` (`host-shell`/`docker_compose`/`proxy`) + `compose_file`/`default_service` or `proxy_command`; lifecycle hooks/verbs (S4). |
 | `.vh-agent-harness/harness-ownership.yml` | (optional; not seeded) Raise-only ownership overrides — create only to take a managed file to `project_owned`. |
@@ -196,6 +195,36 @@ blocks; `update`/`doctor` do not run it automatically) → `doctor` (healthy).
   `Makefile`, and any `AGENTS.md`; it refreshes only generic managed files.
 - `exec`/`shell` always run the shell-guard permission gate before touching the
   runtime, including the `proxy` backend.
+
+## Re-seeding a project_owned file (CLAUDE.md / Makefile)
+
+`CLAUDE.md` and `Makefile` are `project_owned`: they are **seeded once** at
+install (resolved from `.vh-agent-harness/project.config.json`) and then
+**preserved byte-for-byte** on every `update`. That preserve-once rule is the
+safety contract — but it has a consequence: a plain `vh-agent-harness update`
+**cannot** push a template fix into a file that already exists on disk. If a
+seeded file is stale (an old template body, blank where tokens should be, or you
+changed `project.config.json` and want the new values baked in), `update` will
+leave your existing copy untouched.
+
+The sanctioned recovery is **delete-then-update** (a manual re-seed):
+
+```
+rm CLAUDE.md            # or: rm Makefile
+vh-agent-harness update  # re-seeds the deleted file from the current template
+```
+
+- **Warning: this loses local edits.** `CLAUDE.md`/`Makefile` are yours after
+  seed; `rm` discards any hand-edits. Back the file up first if you need them.
+  If you want a managed file to track the platform template forever instead, do
+  NOT use this — raise its ownership to `platform_managed` is not allowed
+  (downgrades are rejected); the intended path for always-managed content is an
+  overlay or the composed `AGENTS.md` (core+mission), not `CLAUDE.md`.
+- Re-seed re-reads `.vh-agent-harness/project.config.json` at render time, so
+  fill that **before** the `update` if you want the new token values in the seed.
+- This is the Slice-1 workaround. Automatic stale-seed detection and a `--reseed`
+  flag are deferred (tracked in the backlog); today the operator notices the
+  staleness and runs the two commands above.
 
 When a command prints a "Next steps" footer, follow it. When unsure, re-run
 `vh-agent-harness guide`.

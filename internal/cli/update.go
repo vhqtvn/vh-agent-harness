@@ -92,6 +92,13 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 		fmt.Fprintf(out, "update: warning: lineage unreadable (%v); proceeding with default answers\n", lerr)
 	}
 
+	// Warn loudly when project.config.json is absent or a consumed token resolves
+	// empty (W3): non-fatal, emitted to stderr so it appears under --dry-run too.
+	// (On update the CLAUDE.md/Makefile are project_owned and preserved when
+	// already present, but an absent config still affects any seed/re-seed and is
+	// the signal a consumer needs to know the tokens are unresolved.)
+	warnEmptyProjectConfigTokens(os.Stderr, abs)
+
 	report, err := seamApply(abs, answers, updateDryRun)
 	if err != nil {
 		return err

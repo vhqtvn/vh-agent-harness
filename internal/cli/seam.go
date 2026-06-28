@@ -397,8 +397,18 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	for _, name := range activeOverlays(target) {
 		pack, err := overlay.OpenPackFor(target, name)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "seam: warning: skipping overlay %q: %v\n", name, err)
-			continue
+			// Fail CLOSED on a profile-listed overlay that won't open/apply (W9).
+			// Every overlay processed here is profile-listed — activeOverlays reads
+			// ONLY vh-harness-profile.yml `overlays:`; there is NO separate
+			// auto-discovered/lenient category — so the old warn-and-skip would
+			// silently produce an INCOMPLETE render (missing the agents/commands/
+			// skills the operator explicitly declared) with no signal. Hard-fail
+			// naming the pack + the underlying error so the operator can fix the
+			// pack or remove it from the profile overlays: list. Refusing the whole
+			// render is correct: a partial overlay set is unpredictable state.
+			return nil, fmt.Errorf("seam: overlay %q (declared in vh-harness-profile.yml overlays:) failed to open: %w\n"+
+				"fix the pack or remove it from the profile overlays: list; refusing to render an incomplete overlay set",
+				name, err)
 		}
 		// Shadowing guard (Slice 3): fail CLOSED before any unit is rendered if
 		// this pack would overwrite an existing rendered path. Point the consumer

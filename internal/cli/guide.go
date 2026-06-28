@@ -60,6 +60,10 @@ repo: it teaches how to operate the harness from the binary itself.`,
 			return err
 		}
 		st := detectHarnessState(cwd)
+		// Warn loudly when project.config.json tokens resolve empty (W3). Emitted
+		// to stderr so it is out-of-band from --json stdout and surfaces the
+		// incomplete-render risk before the operator installs/updates. Non-fatal.
+		warnEmptyProjectConfigTokens(os.Stderr, cwd)
 		steps := nextSteps(st)
 		if guideJSON {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
@@ -102,6 +106,11 @@ func nextSteps(st harnessState) []string {
 	switch st.Phase {
 	case phaseGreenfield:
 		return []string{
+			"Optional but recommended BEFORE install: create `.vh-agent-harness/project.config.json` " +
+				"so the seeded CLAUDE.md/Makefile pick up your project values. Print the template with " +
+				"`vh-agent-harness example .vh-agent-harness/project.config.json > .vh-agent-harness/project.config.json`, " +
+				"then fill `mission_summary`/`architecture_summary` (and `db_user`/`db_name` if used). " +
+				"Those seeds are written ONCE, so filling the config first avoids blank sections.",
 			"Preview first (optional): `vh-agent-harness install --name <ProjectName> --slug <project-slug> --dry-run` " +
 				"shows the per-file plan without writing anything.",
 			"Install the harness here: `vh-agent-harness install --name <ProjectName> --slug <project-slug>` " +
@@ -154,6 +163,9 @@ func nextSteps(st harnessState) []string {
 			"After editing config or installing a new binary: `vh-agent-harness update` (preview with "+
 				"`vh-agent-harness update --dry-run`; managed files refreshed, project-owned preserved; "+
 				"armed-file conflicts are recorded — see `vh-agent-harness proposals`).",
+			"Stale project_owned seed (CLAUDE.md/Makefile)? They are seeded ONCE then preserved, so `update` "+
+				"will NOT push a template fix into an existing copy. Re-seed manually: `rm <file>` then "+
+				"`vh-agent-harness update` (warning: this loses local edits — back the file up first).",
 			"Verify health anytime: `vh-agent-harness doctor`.",
 		)
 		return steps

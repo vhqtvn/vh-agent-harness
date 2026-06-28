@@ -56,6 +56,32 @@ func seamUpdateOut(t *testing.T, root string) (string, error) {
 	return out, err
 }
 
+// TestSeamUpdate_FailClosedOnBadOverlay (W9/Q5) confirms the seam refuses to
+// render when a profile-listed overlay pack fails to open. Previously this was
+// warn-and-skip, which silently produced an INCOMPLETE render (missing the
+// agents/commands/skills the operator declared in the profile) with no signal.
+// Now it hard-fails naming the exact pack + the underlying error. There is no
+// separate "discovered/lenient" overlay category — every overlay is
+// profile-listed (activeOverlays reads vh-harness-profile.yml `overlays:` only),
+// so fail-closed across the board is the correct, predictable rule.
+func TestSeamUpdate_FailClosedOnBadOverlay(t *testing.T) {
+	target := t.TempDir()
+	seamInstallInto(t, target)
+	// Declare a pack that does not exist: no project-local dir, no embedded pack.
+	// A schema-valid profile so activeOverlays returns the list (not nil).
+	writeProfile(t, target, "profile: minimal\nmodules: [core]\nfeatures:\n  backlog: false\noverlays: [totally-bogus-pack]\npolicy_packs: []\n")
+	out, err := seamUpdateOut(t, target)
+	if err == nil {
+		t.Fatalf("update must FAIL (not warn-and-skip) when a profile-listed overlay won't open; got nil err. out=%q", out)
+	}
+	if !strings.Contains(err.Error(), "totally-bogus-pack") {
+		t.Errorf("error must name the failing pack; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "refusing to render") {
+		t.Errorf("error must explain the refusal; got: %v", err)
+	}
+}
+
 // --- seam install: lineage -----------------------------------------------
 
 // TestSeamInstall_WritesLineage confirms the seam install path writes a lineage
@@ -229,10 +255,13 @@ func TestSeamUpdate_PreservesOwnedReconcilesArmed(t *testing.T) {
 	}
 
 	// User edits the armed file to a CLEAN mergeable state: profile=supervised
-	// (valid enum), modules=[core,web] (platform adds core), backlog=true.
-	// After update the reconciler should keep supervised/web/backlog AND merge in
-	// the platform's core module (union-dedup) -> armed-merged.
-	userArmed := []byte("profile: supervised\nmodules: [web]\nfeatures:\n  backlog: true\noverlays: [web-overlay]\npolicy_packs: []\n")
+	// (valid enum), modules=[web] (platform adds core), backlog=true. After update
+	// the reconciler should keep supervised/web/backlog AND merge in the platform's
+	// core module (union-dedup) -> armed-merged. NOTE: overlays:[] — the seam is
+	// now fail-closed on a profile-listed overlay that won't open (W9/Q5), so a
+	// fixture must not declare a non-existent pack (the old web-overlay was
+	// relocated out of the shipped set; see overlay.KnownPacks).
+	userArmed := []byte("profile: supervised\nmodules: [web]\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\n")
 	if err := os.WriteFile(filepath.Join(root, ".vh-agent-harness/vh-harness-profile.yml"), userArmed, 0o644); err != nil {
 		t.Fatalf("edit armed: %v", err)
 	}
@@ -269,7 +298,7 @@ func TestSeamUpdate_PreservesOwnedReconcilesArmed(t *testing.T) {
 		t.Fatalf("read armed after: %v", err)
 	}
 	armedStr := string(armedAfter)
-	for _, want := range []string{"supervised", "web", "backlog: true", "web-overlay"} {
+	for _, want := range []string{"supervised", "web", "backlog: true"} {
 		if !strings.Contains(armedStr, want) {
 			t.Errorf("armed reconcile lost user value %q; got:\n%s", want, armedStr)
 		}

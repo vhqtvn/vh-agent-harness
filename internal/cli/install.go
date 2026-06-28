@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -95,6 +96,12 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		"project_name": installFl.name,
 		"project_slug": installFl.slug,
 	}
+
+	// Warn loudly when project.config.json is absent or a consumed token resolves
+	// empty (W3): previously this was silent and a consumer shipped a CLAUDE.md
+	// with blank sections. Non-fatal; emitted to stderr so it appears alongside
+	// both the --dry-run plan (stdout) and a real apply.
+	warnEmptyProjectConfigTokens(os.Stderr, target)
 
 	report, err := seamApply(target, answers, installFl.dryRun)
 	if err != nil {
