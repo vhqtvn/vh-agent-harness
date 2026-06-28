@@ -73,18 +73,9 @@ var CommandGroups = []CommandGroup{
 	}},
 }
 
-// GroupNames lists the group names in canonical iteration order.
+// GroupNames lists the group names in canonical iteration order, for consumers
+// that need to enumerate groups (e.g. diagnostics, future JSON-schema emission).
 var GroupNames = []string{"readonly", "git_readonly", "gate"}
-
-// groupNameOf returns the group index for a name, or -1 if unknown.
-func groupIndex(name string) int {
-	for i, g := range CommandGroups {
-		if g.Name == name {
-			return i
-		}
-	}
-	return -1
-}
 
 // CoreLocationRules maps each agent location name (plus "default" for the
 // top-level permission.bash block) to its bash decisions. Gate-exempt agents

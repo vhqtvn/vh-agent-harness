@@ -108,8 +108,6 @@ func (o *orderedMap) set(key, val string) {
 	o.entries = append(o.entries, orderedEntry{key: key, val: val})
 }
 
-func (o *orderedMap) len() int { return len(o.entries) }
-
 // MarshalJSON emits the map as compact JSON `{"k":"v",...}` in insertion order.
 // The outer json.MarshalIndent call will compact and re-indent this output to
 // match the surrounding indentation depth.

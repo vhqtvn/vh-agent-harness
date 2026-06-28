@@ -388,5 +388,88 @@ func TestValidate_CoreTablesPass(t *testing.T) {
 	}
 }
 
+// Test 15: multi-agent delegateFrom determinism — two pack agents sharing one
+// delegateFrom target MUST produce byte-stable output regardless of Go map
+// iteration order. Runs 50 iterations to catch intermittent nondeterminism.
+func TestEmit_MultiAgentDelegateFromDeterministic(t *testing.T) {
+	packs := []Pack{{
+		Name: "multi-pack",
+		Agents: map[string]PackAgent{
+			"agent-zebra": {
+				Location:     LocationRule{Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
+				Task:         []TaskEntry{{"*", Deny}},
+				DelegateFrom: []string{"build"},
+			},
+			"agent-alpha": {
+				Location:     LocationRule{Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
+				Task:         []TaskEntry{{"*", Deny}},
+				DelegateFrom: []string{"build"},
+			},
+		},
+	}}
+	configWithOverlay := strings.Replace(miniConfig,
+		`"repo-explorer": {
+      "permission": {
+        "bash": { "__placeholder__": "deny" },
+        "task": { "__placeholder__": "deny" }
+      }
+    }`,
+		`"repo-explorer": {
+      "permission": {
+        "bash": { "__placeholder__": "deny" },
+        "task": { "__placeholder__": "deny" }
+      }
+    },
+    "agent-zebra": {
+      "permission": {
+        "bash": { "__placeholder__": "deny" },
+        "task": { "__placeholder__": "deny" }
+      }
+    },
+    "agent-alpha": {
+      "permission": {
+        "bash": { "__placeholder__": "deny" },
+        "task": { "__placeholder__": "deny" }
+      }
+    }`, 1)
+
+	out1 := mustEmit(t, configWithOverlay, packs, Features{})
+	for i := 0; i < 50; i++ {
+		out := mustEmit(t, configWithOverlay, packs, Features{})
+		if string(out) != string(out1) {
+			t.Fatalf("non-deterministic at iteration %d:\n--- first ---\n%s\n--- iter ---\n%s", i, out1, out)
+		}
+	}
+	// Verify BOTH delegateFrom edges are present in build's task block.
+	var root map[string]any
+	json.Unmarshal(out1, &root)
+	agents := root["agent"].(map[string]any)
+	build := agents["build"].(map[string]any)
+	btask := build["permission"].(map[string]any)["task"].(map[string]any)
+	if btask["agent-alpha"] != "allow" || btask["agent-zebra"] != "allow" {
+		t.Fatalf("both delegateFrom edges should be present: %v", btask)
+	}
+}
+
+// Test 16: validate catches an invalid wildcard decision (F5 regression guard).
+// Previously "*" was skipped before decision validation, so {"*":"bogus"} passed.
+func TestValidate_WildcardInvalidDecision(t *testing.T) {
+	locs := map[string]LocationRule{
+		"default": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
+		"build":   {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
+	}
+	tasks := map[string][]TaskEntry{
+		"build": {{"*", Decision("bogus")}},
+	}
+	gateExempt := map[string]bool{}
+	err := validate(locs, tasks, gateExempt)
+	if err == nil {
+		t.Fatal("expected error for invalid wildcard decision")
+	}
+	if !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("wrong error: %v", err)
+	}
+}
+
 // (extractKeys helper removed — key-order is verified via raw byte position
 // inspection in TestEmit_BashBlockOrder, which doesn't lose order to re-parse.)

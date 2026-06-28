@@ -104,7 +104,17 @@ func resolveRules(packs []Pack) (locations map[string]LocationRule, tasks map[st
 	}
 
 	for _, pack := range packs {
-		for name, agent := range pack.Agents {
+		// Iterate pack agents in SORTED key order so delegateFrom edge
+		// injection is byte-stable (Go map iteration is randomized; two
+		// agents sharing a delegateFrom target would otherwise append in
+		// nondeterministic order, breaking the deterministic-output contract).
+		agentNames := make([]string, 0, len(pack.Agents))
+		for name := range pack.Agents {
+			agentNames = append(agentNames, name)
+		}
+		sort.Strings(agentNames)
+		for _, name := range agentNames {
+			agent := pack.Agents[name]
 			locations[name] = agent.Location
 			if len(agent.Task) > 0 {
 				tasks[name] = agent.Task
@@ -257,14 +267,16 @@ func validate(locations map[string]LocationRule, tasks map[string][]TaskEntry, g
 			return fmt.Errorf("agent %q: task rule must start with *", name)
 		}
 		for _, e := range rule {
+			// Validate the decision for ALL entries (including "*") before
+			// skipping the target-existence check for the wildcard.
+			if !validDecision(e.Decision) {
+				return fmt.Errorf("agent %q: task target %q decision %q invalid", name, e.Target, e.Decision)
+			}
 			if e.Target == "*" {
 				continue
 			}
 			if _, ok := locations[e.Target]; !ok {
 				return fmt.Errorf("agent %q: task target %q is not a known agent location", name, e.Target)
-			}
-			if !validDecision(e.Decision) {
-				return fmt.Errorf("agent %q: task target %q decision %q invalid", name, e.Target, e.Decision)
 			}
 		}
 	}
