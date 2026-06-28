@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -401,5 +402,133 @@ func TestSeamClassifier_ReadsCoreOwnership(t *testing.T) {
 		if got.Class != c.want {
 			t.Errorf("Classify(%q): got %q want %q", c.path, got.Class, c.want)
 		}
+	}
+}
+
+// --- canonical permission emission (O5 slice 2b) ---------------------------
+
+// TestSeamInstall_EmitsCanonicalPermissions verifies the Go-native permission
+// emitter (internal/permconfig) is wired into renderSeamStaging. After a clean
+// install:
+//   - opencode.jsonc is in canonical normalized form (no // MANAGED / // PROJECT:
+//     comments; Q1b deterministic JSONC).
+//   - features.backlog=true (the default install) → the normalize-backlog.js
+//     permission entry IS present (the resolver wipe bug is fixed by the Go
+//     emitter).
+//   - allowed-commands.js is generated from Go canonical tables with the JS
+//     module export shape the shell-guard runtime hook imports.
+//   - doctor passes HEALTHY immediately (managed-drift is byte-stable across
+//     update→doctor because both re-render via the same renderSeamStaging).
+func TestSeamInstall_EmitsCanonicalPermissions(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	cfg, err := os.ReadFile(filepath.Join(root, "opencode.jsonc"))
+	if err != nil {
+		t.Fatalf("read opencode.jsonc: %v", err)
+	}
+	cfgStr := string(cfg)
+	if strings.Contains(cfgStr, "// MANAGED") || strings.Contains(cfgStr, "// PROJECT:") {
+		t.Errorf("canonical opencode.jsonc must NOT carry comments (Q1b); found // MANAGED or // PROJECT:")
+	}
+	if !strings.Contains(cfgStr, "normalize-backlog.js") {
+		t.Errorf("features.backlog=true (default install) must include normalize-backlog permission; the resolver wipe bug is fixed by the Go emitter")
+	}
+
+	ac, err := os.ReadFile(filepath.Join(root, ".opencode", "repo-configs", "allowed-commands.js"))
+	if err != nil {
+		t.Fatalf("read allowed-commands.js: %v", err)
+	}
+	acStr := string(ac)
+	if !strings.HasPrefix(acStr, "export const COMMANDS = {") {
+		t.Errorf("allowed-commands.js must have the JS module export shape shell-guard imports; got prefix %q", acStr[:min(40, len(acStr))])
+	}
+	for _, key := range []string{"readonly:", "git_readonly:", "gate:"} {
+		if !strings.Contains(acStr, key) {
+			t.Errorf("allowed-commands.js must declare group %q", key)
+		}
+	}
+
+	out := seamDoctorOut(t, root)
+	if !strings.Contains(out, "result: HEALTHY") {
+		t.Errorf("doctor want HEALTHY after install with Go-emitted permissions, got %q", out)
+	}
+}
+
+// TestSeamUpdate_BacklogFeatureOffExcludesPermission verifies the Go emitter
+// respects features.backlog=false: the normalize-backlog.js permission entry
+// must be ABSENT from opencode.jsonc, and doctor must still pass HEALTHY (no
+// false drift from the conditional collapsing).
+func TestSeamUpdate_BacklogFeatureOffExcludesPermission(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	writeProfile(t, root, "profile: minimal\nmodules: [core]\nfeatures:\n  backlog: false\noverlays: []\npolicy_packs: []\n")
+	if _, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("update with backlog=false: %v", err)
+	}
+	cfg, err := os.ReadFile(filepath.Join(root, "opencode.jsonc"))
+	if err != nil {
+		t.Fatalf("read opencode.jsonc: %v", err)
+	}
+	if strings.Contains(string(cfg), "normalize-backlog.js") {
+		t.Errorf("features.backlog=false must EXCLUDE normalize-backlog permission; still present after update")
+	}
+	out := seamDoctorOut(t, root)
+	if !strings.Contains(out, "result: HEALTHY") {
+		t.Errorf("doctor want HEALTHY with backlog=false, got %q", out)
+	}
+}
+
+// TestSeamInstall_GateExemptAgentOmitsGateCommands verifies a gate-exempt agent
+// (build) has NO gate command entries in its permission.bash block, while the
+// sole gate-enabled agent (committer) DOES have gate entries with "allow". This
+// is the OpenCode deriveSubagentSessionPermission correctness contract: a parent
+// gate deny would bleed into the committer subagent and block commits.
+func TestSeamInstall_GateExemptAgentOmitsGateCommands(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	cfg, err := os.ReadFile(filepath.Join(root, "opencode.jsonc"))
+	if err != nil {
+		t.Fatalf("read opencode.jsonc: %v", err)
+	}
+	// The canonical output is valid JSON (comments dropped per Q1b), so we can
+	// parse it directly and navigate to specific agent permission blocks.
+	var doc struct {
+		Agent map[string]struct {
+			Permission struct {
+				Bash map[string]string `json:"bash"`
+			} `json:"permission"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(cfg, &doc); err != nil {
+		t.Fatalf("unmarshal canonical opencode.jsonc: %v", err)
+	}
+
+	// build is gate-exempt → must NOT contain any commit-gate entries.
+	buildBash := doc.Agent["build"].Permission.Bash
+	if buildBash == nil {
+		t.Fatal("build agent permission.bash block is missing")
+	}
+	for cmd := range buildBash {
+		if strings.Contains(cmd, "commit-gate.sh") {
+			t.Errorf("build agent (gate-exempt) must NOT have gate command entries; found %q in its permission.bash", cmd)
+		}
+	}
+
+	// committer is the ONLY gate-enabled agent → must have commit-gate entries
+	// with "allow".
+	committerBash := doc.Agent["committer"].Permission.Bash
+	if committerBash == nil {
+		t.Fatal("committer agent permission.bash block is missing")
+	}
+	foundGateAllow := false
+	for cmd, decision := range committerBash {
+		if strings.Contains(cmd, "commit-gate.sh") && decision == "allow" {
+			foundGateAllow = true
+			break
+		}
+	}
+	if !foundGateAllow {
+		t.Errorf("committer agent (gate-enabled) must have at least one commit-gate.sh entry with 'allow'")
 	}
 }

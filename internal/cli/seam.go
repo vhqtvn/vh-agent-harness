@@ -10,6 +10,7 @@ import (
 
 	"github.com/vhqtvn/vh-agent-harness/internal/overlay"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
+	"github.com/vhqtvn/vh-agent-harness/internal/permconfig"
 	"github.com/vhqtvn/vh-agent-harness/internal/proposals"
 	"github.com/vhqtvn/vh-agent-harness/internal/runshape"
 	"github.com/vhqtvn/vh-agent-harness/internal/substrate"
@@ -435,8 +436,9 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 			return nil, fmt.Errorf("seam: overlay %s: %w", name, err)
 		}
 		// Materialize the pack's self-describing permission descriptor (if any)
-		// so update-opencode-config.js can resolve the active roster DYNAMICALLY
-		// (by directory listing) instead of the core script hardcoding any pack.
+		// so the Go-native permission emitter (internal/permconfig) can resolve
+		// the active roster DYNAMICALLY (by directory listing) instead of the
+		// canonical Go tables hardcoding any pack's agents.
 		ppRel, err := pack.MaterializePermissionPack(staging)
 		if err != nil {
 			return nil, fmt.Errorf("seam: overlay %s: %w", name, err)
@@ -456,6 +458,45 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	}
 	for _, o := range report.Orphans {
 		fmt.Fprintf(os.Stderr, "seam: warning: orphan prompt-extension snippet (no matching anchor): pack=%s target=%s slot=%s\n", o.Pack, o.TargetRel, o.Slot)
+	}
+	// Canonical permission emission (O5 slice 2b): collapse the dual permission
+	// source of truth (corpus template bash/task literals AND the Node resolver
+	// tables) into a single Go-native emitter. The emitter overwrites
+	// permission.bash and permission.task blocks authoritatively from Go canonical
+	// tables (internal/permconfig/tables.go), injects delegateFrom task edges from
+	// the materialized permission-packs, and applies the features.backlog gate.
+	// This replaces the operator-run Node resolver (update-opencode-config.js) as
+	// the operational authority for permission content. doctor re-renders via this
+	// same renderSeamStaging pipeline so managed-drift auto-coheres with the
+	// canonical form.
+	permPacks, err := permconfig.LoadPacks(staging)
+	if err != nil {
+		return nil, fmt.Errorf("seam: load permission-packs: %w", err)
+	}
+	cfgPath := filepath.Join(staging, "opencode.jsonc")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return nil, fmt.Errorf("seam: read staged opencode.jsonc for permission emission: %w", err)
+	}
+	features := permconfig.Features{Backlog: renderAnswers["features.backlog"] == "true"}
+	emitted, err := permconfig.Emit(data, permPacks, features)
+	if err != nil {
+		return nil, fmt.Errorf("seam: emit canonical permissions: %w", err)
+	}
+	if err := os.WriteFile(cfgPath, emitted, 0o644); err != nil {
+		return nil, fmt.Errorf("seam: write canonical opencode.jsonc: %w", err)
+	}
+	// Generate allowed-commands.js from the same Go canonical tables so the
+	// shell-guard runtime hook (which imports it as a JS module at exec time)
+	// stays in sync with the emitted permission blocks. Single-source: the Go
+	// tables own both the opencode.jsonc permission content and this compat
+	// artifact. The file is platform_managed; see README.agent.md.
+	acDir := filepath.Join(staging, ".opencode", "repo-configs")
+	if err := os.MkdirAll(acDir, 0o755); err != nil {
+		return nil, fmt.Errorf("seam: ensure repo-configs dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(acDir, "allowed-commands.js"), permconfig.GenerateAllowedCommandsJS(), 0o644); err != nil {
+		return nil, fmt.Errorf("seam: write generated allowed-commands.js: %w", err)
 	}
 	return overlayFiles, nil
 }
