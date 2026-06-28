@@ -63,7 +63,7 @@ repo: it teaches how to operate the harness from the binary itself.`,
 		// Warn loudly when project.config.json tokens resolve empty (W3). Emitted
 		// to stderr so it is out-of-band from --json stdout and surfaces the
 		// incomplete-render risk before the operator installs/updates. Non-fatal.
-		warnEmptyProjectConfigTokens(os.Stderr, cwd)
+		warnUnresolvedProjectConfigTokens(os.Stderr, cwd)
 		steps := nextSteps(st)
 		if guideJSON {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(struct {

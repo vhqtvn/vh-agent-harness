@@ -101,7 +101,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// empty (W3): previously this was silent and a consumer shipped a CLAUDE.md
 	// with blank sections. Non-fatal; emitted to stderr so it appears alongside
 	// both the --dry-run plan (stdout) and a real apply.
-	warnEmptyProjectConfigTokens(os.Stderr, target)
+	warnUnresolvedProjectConfigTokens(os.Stderr, target)
 
 	report, err := seamApply(target, answers, installFl.dryRun)
 	if err != nil {

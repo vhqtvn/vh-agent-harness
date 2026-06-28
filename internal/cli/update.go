@@ -97,7 +97,7 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 	// (On update the CLAUDE.md/Makefile are project_owned and preserved when
 	// already present, but an absent config still affects any seed/re-seed and is
 	// the signal a consumer needs to know the tokens are unresolved.)
-	warnEmptyProjectConfigTokens(os.Stderr, abs)
+	warnUnresolvedProjectConfigTokens(os.Stderr, abs)
 
 	report, err := seamApply(abs, answers, updateDryRun)
 	if err != nil {

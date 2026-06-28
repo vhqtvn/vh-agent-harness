@@ -99,52 +99,69 @@ var consumedProjectConfigFieldsOrdered = []string{
 	"db_name",
 }
 
-// warnEmptyProjectConfigTokens writes a LOUD warning to w (stderr in production)
-// when .vh-agent-harness/project.config.json is absent OR any of the four
-// consumed tokens would resolve to the empty string at render time.
+// warnUnresolvedProjectConfigTokens writes a LOUD warning to w (stderr in
+// production) when .vh-agent-harness/project.config.json is absent OR any of the
+// four consumed tokens would resolve to an EMPTY string OR an UNRESOLVED
+// SENTINEL (e.g. the field still literally contains "{{MISSION_SUMMARY}}") at
+// render time.
 //
-// This closes the W3 adoption footgun: previously an absent/empty
-// project.config.json was SILENT (projectConfigAnswers returns an empty map and
-// the renderer resolves {{MISSION_SUMMARY}} etc. to "" — renderer.go
-// SubstituteHarnessTokens), so a consumer would ship a CLAUDE.md/Makefile with
-// blank sections and no signal that anything was missing. The warning is
-// NON-FATAL: it never blocks install/update/guide, but it makes the incomplete
-// render visible and points the operator at the command that creates the config.
+// This closes the W3 adoption footgun from two directions:
+//   - absent/empty config was previously SILENT (projectConfigAnswers returns an
+//     empty map; the renderer resolves {{MISSION_SUMMARY}} etc. to ""), so a
+//     consumer shipped a CLAUDE.md/Makefile with blank sections and no signal.
+//   - a config saved verbatim from `vh-agent-harness example` still contains the
+//     literal {{...}} sentinels; projectConfigAnswers records them as NON-empty
+//     values, so the prior empty-only check missed them and the renderer
+//     substituted each sentinel for itself — shipping literal {{TOKEN}}s in the
+//     rendered file (the original incident this epic addresses).
 //
-// It surfaces under --dry-run too because the caller (install/update) invokes it
-// before the dry-run branch, so an operator previewing a render learns the
-// seeded files would come out token-empty. projectConfigAnswers only records a
-// field when its value is non-empty, so a resolved-empty token is simply absent
-// from the returned map — which is exactly what this checks.
-func warnEmptyProjectConfigTokens(w io.Writer, target string) {
+// The warning is NON-FATAL: it never blocks install/update/guide, but it makes
+// the incomplete render visible and points the operator at the command that
+// creates the config. It surfaces under --dry-run too (install/update invoke it
+// before the dry-run branch). projectConfigAnswers only records a field when its
+// value is non-empty, so a resolved-empty token is simply absent from the
+// returned map.
+func warnUnresolvedProjectConfigTokens(w io.Writer, target string) {
 	path := filepath.Join(target, runshape.DirName, "project.config.json")
 	_, statErr := os.Stat(path)
 	absent := statErr != nil
 
 	answers := projectConfigAnswers(target)
-	var missing []string
+	type issue struct {
+		field    string
+		sentinel bool
+	}
+	var unresolved []issue
 	for _, f := range consumedProjectConfigFieldsOrdered {
-		if answers[f] == "" {
-			missing = append(missing, f)
+		v := answers[f]
+		switch {
+		case v == "":
+			unresolved = append(unresolved, issue{field: f})
+		case strings.Contains(v, "{{"):
+			unresolved = append(unresolved, issue{field: f, sentinel: true})
 		}
 	}
-	if len(missing) == 0 {
+	if len(unresolved) == 0 {
 		return
 	}
-	sort.Strings(missing)
+	sort.Slice(unresolved, func(i, j int) bool { return unresolved[i].field < unresolved[j].field })
 
 	fmt.Fprintln(w, "--------------------------------------------------------------------------------")
-	fmt.Fprintln(w, "vh-agent-harness WARNING: project.config.json token(s) resolve EMPTY.")
+	fmt.Fprintln(w, "vh-agent-harness WARNING: project.config.json token(s) UNRESOLVED.")
 	if absent {
 		fmt.Fprintf(w, "  No %s found — ALL of the consumed tokens below are empty.\n", filepath.Join(runshape.DirName, "project.config.json"))
 	} else {
-		fmt.Fprintf(w, "  %s exists but these field(s) are unset/empty:\n", filepath.Join(runshape.DirName, "project.config.json"))
+		fmt.Fprintf(w, "  %s exists but these field(s) are empty OR still contain a literal {{...}} sentinel:\n", filepath.Join(runshape.DirName, "project.config.json"))
 	}
-	for _, f := range missing {
-		fmt.Fprintf(w, "    - %s  (renders as {{%s}})\n", f, strings.ToUpper(f))
+	for _, u := range unresolved {
+		if u.sentinel {
+			fmt.Fprintf(w, "    - %s  (still literal {{%s}} — fill in a real value)\n", u.field, strings.ToUpper(u.field))
+		} else {
+			fmt.Fprintf(w, "    - %s  (renders as {{%s}})\n", u.field, strings.ToUpper(u.field))
+		}
 	}
-	fmt.Fprintln(w, "  The seeded CLAUDE.md/Makefile will have BLANK sections for these.")
-	fmt.Fprintln(w, "  Create/fill the config BEFORE install (project_owned seeds are written once):")
+	fmt.Fprintln(w, "  The seeded CLAUDE.md/Makefile will ship BLANK/LITERAL-TOKEN sections for these.")
+	fmt.Fprintln(w, "  Fill the config BEFORE install (project_owned seeds are written once):")
 	fmt.Fprintf(w, "    vh-agent-harness example %s > %s\n",
 		filepath.Join(runshape.DirName, "project.config.json"),
 		filepath.Join(runshape.DirName, "project.config.json"))

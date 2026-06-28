@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -145,4 +146,107 @@ func sortedKeys(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestWarnUnresolvedProjectConfigTokens is the W3 unit test (closes the G3
+// coverage gap surfaced by the Slice-1 commit-review). It exercises
+// warnUnresolvedProjectConfigTokens across the cases that matter for the adoption
+// footgun: absent config (all empty), a fully-filled config (no warning), a
+// config saved verbatim from `vh-agent-harness example` (fields still hold their
+// literal {{...}} sentinels — the original incident this epic addresses), and a
+// mixed config. The function is NON-FATAL, so each case asserts on the captured
+// output, not on a returned error.
+func TestWarnUnresolvedProjectConfigTokens(t *testing.T) {
+	// A config with all four fields filled with real (non-token) values — the
+	// only case that must stay SILENT.
+	filledJSON := `{"project":{
+		"mission_summary":"Build the thing.",
+		"architecture_summary":["apps/api - backend"],
+		"db_user":"svc","db_name":"core"
+	}}`
+
+	tests := []struct {
+		name      string
+		setupJSON string // empty string => write no config (absent)
+		wantWarn  bool
+		// substrings that MUST appear when wantWarn; ignored when !wantWarn.
+		wantSubs []string
+	}{
+		{
+			name:     "absent config warns all four are empty",
+			wantWarn: true,
+			wantSubs: []string{
+				"UNRESOLVED",
+				"No .vh-agent-harness/project.config.json found",
+				"mission_summary",
+				"architecture_summary",
+				"db_user",
+				"db_name",
+			},
+		},
+		{
+			name:      "fully filled config is silent",
+			setupJSON: filledJSON,
+			wantWarn:  false,
+		},
+		{
+			// The verbatim-save footgun: a consumer runs `vh-agent-harness example`
+			// and saves the output unchanged. Every field is non-empty (so the
+			// prior empty-only check missed it) but still a literal sentinel, so
+			// the renderer substitutes the sentinel for itself and ships literal
+			// {{TOKEN}}s. This case MUST warn.
+			name:      "verbatim example sentinels warn",
+			setupJSON: `{"project":{"mission_summary":"{{MISSION_SUMMARY}}","architecture_summary":["{{ARCHITECTURE_SUMMARY}}"],"db_user":"{{DB_USER}}","db_name":"{{DB_NAME}}"}}`,
+			wantWarn:  true,
+			wantSubs: []string{
+				"UNRESOLVED",
+				"still literal {{MISSION_SUMMARY}}",
+				"still literal {{DB_USER}}",
+				"still literal {{DB_NAME}}",
+				"still literal {{ARCHITECTURE_SUMMARY}}",
+			},
+		},
+		{
+			name: "mixed empty and sentinel fields warn on the right subset",
+			// mission_summary filled (silent for it); db_user empty; db_name a
+			// literal sentinel; architecture_summary filled.
+			setupJSON: `{"project":{"mission_summary":"Build it.","architecture_summary":["apps/api"],"db_user":"","db_name":"{{DB_NAME}}"}}`,
+			wantWarn:  true,
+			wantSubs: []string{
+				"db_name",
+				"db_user",
+				"still literal {{DB_NAME}}",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tt.setupJSON != "" {
+				writeProjectConfig(t, root, tt.setupJSON)
+			}
+			var buf bytes.Buffer
+			warnUnresolvedProjectConfigTokens(&buf, root)
+			got := buf.String()
+
+			if tt.wantWarn {
+				if got == "" {
+					t.Fatalf("expected a warning, got empty output")
+				}
+				for _, sub := range tt.wantSubs {
+					if !strings.Contains(got, sub) {
+						t.Errorf("warning output missing substring %q\n--- output ---\n%s", sub, got)
+					}
+				}
+				if !strings.Contains(got, "non-fatal") {
+					t.Errorf("warning must state it is non-fatal")
+				}
+			} else {
+				if got != "" {
+					t.Errorf("expected SILENT (no warning) for a fully-filled config, got:\n%s", got)
+				}
+			}
+		})
+	}
 }
