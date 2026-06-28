@@ -25,7 +25,6 @@
         "wildcard": "ask",
         "readonly": "allow",
         "git_readonly": "allow",
-        "gate": "deny",
         "devSh": "allow"
       },
       "task": { "*": "deny", "committer": "allow" },
