@@ -235,10 +235,10 @@ func (p *Pack) AppendCallableGraph(staging string) error {
 }
 
 // permissionPackRel is the live (staged) subtree under which each active pack's
-// self-describing permission descriptor is materialized. The core permission
-// script (update-opencode-config.js) reads this directory DYNAMICALLY (by
-// directory listing) to resolve the active agent roster, so the harness core
-// never hardcodes any overlay pack by name.
+// self-describing permission descriptor is materialized. The Go-native permission
+// emitter (internal/permconfig) reads this directory DYNAMICALLY (by directory
+// listing) to resolve the active agent roster, so the harness core never
+// hardcodes any overlay pack by name.
 const permissionPackRel = ".opencode/sys-scripts/permission-packs/"
 
 // MaterializePermissionPack copies the pack's permission-pack.jsonc (if present)

@@ -5,9 +5,9 @@
   // contributes when active. It is NOT rendered verbatim under .opencode/; the
   // seam installer materializes it to
   //   .opencode/sys-scripts/permission-packs/web-overlay.jsonc
-  // and update-opencode-config.js reads every file in that directory
-  // DYNAMICALLY (by directory listing, never by hardcoded pack name) to resolve
-  // the active agent roster.
+  // and the Go-native permission emitter (internal/permconfig) reads every file
+  // in that directory DYNAMICALLY (by directory listing, never by hardcoded
+  // pack name) to resolve the active agent roster inside `vh-agent-harness update`.
   //
   // Per-agent fields:
   //   location    -> permission.bash location decisions for the agent

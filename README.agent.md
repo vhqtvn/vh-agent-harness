@@ -182,11 +182,10 @@ Fail-closed behavior:
 
 Golden path: `overlay new <pack> --agent <n> --dry-run` (preview) →
 `overlay new <pack> --agent <n>` (apply) → `update --dry-run` (expect 0
-conflicts) → `update` (renders the pack into `.opencode/` and materializes the
-permission-pack) → render permission blocks:
-`vh-agent-harness exec node .opencode/sys-scripts/update-opencode-config.js`
-(this is what validates + writes the new agent's `permission.bash`/`permission.task`
-blocks; `update`/`doctor` do not run it automatically) → `doctor` (healthy).
+conflicts) → `update` (renders the pack into `.opencode/`, materializes the
+permission-pack, AND resolves the new agent's `permission.bash`/`permission.task`
+blocks + `delegateFrom` edges via the Go-native emitter — no separate step) →
+`doctor` (healthy).
 
 ## What is safe
 

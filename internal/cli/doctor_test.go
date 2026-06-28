@@ -81,11 +81,8 @@ func TestOverlayPermissionState_FailWhenPlaceholder(t *testing.T) {
 	if r.tier != tierFail {
 		t.Fatalf("want FAIL when __placeholder__ present, got %s: %s", r.tier, r.detail)
 	}
-	if !strings.Contains(r.detail, overlayResolverRelPath) {
-		t.Errorf("FAIL detail should name the resolver script %q; got %q", overlayResolverRelPath, r.detail)
-	}
-	if !strings.Contains(r.detail, "node ") {
-		t.Errorf("FAIL detail should instruct running node; got %q", r.detail)
+	if !strings.Contains(r.detail, overlayPermRecoveryCmd) {
+		t.Errorf("FAIL detail should name the recovery command %q; got %q", overlayPermRecoveryCmd, r.detail)
 	}
 }
 
@@ -112,8 +109,8 @@ func TestOverlayPermissionState_FailWhenEdgeMissing(t *testing.T) {
 	if r.tier != tierFail {
 		t.Fatalf("want FAIL when delegateFrom edge missing, got %s: %s", r.tier, r.detail)
 	}
-	if !strings.Contains(r.detail, overlayResolverRelPath) {
-		t.Errorf("FAIL detail should name the resolver script; got %q", r.detail)
+	if !strings.Contains(r.detail, overlayPermRecoveryCmd) {
+		t.Errorf("FAIL detail should name the recovery command; got %q", r.detail)
 	}
 	if !strings.Contains(r.detail, "myoverlay-agent") {
 		t.Errorf("FAIL detail should name the missing-edge agent; got %q", r.detail)

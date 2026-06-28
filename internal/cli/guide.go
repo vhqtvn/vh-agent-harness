@@ -143,19 +143,17 @@ func nextSteps(st harnessState) []string {
 			steps = append(steps, "Add project-specific agents/commands/skills via an overlay pack: "+
 				"create .vh-agent-harness/overlays/<name>/ with agents/<name>.md + opencode-append.jsonc "+
 				"(and optional permission-pack.jsonc), list `<name>` under `overlays:` in "+
-				".vh-agent-harness/vh-harness-profile.yml, then `vh-agent-harness update`. If your pack "+
-				"uses a permission-pack.jsonc, you MUST also run "+
-				"`node .opencode/sys-scripts/update-opencode-config.js` to resolve the overlay agents' "+
-				"permission blocks + delegateFrom edges (`update` does not run it). See `/harness` for "+
+				".vh-agent-harness/vh-harness-profile.yml, then `vh-agent-harness update`. The update "+
+				"command resolves overlay agent permissions and delegateFrom edges from each active "+
+				"pack's permission-pack.jsonc automatically (no separate step). See `/harness` for "+
 				"the full recipe; `vh-agent-harness example` for a pack skeleton.")
 		} else {
 			steps = append(steps, "Active overlays: "+strings.Join(st.Overlays, ", ")+
 				" (pack sources under .vh-agent-harness/overlays/). Edit the pack "+
 				"(agents/<name>.md, opencode-append.jsonc, optional permission-pack.jsonc) and run "+
-				"`vh-agent-harness update` to apply. If your pack uses a permission-pack.jsonc, you "+
-				"MUST also run `node .opencode/sys-scripts/update-opencode-config.js` to resolve the "+
-				"overlay agents' permission blocks + delegateFrom edges (`update` does not run it). "+
-				"See `/harness` for the full recipe.")
+				"`vh-agent-harness update` to apply — it renders the pack into .opencode/ AND "+
+				"resolves overlay agent permissions + delegateFrom edges from each active pack's "+
+				"permission-pack.jsonc. See `/harness` for the full recipe.")
 		}
 		if st.RuntimeBackend == "host-shell" || st.RuntimeBackend == "" {
 			steps = append(steps, "Runtime is host-shell (commands run on the host). To run in a container or via "+

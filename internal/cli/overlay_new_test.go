@@ -439,20 +439,18 @@ func TestOverlayNew_RejectsMissingHarnessDir(t *testing.T) {
 //
 // Why this matters: `overlay new` also appends the pack to `overlays:` (making
 // it ACTIVE). The next `vh-agent-harness update` materializes the pack to
-// .opencode/sys-scripts/permission-packs/<pack>.jsonc and the operator runs
-// `node .opencode/sys-scripts/update-opencode-config.js` to render permission
-// blocks. That script's resolveActiveRules() copies def.location (including any
-// `gate` key) into LOCATION_RULES and adds the agent to GATE_EXEMPT_AGENTS when
-// gateExempt is true; validateRules() then FAILS with
+// .opencode/sys-scripts/permission-packs/<pack>.jsonc and the Go-native emitter
+// (internal/permconfig) resolves it into permission blocks. The emitter's
+// resolveRules() copies def.location (including any `gate` key) into its
+// location table and adds the agent to the gate-exempt set when gateExempt is
+// true; validate() then FAILS with
 //
 //	"LOCATION_RULES.<agent> must NOT have a gate key (gate deny bleeds into
 //	 committer subagent)"
 //
 // if a gateExempt agent carries a gate decision. The crash aborts the ENTIRE
 // permission render (no agent's blocks update), so a single bad pack bricks the
-// repo's permission system. See
-// templates/core/.opencode/sys-scripts/update-opencode-config.js (resolveActiveRules
-// ~L545-560, validateRules ~L939-948).
+// repo's permission system. See internal/permconfig/{tables.go,emit.go}.
 //
 // This test encodes the contract at the source (the generated JSONC) so it runs
 // fast and deterministically without spawning node. Driving the live JS path is

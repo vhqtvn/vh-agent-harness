@@ -376,11 +376,12 @@ func checkManagedDrift(target string) checkResult {
 	}
 }
 
-// overlayResolverRelPath is the operator-run node script that populates overlay
-// agents' permission.bash/task blocks + delegateFrom edges in opencode.jsonc. The
-// Go binary never invokes it; checkOverlayPermissionState names this path in its
-// recovery command so an operator knows exactly what to run.
-const overlayResolverRelPath = ".opencode/sys-scripts/update-opencode-config.js"
+// overlayPermRecoveryCmd is the recovery command surfaced when the overlay-perm
+// check detects unresolved permissions. Since O5 (P2-PIPELINE-001 Slice 2), the
+// Go-native emitter (internal/permconfig/) resolves all permission blocks inside
+// `vh-agent-harness update`'s render pipeline, so the recovery is simply to
+// re-run update.
+const overlayPermRecoveryCmd = "vh-agent-harness update"
 
 // jsoncCommentRe strips JSONC line (//…) and block (/*…*/) comments so a
 // permission-pack body can be parsed by encoding/json. It is sufficient for the
@@ -398,23 +399,20 @@ type overlayPackRef struct {
 }
 
 // checkOverlayPermissionState is a DETECTION-ONLY honesty check (P2-VERIFY-001
-// Slice 1). It surfaces the silent "healthy-but-non-functional" overlay state:
-// an active overlay contributes a permission-pack.jsonc (a roster the
-// operator-run node resolver consumes), but the Go binary never invokes that
-// resolver. Two resolver-has-not-run signals are detectable in a rendered
-// opencode.jsonc: a `__placeholder__` sentinel in a permission bucket (Signal A;
-// a defensive catch — the harness scaffolder `overlay new` writes resolved values,
-// not this sentinel, so it only appears in hand-authored packs), and/or a
-// permission-pack-declared agent whose `"<agent>": "allow"|"ask"` delegateFrom
-// task edge is absent (Signal B; the primary detector). Either means the overlay
-// agent is not fully functional until the operator runs
-// `node .opencode/sys-scripts/update-opencode-config.js` manually.
+// Slice 1). It surfaces the silent "healthy-but-non-functional" overlay state.
+// Since O5 (P2-PIPELINE-001 Slice 2) the Go-native emitter
+// (internal/permconfig/) resolves overlay permissions inside the update render
+// pipeline, so a clean `update` always produces resolved edges. This check
+// catches the residual failure modes: a stale install from before the emitter,
+// a hand-authored pack with a `__placeholder__` sentinel (Signal A; defensive —
+// the scaffolder `overlay new` never emits it), or a permission-pack-declared
+// agent whose `"<agent>": "allow"|"ask"` delegateFrom task edge is absent
+// (Signal B; the primary detector). Either means the operator should re-run
+// `vh-agent-harness update`.
 //
 // The check is READ-ONLY: it inspects the active overlays' permission-pack.jsonc
 // files and opencode.jsonc for two resolver-has-not-run signals, and names the
-// recovery command. It does NOT mutate any file and does NOT run the resolver.
-// The architecture fix (porting the resolver into the Go update pipeline, or
-// byte-stable JSONC emission) is explicitly DEFERRED to P2-PIPELINE-001 Slice 2.
+// recovery command. It does NOT mutate any file.
 //
 // Core-only repos (no active overlays, or overlays without permission-packs) are
 // SILENT — the check returns PASS so doctor stays HEALTHY.
@@ -489,10 +487,10 @@ func checkOverlayPermissionState(target string) checkResult {
 }
 
 // unresolvedOverlayPermDetail renders the standard FAIL detail for the overlay-perm
-// check: it always names the resolver recovery command so an operator (or agent)
-// can copy-paste it. reason is the specific signal that fired.
+// check: it always names the recovery command so an operator (or agent) can
+// copy-paste it. reason is the specific signal that fired.
 func unresolvedOverlayPermDetail(reason string) string {
-	return fmt.Sprintf("unresolved overlay permissions (%s); run `node %s` to resolve", reason, overlayResolverRelPath)
+	return fmt.Sprintf("unresolved overlay permissions (%s); run `%s` to resolve", reason, overlayPermRecoveryCmd)
 }
 
 // permissionPackAgentKeys reads each active pack's permission-pack.jsonc and

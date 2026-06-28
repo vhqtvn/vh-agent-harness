@@ -479,10 +479,10 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// permission.bash and permission.task blocks authoritatively from Go canonical
 	// tables (internal/permconfig/tables.go), injects delegateFrom task edges from
 	// the materialized permission-packs, and applies the features.backlog gate.
-	// This replaces the operator-run Node resolver (update-opencode-config.js) as
-	// the operational authority for permission content. doctor re-renders via this
-	// same renderSeamStaging pipeline so managed-drift auto-coheres with the
-	// canonical form.
+	// This replaces the demoted Node resolver (update-opencode-config.js, now a
+	// deprecation stub) as the operational authority for permission content.
+	// doctor re-renders via this same renderSeamStaging pipeline so managed-drift
+	// auto-coheres with the canonical form.
 	permPacks, err := permconfig.LoadPacks(staging)
 	if err != nil {
 		return nil, fmt.Errorf("seam: load permission-packs: %w", err)

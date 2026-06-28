@@ -421,10 +421,10 @@ func buildOpencodeAppend(pack, agentName string) string {
 //
 // The scaffolded agent is a committer-delegator specialist: it carries
 // gateExempt: true and a task allow on `committer`, so its `location` block
-// MUST omit `gate`. This is the contract update-opencode-config.js
-// validateRules() enforces (a gateExempt agent's gate deny would bleed into the
-// committer subagent session via deriveSubagentSessionPermission). Keep `gate`
-// omitted whenever `gateExempt` is true.
+// MUST omit `gate`. This is the contract the Go-native emitter
+// (internal/permconfig) enforces (a gateExempt agent's gate deny would bleed
+// into the committer subagent session via deriveSubagentSessionPermission).
+// Keep `gate` omitted whenever `gateExempt` is true.
 func buildPermissionPack(pack, agentName string) string {
 	name := agentName
 	if name == "" {
@@ -438,12 +438,12 @@ func buildPermissionPack(pack, agentName string) string {
 	fmt.Fprintf(&sb, "// `vh-agent-harness update` the seam materializes it verbatim to\n")
 	fmt.Fprintf(&sb, "//   .opencode/sys-scripts/permission-packs/%s.jsonc\n", pack)
 	fmt.Fprintf(&sb, "// (this pack is already listed under `overlays:` in vh-harness-profile.yml —\n")
-	fmt.Fprintf(&sb, "// `overlay new` appends it for you), and update-opencode-config.js reads that\n")
+	fmt.Fprintf(&sb, "// `overlay new` appends it for you), and the Go-native permission emitter reads that\n")
 	fmt.Fprintf(&sb, "// directory dynamically to resolve the active roster. So the entries below\n")
-	fmt.Fprintf(&sb, "// take effect once you run `update` then\n")
-	fmt.Fprintf(&sb, "// `vh-agent-harness exec node .opencode/sys-scripts/update-opencode-config.js`.\n")
+	fmt.Fprintf(&sb, "// take effect once you run `vh-agent-harness update` (which renders the pack\n")
+	fmt.Fprintf(&sb, "// into .opencode/ AND resolves all permission blocks + delegateFrom edges).\n")
 	fmt.Fprintf(&sb, "//\n")
-	fmt.Fprintf(&sb, "// Contract (enforced by update-opencode-config.js validateRules): this agent\n")
+	fmt.Fprintf(&sb, "// Contract (enforced by the Go-native emitter's validate step): this agent\n")
 	fmt.Fprintf(&sb, "// is a committer-delegator (gateExempt: true), so its `location` block must NOT\n")
 	fmt.Fprintf(&sb, "// carry a `gate` decision — a gate deny would bleed into the committer\n")
 	fmt.Fprintf(&sb, "// subagent. Keep `gate` omitted while `gateExempt` is true; if you stop\n")
