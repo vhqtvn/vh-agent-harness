@@ -242,5 +242,117 @@ Worked reference overlay: `docs/adoption-examples/web/`.
   checkpoint.
 - `P1-OVERLAY-002` (coarse "implement A/B/C") → `cancelled` (superseded);
   decomposed into the two slices below.
-- `P1-OVERLAY-003` — Slice 1 (A+B+D+E), `in_progress`, owner `build`.
-- `P1-OVERLAY-004` — Slice 2 (fix C: `overlay new`), `todo`/Next, owner `build`.
+- `P1-OVERLAY-003` — Slice 1 (A+B+D+E), `done` (commit `4c0b6f0`), owner `build`.
+- `P1-OVERLAY-004` — Slice 2 (fix C: `overlay new`), `done` (commit `450c123`), owner `build`.
+
+## Slice 2 completion (2026-06-28)
+
+Fix C (`overlay new`) landed in `450c123` (local, not pushed), completing the
+two-slice agent-operability effort. Slice 1 (A+B+D+E) landed earlier in
+`4c0b6f0`. With both slices in, all three failure modes (FM1/FM2/FM3) are
+closed and the full golden path is reachable from a cold consumer agent.
+
+### What `overlay new` does
+
+`vh-agent-harness overlay new <name> [--agent <a> | --command <c> | --skill <s>]
+[--dry-run] [--target <dir>]` (source: `internal/cli/overlay_new.go`, registered
+in `internal/cli/root.go`):
+
+- Scaffolds an overlay pack at `.vh-agent-harness/overlays/<name>/` with the
+  requested unit skeletons (`agents/<a>.md`, `commands/<c>.md`,
+  `skills/<s>/SKILL.md` from the embedded `templates/overlay-skeleton/*.md`)
+  plus the always-on `opencode-append.jsonc` (active agent wiring when
+  `--agent` is given, no-op shell otherwise), `permission-pack.jsonc`, and
+  `callable-graph-snippet.md`.
+- Appends `<name>` to `overlays:` in `vh-harness-profile.yml`. This file is
+  `platform_armed`, so the append goes through
+  `schema.HarnessProfile{}.AppendOverlay`
+  (`internal/schema/harness_profile.go`, ~139–167) — the same
+  load/validate/marshal path `update` reconciles with — **NOT** a naive text
+  insert. `marshalHarnessProfile` re-serializes data only (sorts/dedups arrays,
+  drops comments), so the append is structurally clean.
+- `--dry-run` is strict: writes nothing, prints a file-creation manifest and a
+  `vh-harness-profile.yml` before→after diff.
+- Fail-closed: rejects an existing pack dir, existing files (name collision),
+  invalid names (`nameRe`), and a missing `.vh-agent-harness/`.
+
+### B-F1 — the block and the fix (the highest-risk part of fix C)
+
+The scaffolder's `buildPermissionPack` (`internal/cli/overlay_new.go`,
+~428–473) originally emitted **both** `gate: "deny"` **and**
+`gateExempt: true` for the same `--agent`. That combination violates the
+permission-pack contract enforced by `validateRules()` in
+`templates/core/.opencode/sys-scripts/update-opencode-config.js` (~lines
+924–948): a gate-exempt agent (one in `GATE_EXEMPT_AGENTS`, which
+`gateExempt: true` adds the overlay agent to at ~lines 550–552) **must not
+carry a `gate` key**. The first end-to-end render reached
+`node .opencode/sys-scripts/update-opencode-config.js` and failed
+`validateRules()` (non-zero exit) — the binary's own `update`/`doctor` did not
+catch it.
+
+**Fix:** `buildPermissionPack` omits `gate` for a gate-exempt agent. The
+generated `permission-pack.jsonc` location now carries only
+`wildcard`/`readonly`/`git_readonly`/`devSh`, plus `gateExempt: true`,
+`task { *: deny, committer: allow }`, and `delegateFrom` the three core
+orchestrators (`build`/`coordination`/`project-coordinator`). A regression
+test was added (`internal/cli/overlay_new_test.go` /
+`agf6_output_assertions_test.go`).
+
+### Phase A validation outcome (fresh throwaway consumer repo)
+
+Validated end-to-end in a throwaway consumer repo (`tmp/validate-slice2/`,
+removed after validation; no commit). All checks PASS:
+
+| # | Check | Result |
+| --- | --- | --- |
+| 1 | Fresh binary build + `overlay new --help` shows Slice-2 flags | PASS |
+| 2 | Throwaway `install` + minimal mission + `update` composes `AGENTS.md` | PASS |
+| 3 | `--dry-run` purity (writes nothing; prints 6-file manifest + profile `[]→[demo]` diff) | PASS |
+| 4 | Apply creates the 6 expected files + appends `demo` to profile | PASS |
+| 5 | Profile append structurally clean (valid YAML; `overlays:` list; profile enum untouched) | PASS |
+| 6 | B-F1 fix: `permission-pack.jsonc` greeter location has no `gate` key | PASS |
+| 7 | `update --dry-run` → 0 conflicts | PASS |
+| 8 | `update` renders greeter agent/command/skill + wires `opencode.jsonc` (`greeter` block + `task.greeter:"allow"` in build/coordination/project-coordinator) | PASS |
+| 9 | `doctor` (after `update`, before node script) healthy, 0 problems | PASS |
+| 10 | `node .opencode/sys-scripts/update-opencode-config.js` EXIT 0 — the B-F1 critical step | PASS |
+| 11 | Edge: minimal pack (no unit flags) + stderr warning + append | PASS |
+| 12 | Edge: name-collision rejection (refuse, write nothing, exit 1) | PASS |
+| 13 | Edge: `--dry-run` purity reaffirm (file count unchanged) | PASS |
+
+Two pre-existing gaps were re-confirmed (NOT introduced by Slice 2; tracked
+separately): (1) `install` alone does not compose `AGENTS.md` (needs mission +
+`update`) — `P2-INSTALL-001`; (2) `validateRules()` runs only in the
+operator-run node script, not in the Go binary (see next subsection).
+
+### Pre-existing gap — `validateRules()` verification asymmetry
+
+`validateRules()` (the permission-pack contract check — e.g. a gate-exempt
+agent must not carry a `gate` key) lives only in the operator-run
+`node .opencode/sys-scripts/update-opencode-config.js` script
+(`templates/core/.opencode/sys-scripts/update-opencode-config.js`, ~lines
+924–948, invoked in `main()` at ~1088). The Go binary's `update` and `doctor`
+commands never invoke it. Consequence: an active overlay pack can be "valid"
+per the binary (0 conflicts, doctor healthy) yet fail the permission contract
+on the first real node-script run. This is exactly what surfaced B-F1.
+Tracked as `P2-VERIFY-001`. A related pre-existing drift — the node script
+rewrites managed `opencode.jsonc` permission blocks in ways that diverge from
+the corpus render (drops the `features.backlog` line; canonicalizes an overlay
+agent's permission block so `doctor` reports drift after the node script) — is
+tracked as `P2-CONFIG-001`.
+
+### Source anchors (Slice 2, verified 2026-06-28)
+
+- `internal/cli/overlay_new.go` — the scaffolder (~558 lines);
+  `buildPermissionPack` ~428–473 (omits `gate` for gate-exempt agents — the
+  B-F1 fix).
+- `internal/schema/harness_profile.go` — `AppendOverlay` ~139–167
+  (load/validate/append/marshal; data-only serialization).
+- `internal/cli/overlay_new_test.go` + `agf6_output_assertions_test.go` — unit
+  + regression tests.
+- `templates/overlay-skeleton/{agent,command,skill}.md` — embedded unit
+  skeletons (`corpus.go` embed root).
+- `templates/core/.opencode/sys-scripts/update-opencode-config.js` —
+  `validateRules()` ~924–948; `GATE_EXEMPT_AGENTS` seeding ~550–552; called in
+  `main()` ~1088.
+- `README.agent.md` — golden-path order documents `overlay new` (~lines
+  183–189).
