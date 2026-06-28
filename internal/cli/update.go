@@ -2,8 +2,10 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -43,7 +45,15 @@ When an armed file has a needs-decision conflict, the project instance is left
 untouched and a structured proposal is printed.
 
 This is the seam update path. It does NOT touch the legacy manifest model
-(.opencode/harness-manifest.json).`,
+(.opencode/harness-manifest.json).
+
+Interactive guard: when the target is not an initialized harness project (no
+.vh-agent-harness/vh-harness-profile.yml) and stdin is a TTY, update asks for a
+yes/no confirmation before scaffolding managed files there — so a hand-run
+update in the wrong directory cannot install dust by accident. The prompt is
+bypassed automatically for non-interactive callers (piped stdin, agents, CI,
+'make update', '/harness'), and can be skipped with --force (-f) or
+RUN_FROM_AGENT=1. --dry-run never prompts (it writes nothing).`,
 	Args: cobra.NoArgs,
 	RunE: runUpdate,
 }
@@ -51,12 +61,40 @@ This is the seam update path. It does NOT touch the legacy manifest model
 // updateTargetFlag lets tests/CI point update at a target other than cwd.
 var updateTargetFlag string
 var updateDryRun bool
+var updateForce bool
+
+// The uninitialized-target confirmation guard (interactive-only pre-flight gate)
+// is wired through two injectable seams so unit tests can drive both the
+// prompt-fires path and every bypass path without a real TTY or os.Stdin:
+//
+//   - updateStdinIsTTY reports whether stdin looks interactive. The default uses
+//     a stdlib-only os.Stdin.Stat() check (no isatty dependency); tests override
+//     it to force the interactive or non-interactive branch.
+//   - updateConfirm prints the warning + reads a yes/no answer. The default
+//     reads from os.Stdin; tests override it to simulate accept/decline and to
+//     assert the prompt was (or was not) reached.
+//
+// Both mirror the existing updateTargetFlag/updateDryRun/updateForce package
+// vars. Non-interactive callers (agents, CI, `make update`, `/harness`, piped
+// input) bypass the prompt automatically via the non-TTY check; --force,
+// RUN_FROM_AGENT=1, and --dry-run also bypass.
+var updateStdinIsTTY = func() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+var updateConfirm = defaultUpdateConfirm
 
 func init() {
 	updateCmd.Flags().StringVarP(&updateTargetFlag, "target", "o", "",
 		"target directory (default: current directory)")
 	updateCmd.Flags().BoolVar(&updateDryRun, "dry-run", false,
 		"preview the per-file plan without writing anything")
+	updateCmd.Flags().BoolVarP(&updateForce, "force", "f", false,
+		"bypass the uninitialized-target confirmation prompt")
 }
 
 func runUpdate(cmd *cobra.Command, _ []string) (err error) {
@@ -80,6 +118,25 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 	abs, err := filepath.Abs(target)
 	if err != nil {
 		return fmt.Errorf("resolve target: %w", err)
+	}
+
+	// Uninitialized-target confirmation guard (interactive-only pre-flight gate).
+	// `update` deliberately adopts any tree it is pointed at, so a hand-run
+	// `update` in the wrong directory would scaffold managed files ("dust") that
+	// then have to be removed by hand. When the target carries no harness profile
+	// AND the call is interactive AND nothing bypasses the prompt, require an
+	// explicit yes/no before adopting the tree. The profile is the authoritative
+	// "this is a harness project" signal; a lineage file without a profile is
+	// still treated as uninitialized here (the existing unreadable-lineage warn
+	// below is unchanged). --dry-run writes nothing, so it is safe to run
+	// anywhere and never prompts. On decline, nothing is written and update
+	// returns successfully (exit 0).
+	if !updateDryRun && !updateForce && !envTruthy("RUN_FROM_AGENT") &&
+		updateStdinIsTTY() && !harnessProfileExists(abs) {
+		if !updateConfirm(out, abs) {
+			fmt.Fprintln(out, "No changes made.")
+			return nil
+		}
 	}
 
 	// Recover the install-identity render answers from lineage so the re-render
@@ -132,6 +189,52 @@ func defaultAnswers(target string) map[string]string {
 		"project_name": base,
 		"project_slug": base,
 	}
+}
+
+// harnessProfileExists reports whether target carries the harness profile
+// (.vh-agent-harness/vh-harness-profile.yml) — the authoritative "this is a
+// harness project" signal used by the interactive confirmation guard. A target
+// without it is treated as uninitialized. A lineage file present without a
+// profile is still treated as uninitialized: the profile is the project-intent
+// signal, not the lineage record (which may survive a partial teardown).
+func harnessProfileExists(target string) bool {
+	_, err := os.Stat(filepath.Join(target, harnessProfileName))
+	return err == nil
+}
+
+// envTruthy reports whether the environment variable named by key is set to a
+// canonical truthy value, via the single truthiness check reused across the
+// CLI's env-driven bypass switches (e.g. RUN_FROM_AGENT).
+func envTruthy(key string) bool {
+	return truthyString(os.Getenv(key))
+}
+
+// truthyString is the canonical env-value truthiness test. Truthy = one of
+// "1", "true", "yes", "on" (case-insensitive, after trimming whitespace);
+// everything else — including the empty string and "0" — is false.
+func truthyString(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// defaultUpdateConfirm is the default uninitialized-target confirmation prompt.
+// It prints a warning naming the absolute target dir, states that managed files
+// (.opencode/, etc.) will be scaffolded/adopted there, suggests --dry-run first,
+// then reads a yes/no answer from os.Stdin. Returns true on accept (proceed),
+// false on decline (no / empty / EOF). The prompt style mirrors selfupdate's
+// "[y/N]" confirmation.
+func defaultUpdateConfirm(out io.Writer, target string) bool {
+	fmt.Fprintf(out, "Target %s is not an initialized harness project ", target)
+	fmt.Fprintln(out, "(no .vh-agent-harness/vh-harness-profile.yml found).")
+	fmt.Fprintln(out, "Running update here will scaffold/adopt managed files (.opencode/, etc.) into that directory.")
+	fmt.Fprintln(out, "Preview first with `vh-agent-harness update --dry-run`.")
+	fmt.Fprint(out, "Proceed with update? [y/N]: ")
+	var ans string
+	_, _ = fmt.Scanln(&ans)
+	return strings.EqualFold(strings.TrimSpace(ans), "y")
 }
 
 // installRenderAnswers returns the install-identity render answers recovered

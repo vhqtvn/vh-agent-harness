@@ -102,7 +102,7 @@ vh-agent-harness example .vh-agent-harness/project.config.json > .vh-agent-harne
 | Group | Commands |
 | --- | --- |
 | Orientation | `guide` (state + next steps; `--json`) |
-| Install lifecycle | `install`, `update`, `uninstall` (`install`/`update` take `--dry-run`) |
+| Install lifecycle | `install`, `update`, `uninstall` (`install`/`update` take `--dry-run`; `update` also takes `-f`/`--force`) |
 | Health | `preflight`, `doctor`, `proposals` |
 | Render inspection | `diff` |
 | Runtime | `exec`, `shell`, `up`, `down`, `logs`, `ps` |
@@ -112,6 +112,12 @@ vh-agent-harness example .vh-agent-harness/project.config.json > .vh-agent-harne
 `--dry-run` on `install`/`update` prints the full per-file plan
 (would-overwrite / seed / preserve / reconcile / conflict) **without writing
 anything** — a safe preview before applying.
+
+`update` confirms before scaffolding into an **uninitialized** directory when
+run interactively (no `.vh-agent-harness/vh-harness-profile.yml`). The prompt is
+bypassed for non-interactive callers (piped stdin, agents, CI, `make update`),
+by `RUN_FROM_AGENT=1`, or with `-f`/`--force`. `--dry-run` also bypasses it
+(it writes nothing). See `README.agent.md` for the full guard rules.
 
 ## Adoption & extension
 

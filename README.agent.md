@@ -227,5 +227,36 @@ vh-agent-harness update  # re-seeds the deleted file from the current template
   flag are deferred (tracked in the backlog); today the operator notices the
   staleness and runs the two commands above.
 
+## Update guard (running `update` in an uninitialized directory)
+
+`update` deliberately adopts any tree it is pointed at — that is how it can
+re-render a pre-seam project. The flip side is that a hand-run `update` in the
+wrong (uninitialized) directory would scaffold managed files (`.opencode/`,
+etc.) you then have to remove by hand. To prevent that, `update` asks for
+confirmation before adopting when **all** of these hold:
+
+- the target has **no** `.vh-agent-harness/vh-harness-profile.yml` (the
+  authoritative "is this a harness project" signal), and
+- stdin is a **TTY** (you are running it by hand), and
+- nothing bypasses the prompt.
+
+The prompt names the absolute target dir and suggests previewing with
+`--dry-run` first. Decline (no / empty / EOF) and `update` writes nothing and
+exits 0; accept and it proceeds as usual.
+
+The prompt is **bypassed automatically** for non-interactive callers, so the
+agent / dogfood / CI path stays frictionless. It is skipped when any of:
+
+- stdin is **not** a TTY (pipes, agents, CI, `make update`, `/harness`,
+  redirected input), or
+- `RUN_FROM_AGENT=1` is set (truthy: `1`/`true`/`yes`/`on`), or
+- `--force` / `-f` is passed, or
+- `--dry-run` is passed (it writes nothing, so it is safe to run anywhere and
+  never prompts).
+
+An **initialized** target (profile present) never prompts, regardless of TTY or
+flags — the guard only guards the adopt-into-uninitialized case. `install`
+remains the explicit "I mean it" path and is unaffected.
+
 When a command prints a "Next steps" footer, follow it. When unsure, re-run
 `vh-agent-harness guide`.
