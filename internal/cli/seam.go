@@ -150,6 +150,20 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 		return nil, err
 	}
 
+	// Migration courtesy check (O5 slice 2c, Q5c): allowed-commands.js is now
+	// generated from Go canonical tables (internal/permconfig/tables.go). If the
+	// LIVE file differs from the generated form, it was either customized by the
+	// operator (adding/removing commands in the readonly/git_readonly/gate
+	// groups) or is a prior harness version. Either way, the canonical overwrite
+	// would discard those changes — warn loudly so the operator can back up the
+	// file or port custom deny-rules to forbidden-patterns.project.js. This is a
+	// WARNING, not a refusal: the file is platform_managed (free-overwrite by
+	// contract), and refusing would block legitimate version upgrades whenever
+	// the Go tables change.
+	if !dryRun {
+		warnIfAllowedCommandsCustomized(target, staging)
+	}
+
 	// The classifier is per-apply: core defaults PLUS overlay_extension rules for
 	// every path the active overlays rendered, resolved against the project's S2
 	// raise-only overrides (harness-ownership.yml). A downgrade override (or any
@@ -520,6 +534,47 @@ func walkStagedLivePaths(staging string) map[string]bool {
 		return nil
 	})
 	return out
+}
+
+// warnIfAllowedCommandsCustomized compares the LIVE allowed-commands.js in the
+// target with the freshly-generated canonical form in staging. If they differ,
+// the operator either customized the file (adding/removing commands in the
+// readonly/git_readonly/gate groups) or is running a prior harness version. The
+// canonical overwrite will discard those changes; this warning makes that
+// visible so the operator can back up the file or port custom deny-rules to
+// forbidden-patterns.project.js (Q5c: never silently discard custom command
+// groups).
+func warnIfAllowedCommandsCustomized(target, staging string) {
+	if !isAllowedCommandsCustomized(target, staging) {
+		return
+	}
+	const rel = ".opencode/repo-configs/allowed-commands.js"
+	fmt.Fprintf(os.Stderr, `
+vh-agent-harness WARNING: %s has been modified and will be overwritten.
+  The file is now GENERATED from Go canonical tables (internal/permconfig/tables.go).
+  Previous content differed from the canonical form — custom commands in the
+  readonly/git_readonly/gate groups are no longer picked up.
+  To preserve custom deny-rules, use .opencode/repo-configs/forbidden-patterns.project.js.
+  To preview the exact changes, run: vh-agent-harness update --dry-run
+
+`, rel)
+}
+
+// isAllowedCommandsCustomized reports whether the live allowed-commands.js in
+// target differs from the freshly-generated canonical form in staging. Returns
+// false when either file is missing (first install or render bug surfaced
+// elsewhere).
+func isAllowedCommandsCustomized(target, staging string) bool {
+	const rel = ".opencode/repo-configs/allowed-commands.js"
+	staged, serr := os.ReadFile(filepath.Join(staging, rel))
+	if serr != nil {
+		return false
+	}
+	live, lerr := os.ReadFile(filepath.Join(target, rel))
+	if lerr != nil {
+		return false
+	}
+	return !bytes.Equal(staged, live)
 }
 
 // seamClassifierWithOverlays builds the seam classifier for one apply: the core
