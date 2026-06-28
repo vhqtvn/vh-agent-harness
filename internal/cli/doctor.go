@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -48,6 +49,7 @@ var doctorCmd = &cobra.Command{
   lineage       .vh-agent-harness/lineage.yml present + parseable    FAIL if leaked/unparseable
   armed-schema  every platform_armed file schema-conformant          FAIL if schema-invalid
   managed-drift every platform_managed file matches re-rendered bytes FAIL if drifted/missing
+  overlay-perm  active overlay permission-packs resolved in opencode.jsonc FAIL if resolver not run
   environment   node on PATH + shell-guard eval.js present            FAIL if missing
   gitignore     harness-written dirs (.opencode/state…, __pycache__) ignored WARN if not ignored
 
@@ -112,7 +114,20 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	fmt.Fprintln(out, "    "+dr.String())
 	applyTier(dr.tier, &problems, &warns)
 
-	// 4. Environment (shell-guard readiness: node + eval.js bridge).
+	// 4. Overlay-perm (detection-only honesty check): an active overlay with a
+	//    permission-pack.jsonc needs the operator-run node resolver to populate
+	//    the pack agents' permission.bash/task blocks + delegateFrom edges in
+	//    opencode.jsonc. The Go binary never invokes that resolver, so a freshly
+	//    rendered overlay repo is "managed-drift clean" but functionally broken.
+	//    This surfaces the broken state as FAIL instead of a silent HEALTHY.
+	//    Read-only; core-only repos stay silent (PASS). The architecture fix
+	//    (resolver-in-pipeline) is deferred to P2-PIPELINE-001 Slice 2.
+	fmt.Fprintln(out, "  overlay-perm:")
+	or := checkOverlayPermissionState(abs)
+	fmt.Fprintln(out, "    "+or.String())
+	applyTier(or.tier, &problems, &warns)
+
+	// 5. Environment (shell-guard readiness: node + eval.js bridge).
 	fmt.Fprintln(out, "  environment:")
 	nr := checkNode()
 	fmt.Fprintln(out, "    "+nr.String())
@@ -121,14 +136,14 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	fmt.Fprintln(out, "    "+er.String())
 	applyTier(er.tier, &problems, &warns)
 
-	// 5. Config file-refs ({file:...} in opencode.jsonc must resolve; per-agent
+	// 6. Config file-refs ({file:...} in opencode.jsonc must resolve; per-agent
 	//    model files exist-but-empty are a setup warning).
 	fmt.Fprintln(out, "  config-refs:")
 	cr := checkConfigRefs(abs)
 	fmt.Fprintln(out, "    "+cr.String())
 	applyTier(cr.tier, &problems, &warns)
 
-	// 6. Harness-written dirs must be gitignored (WARN): runtime scratch +
+	// 7. Harness-written dirs must be gitignored (WARN): runtime scratch +
 	//    Python __pycache__. .gitignore is project_owned, so an adopted/edited
 	//    repo can silently commit them; this surfaces it without failing.
 	fmt.Fprintln(out, "  gitignore:")
@@ -359,6 +374,169 @@ func checkManagedDrift(target string) checkResult {
 		return checkResult{name: "managed-drift", tier: tierPass,
 			detail: fmt.Sprintf("%d managed file(s) in sync", checked)}
 	}
+}
+
+// overlayResolverRelPath is the operator-run node script that populates overlay
+// agents' permission.bash/task blocks + delegateFrom edges in opencode.jsonc. The
+// Go binary never invokes it; checkOverlayPermissionState names this path in its
+// recovery command so an operator knows exactly what to run.
+const overlayResolverRelPath = ".opencode/sys-scripts/update-opencode-config.js"
+
+// jsoncCommentRe strips JSONC line (//…) and block (/*…*/) comments so a
+// permission-pack body can be parsed by encoding/json. It is sufficient for the
+// well-formed, machine-generated packs the seam ships; not a general JSONC parser.
+var jsoncCommentRe = regexp.MustCompile(`(?s)//.*?\n|/\*.*?\*/`)
+
+// jsoncTrailingCommaRe strips trailing commas before } and ] so a JSONC pack body
+// (which commonly ends list/map entries with a comma) parses as strict JSON.
+var jsoncTrailingCommaRe = regexp.MustCompile(`,\s*([}\]])`)
+
+// overlayPackRef names one active overlay pack that ships a permission-pack.jsonc.
+type overlayPackRef struct {
+	name string // overlay pack name (for human-readable errors)
+	path string // absolute path to its permission-pack.jsonc
+}
+
+// checkOverlayPermissionState is a DETECTION-ONLY honesty check (P2-VERIFY-001
+// Slice 1). It surfaces the silent "healthy-but-non-functional" overlay state:
+// an active overlay contributes a permission-pack.jsonc (a roster the
+// operator-run node resolver consumes), but the Go binary never invokes that
+// resolver. Two resolver-has-not-run signals are detectable in a rendered
+// opencode.jsonc: a `__placeholder__` sentinel in a permission bucket (Signal A;
+// a defensive catch — the harness scaffolder `overlay new` writes resolved values,
+// not this sentinel, so it only appears in hand-authored packs), and/or a
+// permission-pack-declared agent whose `"<agent>": "allow"|"ask"` delegateFrom
+// task edge is absent (Signal B; the primary detector). Either means the overlay
+// agent is not fully functional until the operator runs
+// `node .opencode/sys-scripts/update-opencode-config.js` manually.
+//
+// The check is READ-ONLY: it inspects the active overlays' permission-pack.jsonc
+// files and opencode.jsonc for two resolver-has-not-run signals, and names the
+// recovery command. It does NOT mutate any file and does NOT run the resolver.
+// The architecture fix (porting the resolver into the Go update pipeline, or
+// byte-stable JSONC emission) is explicitly DEFERRED to P2-PIPELINE-001 Slice 2.
+//
+// Core-only repos (no active overlays, or overlays without permission-packs) are
+// SILENT — the check returns PASS so doctor stays HEALTHY.
+func checkOverlayPermissionState(target string) checkResult {
+	const name = "overlay-perm"
+
+	// 1. No active overlays -> core-only -> resolver is not required -> silent PASS.
+	overlays := activeOverlays(target)
+	if len(overlays) == 0 {
+		return checkResult{name: name, tier: tierPass,
+			detail: "no active overlays (core-only) — permission resolver not required"}
+	}
+
+	// 2. Collect every active overlay that ships a permission-pack.jsonc. If none
+	//    does, the resolver has nothing to resolve here -> silent PASS.
+	var packs []overlayPackRef
+	for _, ov := range overlays {
+		p := filepath.Join(target, ".vh-agent-harness", "overlays", ov, "permission-pack.jsonc")
+		if isRegularFile(p) {
+			packs = append(packs, overlayPackRef{name: ov, path: p})
+		}
+	}
+	if len(packs) == 0 {
+		return checkResult{name: name, tier: tierPass,
+			detail: fmt.Sprintf("%d active overlay(s), none carry a permission-pack.jsonc — resolver not required", len(overlays))}
+	}
+
+	// 3. opencode.jsonc is the surface the resolver rewrites. If it is absent the
+	//    managed-drift check already FAILs the missing managed file; stay SKIP
+	//    here rather than double-reporting existence as a content problem.
+	data, err := os.ReadFile(filepath.Join(target, "opencode.jsonc"))
+	if err != nil {
+		return checkResult{name: name, tier: tierSkip,
+			detail: "no opencode.jsonc (managed-drift reports absence)"}
+	}
+	cfg := string(data)
+
+	// 4. Signal A (defensive) — the `__placeholder__` sentinel some hand-authored
+	//    overlay packs use for unfilled permission buckets. The harness scaffolder
+	//    (`overlay new`) writes resolved values, not this sentinel, so this branch
+	//    is a belt-and-suspenders catch; Signal B below is the primary detector.
+	//    Harmless when the literal never appears (no false-positive risk).
+	if strings.Contains(cfg, "__placeholder__") {
+		return checkResult{name: name, tier: tierFail,
+			detail: unresolvedOverlayPermDetail("__placeholder__ present in opencode.jsonc")}
+	}
+
+	// 5. Signal B — the resolver injects each pack agent's delegateFrom edges as
+	//    `"<agent>": "allow"|"ask"` task entries into the core orchestrators. A
+	//    missing edge for any declared agent means the resolver has not run.
+	agentKeys, parseErr := permissionPackAgentKeys(packs)
+	if parseErr != nil {
+		// A malformed pack is the schema/managed lint surfaces' concern; Signal A
+		// was already checked above, so SKIP Signal B rather than mask Signal A or
+		// fail on a parse detail outside this check's contract.
+		return checkResult{name: name, tier: tierSkip,
+			detail: fmt.Sprintf("permission-pack parse: %v (signal A checked, signal B skipped)", parseErr)}
+	}
+	var missing []string
+	for _, k := range agentKeys {
+		if !hasResolvedAgentEdge(cfg, k) {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) > 0 {
+		return checkResult{name: name, tier: tierFail,
+			detail: unresolvedOverlayPermDetail(
+				fmt.Sprintf("missing delegateFrom edges for agent(s): %s", strings.Join(missing, ", ")))}
+	}
+	return checkResult{name: name, tier: tierPass,
+		detail: fmt.Sprintf("%d overlay agent(s) across %d pack(s) have resolved permission edges", len(agentKeys), len(packs))}
+}
+
+// unresolvedOverlayPermDetail renders the standard FAIL detail for the overlay-perm
+// check: it always names the resolver recovery command so an operator (or agent)
+// can copy-paste it. reason is the specific signal that fired.
+func unresolvedOverlayPermDetail(reason string) string {
+	return fmt.Sprintf("unresolved overlay permissions (%s); run `node %s` to resolve", reason, overlayResolverRelPath)
+}
+
+// permissionPackAgentKeys reads each active pack's permission-pack.jsonc and
+// returns the distinct agent keys declared under the top-level "agents" object,
+// in first-seen order. Packs are JSONC (comments + trailing commas); this strips
+// that noise then unmarshals into a generic map and walks ["agents"]. A pack that
+// declares no "agents" object contributes nothing. A read/parse error short-circuits.
+func permissionPackAgentKeys(packs []overlayPackRef) ([]string, error) {
+	seen := map[string]bool{}
+	var keys []string
+	for _, pk := range packs {
+		raw, err := os.ReadFile(pk.path)
+		if err != nil {
+			return nil, fmt.Errorf("read %s/permission-pack.jsonc: %w", pk.name, err)
+		}
+		cleaned := jsoncCommentRe.ReplaceAllString(string(raw), "")
+		cleaned = jsoncTrailingCommaRe.ReplaceAllString(cleaned, "$1")
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(cleaned), &doc); err != nil {
+			return nil, fmt.Errorf("parse %s/permission-pack.jsonc: %w", pk.name, err)
+		}
+		agentsNode, ok := doc["agents"].(map[string]any)
+		if !ok {
+			continue // pack declares no agents; nothing to resolve for it
+		}
+		for k := range agentsNode {
+			if !seen[k] {
+				seen[k] = true
+				keys = append(keys, k)
+			}
+		}
+	}
+	return keys, nil
+}
+
+// hasResolvedAgentEdge reports whether cfg (opencode.jsonc text) contains a
+// resolved task entry for agent — i.e. `"agent": "allow"` or `"agent": "ask"`.
+// The resolver injects these as delegateFrom edges into the core orchestrators'
+// task blocks; their absence (only a deny or no entry) means unresolved. The
+// match is tolerant of arbitrary whitespace around the colon. The agent name is
+// regexp-escaped defensively even though overlay names are filesystem-safe.
+func hasResolvedAgentEdge(cfg, agent string) bool {
+	re := regexp.MustCompile(fmt.Sprintf(`"%s":\s*"(allow|ask)"`, regexp.QuoteMeta(agent)))
+	return re.MatchString(cfg)
 }
 
 // harnessWrittenIgnorableDirs are subtrees the harness's own runtime and scripts
