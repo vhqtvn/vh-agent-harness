@@ -9,8 +9,9 @@ import "testing"
 //
 // truthyString lowercases the whitespace-trimmed input and matches one of
 // {"1","true","yes","on"}; everything else (including "", "0", and the
-// single-letter abbreviations "y"/"t" that defaultUpdateConfirm accepts) is
-// false. This mirrors the contract in the function's doc comment exactly.
+// "y" that defaultUpdateConfirm accepts — defaultUpdateConfirm compares
+// only against "y" case-insensitively, never "t") is false. This mirrors
+// the contract in the function's doc comment exactly.
 //
 // This does NOT duplicate the RUN_FROM_AGENT="1" integration test in
 // update_guard_test.go — that one exercises the guard's env bypass end to end;
