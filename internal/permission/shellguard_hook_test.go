@@ -263,6 +263,203 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 	if err != nil || act != Deny {
 		t.Errorf("hook Evaluate(apt-get install foo) = (%s,%v), want (Deny,nil)", act, err)
 	}
+
+	// git-mutation-bypass regression matrix (Go -> node -> WASM -> evaluate()).
+	// The first two anchors are the FP fix: descriptive prose containing git
+	// tokens inside echo/printf args is now carved out by the inspector allowIf
+	// union (ALLOW_IF_GIT_MUTATION). The remaining anchors pin the
+	// load-bearing security invariants that must NOT regress:
+	//   - bash -c / sh -c / vh-agent-harness exec / eval evasion still DENIED,
+	//   - every chain-guard shape (&&, |, ;, $()) still DENIED,
+	//   - git -C <path> <mutation> still DENIED via normalizeGitC + scan #2,
+	//   - the commit-gate carve-out path still ALLOWS end-to-end.
+	// Each command is passed as a single-element argv so eval.js's
+	// argv.join(" ") yields exactly the intended command string.
+	gitCases := []struct {
+		name string
+		cmd  string
+		want Action
+	}{
+		{
+			name: "echo prose with git checkout/status tokens (FP fix)",
+			cmd:  `echo "cleanup: git checkout / git status fix"`,
+			want: Allow,
+		},
+		{
+			name: "printf prose with git checkout token (FP fix)",
+			cmd:  `printf "see git checkout notes"`,
+			want: Allow,
+		},
+		{
+			name: "echo nested quotes with git tokens (FP fix)",
+			cmd:  `echo "use 'git checkout' then \"git status\""`,
+			want: Allow,
+		},
+		{
+			// `command` is a bash builtin that EXECUTES its argument. It is in
+			// the shared INSPECTOR_FULL (other rules carve it out for benign
+			// `command -v foo` lookups), but the git-mutation carve-out uses a
+			// SEPARATE verb set (GIT_MUTATION_INSPECTORS) that EXCLUDES
+			// `command`. Otherwise `command git commit -m x` would be carved
+			// out at scan #1 (command in command position → allowIf matches)
+			// and the git commit would run. This is the most realistic vector
+			// (an agent would naturally write `command git commit`).
+			name: "command git commit denied (executor verb not a safe inspector)",
+			cmd:  `command git commit -m x`,
+			want: Deny,
+		},
+		{
+			name: "command git push denied (executor verb not a safe inspector)",
+			cmd:  `command git push origin main`,
+			want: Deny,
+		},
+		{
+			name: "bash -c git commit denied",
+			cmd:  `bash -c 'git commit -m x'`,
+			want: Deny,
+		},
+		{
+			name: "sh -c git push denied",
+			cmd:  `sh -c 'git push origin main'`,
+			want: Deny,
+		},
+		{
+			name: "vh-agent-harness exec bash -c git reset denied (load-bearing evasion)",
+			cmd:  `vh-agent-harness exec bash -c 'git reset --hard'`,
+			want: Deny,
+		},
+		{
+			name: "eval git checkout denied",
+			cmd:  `eval 'git checkout x'`,
+			want: Deny,
+		},
+		{
+			name: "echo then && git push denied (chain-guard)",
+			cmd:  `echo hi && git push origin`,
+			want: Deny,
+		},
+		{
+			name: "cat piped to git commit denied (chain-guard pipe)",
+			cmd:  `cat x | git commit -F -`,
+			want: Deny,
+		},
+		{
+			name: "echo semicolon git push denied (chain-guard semicolon)",
+			cmd:  `echo x; git push`,
+			want: Deny,
+		},
+		{
+			name: "echo command-substitution git push denied (chain-guard $())",
+			cmd:  `echo $(git push)`,
+			want: Deny,
+		},
+		{
+			// Bash process substitution `<(...)` runs the inner command with NO
+			// list separator, so `echo x <(git commit ...)` would otherwise be
+			// carved out (echo satisfies the inspector carve-out) and the git
+			// commit would run. The chain-guard alternation now includes `<(`.
+			name: "echo process-sub git commit denied (chain-guard process-sub <())",
+			cmd:  `echo x <(git commit -m pwned)`,
+			want: Deny,
+		},
+		{
+			name: "echo process-sub git push denied (chain-guard process-sub >())",
+			cmd:  `echo y >(git push origin main)`,
+			want: Deny,
+		},
+		{
+			// Bash treats a LITERAL newline as a statement separator (equivalent
+			// to `;`). A smuggled second leg after a newline must NOT escape the
+			// chain-guard: `echo step1\ngit commit` would otherwise be carved out
+			// (echo satisfies the shell-`-c` inspector carve-out) and the git
+			// commit would run. The char class now includes \n.
+			name: "echo newline git commit denied (chain-guard newline separator)",
+			cmd:  "vh-agent-harness exec bash -c 'echo step1\ngit commit -m y'",
+			want: Deny,
+		},
+		{
+			name: "echo newline git push denied (chain-guard newline separator)",
+			cmd:  "vh-agent-harness exec bash -c 'echo step1\ngit push origin main'",
+			want: Deny,
+		},
+		{
+			name: "printf newline git reset denied (chain-guard newline separator)",
+			cmd:  "vh-agent-harness exec bash -c 'printf done\ngit reset --hard'",
+			want: Deny,
+		},
+		{
+			name: "git -C . commit denied (normalizeGitC + scan #2)",
+			cmd:  `git -C . commit -m x`,
+			want: Deny,
+		},
+		{
+			name: "git commit with inspector-substring arg denied (unanchored-shell-c bypass vector)",
+			cmd:  `vh-agent-harness exec git commit -m "bash -c 'echo ok'"`,
+			want: Deny,
+		},
+		{
+			name: "git push with inspector-substring arg denied (unanchored-shell-c bypass vector)",
+			cmd:  `vh-agent-harness exec git push origin main "bash -c 'echo x'"`,
+			want: Deny,
+		},
+		{
+			name: "git reset with inspector-substring arg denied (unanchored-shell-c bypass vector)",
+			cmd:  `vh-agent-harness exec git reset --hard "sh -c 'cat y'"`,
+			want: Deny,
+		},
+		{
+			// F1 fix: a `;`-composite chaining a git mutation after a
+			// commit-gate.sh prefix. Mechanism this closes: alt-A
+			// `COMMIT_GATE_PREFIX` previously had NO chain-guard, so scan #1's
+			// allowIf matched the `.opencode/scripts/commit-gate.sh` prefix and
+			// carved the whole composite out → forbidden=null → parseCommands
+			// split on `;` → the per-command re-scan only fires for tokens[0]
+			// ==="git", so the `vh-agent-harness exec bash -c '...'` leg was
+			// never re-scanned and matched the `vh-agent-harness *` allowlist →
+			// ALLOW. Now alt-A carries the SAME chain-guard as alt-B (the
+			// leading negative lookahead over the whole string), so the `;`
+			// refuses the carve-out at scan #1 → DENY.
+			name: "commit-gate.sh ; vh-agent-harness exec git commit denied (F1 alt-A chain-guard fix)",
+			cmd:  `.opencode/scripts/commit-gate.sh acquire; vh-agent-harness exec bash -c 'git commit -m pwned'`,
+			want: Deny,
+		},
+		{
+			// Defense-in-depth: the `&&` composite against the commit-gate
+			// prefix. Once alt-A carries the chain-guard, the `&&` also
+			// refuses the carve-out at scan #1 → DENY (no second-leg
+			// vh-agent-harness exec wrapping needed).
+			name: "commit-gate.sh && git push denied (alt-A chain-guard, && composite)",
+			cmd:  `.opencode/scripts/commit-gate.sh acquire && git push origin main`,
+			want: Deny,
+		},
+		{
+			// Defense-in-depth: the `|` composite against the commit-gate
+			// prefix. The `|` is in the chain-guard char class, so the carve-out
+			// is refused at scan #1 → DENY.
+			name: "commit-gate.sh | git commit denied (alt-A chain-guard, pipe composite)",
+			cmd:  `.opencode/scripts/commit-gate.sh acquire | git commit -F -`,
+			want: Deny,
+		},
+		{
+			name: "commit-gate.sh acquire allowed (carve-out preserved)",
+			cmd:  `.opencode/scripts/commit-gate.sh acquire --paths-file .git/commit-gate/paths-x --message-file .git/commit-gate/msg-x --session-alias A`,
+			want: Allow,
+		},
+	}
+	for _, c := range gitCases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, _, evalErr := h.Evaluate(context.Background(), []string{c.cmd})
+			if evalErr != nil {
+				t.Fatalf("Evaluate(%q) error %v; want verdict %s (no bridge error)", c.cmd, evalErr, c.want)
+			}
+			// Assert the EXACT verdict: deny cases must be Deny (not Ask/Allow),
+			// so the committer-flow allowlist carve-out cannot mask a regression.
+			if got != c.want {
+				t.Errorf("Evaluate(%q) = %s; want %s", c.cmd, got, c.want)
+			}
+		})
+	}
 }
 
 // findModuleRoot walks up from cwd until it finds go.mod. go test runs with
