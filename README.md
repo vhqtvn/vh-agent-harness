@@ -115,9 +115,11 @@ anything** — a safe preview before applying.
 
 `update` confirms before scaffolding into an **uninitialized** directory when
 run interactively (no `.vh-agent-harness/vh-harness-profile.yml`). The prompt is
-bypassed for non-interactive callers (piped stdin, agents, CI, `make update`),
-by `RUN_FROM_AGENT=1`, or with `-f`/`--force`. `--dry-run` also bypasses it
-(it writes nothing). See `README.agent.md` for the full guard rules.
+bypassed for non-interactive callers (piped stdin, agents, CI), by
+`RUN_FROM_AGENT=1`, or with `-f`/`--force`. `make update` only bypasses when
+its stdin is not a TTY (an interactive `make update` in a terminal still
+prompts). `--dry-run` also bypasses it (it writes nothing). See
+`README.agent.md` for the full guard rules.
 
 ## Adoption & extension
 

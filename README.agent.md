@@ -246,8 +246,10 @@ exits 0; accept and it proceeds as usual.
 The prompt is **bypassed automatically** for non-interactive callers, so the
 agent / dogfood / CI path stays frictionless. It is skipped when any of:
 
-- stdin is **not** a TTY (pipes, agents, CI, `make update`, `/harness`,
-  redirected input), or
+- stdin is **not** a TTY (the actual mechanism) — piped/redirected input,
+  agents, CI, `/harness`, and `make update` only when its stdin is not a TTY
+  (an interactive `make update` in a real terminal still inherits the TTY and
+  still prompts), or
 - `RUN_FROM_AGENT=1` is set (truthy: `1`/`true`/`yes`/`on`), or
 - `--force` / `-f` is passed, or
 - `--dry-run` is passed (it writes nothing, so it is safe to run anywhere and
