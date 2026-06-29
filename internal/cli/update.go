@@ -51,9 +51,11 @@ Interactive guard: when the target is not an initialized harness project (no
 .vh-agent-harness/vh-harness-profile.yml) and stdin is a TTY, update asks for a
 yes/no confirmation before scaffolding managed files there — so a hand-run
 update in the wrong directory cannot install dust by accident. The prompt is
-bypassed automatically for non-interactive callers (piped stdin, agents, CI,
-'make update', '/harness'), and can be skipped with --force (-f) or
-RUN_FROM_AGENT=1. --dry-run never prompts (it writes nothing).`,
+bypassed automatically when stdin is not a TTY (piped/redirected input, agents,
+CI; 'make update' and '/harness' only when their stdin is non-interactive), and
+can be skipped with --force (-f) or RUN_FROM_AGENT=1. An interactive 'make
+update' in a terminal still has a TTY and still prompts. --dry-run never prompts
+(it writes nothing).`,
 	Args: cobra.NoArgs,
 	RunE: runUpdate,
 }
@@ -75,9 +77,10 @@ var updateForce bool
 //     assert the prompt was (or was not) reached.
 //
 // Both mirror the existing updateTargetFlag/updateDryRun/updateForce package
-// vars. Non-interactive callers (agents, CI, `make update`, `/harness`, piped
-// input) bypass the prompt automatically via the non-TTY check; --force,
-// RUN_FROM_AGENT=1, and --dry-run also bypass.
+// vars. The prompt is bypassed automatically whenever stdin is not a TTY
+// (agents, CI, piped input, and `make update` / `/harness` run non-interactively;
+// an interactive `make update` in a terminal still has a TTY and still prompts).
+// --force, RUN_FROM_AGENT=1, and --dry-run also bypass.
 var updateStdinIsTTY = func() bool {
 	info, err := os.Stdin.Stat()
 	if err != nil {

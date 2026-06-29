@@ -135,8 +135,8 @@ func TestUpdateGuard_UninitializedInteractiveAccept(t *testing.T) {
 // --- bypass: non-TTY -------------------------------------------------------
 
 // TestUpdateGuard_UninitializedNonTTYProceeds: an uninitialized target reached
-// via a non-TTY stdin (pipes, agents, CI, make update, /harness) must NOT prompt
-// and must proceed with current behavior.
+// via a non-TTY stdin (pipes, agents, CI; make update / /harness only when run
+// non-interactively) must NOT prompt and must proceed with current behavior.
 func TestUpdateGuard_UninitializedNonTTYProceeds(t *testing.T) {
 	target := t.TempDir()
 	withGuardSeams(t,
