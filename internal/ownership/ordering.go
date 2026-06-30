@@ -147,9 +147,11 @@ func IsMutableByPlatform(c Class) bool {
 // present), seeded once (project_owned / external_generated when absent),
 // schema-reconciled or turned into a proposal (platform_armed), or off the
 // update path entirely (local_only). The seam apply switch
-// (internal/substrate/apply.go planOutcome) routes only these two classes to
-// ActionManagedOverwrite; reaching the overwrite route for any other class is a
-// platform bug and fails closed.
+// (internal/substrate/apply.go planOutcome) routes only these two classes to the
+// managed-* outcomes — ActionManagedOverwrite, or ActionManagedNoop
+// (managed-unchanged) when the live instance is already byte-identical to the
+// freshly rendered corpus. Reaching the managed-overwrite route for any other
+// class is a platform bug and fails closed.
 func IsPlatformOverwritable(c Class) bool {
 	return c == ClassPlatformManaged || c == ClassOverlayExtension
 }
