@@ -11,16 +11,22 @@ import (
 	"sort"
 
 	corpus "github.com/vhqtvn/vh-agent-harness"
+	"github.com/vhqtvn/vh-agent-harness/internal/resolver"
 	"github.com/vhqtvn/vh-agent-harness/internal/substrate"
 )
 
 // Merge-content / catalog file names that live at a pack root and are NOT
-// rendered as unit files (they are deep-merged / materialized elsewhere
-// instead).
+// rendered as unit files (they are deep-merged / materialized / parsed
+// elsewhere instead).
 const (
 	appendFileName         = "opencode-append.jsonc"
 	snippetFileName        = "callable-graph-snippet.md"
 	permissionPackFileName = "permission-pack.jsonc"
+	// capabilityManifestFileName is the pack-root file declaring the
+	// capability this pack provides (id/provides/hard_deps/optional_deps). It
+	// is parsed by ReadCapabilityManifest and merged by resolver.MergeCatalogs;
+	// it is NOT a renderable unit. See internal/resolver/manifest.go.
+	capabilityManifestFileName = "capability-manifest.yml"
 )
 
 // Live (staged) paths that the merge-content files target. These mirror the
@@ -119,7 +125,8 @@ func OpenPackFor(target, name string) (*Pack, error) {
 // Extension snippets are render-time injection material (see ExtensionSnippets),
 // never standalone units.
 func isUnitFile(rel string) bool {
-	if rel == appendFileName || rel == snippetFileName || rel == permissionPackFileName {
+	switch rel {
+	case appendFileName, snippetFileName, permissionPackFileName, capabilityManifestFileName:
 		return false
 	}
 	if isExtensionSnippet(rel) {
@@ -263,4 +270,36 @@ func (p *Pack) MaterializePermissionPack(staging string) (string, error) {
 		return "", fmt.Errorf("overlay %s: materialize permission-pack: %w", p.Name, err)
 	}
 	return liveRel, nil
+}
+
+// ReadCapabilityManifest reads and parses the pack's capability-manifest.yml
+// (if present) into a resolver.CapabilityManifest. It is the pack-level load
+// half of the capability model: it returns the PARSED manifest (parse-only,
+// matching resolver.ParseManifest's contract; structural and cross-capability
+// validation is the resolver.MergeCatalogs layer's job). Returns
+// (zero, false, nil) when the pack ships no manifest — a pack may legitimately
+// contribute units/permissions without declaring a capability (e.g. a
+// skills-only pack). A present-but-malformed YAML is returned as an error
+// wrapping the parse failure; an absent file is reported via ok=false (not an
+// error) so callers can treat "no manifest" and "broken manifest" differently.
+//
+// Source-shadowing is handled at the FS layer by OpenPackFor (a project-local
+// pack at .vh-agent-harness/overlays/<name>/ wins over the embedded tree), so
+// by the time a *Pack reaches this method the shadowing winner is already
+// resolved; this method simply reads whatever manifest the (already-shadowed)
+// pack ships. resolver.MergeCatalogs applies the same project-wins rule again
+// at the manifest-merge layer for defense-in-depth.
+func (p *Pack) ReadCapabilityManifest() (manifest resolver.CapabilityManifest, ok bool, err error) {
+	raw, rerr := fs.ReadFile(p.FS, capabilityManifestFileName)
+	if rerr != nil {
+		if errors.Is(rerr, fs.ErrNotExist) {
+			return resolver.CapabilityManifest{}, false, nil
+		}
+		return resolver.CapabilityManifest{}, false, fmt.Errorf("overlay %s: read capability-manifest: %w", p.Name, rerr)
+	}
+	m, perr := resolver.ParseManifest(raw)
+	if perr != nil {
+		return resolver.CapabilityManifest{}, false, fmt.Errorf("overlay %s: %w", p.Name, perr)
+	}
+	return m, true, nil
 }

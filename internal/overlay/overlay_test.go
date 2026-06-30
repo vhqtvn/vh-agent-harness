@@ -231,7 +231,7 @@ func TestOpenPack_UnknownPackFailsClosed(t *testing.T) {
 // a pack root are NOT unit files (they are deep-merged/appended, not rendered
 // verbatim), while a normal agent/skill/command path IS a unit file.
 func TestIsUnitFile_ClassifiesMergeContent(t *testing.T) {
-	for _, merge := range []string{appendFileName, snippetFileName, permissionPackFileName} {
+	for _, merge := range []string{appendFileName, snippetFileName, permissionPackFileName, capabilityManifestFileName} {
 		if isUnitFile(merge) {
 			t.Errorf("isUnitFile(%q): want false (merge-content)", merge)
 		}
