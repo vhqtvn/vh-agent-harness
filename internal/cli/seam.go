@@ -514,6 +514,20 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	if err := os.WriteFile(cfgPath, emitted, 0o644); err != nil {
 		return nil, fmt.Errorf("seam: write canonical opencode.jsonc: %w", err)
 	}
+	// Phase 4 capability-installer: post-render fail-closed reference
+	// validation. Assert that no reference in the just-emitted opencode.jsonc
+	// points at an agent that did not render (a dangling permission.task edge)
+	// or at a prompt file conditional rendering removed. This is defense-in-depth
+	// on top of Phase 3's present-agent filter (computeTaskBlock): by here the
+	// OPTIONAL task edges to capability-gated agents are already pruned, so any
+	// surviving dangling reference is a HARD inconsistency (a capability
+	// manifest declaring a hard dependency whose cluster did not fully render,
+	// or a prompt ref to a file conditional rendering removed) and MUST fail
+	// closed before the broken artifact reaches the live tree. True no-op when
+	// the render is consistent (the dogfood render today).
+	if err := validateRenderedRefs(staging, emitted); err != nil {
+		return nil, fmt.Errorf("seam: %w", err)
+	}
 	// Generate allowed-commands.js from the same Go canonical tables so the
 	// shell-guard runtime hook (which imports it as a JS module at exec time)
 	// stays in sync with the emitted permission blocks. Single-source: the Go
