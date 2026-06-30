@@ -1,30 +1,33 @@
 package cli
 
-// Phase 3 capability-installer render tests. These exercise the resolver ->
+// Phase 3/5 capability-installer render tests. These exercise the resolver ->
 // renderSeamStaging wiring (internal/cli/seam.go renderSeamStaging +
 // internal/cli/profile.go resolveCapabilityAnswers) end-to-end through the real
 // install/update/doctor verbs, then parse the rendered opencode.jsonc to assert
 // which agents and which universal-agent task edges render for a given profile.
 //
-// Coverage:
-//   - Backward-compat default: a profile with NO `capabilities:` key (the
-//     current dogfood + embedded default profiles) must render ALL 21 agents
-//     (9 ungated incl. the dormant plan subagent + 7 gated-commit + 5 debate)
-//     byte-identically to pre-Phase-3 — the resolver's phase3BackwardCompatDefault
-//     selects {core/gated-commit, core/debate} so every gated block renders.
+// Coverage (Phase 5 preset semantics — the backward-compat bridge is gone):
+//   - Supervised preset: a profile declaring `profile: supervised` must render
+//     ALL 21 agents (9 ungated incl. the dormant plan subagent + 7 gated-commit +
+//     5 debate) — the supervised preset selects {core/gated-commit, core/debate}
+//     so every gated block renders. This is what this repo (and vh-solara-style
+//     repos) ship.
+//   - Minimal preset: a profile declaring `profile: minimal` with no explicit
+//     capabilities must render ONLY the 9 ungated agents (8 CoreCatalog
+//     baseline + dormant plan) — minimal's preset is empty, so no cluster
+//     resolves. This is the Phase-5 behavior flip: minimal genuinely means
+//     minimal.
 //   - Like-for-like across render paths: install + doctor must agree (no managed
 //     drift), proving the resolver wiring lives INSIDE renderSeamStaging (shared
 //     by seamApply AND doctor's managed-drift re-render).
-//   - Graceful degradation: a profile that selects ONLY core/debate must drop
-//     the gated-commit agents AND the universal agents' task edges to them
-//     (build/coordination/project-coordinator -> committer et al.; docs-steward
-//     -> committer), while keeping the 9 ungated + 5 debate agents and the
-//     debate task edges. Task-edge dropping is enforced by permconfig.Emit's
-//     present-agent filter (internal/permconfig/emit.go), not the template
-//     gates (which permconfig authoritatively overwrites — see tables.go).
-//
-// These are the Phase 3 acceptance tests: render parity (no behavior change for
-// the current profile) and graceful degradation (the capability gate contract).
+//   - Graceful degradation: a profile that selects ONLY core/debate (minimal
+//     preset ∪ {core/debate}) must drop the gated-commit agents AND the universal
+//     agents' task edges to them (build/coordination/project-coordinator ->
+//     committer et al.; docs-steward -> committer), while keeping the 9 ungated +
+//     5 debate agents and the debate task edges. Task-edge dropping is enforced
+//     by permconfig.Emit's present-agent filter (internal/permconfig/emit.go),
+//     not the template gates (which permconfig authoritatively overwrites — see
+//     tables.go).
 
 import (
 	"encoding/json"
@@ -167,17 +170,22 @@ func capRenderSortedKeys(m map[string]bool) []string {
 	return out
 }
 
-// TestSeamRender_BackwardCompatDefaultRendersAllCapabilities is the Phase 3
-// render-PARITY proof: a profile with no `capabilities:` key (the current
-// dogfood + embedded default profiles) must render all 21 agents — the resolver's
-// backward-compat default selects both core seeds so every gated block renders,
-// byte-identical to pre-Phase-3. If this regresses, the current profile silently
-// loses agents on the next update.
-func TestSeamRender_BackwardCompatDefaultRendersAllCapabilities(t *testing.T) {
+// TestSeamRender_SupervisedProfileRendersAllCapabilities is the Phase 5
+// supervised-preset proof: a profile declaring `profile: supervised` must render
+// all 21 agents — the supervised preset selects both core clusters so every
+// gated block renders. This is the roster this repo (and vh-solara-style repos)
+// ship. If this regresses, the supervised profile silently loses agents on the
+// next update. (Phase 3 ran this assertion against the now-removed
+// backward-compat bridge; Phase 5 reframes it to the explicit supervised preset.)
+func TestSeamRender_SupervisedProfileRendersAllCapabilities(t *testing.T) {
 	root := t.TempDir()
 	seamInstallInto(t, root)
-	// The installed profile is the embedded default (no `capabilities:` key),
-	// so the backward-compat default applies.
+	// Switch the installed (minimal) profile to supervised, then update so the
+	// re-render resolves the supervised preset.
+	writeProfile(t, root, "profile: supervised\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\n")
+	if _, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("update with profile:supervised: %v", err)
+	}
 	rendered := parseRenderedAgents(t, root)
 
 	// All 21 agents must render (9 ungated + 7 gated-commit + 5 debate).
@@ -189,57 +197,111 @@ func TestSeamRender_BackwardCompatDefaultRendersAllCapabilities(t *testing.T) {
 	}
 
 	// The universal agents' task edges to the gated agents must render too
-	// (the per-edge gates are true under the backward-compat default). The
+	// (the per-edge gates are true under the supervised preset). The
 	// orchestrators carry the full gated roster; docs-steward carries only its
 	// optional committer edge (no debate edge in CoreTaskRules).
 	edges := parseRenderedTaskEdges(t, root)
 	for _, orch := range orchestrators {
 		task := edges[orch]
 		if !task["committer"] {
-			t.Errorf("%s -> committer task edge must render under backward-compat default", orch)
+			t.Errorf("%s -> committer task edge must render under supervised preset", orch)
 		}
 		if !task["commit-message"] {
-			t.Errorf("%s -> commit-message task edge must render under backward-compat default", orch)
+			t.Errorf("%s -> commit-message task edge must render under supervised preset", orch)
 		}
 		if !task["debate"] {
-			t.Errorf("%s -> debate task edge must render under backward-compat default", orch)
+			t.Errorf("%s -> debate task edge must render under supervised preset", orch)
 		}
 	}
 	if !edges["docs-steward"]["committer"] {
-		t.Errorf("docs-steward -> committer task edge must render under backward-compat default")
+		t.Errorf("docs-steward -> committer task edge must render under supervised preset")
 	}
 }
 
-// TestSeamRender_DoctorLikeForLikeNoDriftOnBackwardCompat proves the resolver
-// wiring lives INSIDE renderSeamStaging (not only in seamApply): the doctor
-// managed-drift check re-renders via the same path, so install and doctor must
-// agree byte-for-byte. A HEALTHY doctor means no gated agent block is spuriously
-// flagged as drift — the exact invariant that motivated injecting the resolver
-// at renderSeamStaging rather than at seamApply.
-func TestSeamRender_DoctorLikeForLikeNoDriftOnBackwardCompat(t *testing.T) {
+// TestSeamRender_MinimalProfileRendersBaselineOnly is the Phase 5 behavior-flip
+// proof: a profile declaring `profile: minimal` with NO explicit capabilities
+// must render ONLY the 9 ungated agents (8 CoreCatalog baseline + dormant plan).
+// minimal's preset is empty, so neither core cluster resolves and no gated agent
+// block renders. This is the headline "minimal genuinely means minimal" change
+// that distinguishes Phase 5 from the Phase-3 backward-compat bridge (which
+// forced both clusters for every profile).
+func TestSeamRender_MinimalProfileRendersBaselineOnly(t *testing.T) {
 	root := t.TempDir()
 	seamInstallInto(t, root)
+	// The installed profile IS minimal (the embedded default), but write it
+	// explicitly and update so the test is self-documenting and resilient to a
+	// future change to the embedded default.
+	writeProfile(t, root, "profile: minimal\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\n")
+	if _, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("update with profile:minimal: %v", err)
+	}
+	rendered := parseRenderedAgents(t, root)
+
+	// ONLY the 9 ungated agents render; both clusters are absent.
+	assertAgentsPresent(t, rendered, ungatedAgents)
+	assertAgentsAbsent(t, rendered, gatedCommitAgents)
+	assertAgentsAbsent(t, rendered, debateAgents)
+	if got, want := len(rendered), len(ungatedAgents); got != want {
+		t.Errorf("agent count: got %d, want %d (ungated only; rendered=%v)", got, want, capRenderSortedKeys(rendered))
+	}
+
+	// No ungated agent carries a task edge to a gated agent (graceful
+	// degradation of the edges, mirroring the absent agent blocks). orchestrators
+	// keep NO committer/commit-message/debate edges; docs-steward keeps NO
+	// committer edge.
+	edges := parseRenderedTaskEdges(t, root)
+	for _, orch := range orchestrators {
+		task := edges[orch]
+		if task["committer"] {
+			t.Errorf("%s -> committer task edge must NOT render under minimal preset (no cluster)", orch)
+		}
+		if task["commit-message"] {
+			t.Errorf("%s -> commit-message task edge must NOT render under minimal preset (no cluster)", orch)
+		}
+		if task["debate"] {
+			t.Errorf("%s -> debate task edge must NOT render under minimal preset (no cluster)", orch)
+		}
+	}
+	if edges["docs-steward"]["committer"] {
+		t.Errorf("docs-steward -> committer task edge must NOT render under minimal preset (no cluster)")
+	}
+}
+
+// TestSeamRender_DoctorLikeForLikeNoDriftOnSupervised proves the resolver wiring
+// lives INSIDE renderSeamStaging (not only in seamApply): the doctor
+// managed-drift check re-renders via the same path, so update and doctor must
+// agree byte-for-byte under the supervised preset. A HEALTHY doctor means no
+// gated agent block is spuriously flagged as drift — the exact invariant that
+// motivated injecting the resolver at renderSeamStaging rather than at seamApply.
+func TestSeamRender_DoctorLikeForLikeNoDriftOnSupervised(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	writeProfile(t, root, "profile: supervised\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\n")
+	if _, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("update with profile:supervised: %v", err)
+	}
 	out := seamDoctorOut(t, root)
 	if !strings.Contains(out, "result: HEALTHY") {
-		t.Errorf("doctor must report HEALTHY (no managed drift) under the backward-compat default;\ngot:\n%s", out)
+		t.Errorf("doctor must report HEALTHY (no managed drift) under the supervised preset;\ngot:\n%s", out)
 	}
 	if strings.Contains(out, "drifted") {
-		t.Errorf("doctor must report NO drifted files under the backward-compat default;\ngot:\n%s", out)
+		t.Errorf("doctor must report NO drifted files under the supervised preset;\ngot:\n%s", out)
 	}
 }
 
 // TestSeamRender_CapabilitySelectionGracefulDegradation proves the capability
-// gate contract: a profile selecting ONLY core/debate drops the gated-commit
-// agents AND the universal agents' task edges to them (graceful degradation),
-// while keeping the 8 baseline + 5 debate agents and the debate task edges. This
-// is the headline graceful-degradation case — docs-steward (a baseline agent)
-// keeps working without its optional committer edge.
+// gate contract under the Phase-5 union model: a profile selecting ONLY
+// core/debate (minimal preset ∪ {core/debate} = {core/debate}) drops the
+// gated-commit agents AND the universal agents' task edges to them (graceful
+// degradation), while keeping the 8 baseline + 5 debate agents and the debate
+// task edges. This is the headline graceful-degradation case — docs-steward (a
+// baseline agent) keeps working without its optional committer edge.
 func TestSeamRender_CapabilitySelectionGracefulDegradation(t *testing.T) {
 	root := t.TempDir()
 	seamInstallInto(t, root)
-	// Select ONLY core/debate: an explicit non-empty capabilities list disables
-	// the backward-compat default, so core/gated-commit must NOT resolve.
-	writeProfile(t, root, "profile: minimal\nmodules: [core]\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\ncapabilities:\n  - core/debate\n")
+	// minimal preset (empty) ∪ {core/debate} = {core/debate}, so core/gated-commit
+	// must NOT resolve.
+	writeProfile(t, root, "profile: minimal\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\ncapabilities:\n  - core/debate\n")
 	if _, err := seamUpdateOut(t, root); err != nil {
 		t.Fatalf("update with capabilities:[core/debate]: %v", err)
 	}

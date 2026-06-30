@@ -9,9 +9,13 @@
 # This is the platform DEFAULT (v1): the minimal core corpus. Overlays widen
 # modules/overlays/features in later slices; the schema
 # (internal/schema/harness_profile.go) is the contract.
-profile: minimal
-modules:
-  - core
+#
+# Phase 5: `profile: supervised` selects the capability preset [core/gated-commit,
+# core/debate] (baseline + both core clusters), so this repo keeps its
+# gated-commit and debate workflows. The legacy `modules:` field is deprecated
+# under the preset model and dropped here — `profile:` + `capabilities:` now
+# carry the intent `modules:` once approximated.
+profile: supervised
 features:
   backlog: true
 overlays: []

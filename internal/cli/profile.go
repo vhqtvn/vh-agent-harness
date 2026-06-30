@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -123,11 +124,11 @@ func boolStr(b bool) string {
 	return "false"
 }
 
-// --- Phase 3 capability-installer: resolver wiring --------------------------
+// --- Capability-installer: profile-preset resolution (Phase 5 behavior flip) -
 //
 // The functions below run the capability resolver (Phase 2) against the live
-// S3 profile's `capabilities:` selection and project the resolved set onto the
-// flat "capabilities.<key>" render answers the GoTemplateRenderer consumes via
+// S3 profile's capability selection and project the resolved set onto the flat
+// "capabilities.<key>" render answers the GoTemplateRenderer consumes via
 // buildTemplateData's dotted-key nesting. Templates then gate agent blocks and
 // task-allowlist edges with {{ if .capabilities.<key> }}.
 //
@@ -135,25 +136,49 @@ func boolStr(b bool) string {
 // render path — install/update AND doctor's managed-drift re-render — resolves
 // capabilities like-for-like (a gate true at install must also be true at
 // doctor, else doctor false-flags drift on the gated agent blocks).
-
-// phase3BackwardCompatDefault is the capability selection applied when a profile
-// declares NO explicit `capabilities:` list. Phase 3 changes the render
-// MECHANISM (gates + resolver wiring) but MUST NOT change the render BEHAVIOR
-// for the existing dogfood profile (profile: minimal, no capabilities: key),
-// which today ships all 20 agents. Selecting both core seeds reproduces that
-// output exactly: core/gated-commit provides the 7 gated-commit agents and
-// core/debate provides the 5 debate agents, so every capability gate evaluates
-// true and every gated block renders.
 //
-// PHASE 5 TODO: flip this default to a baseline-only (empty) selection once the
-// dogfood profile is migrated to an explicit capabilities: declaration (or
-// `profile: supervised`). That single change here is the genuine "minimal = 8
-// universal agents only" behavior flip; everything else (the template gates, the
-// resolver wiring, the F1 baseline-never-satisfies-gate invariant) is already
-// in place after Phase 3, so the flip is one findable edit.
-var phase3BackwardCompatDefault = []resolver.CapabilityID{
-	"core/gated-commit",
-	"core/debate",
+// SELECTION MODEL (Phase 5). A profile's resolved capability selection is
+//
+//	preset(profile) ∪ explicit(capabilities:)
+//
+// where preset(profile) is a small map keyed by the `profile:` enum and the
+// explicit `capabilities:` list is unioned on top. An empty selection is a
+// valid, meaningful state — it resolves to the catalog's 8 universal baseline
+// agents only (no clusters). This replaces the Phase-3 `phase3BackwardCompatDefault`
+// bridge, which forced [core/gated-commit, core/debate] whenever a profile
+// declared no explicit capabilities (so every profile rendered the full 20-agent
+// roster regardless of its `profile:` enum). Phase 5 makes the enum mean
+// something.
+
+// profileCapabilityPresets maps the `profile:` enum value to the capability
+// selection it carries as a BASE preset (before any explicit `capabilities:`
+// are unioned in). Unknown values resolve to the empty preset (baseline-only),
+// which is the safe default — a typo in `profile:` cannot silently grant
+// clusters.
+//
+// Semantics:
+//
+//   - "minimal"      -> baseline-only (the 8 universal agents). This is the
+//     genuine "lean harness" shape: coordination, build, project-coordinator,
+//     researcher, repo-explorer, planner, docs-steward, ship-review.
+//   - "supervised"   -> baseline + both core clusters (gated-commit, debate).
+//     This is the full-featured shape this repo and vh-solara-style repos want:
+//     it keeps the gated-commit protocol AND the multi-model debate workflow.
+//   - "coordination" -> aliased to minimal (baseline-only). No capability cluster
+//     is intrinsically scoped to "coordination-only" today; treating it as
+//     baseline-only keeps the enum honest rather than inventing a fake default.
+//     A profile that wants a cluster under `coordination` declares it via
+//     `capabilities:`.
+//   - "web"          -> aliased to minimal (baseline-only) for the same reason
+//     as `coordination`: there is not yet a web-scoped capability cluster.
+//
+// When a new capability cluster is added whose scope aligns with one of the
+// under-used enum values, extend this map rather than letting the enum drift.
+var profileCapabilityPresets = map[string][]resolver.CapabilityID{
+	"minimal":      nil,
+	"supervised":   {"core/gated-commit", "core/debate"},
+	"coordination": nil,
+	"web":          nil,
 }
 
 // capabilityTemplateKey maps a capability ID (namespace/name) to the template
@@ -176,55 +201,106 @@ func capabilityTemplateKey(id string) string {
 	return strings.ReplaceAll(id, "-", "_")
 }
 
-// readProfileCapabilities reads the explicit `capabilities:` list from the live
-// S3 vh-harness-profile.yml at <target>. Contract mirrors readProfileAnswers:
-//
-//   - greenfield/missing file -> nil (the caller applies the backward-compat
-//     default).
-//   - malformed/unreadable -> nil (doctor reports the schema error separately;
-//     render never aborts on a malformed profile).
-//   - valid file with NO capabilities: key, null, OR an empty `capabilities:
-//     []` -> nil (default applies; this is the current dogfood profile). Empty
-//     is folded into the default because the profile normalizer materializes an
-//     absent key as `capabilities: []` on the first update, so distinguishing
-//     them would make the default vanish post-update. The genuine baseline-only
-//     opt-out is Phase 5's flip of phase3BackwardCompatDefault to empty.
-//   - valid file with capabilities: [ids] -> that selection.
-//
-// The nil-vs-non-empty distinction is load-bearing: nil (no explicit selection)
-// applies the backward-compat default; a non-empty slice is honored as-is.
-func readProfileCapabilities(target string) []resolver.CapabilityID {
-	raw, err := os.ReadFile(filepath.Join(target, harnessProfileName))
-	if err != nil {
-		return nil // greenfield; default applies
-	}
-	if errs := (schema.HarnessProfile{}).Validate(raw); len(errs) > 0 {
-		return nil // malformed; default applies (doctor reports the schema error)
-	}
+// parseProfileSelection is the pure projection of a validated vh-harness-profile.yml
+// blob onto the (profile, capabilities) pair that drives capability resolution.
+// It returns the `profile:` enum value (lowercased; "" if absent/unparsable) and
+// the explicit `capabilities:` list (nil if absent/empty). Split from the I/O
+// reader so tests can pin the preset-union behavior without touching the disk.
+func parseProfileSelection(raw []byte) (profile string, capabilities []resolver.CapabilityID) {
 	var d struct {
+		Profile      string   `yaml:"profile"`
 		Capabilities []string `yaml:"capabilities"`
 	}
 	if err := yaml.Unmarshal(raw, &d); err != nil {
-		return nil
+		return "", nil
 	}
-	// An absent key, an explicit null, and an explicit `capabilities: []` are
-	// ALL treated as "no explicit selection -> default applies". They are
-	// indistinguishable in practice because the profile normalizer materializes
-	// an absent/null key as `capabilities: []` on the first update, so honoring
-	// a nil-vs-empty distinction here would make the backward-compat default
-	// vanish after a single update (false drift on every gated block). The only
-	// way to opt OUT of the default is to declare a non-empty selection; the
-	// genuine "baseline-only" behavior is Phase 5's flip of
-	// phase3BackwardCompatDefault to an empty slice (then absent/empty -> empty
-	// selection -> 8 universal agents).
-	if len(d.Capabilities) == 0 {
-		return nil
-	}
+	profile = strings.TrimSpace(d.Profile)
 	out := make([]resolver.CapabilityID, 0, len(d.Capabilities))
 	for _, c := range d.Capabilities {
 		out = append(out, c)
 	}
+	if len(out) == 0 {
+		return profile, nil
+	}
+	return profile, out
+}
+
+// presetCapabilities returns the base capability selection for a `profile:` enum
+// value, copying the preset slice so callers may mutate freely. Unknown values
+// resolve to nil (baseline-only) — the safe default.
+func presetCapabilities(profile string) []resolver.CapabilityID {
+	if preset, ok := profileCapabilityPresets[profile]; ok {
+		return append([]resolver.CapabilityID(nil), preset...)
+	}
+	return nil
+}
+
+// unionCapabilities merges a base preset selection with an explicit opt-in list,
+// deduplicating by capability id while preserving order (preset entries first,
+// then explicit entries not already present). This implements the Phase-5 union
+// semantics: `capabilities:` adds to the preset rather than replacing it, so a
+// profile can say `profile: minimal` + `capabilities: [core/debate]` and get
+// baseline + debate only.
+func unionCapabilities(preset, explicit []resolver.CapabilityID) []resolver.CapabilityID {
+	seen := make(map[string]struct{}, len(preset)+len(explicit))
+	out := make([]resolver.CapabilityID, 0, len(preset)+len(explicit))
+	for _, id := range preset {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for _, id := range explicit {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
 	return out
+}
+
+// corpusDefaultProfileSelection is the capability selection implied by the
+// embedded platform-default profile, used on a greenfield install when the
+// target has no live profile yet. Mirrors readProfileAnswers' greenfield
+// fallback so install-time and post-update renders agree on the seeded profile.
+func corpusDefaultProfileSelection() []resolver.CapabilityID {
+	sub, err := fs.Sub(corpus.CoreFS, corpus.CoreDir)
+	if err != nil {
+		return nil
+	}
+	raw, err := fs.ReadFile(sub, harnessProfileName)
+	if err != nil {
+		return nil
+	}
+	profile, caps := parseProfileSelection(raw)
+	return unionCapabilities(presetCapabilities(profile), caps)
+}
+
+// readProfileSelection reads the capability selection driving THIS render from
+// the live S3 profile at <target>, applying the Phase-5 preset-union model:
+//
+//	preset(profile) ∪ explicit(capabilities:)
+//
+// Contract mirrors readProfileAnswers:
+//
+//   - greenfield/missing file -> the embedded platform-default profile's
+//     selection (so install renders byte-identically to the profile it is about
+//     to seed, avoiding spurious drift on the first doctor/update).
+//   - malformed/unreadable -> nil selection (baseline-only). Doctor reports the
+//     schema error separately; render never aborts on a malformed profile.
+//   - valid file -> preset(profile) ∪ capabilities:.
+func readProfileSelection(target string) []resolver.CapabilityID {
+	raw, err := os.ReadFile(filepath.Join(target, harnessProfileName))
+	if err != nil {
+		return corpusDefaultProfileSelection() // greenfield; render the seeded shape
+	}
+	if errs := (schema.HarnessProfile{}).Validate(raw); len(errs) > 0 {
+		return nil // malformed; baseline-only (doctor reports the schema error)
+	}
+	profile, caps := parseProfileSelection(raw)
+	return unionCapabilities(presetCapabilities(profile), caps)
 }
 
 // resolveCapabilityAnswers runs the resolver for the live profile's capability
@@ -238,21 +314,15 @@ func readProfileCapabilities(target string) []resolver.CapabilityID {
 // absent-key zero value). This mirrors how features.backlog is projected: a
 // complete, closed projection rather than a sparse one.
 //
-// Catalog construction: Phase 3 uses CoreCatalog() alone — no overlay pack
-// contributes capabilities today. PHASE 3 HOOK: when an overlay pack contributes
-// a CapabilityManifest, merge it via resolver.MergeCatalogs here (read each
-// active overlay pack's ReadCapabilityManifest and build PackContribution
-// records) before resolving. Left as a marked hook because wiring overlay
-// contributions at render time is out of scope for Phase 3 and no current
-// overlay contributes.
+// Catalog construction: CoreCatalog() alone — no overlay pack contributes
+// capabilities today. PHASE 3 HOOK: when an overlay pack contributes a
+// CapabilityManifest, merge it via resolver.MergeCatalogs here (read each active
+// overlay pack's ReadCapabilityManifest and build PackContribution records)
+// before resolving. Left as a marked hook because wiring overlay contributions
+// at render time is out of scope for Phase 3 and no current overlay contributes.
 func resolveCapabilityAnswers(target string) (map[string]string, error) {
 	catalog := resolver.CoreCatalog()
-	selected := readProfileCapabilities(target)
-	if selected == nil {
-		// No explicit capabilities: declaration -> backward-compat default so
-		// the current profile renders byte-identically to pre-Phase-3.
-		selected = append([]resolver.CapabilityID(nil), phase3BackwardCompatDefault...)
-	}
+	selected := readProfileSelection(target)
 	set, err := resolver.Resolve(selected, catalog)
 	if err != nil {
 		return nil, fmt.Errorf("resolve capabilities %v: %w", selected, err)
@@ -262,4 +332,71 @@ func resolveCapabilityAnswers(target string) (map[string]string, error) {
 		out["capabilities."+capabilityTemplateKey(id)] = boolStr(set.Has(id))
 	}
 	return out, nil
+}
+
+// --- modules: deprecation (Phase 5) ------------------------------------------
+//
+// `modules:` is the legacy profile field that pre-dates the capability-preset
+// model. Under Phase 5 it is redundant: the `profile:` enum's presets now carry
+// the intent `modules:` once approximated (a curated bundle of agents). It is
+// NOT removed from the schema (deprecation only, so existing profiles keep
+// parsing), but a non-empty `modules:` list surfaces a one-line warning on every
+// update and doctor run so operators know to migrate.
+
+// profileDeprecationSink is the writer for profile-deprecation warnings. It
+// defaults to os.Stderr (the seam.go warning channel) but is a package-level
+// variable so tests can swap it for a buffer and assert the warning text. This
+// mirrors the swappable-sink precedent in internal/runtime/bare.go
+// (`bareStderr`) and internal/permission/permission.go (`stderr`).
+var profileDeprecationSink io.Writer = os.Stderr
+
+// modulesDeprecationWarning returns the one-line deprecation warning for a
+// non-empty `modules:` list, or "" when the list is nil/empty (no warning to
+// emit). Pure + testable; the caller owns the sink write. The modules values are
+// not interpolated into the message (they are operator-controlled and could
+// contain shell metacharacters); only the count is reported.
+func modulesDeprecationWarning(modules []string) string {
+	if len(modules) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"seam: warning: vh-harness-profile.yml `modules:` (%d entry) is deprecated; "+
+			"use the `profile:` enum (presets) and `capabilities:` (opt-in union) instead.\n",
+		len(modules),
+	)
+}
+
+// liveProfileModules reads the `modules:` list from the LIVE S3 profile only
+// (NOT the embedded default), returning nil when the live profile is absent.
+// This is deliberate: the embedded default still ships `modules: [core]`, and we
+// do NOT want to warn during the greenfield seeding render (install) where the
+// live profile does not yet exist — only on a real update/doctor where the
+// operator's live profile still carries a now-meaningless `modules:`. A
+// malformed profile yields nil (doctor reports the schema error separately).
+func liveProfileModules(target string) []string {
+	raw, err := os.ReadFile(filepath.Join(target, harnessProfileName))
+	if err != nil {
+		return nil // greenfield; no live profile to warn about
+	}
+	if errs := (schema.HarnessProfile{}).Validate(raw); len(errs) > 0 {
+		return nil // malformed; doctor reports the schema error
+	}
+	var d struct {
+		Modules []string `yaml:"modules"`
+	}
+	if err := yaml.Unmarshal(raw, &d); err != nil {
+		return nil
+	}
+	return d.Modules
+}
+
+// emitModulesDeprecationWarning writes the modules-deprecation warning to
+// profileDeprecationSink when the live profile carries a non-empty `modules:`
+// list. No-op otherwise (greenfield, empty modules, or malformed profile). Used
+// by renderSeamStaging so the warning fires on both update (seamApply) and
+// doctor (checkManagedDrift) renders.
+func emitModulesDeprecationWarning(target string) {
+	if msg := modulesDeprecationWarning(liveProfileModules(target)); msg != "" {
+		fmt.Fprint(profileDeprecationSink, msg)
+	}
 }

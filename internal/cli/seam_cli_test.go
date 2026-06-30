@@ -521,9 +521,20 @@ func TestSeamUpdate_BacklogFeatureOffExcludesPermission(t *testing.T) {
 // sole gate-enabled agent (committer) DOES have gate entries with "allow". This
 // is the OpenCode deriveSubagentSessionPermission correctness contract: a parent
 // gate deny would bleed into the committer subagent and block commits.
+//
+// Phase 5: the bare install renders the embedded-default `profile: minimal`
+// (baseline-only — no committer). This test needs the gated-commit cluster, so
+// it switches the profile to `supervised` and updates before asserting. The
+// gate-exempt/gate-enabled contract under test is unchanged; only the profile
+// setup is Phase-5-aware.
 func TestSeamInstall_GateExemptAgentOmitsGateCommands(t *testing.T) {
 	root := t.TempDir()
 	seamInstallInto(t, root)
+	// Render the gated-commit cluster (committer et al.) via the supervised preset.
+	writeProfile(t, root, "profile: supervised\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\n")
+	if _, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("update with profile:supervised: %v", err)
+	}
 	cfg, err := os.ReadFile(filepath.Join(root, "opencode.jsonc"))
 	if err != nil {
 		t.Fatalf("read opencode.jsonc: %v", err)

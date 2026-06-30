@@ -396,10 +396,10 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// never clobber install identity (project_name/slug) — they are disjoint.
 	renderAnswers = mergeRenderAnswers(renderAnswers, projectConfigAnswers(target))
 	// Phase 3 capability-installer: resolve the profile's capability selection
-	// (applying the backward-compat default when none is declared) and project
-	// it onto capabilities.<key> answers so {{ if .capabilities.<key> }} gates
-	// in opencode.jsonc.tmpl resolve from the operator's actual selection. This
-	// runs here — INSIDE renderSeamStaging, not only in seamApply — so EVERY
+	// (applying the Phase-5 profile preset ∪ explicit capabilities: union) and
+	// project it onto capabilities.<key> answers so {{ if .capabilities.<key> }}
+	// gates in opencode.jsonc.tmpl resolve from the operator's actual selection.
+	// This runs here — INSIDE renderSeamStaging, not only in seamApply — so EVERY
 	// render path renders like-for-like: install/update, doctor's managed-drift
 	// re-render, and inventory all see the same capability gates. If only
 	// seamApply resolved capabilities, doctor would re-render without them and
@@ -409,6 +409,12 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 		return nil, fmt.Errorf("seam: %w", err)
 	}
 	renderAnswers = mergeRenderAnswers(renderAnswers, capAnswers)
+	// Phase 5 modules deprecation: warn (to the swappable profileDeprecationSink)
+	// when the LIVE profile still carries a non-empty `modules:` list. Emitted
+	// here so it fires on BOTH update (seamApply -> renderSeamStaging) and doctor
+	// (checkManagedDrift -> renderSeamStaging). No-op on greenfield (no live
+	// profile yet) so the seeding render stays quiet.
+	emitModulesDeprecationWarning(target)
 	if err := renderer.Render(staging, substrate.RenderSpec{
 		TemplateSource: corpus.CoreDir,
 		Answers:        renderAnswers,
