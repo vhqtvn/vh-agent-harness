@@ -183,6 +183,98 @@ func TestApply_ManagedUpdatedOwnedPreservedArmedReconciled(t *testing.T) {
 	}
 }
 
+// TestApply_ManagedNoopWhenByteIdentical confirms a platform_managed file whose
+// live instance is byte-identical to the freshly rendered corpus is reported as
+// ActionManagedNoop (managed-unchanged) and NOT rewritten — distinguishing a
+// no-op refresh from real churn. A drifted live copy still overwrites.
+func TestApply_ManagedNoopWhenByteIdentical(t *testing.T) {
+	live := t.TempDir()
+	staging := t.TempDir()
+
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+	if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+
+	// Seed the live tree with the EXACT staged corpus bytes for one managed
+	// file, and DRIFTED bytes for another. We must read staged bytes after
+	// render so they match byte-for-byte (no hardcoded copy that drifts).
+	const upToDateRel = ".vh-agent-harness/AGENTS.core.md"
+	const driftedRel = ".opencode/agents/build.md" // platform_managed in the corpus
+	stagedUpToDate, _ := os.ReadFile(filepath.Join(staging, upToDateRel))
+	writeFile(t, live, upToDateRel, string(stagedUpToDate))
+	writeFile(t, live, driftedRel, "DRIFTED CONTENT not the corpus\n")
+
+	report, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging,
+		Classifier:     corpusClassifier(t),
+		HarnessVersion: "0.1.0-test", TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	byPath := map[string]FileOutcome{}
+	for _, o := range report.Outcomes {
+		byPath[o.Path] = o
+	}
+
+	// Byte-identical -> managed-unchanged (no write).
+	if got, ok := byPath[upToDateRel]; !ok || got.Action != ActionManagedNoop {
+		t.Fatalf("byte-identical managed file: want %s, got %+v", ActionManagedNoop, got)
+	}
+
+	// Drifted -> managed-overwrite (still written).
+	if got, ok := byPath[driftedRel]; !ok || got.Action != ActionManagedOverwrite {
+		t.Fatalf("drifted managed file: want %s, got %+v", ActionManagedOverwrite, got)
+	}
+}
+
+// TestApply_ManagedNoopIsPureSkip verifies a managed-unchanged outcome touches
+// neither the file bytes nor the mtime: the noop must be a pure skip (no write
+// at all). This guards executeOutcome's switch against accidentally writing
+// managed-noop files.
+func TestApply_ManagedNoopIsPureSkip(t *testing.T) {
+	live := t.TempDir()
+	staging := t.TempDir()
+
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+	if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+
+	const rel = ".vh-agent-harness/AGENTS.core.md"
+	stagedBytes, _ := os.ReadFile(filepath.Join(staging, rel))
+	writeFile(t, live, rel, string(stagedBytes))
+
+	livePath := filepath.Join(live, rel)
+	beforeInfo, err := os.Stat(livePath)
+	if err != nil {
+		t.Fatalf("stat before: %v", err)
+	}
+
+	if _, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging,
+		Classifier:     corpusClassifier(t),
+		HarnessVersion: "0.1.0-test", TemplateSource: "templates/core",
+	}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	afterInfo, err := os.Stat(livePath)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	// A pure skip must preserve BOTH the size and the mtime (a write would
+	// bump the mtime even when the bytes are identical).
+	if afterInfo.Size() != beforeInfo.Size() {
+		t.Errorf("managed-noop rewrote the file: size changed %d -> %d", beforeInfo.Size(), afterInfo.Size())
+	}
+	if !afterInfo.ModTime().Equal(beforeInfo.ModTime()) {
+		t.Errorf("managed-noop must not bump mtime: before=%v after=%v", beforeInfo.ModTime(), afterInfo.ModTime())
+	}
+}
+
 func TestApply_ArmedConflictEmitsStructuredProposal(t *testing.T) {
 	live := t.TempDir()
 	staging := t.TempDir()

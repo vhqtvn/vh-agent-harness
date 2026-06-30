@@ -1,6 +1,7 @@
 package substrate
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -48,6 +49,7 @@ type FileAction string
 
 const (
 	ActionManagedOverwrite FileAction = "managed-overwrite"   // platform_managed -> overwrite
+	ActionManagedNoop      FileAction = "managed-unchanged"   // platform_managed/active overlay_extension already up to date
 	ActionProjectPreserved FileAction = "project-preserved"   // project_owned present -> skip
 	ActionProjectSeeded    FileAction = "project-seeded"      // project_owned absent -> seed once
 	ActionArmedMerged      FileAction = "armed-merged"        // platform_armed clean reconcile applied
@@ -200,7 +202,16 @@ func planOutcome(opts ApplyOptions, rel string) (FileOutcome, error) {
 	switch cls.Class {
 	case ownership.ClassPlatformManaged:
 		// IsMutableByPlatform(ClassPlatformManaged) == true: the generic
-		// force-overwrite class. A plain re-render overwrites it wholesale.
+		// force-overwrite class. A plain re-render overwrites it wholesale —
+		// UNLESS the live instance is already byte-identical to the freshly
+		// re-rendered corpus, in which case we route to ActionManagedNoop
+		// (no write, reported as managed-unchanged) so the summary can
+		// distinguish real churn from a no-op refresh. An absent live file
+		// is NOT up to date (first install still seeds/overwrites).
+		if managedUpToDate(stagedPath, livePath) {
+			return FileOutcome{Path: rel, Class: cls.Class, Action: ActionManagedNoop,
+				Note: "platform_managed already up to date"}, nil
+		}
 		return FileOutcome{Path: rel, Class: cls.Class, Action: ActionManagedOverwrite}, nil
 
 	case ownership.ClassProjectOwned:
@@ -223,6 +234,13 @@ func planOutcome(opts ApplyOptions, rel string) (FileOutcome, error) {
 		// copy untouched (orphan-cleanup is a v0+ concern; the classifier is
 		// rebuild-only, so a deselected overlay file is unclassified and would
 		// fail-closed if re-introduced — acceptable v0).
+		//
+		// Like platform_managed, a byte-identical live instance is a no-op
+		// (ActionManagedNoop / managed-unchanged) rather than a churn write.
+		if managedUpToDate(stagedPath, livePath) {
+			return FileOutcome{Path: rel, Class: cls.Class, Action: ActionManagedNoop,
+				Note: "overlay_extension active; already up to date"}, nil
+		}
 		return FileOutcome{Path: rel, Class: cls.Class, Action: ActionManagedOverwrite,
 			Note: "overlay_extension active; overwritten from staged overlay unit"}, nil
 
@@ -312,7 +330,7 @@ func executeOutcome(opts ApplyOptions, o *FileOutcome) {
 		o.Action == ActionArmedMerged {
 		writeArmedManaged(opts, o)
 	}
-	// Preserved / proposal / noop / unsupported / ignored -> no write.
+	// Preserved / proposal / noop (armed or managed) / unsupported / ignored -> no write.
 }
 
 // writeArmedManaged computes the bytes to write (copy for managed/seed; reconcile
@@ -374,6 +392,28 @@ func writeArmedManaged(opts ApplyOptions, o *FileOutcome) {
 func fileExists(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && !info.IsDir()
+}
+
+// managedUpToDate reports whether the live instance of a platform_managed /
+// active overlay_extension file is byte-identical to the freshly staged corpus
+// copy. When true, planOutcome routes to ActionManagedNoop (no write, reported
+// as managed-unchanged) instead of ActionManagedOverwrite, so the update
+// summary distinguishes real churn from a no-op refresh. An absent live file is
+// NOT up to date (first install still seeds/overwrites). A read error is
+// treated as not-up-to-date so the safe default is to overwrite.
+func managedUpToDate(stagedPath, livePath string) bool {
+	if !fileExists(livePath) {
+		return false
+	}
+	staged, err := os.ReadFile(stagedPath)
+	if err != nil {
+		return false
+	}
+	live, err := os.ReadFile(livePath)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(staged, live)
 }
 
 func fieldErrorsString(errs []schema.FieldError) string {

@@ -49,7 +49,7 @@ To see what changed in a release and how to migrate, inspect its migration note
 ## Golden rules
 
 1. **Preview before applying.** `install --dry-run` / `update --dry-run` print
-   the full per-file plan (overwrite / seed / preserve / reconcile / conflict)
+   the full per-file plan (overwrite / unchanged / seed / preserve / reconcile / conflict)
    and write nothing. Read it before the real run.
 2. **Never hand-edit a `platform_managed` file** — `update` overwrites it. To
    change managed behavior, use a seam: overlay, profile, run-shape, mission,

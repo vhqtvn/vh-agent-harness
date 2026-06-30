@@ -133,6 +133,7 @@ func summarizeOutcomes(outcomes []substrate.FileOutcome) string {
 	// Stable order for readability.
 	order := []substrate.FileAction{
 		substrate.ActionManagedOverwrite,
+		substrate.ActionManagedNoop,
 		substrate.ActionProjectSeeded,
 		substrate.ActionProjectPreserved,
 		substrate.ActionArmedMerged,

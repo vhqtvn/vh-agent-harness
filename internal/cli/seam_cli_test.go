@@ -373,6 +373,39 @@ func TestSeamInstall_IdempotentReinstall(t *testing.T) {
 	}
 }
 
+// TestSeamReinstall_ReportsManagedUnchangedOnCurrentTree verifies the user-
+// facing summary distinguishes already-current managed files: a re-install over
+// a tree whose managed files are byte-identical to the corpus reports
+// managed-unchanged (not managed-overwrite) for those files, while a drifted
+// managed file still reports managed-overwrite.
+func TestSeamReinstall_ReportsManagedUnchangedOnCurrentTree(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	// Corrupt exactly one managed file; the rest stay byte-identical to the corpus.
+	const driftedRel = ".vh-agent-harness/AGENTS.core.md"
+	if err := os.WriteFile(filepath.Join(root, driftedRel), []byte("CORRUPTED\n"), 0o644); err != nil {
+		t.Fatalf("corrupt managed: %v", err)
+	}
+
+	installFl = newInstallFlags()
+	installFl.target = root
+	cmd, buf := newOutCmd()
+	if err := runInstall(cmd, []string{}); err != nil {
+		t.Fatalf("re-install: %v (out=%q)", err, buf.String())
+	}
+	out := buf.String()
+
+	// The drifted file -> managed-overwrite.
+	if !strings.Contains(out, "managed-overwrite") {
+		t.Errorf("want managed-overwrite for the drifted file, got %q", out)
+	}
+	// The byte-identical majority -> managed-unchanged.
+	if !strings.Contains(out, "managed-unchanged") {
+		t.Errorf("want managed-unchanged for already-current managed files, got %q", out)
+	}
+}
+
 // --- classifier reads S2 manifest (smoke) ------------------------------
 
 // TestSeamClassifier_ReadsCoreOwnership confirms the seam classifier is built

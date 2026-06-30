@@ -243,10 +243,15 @@ func printDryRunPlan(out io.Writer, verb, target string, report *substrate.Apply
 	fmt.Fprintln(out)
 
 	byAction := map[substrate.FileAction][]string{}
-	managed := 0
+	managedOverwrite := 0
+	managedNoop := 0
 	for _, o := range report.Outcomes {
 		if o.Action == substrate.ActionManagedOverwrite {
-			managed++
+			managedOverwrite++
+			continue
+		}
+		if o.Action == substrate.ActionManagedNoop {
+			managedNoop++
 			continue
 		}
 		byAction[o.Action] = append(byAction[o.Action], o.Path)
@@ -265,8 +270,11 @@ func printDryRunPlan(out io.Writer, verb, target string, report *substrate.Apply
 	section("Would PRESERVE — your file, left untouched", substrate.ActionProjectPreserved)
 	section("Would RECONCILE — armed config, schema-merged", substrate.ActionArmedMerged)
 	section("CONFLICT — armed config needs a decision, NOT written", substrate.ActionArmedProposal)
-	if managed > 0 {
-		fmt.Fprintf(out, "Would OVERWRITE — %d generic managed file(s), force-refreshed from the corpus.\n", managed)
+	if managedOverwrite > 0 {
+		fmt.Fprintf(out, "Would OVERWRITE — %d generic managed file(s), force-refreshed from the corpus.\n", managedOverwrite)
+	}
+	if managedNoop > 0 {
+		fmt.Fprintf(out, "Already current — %d managed file(s) byte-identical to the corpus (no write).\n", managedNoop)
 	}
 	if sp := summarizeProposals(report.Proposals); sp != "" {
 		fmt.Fprintln(out, sp)
