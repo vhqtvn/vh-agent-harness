@@ -404,7 +404,7 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// re-render, and inventory all see the same capability gates. If only
 	// seamApply resolved capabilities, doctor would re-render without them and
 	// false-flag drift on every gated agent block.
-	capAnswers, err := resolveCapabilityAnswers(target)
+	capAnswers, renderPacks, err := resolveCapabilityAnswers(target)
 	if err != nil {
 		return nil, fmt.Errorf("seam: %w", err)
 	}
@@ -429,20 +429,23 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	existing := walkStagedLivePaths(staging)
 	var overlayFiles []string
 	var packs []*overlay.Pack
-	for _, name := range activeOverlays(target) {
+	for _, name := range renderPacks {
 		pack, err := overlay.OpenPackFor(target, name)
 		if err != nil {
-			// Fail CLOSED on a profile-listed overlay that won't open/apply (W9).
-			// Every overlay processed here is profile-listed — activeOverlays reads
-			// ONLY vh-harness-profile.yml `overlays:`; there is NO separate
-			// auto-discovered/lenient category — so the old warn-and-skip would
-			// silently produce an INCOMPLETE render (missing the agents/commands/
-			// skills the operator explicitly declared) with no signal. Hard-fail
-			// naming the pack + the underlying error so the operator can fix the
-			// pack or remove it from the profile overlays: list. Refusing the whole
-			// render is correct: a partial overlay set is unpredictable state.
-			return nil, fmt.Errorf("seam: overlay %q (declared in vh-harness-profile.yml overlays:) failed to open: %w\n"+
-				"fix the pack or remove it from the profile overlays: list; refusing to render an incomplete overlay set",
+			// Fail CLOSED on a selected overlay pack that won't open/apply (W9).
+			// Each pack processed here is selected — either explicitly via the
+			// profile `overlays:` list OR implicitly because a resolved
+			// capability is provided by it (Phase-3 overlay integration). There
+			// is no separate auto-discovered/lenient category, so the old
+			// warn-and-skip would silently produce an INCOMPLETE render (missing
+			// the agents/commands/skills the operator declared or opted into via
+			// a capability) with no signal. Hard-fail naming the pack + the
+			// underlying error so the operator can fix the pack or remove it
+			// from the profile overlays: list / capabilities: selection.
+			// Refusing the whole render is correct: a partial overlay set is
+			// unpredictable state.
+			return nil, fmt.Errorf("seam: overlay %q (selected via the profile overlays: list or a resolved capability) failed to open: %w\n"+
+				"fix the pack or remove it from the profile overlays: list / capabilities: selection; refusing to render an incomplete overlay set",
 				name, err)
 		}
 		// Shadowing guard (Slice 3): fail CLOSED before any unit is rendered if

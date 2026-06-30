@@ -1,0 +1,26 @@
+{
+  // Release overlay pack — self-describing permission descriptor for the
+  // `releaser` agent. Read by the Go-native permission emitter
+  // (internal/permconfig Emit, via LoadPacks over the materialized
+  // .opencode/sys-scripts/permission-packs/release.jsonc). The emitter overwrites
+  // the releaser's permission.bash/task blocks authoritatively from this
+  // descriptor; the opencode-append.jsonc placeholders are discarded.
+  //
+  // Surface:
+  //   - readonly + git_readonly allowed (discover tags/commits/sha read-only).
+  //   - gate DENIED: the releaser is NOT part of the gated-commit protocol and
+  //     never calls commit-gate.sh. Its only mutation is the single release-tag
+  //     wrapper invocation, executed via the devSh:allow group
+  //     (vh-agent-harness exec <wrapper>).
+  //   - wildcard DENIED: no arbitrary commands.
+  //   - task {"*":"deny"}: leaf specialist — accepts no downstream delegations.
+  //   - delegateFrom [build, coordination, project-coordinator]: those three
+  //     orchestrators may delegate a release task to the releaser.
+  "agents": {
+    "releaser": {
+      "location": { "wildcard": "deny", "readonly": "allow", "git_readonly": "allow", "gate": "deny", "devSh": "allow" },
+      "task": { "*": "deny" },
+      "delegateFrom": ["build", "coordination", "project-coordinator"]
+    }
+  }
+}

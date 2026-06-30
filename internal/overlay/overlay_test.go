@@ -151,16 +151,17 @@ func TestOpenPackFor_FallsBackToEmbedded(t *testing.T) {
 
 // --- KnownPacks ------------------------------------------------------------
 
-// TestKnownPacks_NoShippedPacks confirms KnownPacks returns an empty set: the
-// harness ships no overlay packs after the 2026-06-25 clearance (web-overlay was
-// relocated to a non-shipped adoption reference).
-func TestKnownPacks_NoShippedPacks(t *testing.T) {
+// TestKnownPacks_ShipsReleasePack confirms KnownPacks lists the `release` pack —
+// the first shipped embedded overlay pack (Phase-3 capability-installer overlay
+// integration reference implementation). web-overlay remains relocated to a
+// non-shipped adoption reference; release is the sole shipped pack today.
+func TestKnownPacks_ShipsReleasePack(t *testing.T) {
 	got, err := KnownPacks()
 	if err != nil {
 		t.Fatalf("KnownPacks: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("KnownPacks: expected no shipped packs, got %v", got)
+	if len(got) != 1 || got[0] != "release" {
+		t.Fatalf("KnownPacks: expected exactly [release], got %v", got)
 	}
 }
 
@@ -193,15 +194,16 @@ func TestKnownPacks_MatchesEmbeddedDir(t *testing.T) {
 
 // --- OpenPack --------------------------------------------------------------
 
-// TestOpenPack_NoShippedPacksFailClosed confirms that with no packs shipped,
-// OpenPack fails closed (wrapping fs.ErrNotExist) for every name. This is the
-// contract a profile that references a non-existent pack hits.
-func TestOpenPack_NoShippedPacksFailClosed(t *testing.T) {
+// TestOpenPack_UnknownNamesFailClosed confirms OpenPack fails closed (wrapping
+// fs.ErrNotExist) for any name that is not a shipped pack. This is the contract
+// a profile that references a non-existent pack hits. (The `release` pack is the
+// one shipped name today; every name listed below is deliberately NOT it.)
+func TestOpenPack_UnknownNamesFailClosed(t *testing.T) {
 	for _, name := range []string{"web-overlay", "anything", "acme", "acme-cockpit"} {
 		t.Run(name, func(t *testing.T) {
 			_, err := OpenPack(name)
 			if err == nil {
-				t.Fatalf("OpenPack(%q): want error (no packs shipped), got nil", name)
+				t.Fatalf("OpenPack(%q): want error (not a shipped pack), got nil", name)
 			}
 			if !errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("OpenPack(%q): error should wrap fs.ErrNotExist; got %v", name, err)

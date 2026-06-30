@@ -14,6 +14,7 @@ This file stores older `done` and `cancelled` rows moved out of `docs/planning/b
 | P1-DOCTOR-010 | done | doctor | gitignore check warns when runtime-state + __pycache__ dirs aren't ignored. |  | 2026-06-28 v0.1.2/v0.1.4 |  |
 | P1-CONFIG-010 | done | config | Stop shipping *.example scaffolds; add `vh-agent-harness example`; consume project.config.json at render (mission/architecture/db). |  | 2026-06-28 v0.1.4 |  |
 | P1-CORPUS-010 | done | corpus | Fix validate-opencode-config.py JSONC parsing (trailing comma + interleaved comments) — unblocked all commits in consumer repos. |  | 2026-06-28 v0.1.3 |  |
+| P1-OVERLAY-001 | done | overlay | Research + design how to make vh-agent-harness reliably operable by coding agents in consumer repos (overlay discoverability, the customize-opencode conflict, guide/example). Deliverable: ranked fix set — A AGENTS.core.md "extending" section, B /harness command, C `overlay new` scaffolder. | build | 2026-06-28 research resolved → ranked fix set (A–E) + 3 operator-confirmed decisions in docs/checkpoints/2026-06-28-harness-agent-operability.md. Implementation decomposed into P1-OVERLAY-003 (Slice 1) + P1-OVERLAY-004 (Slice 2) | README.agent.md |
 | P1-CLI-010 | done | cli | Seam-aware diff/uninstall/preflight (work on seam installs, not just legacy manifest). |  | 2026-06-27 v0.1.1 |  |
 | P1-CLI-011 | done | cli | exec: run mutating commands (fix shell-guard double-gate); make `--` optional. |  | 2026-06-27 v0.1.2 |  |
 

@@ -45,20 +45,22 @@ var CoreFS embed.FS
 // Overlay units are ownership class overlay_extension (auto-overwritten while
 // the pack stays active).
 //
-// As of the 2026-06-25 pre-publish clearance this directory ships NO packs:
-// KnownPacks returns an empty list. The web-overlay pack (the only candidate)
-// was relocated to a non-shipped adoption reference under
-// docs/adoption-examples/web/ (a non-shipped adoption reference). The
-// internal/overlay/ infra (KnownPacks/OpenPack/Pack) stays intact as the
-// forward mechanism: the day an overlay pack ships, drop its directory under
-// templates/overlays/ and KnownPacks lists it automatically — no code change.
-// The directory retains a .gitkeep so the embed directive still matches a file.
+// This directory ships the embedded overlay packs. The `release` pack is the
+// first shipped embedded overlay pack and the reference implementation of the
+// Phase-3 capability-installer overlay integration: it carries a
+// capability-manifest.yml (id: core/release, hard_dep: core/gated-commit) and is
+// discovered automatically by internal/cli/profile.go discoverPackContributions.
+// The web-overlay pack was relocated to a non-shipped adoption reference under
+// docs/adoption-examples/web/. The internal/overlay/ infra
+// (KnownPacks/OpenPack/Pack) lists any directory dropped here automatically — no
+// code change. The directory retains a .gitkeep so the embed directive still
+// matches at least one file even if every pack directory is later removed.
 const OverlaysDir = "templates/overlays"
 
 // OverlaysFS is the read-only embedded overlay packs tree. Callers read from
 // the OverlaysDir sub-directory. internal/overlay lists/opens packs from here.
-// Currently embeds only the .gitkeep (no shipped packs); KnownPacks() returns
-// an empty slice and OpenPack(name) returns fs.ErrNotExist for any name.
+// Currently embeds the `release` pack plus the retained .gitkeep; KnownPacks()
+// returns ["release"] and OpenPack("release") opens the shipped pack.
 //
 //go:embed all:templates/overlays
 var OverlaysFS embed.FS

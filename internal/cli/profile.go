@@ -6,11 +6,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	corpus "github.com/vhqtvn/vh-agent-harness"
+	"github.com/vhqtvn/vh-agent-harness/internal/overlay"
 	"github.com/vhqtvn/vh-agent-harness/internal/resolver"
 	"github.com/vhqtvn/vh-agent-harness/internal/schema"
 )
@@ -304,34 +306,227 @@ func readProfileSelection(target string) []resolver.CapabilityID {
 }
 
 // resolveCapabilityAnswers runs the resolver for the live profile's capability
-// selection and projects the result onto flat render answers:
+// selection, projects the resolved set onto flat render answers, AND computes
+// the deduplicated pack list that must RENDER this pass. It completes the
+// Phase-3 capability-installer's overlay integration: any discoverable overlay
+// pack (embedded under templates/overlays or project-local under
+// <target>/.vh-agent-harness/overlays) that ships a capability-manifest.yml
+// participates in the resolver AUTOMATICALLY.
 //
-//	"capabilities.<key>" -> "true"/"false"
+// The two selection paths CONVERGE here so either way of opting into a pack's
+// capability renders the same cluster:
 //
-// One answer key is emitted for EVERY capability id in the catalog (selected ->
-// "true", absent -> "false"), so the `.capabilities` map always exists and every
-// {{ if .capabilities.<key> }} gate evaluates a real boolean (never an
-// absent-key zero value). This mirrors how features.backlog is projected: a
-// complete, closed projection rather than a sparse one.
+//   - overlays: [release]           -> release pack renders AND core/release
+//     resolves (pulling core/gated-commit in via the hard-dep closure).
+//   - capabilities: [core/release]  -> same: release pack renders AND
+//     core/gated-commit resolves.
 //
-// Catalog construction: CoreCatalog() alone — no overlay pack contributes
-// capabilities today. PHASE 3 HOOK: when an overlay pack contributes a
-// CapabilityManifest, merge it via resolver.MergeCatalogs here (read each active
-// overlay pack's ReadCapabilityManifest and build PackContribution records)
-// before resolving. Left as a marked hook because wiring overlay contributions
-// at render time is out of scope for Phase 3 and no current overlay contributes.
-func resolveCapabilityAnswers(target string) (map[string]string, error) {
-	catalog := resolver.CoreCatalog()
-	selected := readProfileSelection(target)
-	set, err := resolver.Resolve(selected, catalog)
-	if err != nil {
-		return nil, fmt.Errorf("resolve capabilities %v: %w", selected, err)
+// Catalog construction:
+//
+//	CoreCatalog() merged with EVERY discoverable overlay pack's
+//	capability-manifest.yml (embedded + project-local, project-wins shadowing).
+//
+// Selection:
+//
+//	preset(profile) ∪ explicit(capabilities:) ∪
+//	{capabilities provided by overlays:-listed packs that declare a manifest}
+//
+// The third operand is the convergence: a pack listed in overlays: whose
+// manifest declares a capability id also feeds the resolver, so its hard_deps
+// close and its cluster gates open — without it, overlays:[release] would
+// render the pack's units but leave core/gated-commit unselected and the
+// releaser's own capability gate closed.
+//
+// Returns:
+//   - answers: "capabilities.<key>" -> "true"/"false" (one key per catalog id;
+//     a closed projection so every {{ if .capabilities.<key> }} gate evaluates
+//     a real boolean, never an absent-key zero value).
+//   - renderPacks: the pack names that must render this pass — the explicit
+//     overlays: list (profile order) UNION packs owning resolved capabilities
+//     (sorted, deduplicated). Either selection path therefore reaches the
+//     render loop.
+func resolveCapabilityAnswers(target string) (answers map[string]string, renderPacks []string, err error) {
+	contribs, derr := discoverPackContributions(target)
+	if derr != nil {
+		return nil, nil, fmt.Errorf("seam: %w", derr)
 	}
+	survivors := resolver.ResolveContributions(contribs)
+
+	// Build the capability-id <-> pack-name maps from the surviving (post
+	// project-wins shadowing) contributions. Both directions are needed:
+	// packToID turns an overlays:-listed pack into a capability id for the
+	// selection; idToPack turns a resolved capability id into a pack to render.
+	idToPack := make(map[string]string, len(survivors))
+	packToID := make(map[string]string, len(survivors))
+	for _, c := range survivors {
+		idToPack[c.Manifest.ID] = c.Pack
+		packToID[c.Pack] = c.Manifest.ID
+	}
+
+	catalog, merr := resolver.MergeCatalogs(resolver.CoreCatalog(), contribs)
+	if merr != nil {
+		return nil, nil, fmt.Errorf("seam: %w", merr)
+	}
+
+	// Selection = preset(profile) ∪ explicit(capabilities:) ∪ capabilities
+	// implied by overlays:-listed packs that declare a manifest.
+	explicit := readProfileSelection(target) // preset(profile) ∪ capabilities:
+	overlayImplied := make([]resolver.CapabilityID, 0)
+	for _, name := range activeOverlays(target) {
+		if id, ok := packToID[name]; ok {
+			overlayImplied = append(overlayImplied, id)
+		}
+	}
+	selected := unionCapabilities(explicit, overlayImplied)
+
+	set, rerr := resolver.Resolve(selected, catalog)
+	if rerr != nil {
+		return nil, nil, fmt.Errorf("resolve capabilities %v: %w", selected, rerr)
+	}
+
+	// Render answers: one key per catalog id (closed projection).
 	out := make(map[string]string, len(catalog.IDs()))
 	for _, id := range catalog.IDs() {
 		out["capabilities."+capabilityTemplateKey(id)] = boolStr(set.Has(id))
 	}
-	return out, nil
+
+	// Render packs: explicit overlays: list (profile order, preserved) UNION
+	// packs owning resolved capabilities (sorted, appended after the explicit
+	// list). Preserving explicit-list order keeps existing pack-rendering
+	// semantics (shadowing guard sees packs in profile order); the implied
+	// additions are sorted for determinism.
+	explicitList := activeOverlays(target)
+	seen := make(map[string]bool, len(explicitList)+len(survivors))
+	packs := make([]string, 0, len(explicitList)+len(survivors))
+	for _, name := range explicitList {
+		if !seen[name] {
+			seen[name] = true
+			packs = append(packs, name)
+		}
+	}
+	var implied []string
+	for _, id := range set.All() {
+		if name, ok := idToPack[id]; ok && !seen[name] {
+			seen[name] = true
+			implied = append(implied, name)
+		}
+	}
+	sort.Strings(implied)
+	packs = append(packs, implied...)
+
+	return out, packs, nil
+}
+
+// discoverPackContributions reads capability-manifest.yml from EVERY
+// discoverable overlay pack — embedded under templates/overlays (via
+// overlay.KnownPacks) and project-local under
+// <target>/.vh-agent-harness/overlays — and returns a PackContribution record
+// for each pack that declares a manifest.
+//
+// SHADOWING MODEL (Model X). A project-local pack shadows an embedded pack by
+// name WHOLLY — rendered files (OpenPackFor is project-first at the render
+// layer) AND capability identity (this catalog). So:
+//
+//   - If the project pack HAS a capability-manifest.yml, its manifest becomes
+//     the capability (resolver.MergeCatalogs applies project-wins at the merge
+//     layer; resolver.ResolveContributions preserves it as SourceProject).
+//   - If the project pack has NO manifest, it is overlay-only: it renders its
+//     files but provides NO capability, and the embedded capability it shadows
+//     by name is DROPPED here (NOT inherited). To REPLACE (rather than drop) a
+//     shadowed capability, ship a capability-manifest.yml in the project pack.
+//
+// This is enforced by building the project pack-name set FIRST and skipping any
+// embedded pack whose name it contains BEFORE emitting a contribution, so the
+// render layer (OpenPackFor project-first) and the resolver layer (this
+// catalog) agree on what "the pack" is. A present-but-malformed manifest is a
+// hard error (fail-closed): silently dropping a broken pack from the resolver
+// would hide a real configuration problem and could let a hard_dep quietly go
+// unsatisfied.
+//
+// A missing project overlays directory is benign (greenfield or a project that
+// ships no packs of its own) and yields contributions from the embedded tree
+// only.
+func discoverPackContributions(target string) ([]resolver.PackContribution, error) {
+	var contribs []resolver.PackContribution
+
+	// Build the project pack-name set FIRST. A project-local pack that shadows
+	// an embedded pack by name replaces it WHOLLY (files + capability), so any
+	// embedded pack whose name collides MUST be skipped below regardless of
+	// whether the project pack has a manifest. A no-manifest project pack is
+	// overlay-only (renders its files, provides no capability, drops the
+	// embedded capability it shadows); a with-manifest project pack supplies its
+	// own capability via the project loop below (MergeCatalogs project-wins).
+	projectDir := filepath.Join(target, filepath.FromSlash(overlay.ProjectOverlaysSubdir))
+	entries, err := os.ReadDir(projectDir)
+	if err != nil {
+		// Missing project overlays dir is benign; any other read error fails
+		// closed so a permissions problem surfaces rather than silently masking
+		// a project pack from the resolver.
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("discover overlay contributions: read project overlays dir %q: %w", projectDir, err)
+		}
+		entries = nil
+	}
+	projectPackNames := make(map[string]struct{}, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			projectPackNames[e.Name()] = struct{}{}
+		}
+	}
+
+	// Embedded packs (shipped inside the binary). Skip any whose name is
+	// shadowed WHOLLY by a project-local pack of the same name (Model X).
+	embedded, err := overlay.KnownPacks()
+	if err != nil {
+		return nil, fmt.Errorf("discover overlay contributions: list embedded packs: %w", err)
+	}
+	for _, name := range embedded {
+		if _, shadowed := projectPackNames[name]; shadowed {
+			continue // project pack shadows this embedded pack wholly (files + capability)
+		}
+		pack, err := overlay.OpenPack(name)
+		if err != nil {
+			return nil, fmt.Errorf("discover overlay contributions: open embedded pack %q: %w", name, err)
+		}
+		m, ok, err := pack.ReadCapabilityManifest()
+		if err != nil {
+			return nil, fmt.Errorf("discover overlay contributions: read manifest %q: %w", name, err)
+		}
+		if !ok {
+			continue // skills-only / no-manifest EMBEDDED pack: renders via overlays: but resolves nothing
+		}
+		contribs = append(contribs, resolver.PackContribution{
+			Pack: name, Source: resolver.SourceEmbedded, Manifest: m,
+		})
+	}
+
+	// Project-local packs (the consuming project's .vh-agent-harness/overlays).
+	// OpenPackFor resolves project-first, so it opens THIS project dir's
+	// manifest — the same project pack FS the render loop loads — keeping the
+	// resolver and render layers in agreement. A project pack WITHOUT a
+	// manifest contributes nothing here (overlay-only); its files still render
+	// via the render loop's OpenPackFor.
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		pack, err := overlay.OpenPackFor(target, name)
+		if err != nil {
+			return nil, fmt.Errorf("discover overlay contributions: open project pack %q: %w", name, err)
+		}
+		m, ok, err := pack.ReadCapabilityManifest()
+		if err != nil {
+			return nil, fmt.Errorf("discover overlay contributions: read manifest %q: %w", name, err)
+		}
+		if !ok {
+			continue
+		}
+		contribs = append(contribs, resolver.PackContribution{
+			Pack: name, Source: resolver.SourceProject, Manifest: m,
+		})
+	}
+	return contribs, nil
 }
 
 // --- modules: deprecation (Phase 5) ------------------------------------------

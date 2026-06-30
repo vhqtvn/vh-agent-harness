@@ -190,8 +190,9 @@ corpus.go                go:embed roots: templates/{core,overlays}, plus embedde
 internal/                substrate seam, ownership, schema, lineage, runshape,
                          runtime, hooks, overlay, proposals, drift, permission, cli
 templates/core/          canonical domain-free corpus (rendered into projects)
-templates/overlays/      shipped overlay packs (empty by default; projects ship
-                         their own under <project>/.vh-agent-harness/overlays/)
+templates/overlays/      shipped embedded overlay packs (opt-in capability packs;
+                          e.g. `release` — the tag-driven release subagent). Projects
+                          ship their own under <project>/.vh-agent-harness/overlays/
 templates/migrations/    per-release migration notes (binary/help-surface only;
                          embedded, NOT rendered into consumer repos — one per release)
 docs/coordination/       coordination templates + report schemas (rendered into projects)

@@ -1,7 +1,10 @@
-# go:embed root for shipped overlay packs. Currently EMPTY by operator decision
-# (2026-06-25): the web-overlay pack was relocated to a non-shipped adoption
-# reference under docs/adoption-examples/web/. This directory ships NO packs.
-# The internal/overlay/ infra (KnownPacks/OpenPack/Pack) stays intact as the
-# forward mechanism: the day an overlay pack ships, drop its directory here and
-# KnownPacks lists it automatically. The .gitkeep also satisfies go:embed
-# (all:templates/overlays needs at least one matched file to compile).
+# go:embed root for shipped overlay packs. A pack directory dropped here is
+# listed automatically by internal/overlay.KnownPacks() and participates in the
+# capability resolver when it carries a capability-manifest.yml (see
+# internal/cli/profile.go resolveCapabilityAnswers -> discoverPackContributions).
+#
+# Currently ships the `release` pack (the first embedded overlay pack and the
+# reference implementation of the Phase-3 capability-installer overlay
+# integration). The .gitkeep is retained so the embed directive
+# (all:templates/overlays) still matches at least one file even if every pack
+# directory is later removed.

@@ -1,0 +1,24 @@
+{
+  // Release overlay pack — agent metadata for `releaser`. Permission content
+  // (permission.bash / permission.task) for this agent is emitted by the
+  // Go-native permission emitter (internal/permconfig), which reads this pack's
+  // permission-pack.jsonc (materialized under
+  // .opencode/sys-scripts/permission-packs/release.jsonc) and overwrites the
+  // permission block authoritatively. The EMPTY placeholder objects below let a
+  // plain deep-merge produce a structurally-valid `agent.releaser` block with a
+  // `permission` object the emitter then overwrites — they intentionally carry
+  // no real permission decisions (the deprecated update-opencode-config.js
+  // resolver is no longer the authority; do not edit permissions here).
+  "agent": {
+    "releaser": {
+      "description": "Releaser agent (release specialist) — thin spine + default tag-driven adapter: compute next semver tag from conventional commits and apply it via the sanctioned release-tag wrapper (never raw git tag/push).",
+      "mode": "subagent",
+      "color": "accent",
+      "prompt": "{file:.opencode/agents/releaser.md}",
+      "permission": {
+        "bash": { "__placeholder__": "deny" },
+        "task": { "__placeholder__": "deny" }
+      }
+    }
+  }
+}

@@ -93,14 +93,16 @@ func MergeCatalogs(core *Catalog, contribs []PackContribution) (*Catalog, error)
 		return nil, fmt.Errorf("resolver: merge: core catalog is nil")
 	}
 
-	survivors := resolveShadowing(contribs)
+	survivors := ResolveContributions(contribs)
 
 	// Combined manifest list: core seed capabilities first (in their stable
 	// registration order), then pack contributions in sorted pack-name order
 	// (deterministic). Baseline always comes from core.
 	combined := make([]CapabilityManifest, 0, len(core.caps)+len(survivors))
 	combined = append(combined, core.caps...)
-	combined = append(combined, survivors...)
+	for _, c := range survivors {
+		combined = append(combined, c.Manifest)
+	}
 
 	merged := newCatalog(core.baseline, combined...)
 
@@ -117,21 +119,23 @@ func MergeCatalogs(core *Catalog, contribs []PackContribution) (*Catalog, error)
 	return merged, nil
 }
 
-// resolveShadowing applies project-over-embedded shadowing: for each pack name,
-// a project-local contribution (if any) wins and the embedded contribution for
-// that name is dropped. Survivors are returned in sorted pack-name order for
-// deterministic catalog construction. Among contributions sharing the SAME
+// ResolveContributions applies project-over-embedded shadowing and returns the
+// surviving pack contributions in sorted pack-name order. It is the EXPORTED
+// half of the shadowing rule: unlike the manifest-only projection below, it
+// preserves each survivor's Pack name and Source, so a render caller can build
+// the capability-id -> pack-name map it needs to render the packs owning the
+// resolved capabilities (the Phase-3 capability-installer overlay integration).
+//
+// Shadowing rule (identical to resolveShadowing): for each pack name, a
+// project-local contribution (if any) wins and the embedded contribution for
+// that name is dropped. The shadowing pack REPLACES the shadowed pack's manifest
+// entirely — it contributes its own id/provides/deps and inherits NOTHING from
+// the embedded pack it shadows. Among contributions sharing the SAME
 // (pack, source) — a discovery double-call — the first wins; that is a
 // discovery concern, not a merge concern.
-//
-// The shadowing pack REPLACES the shadowed pack's manifest entirely: it
-// contributes its own id/provides/deps and inherits NOTHING from the embedded
-// pack it shadows. There is therefore no "merge within a shadowed pack" — the
-// project manifest is taken whole.
-func resolveShadowing(contribs []PackContribution) []CapabilityManifest {
+func ResolveContributions(contribs []PackContribution) []PackContribution {
 	type pick struct {
-		manifest CapabilityManifest
-		source   ContributionSource
+		contrib PackContribution
 	}
 	chosen := make(map[string]pick)
 	// First pass: seed with embedded contributions; second pass: project
@@ -140,14 +144,14 @@ func resolveShadowing(contribs []PackContribution) []CapabilityManifest {
 	for _, c := range contribs {
 		if c.Source == SourceEmbedded {
 			if _, exists := chosen[c.Pack]; !exists {
-				chosen[c.Pack] = pick{manifest: c.Manifest, source: SourceEmbedded}
+				chosen[c.Pack] = pick{contrib: c}
 			}
 		}
 	}
 	for _, c := range contribs {
 		if c.Source == SourceProject {
 			// Project wins: overwrite any embedded (or earlier project) entry.
-			chosen[c.Pack] = pick{manifest: c.Manifest, source: SourceProject}
+			chosen[c.Pack] = pick{contrib: c}
 		}
 	}
 	names := make([]string, 0, len(chosen))
@@ -155,9 +159,23 @@ func resolveShadowing(contribs []PackContribution) []CapabilityManifest {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	out := make([]CapabilityManifest, 0, len(names))
+	out := make([]PackContribution, 0, len(names))
 	for _, n := range names {
-		out = append(out, chosen[n].manifest)
+		out = append(out, chosen[n].contrib)
+	}
+	return out
+}
+
+// resolveShadowing is the manifest-only projection of ResolveContributions kept
+// for internal call sites that want the surviving manifests without the pack
+// metadata. MergeCatalogs now uses ResolveContributions directly (it needs the
+// survivor slice, not just the manifests), so this helper remains as a thin
+// convenience for any future internal caller.
+func resolveShadowing(contribs []PackContribution) []CapabilityManifest {
+	survivors := ResolveContributions(contribs)
+	out := make([]CapabilityManifest, 0, len(survivors))
+	for _, c := range survivors {
+		out = append(out, c.Manifest)
 	}
 	return out
 }

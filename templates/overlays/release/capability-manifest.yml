@@ -1,0 +1,16 @@
+# Capability manifest for the embedded `release` overlay pack — the first
+# shipped embedded overlay pack and the reference implementation of the
+# Phase-3 capability-installer overlay integration. Selecting this capability
+# (via `capabilities: [core/release]` OR `overlays: [release]`) causes the
+# resolver to pull this pack's cluster AND, through the hard_dep below, the
+# core/gated-commit cluster (commit-message/commit-reviewer/committer et al.).
+#
+# Manifest id grammar: `namespace/name` (the catalog regex
+# `^[a-z][a-z0-9-]*/[a-z][a-z0-9-]*$` requires the slash). The pack DIRECTORY is
+# `release`; the capability ID is `core/release`.
+id: core/release
+provides:
+  - releaser
+hard_deps:
+  - core/gated-commit
+optional_deps: []
