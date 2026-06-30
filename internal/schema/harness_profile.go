@@ -54,6 +54,14 @@ type harnessProfileData struct {
 	Features    map[string]bool `yaml:"features"`
 	Overlays    []string        `yaml:"overlays"`
 	PolicyPacks []string        `yaml:"policy_packs"`
+	// Capabilities is the profile's selected capability IDs (grammar
+	// namespace/name, e.g. core/gated-commit). Phase 1 accepts and validates the
+	// field (non-empty, de-duplicated entries, like the other string arrays);
+	// the resolver (Phase 2) will resolve these IDs against the central core
+	// Catalog and expand preset semantics. The legacy modules: key is NOT
+	// deprecated by this field yet. ID grammar and existence are resolver
+	// concerns, not schema concerns: the schema only carries the selection list.
+	Capabilities []string `yaml:"capabilities"`
 }
 
 // allowedTopLevel is the exhaustive set of top-level keys a vh-harness-profile.yml
@@ -64,6 +72,7 @@ var harnessProfileAllowedTopLevel = map[string]bool{
 	"features":     true,
 	"overlays":     true,
 	"policy_packs": true,
+	"capabilities": true,
 }
 
 // Validate reports every structural problem in a vh-harness-profile.yml instance.
@@ -87,7 +96,7 @@ func (HarnessProfile) Validate(raw []byte) []FieldError {
 		if !harnessProfileAllowedTopLevel[k] {
 			errs = append(errs, FieldError{
 				Field:   k,
-				Message: fmt.Sprintf("unknown top-level key %q; allowed: profile, modules, features, overlays, policy_packs", k),
+				Message: fmt.Sprintf("unknown top-level key %q; allowed: profile, modules, features, overlays, policy_packs, capabilities", k),
 			})
 		}
 	}
@@ -106,12 +115,15 @@ func (HarnessProfile) Validate(raw []byte) []FieldError {
 		})
 	}
 
-	// modules / overlays / policy_packs: must be string arrays (yaml already
-	// enforced the element type via the struct; a non-array would have failed
-	// Unmarshal above). No further v1 constraints.
+	// modules / overlays / policy_packs / capabilities: must be string arrays
+	// (yaml already enforced the element type via the struct; a non-array would
+	// have failed Unmarshal above). No further v1 constraints. capabilities IDs
+	// (namespace/name grammar, existence) are validated by the resolver (Phase
+	// 2), not the schema — the schema only carries the selection list.
 	errs = appendStringArrayErrors(errs, "modules", d.Modules)
 	errs = appendStringArrayErrors(errs, "overlays", d.Overlays)
 	errs = appendStringArrayErrors(errs, "policy_packs", d.PolicyPacks)
+	errs = appendStringArrayErrors(errs, "capabilities", d.Capabilities)
 
 	// features: map[string]bool already enforced. No further v1 constraints.
 	return errs
@@ -235,6 +247,12 @@ func (HarnessProfile) Reconcile(project, platformDefault []byte) (ReconcileResul
 	applied = append(applied, ovNote)
 	mergedPacks, pkNote := reconcileAppendOnly("policy_packs", pData.PolicyPacks, dData.PolicyPacks)
 	applied = append(applied, pkNote)
+	// capabilities is append-only like the other string arrays: the project's
+	// selections are unioned with the platform default so a reconcile can never
+	// silently drop a declared capability. This is NOT preset expansion (Phase
+	// 2+); it only preserves the selection list through the merge.
+	mergedCapabilities, capNote := reconcileAppendOnly("capabilities", pData.Capabilities, dData.Capabilities)
+	applied = append(applied, capNote)
 
 	// --- features (keyed map, project-wins per key) ---
 	mergedFeatures, featNote := reconcileFeaturesMap(pData.Features, dData.Features)
@@ -250,11 +268,12 @@ func (HarnessProfile) Reconcile(project, platformDefault []byte) (ReconcileResul
 	}
 
 	merged := harnessProfileData{
-		Profile:     mergedProfile,
-		Modules:     mergedModules,
-		Features:    mergedFeatures,
-		Overlays:    mergedOverlays,
-		PolicyPacks: mergedPacks,
+		Profile:      mergedProfile,
+		Modules:      mergedModules,
+		Features:     mergedFeatures,
+		Overlays:     mergedOverlays,
+		PolicyPacks:  mergedPacks,
+		Capabilities: mergedCapabilities,
 	}
 	out, err := marshalHarnessProfile(merged)
 	if err != nil {
@@ -394,6 +413,7 @@ func marshalHarnessProfile(d harnessProfileData) ([]byte, error) {
 	d.Modules = sortedDedupStrings(d.Modules)
 	d.Overlays = sortedDedupStrings(d.Overlays)
 	d.PolicyPacks = sortedDedupStrings(d.PolicyPacks)
+	d.Capabilities = sortedDedupStrings(d.Capabilities)
 	out, err := yaml.Marshal(d)
 	if err != nil {
 		return nil, err

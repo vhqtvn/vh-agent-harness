@@ -213,6 +213,76 @@ func TestHarnessProfileReconcile_MalformedProjectIsError(t *testing.T) {
 	}
 }
 
+func TestHarnessProfileValidate_AcceptsCapabilities(t *testing.T) {
+	raw := []byte(`profile: coordination
+capabilities: [core/gated-commit]
+`)
+	errs := HarnessProfile{}.Validate(raw)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for a capabilities entry, got: %+v", errs)
+	}
+	// The field round-trips through the parser.
+	d := mustParseProfile(t, raw)
+	if len(d.Capabilities) != 1 || d.Capabilities[0] != "core/gated-commit" {
+		t.Fatalf("capabilities: expected [core/gated-commit], got %v", d.Capabilities)
+	}
+}
+
+func TestHarnessProfileValidate_CapabilitiesEmptyAndDuplicate(t *testing.T) {
+	raw := []byte(`capabilities: [core/gated-commit, "", core/gated-commit]
+`)
+	errs := HarnessProfile{}.Validate(raw)
+	fields := map[string]bool{}
+	for _, e := range errs {
+		fields[e.Field] = true
+	}
+	// duplicate + empty entry flagged, mirroring modules/overlays handling.
+	if !fields["capabilities[1]"] {
+		t.Fatalf("expected capabilities[1] (empty) error, got: %+v", errs)
+	}
+	if !fields["capabilities[2]"] {
+		t.Fatalf("expected capabilities[2] (duplicate) error, got: %+v", errs)
+	}
+}
+
+func TestHarnessProfileReconcile_CapabilitiesPreservedAsAppendOnlyUnion(t *testing.T) {
+	// A profile declaring capabilities must NOT have them silently dropped by a
+	// reconcile. The project's selection is unioned with the platform default.
+	project := []byte(`profile: coordination
+capabilities: [core/gated-commit]
+`)
+	platformDefault := []byte(`profile: minimal
+capabilities: [core/debate]
+`)
+	res, err := HarnessProfile{}.Reconcile(project, platformDefault)
+	if err != nil {
+		t.Fatalf("reconcile errored: %v", err)
+	}
+	if res.Outcome != OutcomeApply {
+		t.Fatalf("expected Apply, got %s", res.Outcome)
+	}
+	d := mustParseProfile(t, res.Merged)
+	if got := joinSorted(d.Capabilities); got != "core/debate,core/gated-commit" {
+		t.Fatalf("capabilities union: expected core/debate,core/gated-commit; got %q (%v)", got, d.Capabilities)
+	}
+}
+
+func TestHarnessProfileReconcile_CapabilitiesAbsentStaysAbsent(t *testing.T) {
+	// When neither side declares capabilities, the merged output omits the key
+	// (no spurious empty capabilities: [] line).
+	project := []byte(`profile: minimal
+`)
+	platformDefault := []byte(`profile: minimal
+`)
+	res, err := HarnessProfile{}.Reconcile(project, platformDefault)
+	if err != nil {
+		t.Fatalf("reconcile errored: %v", err)
+	}
+	if res.Outcome != OutcomeNoop {
+		t.Fatalf("expected Noop for byte-identical input, got %s", res.Outcome)
+	}
+}
+
 // joinSorted is a tiny test helper to assert union contents deterministically.
 func joinSorted(in []string) string {
 	out := append([]string(nil), in...)
