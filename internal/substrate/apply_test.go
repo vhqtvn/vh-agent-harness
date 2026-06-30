@@ -508,3 +508,71 @@ func TestApply_LineageIdempotent(t *testing.T) {
 		t.Errorf("lineage churned on no-op re-render:\n--- first ---\n%s\n--- second ---\n%s", first, second)
 	}
 }
+
+// TestApply_ManagedAbsentRoutesToOverwriteNotNoop locks the safety fallback for
+// the FIRST-INSTALL / missing-file path: a platform_managed file whose live
+// instance is ABSENT must route to ActionManagedOverwrite, never silently no-op
+// as ActionManagedNoop. Byte-identical → noop is covered by
+// TestApply_ManagedNoopWhenByteIdentical; this test guards the absent branch so
+// an unreadable/missing live managed file can never silently skip.
+func TestApply_ManagedAbsentRoutesToOverwriteNotNoop(t *testing.T) {
+	live := t.TempDir() // empty: no managed file present (first-install shape)
+	staging := t.TempDir()
+
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+	if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+
+	report, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging,
+		Classifier:     corpusClassifier(t),
+		HarnessVersion: "0.1.0-test", TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	const rel = ".vh-agent-harness/AGENTS.core.md" // platform_managed in the corpus
+	byPath := map[string]FileOutcome{}
+	for _, o := range report.Outcomes {
+		byPath[o.Path] = o
+	}
+	got, ok := byPath[rel]
+	if !ok {
+		t.Fatalf("absent managed file produced no outcome; got %+v", report.Outcomes)
+	}
+	if got.Action != ActionManagedOverwrite {
+		t.Fatalf("absent managed file: want %s (never noop), got %s", ActionManagedOverwrite, got.Action)
+	}
+}
+
+// TestManagedUpToDate_AbsentOrUnreadableFallsBackToFalse locks the read-error /
+// unreadable fallback of managedUpToDate directly. managedUpToDate is the unit
+// that embodies the "absent or unreadable live managed file must fall back to
+// overwrite, never noop" contract. The unreadable case is awkward to trigger
+// through the black-box Apply path: a directory at the live path fails the
+// subsequent executeOutcome write, and a chmod-000 file is still readable as
+// root. So the fallback is locked at the unit that owns it. A directory livePath
+// exists (so it is not the absent case) yet is not a readable file, modeling the
+// unreadable path; both must return false so planOutcome routes to overwrite.
+func TestManagedUpToDate_AbsentOrUnreadableFallsBackToFalse(t *testing.T) {
+	staging := t.TempDir()
+	const stagedRel = "staged.txt"
+	writeFile(t, staging, stagedRel, "staged corpus bytes\n")
+	stagedPath := filepath.Join(staging, stagedRel)
+
+	// Absent live file (first-install / missing-file path) -> not up to date.
+	absentLive := filepath.Join(t.TempDir(), "does-not-exist")
+	if managedUpToDate(stagedPath, absentLive) {
+		t.Errorf("absent live file: managedUpToDate must be false (route to overwrite), got true")
+	}
+
+	// Unreadable live "file": the live path resolves to a DIRECTORY. It exists,
+	// so it is not the absent case, but it is not a readable managed file — the
+	// safe default is to treat it as not-up-to-date and overwrite.
+	dirLive := t.TempDir() // a directory is not a readable managed file
+	if managedUpToDate(stagedPath, dirLive) {
+		t.Errorf("unreadable (directory) live path: managedUpToDate must be false (route to overwrite), got true")
+	}
+}
