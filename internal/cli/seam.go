@@ -395,6 +395,20 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// seeded CLAUDE.md/Makefile resolve {{MISSION_SUMMARY}} etc. The config keys
 	// never clobber install identity (project_name/slug) — they are disjoint.
 	renderAnswers = mergeRenderAnswers(renderAnswers, projectConfigAnswers(target))
+	// Phase 3 capability-installer: resolve the profile's capability selection
+	// (applying the backward-compat default when none is declared) and project
+	// it onto capabilities.<key> answers so {{ if .capabilities.<key> }} gates
+	// in opencode.jsonc.tmpl resolve from the operator's actual selection. This
+	// runs here — INSIDE renderSeamStaging, not only in seamApply — so EVERY
+	// render path renders like-for-like: install/update, doctor's managed-drift
+	// re-render, and inventory all see the same capability gates. If only
+	// seamApply resolved capabilities, doctor would re-render without them and
+	// false-flag drift on every gated agent block.
+	capAnswers, err := resolveCapabilityAnswers(target)
+	if err != nil {
+		return nil, fmt.Errorf("seam: %w", err)
+	}
+	renderAnswers = mergeRenderAnswers(renderAnswers, capAnswers)
 	if err := renderer.Render(staging, substrate.RenderSpec{
 		TemplateSource: corpus.CoreDir,
 		Answers:        renderAnswers,

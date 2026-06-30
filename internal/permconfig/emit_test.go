@@ -476,3 +476,88 @@ func TestValidate_WildcardInvalidDecision(t *testing.T) {
 
 // (extractKeys helper removed — key-order is verified via raw byte position
 // inspection in TestEmit_BashBlockOrder, which doesn't lose order to re-parse.)
+
+// Test 17: present-agent filter drops task edges to absent agents (Phase 3
+// capability-gating seam). When the rendered config omits an agent block
+// (because a template capability gate hid it), every task edge pointing at
+// that agent must be dropped so no orchestrator carries a dangling allow
+// entry. The "*" wildcard is always preserved. This is the unit-level pin for
+// the graceful-degradation contract; the end-to-end proof lives in
+// internal/cli/capability_render_test.go.
+func TestEmit_PresentAgentFilterDropsAbsentTaskEdges(t *testing.T) {
+	// build is present and is an orchestrator; repo-explorer is present and is
+	// a valid task target; committer / commit-message / commit-reviewer are
+	// ABSENT (gated out). Per CoreTaskRules, build's task allowlist references
+	// all of them — the absent ones must be dropped, the present one kept.
+	const cfg = `{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": { "bash": { "__placeholder__": "deny" } },
+  "agent": {
+    "build":         { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "repo-explorer": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }
+  }
+}`
+	out := mustEmit(t, cfg, nil, Features{})
+	var root map[string]any
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	build := root["agent"].(map[string]any)["build"].(map[string]any)
+	task := build["permission"].(map[string]any)["task"].(map[string]any)
+
+	// "*" wildcard always survives.
+	if task["*"] != "deny" {
+		t.Fatalf(`build.task["*"] = %v, want "deny"`, task["*"])
+	}
+	// repo-explorer is present → its edge is kept.
+	if task["repo-explorer"] != "allow" {
+		t.Fatalf(`build.task["repo-explorer"] = %v, want "allow" (agent is present)`, task["repo-explorer"])
+	}
+	// Absent gated-commit agents → their edges are dropped (no dangling allow).
+	for _, absent := range []string{"committer", "commit-message", "commit-reviewer", "debate", "solution-brief"} {
+		if v, ok := task[absent]; ok {
+			t.Fatalf(`build.task[%q] = %v, want ABSENT (agent gated out → graceful degradation)`, absent, v)
+		}
+	}
+}
+
+// Test 18: present-agent filter keeps ALL task edges when every referenced
+// agent is present (backward-compat invariant). A full roster must render
+// build's complete task allowlist byte-identically to pre-Phase-3 — the filter
+// is a strict no-op when nothing is gated out.
+func TestEmit_PresentAgentFilterNoopWhenAllPresent(t *testing.T) {
+	// Every agent CoreTaskRules["build"] references gets a block.
+	const cfg = `{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": { "bash": { "__placeholder__": "deny" } },
+  "agent": {
+    "build": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }
+  }
+}`
+	// Augment with every build task target so all are present.
+	full := strings.Replace(cfg, `"build": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+		strings.Join([]string{
+			`"build": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+			`"commit-message": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+			`"project-coordinator": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+			`"planner": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+			`"researcher": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+			`"repo-explorer": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+			`"commit-reviewer": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+			`"ship-review": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+			`"committer": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+			`"docs-steward": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+			`"debate": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+			`"solution-brief": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+		}, ",\n    "), 1)
+	out := mustEmit(t, full, nil, Features{})
+	var root map[string]any
+	json.Unmarshal(out, &root)
+	task := root["agent"].(map[string]any)["build"].(map[string]any)["permission"].(map[string]any)["task"].(map[string]any)
+	// Every CoreTaskRules["build"] entry must survive.
+	for _, e := range CoreTaskRules["build"] {
+		if task[e.Target] != string(e.Decision) {
+			t.Fatalf(`build.task[%q] = %v, want %q (full roster → no filtering)`, e.Target, task[e.Target], e.Decision)
+		}
+	}
+}

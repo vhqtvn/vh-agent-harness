@@ -203,17 +203,25 @@
                 },
                 "task": {
                     "*": "deny",
+                    {{- if .capabilities.gated_commit }}
                     "commit-message": "allow",
+                    {{- end }}
                     "project-coordinator": "allow",
                     "planner": "allow",
                     "researcher": "allow",
                     "repo-explorer": "allow",
+                    {{- if .capabilities.gated_commit }}
                     "commit-reviewer": "allow",
+                    {{- end }}
                     "ship-review": "allow",
+                    {{- if .capabilities.gated_commit }}
                     "committer": "allow",
+                    {{- end }}
                     "docs-steward": "allow",
+                    {{- if .capabilities.debate }}
                     "debate": "allow",
                     "solution-brief": "allow",
+                    {{- end }}
                 },
             },
             "description": "Default primary agent for day-to-day work. Asks before edits and editable specialist handoffs.",
@@ -233,15 +241,23 @@
                     "*": "deny",
                     "build": "allow",
                     "project-coordinator": "allow",
+                    {{- if .capabilities.gated_commit }}
                     "commit-message": "allow",
+                    {{- end }}
                     "planner": "allow",
                     "researcher": "allow",
                     "repo-explorer": "allow",
+                    {{- if .capabilities.gated_commit }}
                     "commit-reviewer": "allow",
+                    {{- end }}
                     "ship-review": "allow",
+                    {{- if .capabilities.gated_commit }}
                     "committer": "allow",
+                    {{- end }}
+                    {{- if .capabilities.debate }}
                     "debate": "allow",
                     "solution-brief": "allow",
+                    {{- end }}
                 },
                 "bash": {
                     "*": "deny",
@@ -408,15 +424,23 @@
                 "task": {
                     "*": "deny",
                     "build": "allow",
+                    {{- if .capabilities.gated_commit }}
                     "commit-message": "allow",
+                    {{- end }}
                     "planner": "allow",
                     "researcher": "allow",
                     "repo-explorer": "allow",
+                    {{- if .capabilities.gated_commit }}
                     "commit-reviewer": "allow",
+                    {{- end }}
                     "ship-review": "allow",
+                    {{- if .capabilities.gated_commit }}
                     "committer": "allow",
+                    {{- end }}
+                    {{- if .capabilities.debate }}
                     "debate": "allow",
                     "solution-brief": "allow",
+                    {{- end }}
                 },
                 "bash": {
                     "*": "deny",
@@ -455,6 +479,7 @@
             },
             "model": "{file:./.local/config/agent-model/project-coordinator}",
         },
+        {{- if .capabilities.debate }}
         "debate": {
             "description": "Multi-model debate orchestrator for complex reasoning and creative option exploration",
             "mode": "subagent",
@@ -754,6 +779,7 @@
                 },
             },
         },
+        {{- end }}
         "repo-explorer": {
             "description": "Read-only repo reconnaissance and codepath discovery",
             "mode": "subagent",
@@ -823,7 +849,9 @@
                 "webfetch": "deny",
                 "task": {
                     "*": "deny",
+                    {{- if .capabilities.gated_commit }}
                     "committer": "allow",
+                    {{- end }}
                 },
                 "bash": {
                     "*": "deny",
@@ -861,6 +889,7 @@
                 },
             },
         },
+        {{- if .capabilities.gated_commit }}
         "commit-message": {
             "description": "Read-only commit assistant that gates on commit-reviewer before drafting commit messages",
             "mode": "subagent",
@@ -1265,6 +1294,7 @@
                 },
             },
         },
+        {{- end }}
         "ship-review": {
             "description": "Final whole-change read-only review for boundaries, tests, docs drift, and overclaim risk",
             "mode": "subagent",

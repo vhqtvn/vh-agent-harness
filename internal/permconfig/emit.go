@@ -20,6 +20,15 @@ import (
 // controlled-order permission blocks via orderedMap, 4-space indent, comments
 // dropped, trailing newline).
 //
+// Task-edge capability gating: each agent's task allowlist is filtered to the
+// agents actually present in the rendered config. When a template capability
+// gate (e.g. {{if .capabilities.gated_commit}}) hides an agent block, every
+// task edge pointing at that agent is dropped here so no orchestrator carries
+// a dangling allow entry. This is the enforcement seam for Phase 3 capability
+// gating; the template's own task-edge gates are a self-describing scaffold
+// (consistent with the scaffold-overwrite philosophy documented in tables.go)
+// that this emitter authoritatively supersedes.
+//
 // The caller is renderSeamStaging (internal/cli/seam.go), invoked after the
 // core render + overlay merge + permission-pack materialization. Both
 // seamApply (install/update) and doctor (drift check) call the same pipeline,
@@ -46,29 +55,40 @@ func Emit(input []byte, packs []Pack, features Features) ([]byte, error) {
 		}
 	}
 
+	// present is the set of agents that have a block in the rendered config.
+	// Task edges to absent agents — gated out of the template by a capability
+	// gate (e.g. committer when core/gated-commit is unselected) — are dropped
+	// from every orchestrator's task allowlist below. This keeps permconfig.Emit
+	// coherent with the template: no agent may delegate to an agent that isn't
+	// there. See Phase 3 capability gating in internal/cli/profile.go
+	// (resolveCapabilityAnswers) and the cluster gates in opencode.jsonc.tmpl.
+	agents, _ := root["agent"].(map[string]any)
+	present := make(map[string]bool, len(agents))
+	for name := range agents {
+		present[name] = true
+	}
+
 	// Overwrite each agent's permission.bash and permission.task blocks.
 	// Iteration order over the Go map is irrelevant — json.MarshalIndent sorts
 	// agent keys alphabetically on output, so the result is deterministic.
-	if agents, ok := root["agent"].(map[string]any); ok {
-		for name, rule := range locations {
-			if name == "default" {
-				continue
-			}
-			agentBlock, ok := agents[name].(map[string]any)
-			if !ok {
-				continue // defensive: location has no agent block in config
-			}
-			perm, ok := agentBlock["permission"].(map[string]any)
-			if !ok {
-				continue
-			}
-			if _, ok := perm["bash"]; ok {
-				// Backlog entry is top-level only; agents never get it.
-				perm["bash"] = computeBashBlock(rule, name, features)
-			}
-			if _, ok := perm["task"]; ok {
-				perm["task"] = computeTaskBlock(tasks[name])
-			}
+	for name, rule := range locations {
+		if name == "default" {
+			continue
+		}
+		agentBlock, ok := agents[name].(map[string]any)
+		if !ok {
+			continue // defensive: location has no agent block in config
+		}
+		perm, ok := agentBlock["permission"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := perm["bash"]; ok {
+			// Backlog entry is top-level only; agents never get it.
+			perm["bash"] = computeBashBlock(rule, name, features)
+		}
+		if _, ok := perm["task"]; ok {
+			perm["task"] = computeTaskBlock(tasks[name], present)
 		}
 	}
 
@@ -197,9 +217,18 @@ func computeBashBlock(rule LocationRule, locationName string, features Features)
 // (the resolver's Object.entries order). The core tables encode this order
 // explicitly via []TaskEntry slices; overlay pack tasks are parsed with "*"
 // first (natural alphabetical sort puts ASCII 42 before lowercase letters).
-func computeTaskBlock(rule []TaskEntry) *orderedMap {
+//
+// Edges to agents absent from the rendered config (present[target]==false) are
+// skipped — this is the capability-gating seam. When a capability gate hides an
+// agent block in the template, every task edge pointing at that agent is
+// dropped here so no orchestrator carries a dangling allow entry. The "*"
+// wildcard is always preserved regardless of presence.
+func computeTaskBlock(rule []TaskEntry, present map[string]bool) *orderedMap {
 	om := newOrderedMap()
 	for _, e := range rule {
+		if e.Target != "*" && !present[e.Target] {
+			continue
+		}
 		om.set(e.Target, string(e.Decision))
 	}
 	return om

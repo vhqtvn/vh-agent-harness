@@ -222,6 +222,38 @@ func TestResolve_BaselineAlwaysPresent(t *testing.T) {
 	}
 }
 
+// TestResolve_BaselineAgentsNeverSatisfyCapabilityGate is the Phase 3
+// carry-forward of the F1 negative-pin assertion: a baseline agent name is
+// NEVER a capability ID in the resolved closure, even when every seed capability
+// is selected. This pins the exact invariant the Phase 3 template gates depend
+// on — CapabilitySet.Has only consults the capability closure, so a baseline
+// agent can never accidentally satisfy a {{- if .capabilities.<id> }} gate and
+// force its cluster to render. The template gates are predicated on capability
+// IDs (core/gated-commit, core/debate), never on baseline agent names, so this
+// test guards against a future regression that conflated the two.
+func TestResolve_BaselineAgentsNeverSatisfyCapabilityGate(t *testing.T) {
+	c := CoreCatalog()
+	// Select the full backward-compat default so the closure is non-empty and
+	// Has has real capability IDs to report true for (positive control below).
+	set, err := Resolve([]string{"core/gated-commit", "core/debate"}, c)
+	if err != nil {
+		t.Fatalf("Resolve: unexpected error: %v", err)
+	}
+	// Positive control: the selected capabilities DO satisfy Has, proving the
+	// assertions below are exercising a populated closure, not a vacuous one.
+	if !set.Has("core/gated-commit") || !set.Has("core/debate") {
+		t.Fatalf("positive control failed: selected capabilities must satisfy Has(); got All()=%v", set.All())
+	}
+	// Negative pin: every baseline agent name returns Has()==false. Baseline
+	// agents are infrastructural (never selected), so they never appear in the
+	// capability closure that Has consults.
+	for _, b := range c.BaselineAgents() {
+		if set.Has(CapabilityID(b)) {
+			t.Errorf("baseline agent %q must NOT satisfy Has() (baseline is not a capability id); All()=%v", b, set.All())
+		}
+	}
+}
+
 func TestResolve_EmptySelectionBaselineOnly(t *testing.T) {
 	// A profile that selects no capabilities still renders the baseline. The
 	// closure is empty and Agents() == Baseline().
