@@ -16,6 +16,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -26,29 +27,47 @@ const rootShort = "vh-agent-harness: install, manage, and run a repo-resident AI
 var rootCmd = &cobra.Command{
 	Use:   "vh-agent-harness",
 	Short: rootShort,
-	Long: `vh-agent-harness is a single static binary that installs, manages, and
+	Long: `vh-agent-harness is a single static Go binary that installs, manages, and
 runs a repo-resident AI agent harness.
-
-New here? Run 'vh-agent-harness guide' first — it detects the harness state in
-the current repo and prints the exact next steps (install, configure, adopt, or
-update). Add --json for machine-readable output.
 
 It is the installer (rendering config-driven files from embedded templates
 through a substrate seam), the manager (diff, doctor, proposals), and the
 executor (driving a runtime backend abstraction). State is lineage-governed
 and repo-relative.
 
-Implemented: install, update, uninstall, preflight, doctor, proposals, diff,
-and the seam that renders + applies the embedded corpus with per-class
-ownership, schema reconciliation, and lineage tracking.
+Agent orientation
+  guide          detect harness state + the exact next steps (run this first in any repo)
+  install        install/adopt the harness (preview with --dry-run)
+  update         re-render the corpus after a config or binary change (--dry-run)
+  doctor         verify install health
+  diff           inspect drift vs. the embedded corpus
+  status         show install + runtime info
+  example        print a config file's doc/template (no *.example scaffolds shipped)
 
-Runtime verbs: exec, shell, up, down, logs, ps, status. These resolve the
-backend by reading the S4 run-shape (.vh-agent-harness/run-shape.yml runtime:
-block) FIRST, falling back to the legacy manifest
-(.opencode/harness-manifest.json) when S4 is absent. The seam install path
-seeds a default S4 (runtime.backend: host-shell) when none exists, so the
-runtime verbs resolve a backend post-install (at minimum 'vh-agent-harness exec'
-works via host-shell). See the config-authority model.`,
+Upgrade loop (after a new binary or config change):
+  vh-agent-harness self-update
+  vh-agent-harness update --dry-run
+  vh-agent-harness update
+  vh-agent-harness doctor
+
+Inspect migration notes for a release:
+  vh-agent-harness help migrate            # the note for the locally adopted version
+  vh-agent-harness help migrate vX.Y.Z     # a specific release's note
+
+Runtime verbs (exec, shell, up, down, logs, ps) resolve the backend by reading
+the S4 run-shape (.vh-agent-harness/run-shape.yml) first, falling back to the
+legacy manifest (.opencode/harness-manifest.json). See the config-authority model.
+
+Run 'vh-agent-harness guide' for dynamic, repo-aware next steps.`,
+	// No-args prints the root help and exits 0. An unexpected token (a typo'd
+	// subcommand) is surfaced as an unknown-command error rather than silently
+	// showing help, so typos don't look like success.
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return cmd.Help()
+		}
+		return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
+	},
 }
 
 func init() {
@@ -82,7 +101,12 @@ func init() {
 		statusCmd,
 		// runtime service status
 		psCmd,
+		// help command (replaces cobra's auto-generated one so it can also route
+		// the special `help migrate [version]` topic; migrate is NOT a top-level
+		// command — it is intercepted inside help only).
+		helpCmd,
 	)
+	rootCmd.SetHelpCommand(helpCmd)
 }
 
 // Execute runs the root command and exits the process on error.

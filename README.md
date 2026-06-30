@@ -99,6 +99,11 @@ vh-agent-harness example .vh-agent-harness/project.config.json > .vh-agent-harne
 
 ## Command surface
 
+Running `vh-agent-harness` with **no arguments** prints the root help (exit 0):
+a static command-surface map, the agent orientation block, the upgrade loop, and
+a pointer to `guide`. Run `vh-agent-harness guide` for dynamic, repo-aware next
+steps.
+
 | Group | Commands |
 | --- | --- |
 | Orientation | `guide` (state + next steps; `--json`) |
@@ -108,6 +113,14 @@ vh-agent-harness example .vh-agent-harness/project.config.json > .vh-agent-harne
 | Runtime | `exec`, `shell`, `up`, `down`, `logs`, `ps` |
 | Status | `status` |
 | Binary | `version`, `self-update` |
+| Help | `help [command]`, `help migrate [version]` (read-only migration notes) |
+
+`help migrate [version]` prints the per-release migration note. With no version
+it shows the note for the locally adopted harness version (detected from
+lineage), or the latest bundled note when none matches; an explicit `vX.Y.Z`
+(or `X.Y.Z`) prints that release's note. It is **documentation only** — it never
+modifies files. The notes are embedded in the binary (under
+`templates/migrations/`) and are not rendered into consumer repos.
 
 `--dry-run` on `install`/`update` prints the full per-file plan
 (would-overwrite / seed / preserve / reconcile / conflict) **without writing
@@ -172,12 +185,15 @@ release time (see `.goreleaser.yml`); the default dev label is `0.1.0-dev`.
 ```
 cmd/vh-agent-harness/    main entrypoint
 core_manifest.go         core-corpus ownership classification (embed walk)
-corpus.go                go:embed roots: templates/{core,overlays}
+corpus.go                go:embed roots: templates/{core,overlays}, plus embedded
+                         helpers (examples, overlay-skeleton, migrations)
 internal/                substrate seam, ownership, schema, lineage, runshape,
                          runtime, hooks, overlay, proposals, drift, permission, cli
 templates/core/          canonical domain-free corpus (rendered into projects)
 templates/overlays/      shipped overlay packs (empty by default; projects ship
                          their own under <project>/.vh-agent-harness/overlays/)
+templates/migrations/    per-release migration notes (binary/help-surface only;
+                         embedded, NOT rendered into consumer repos — one per release)
 docs/coordination/       coordination templates + report schemas (rendered into projects)
 docs/adoption-examples/  non-shipped adoption reference (web/)
 ```

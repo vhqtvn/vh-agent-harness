@@ -97,3 +97,19 @@ const OverlaySkeletonDir = "templates/overlay-skeleton"
 //
 //go:embed all:templates/overlay-skeleton
 var OverlaySkeletonFS embed.FS
+
+// MigrationsDir is the embed.FS sub-directory holding the per-release migration
+// notes (one file per release: vX.Y.Z.md). These are BINARY/HELP-SURFACE docs,
+// NOT consumer-corpus files: they live OUTSIDE templates/core, so the substrate
+// seam never renders them into a target repo, and they carry NO ownership class
+// in core_manifest.go. The `help migrate [version]` command reads ONLY from this
+// embedded copy (never the live filesystem), so a release's note travels with the
+// binary that shipped it and is available offline from any CWD. This mirrors the
+// existing embed-only pattern used for ExamplesFS and OverlaySkeletonFS.
+const MigrationsDir = "templates/migrations"
+
+// MigrationsFS is the read-only embedded migration-notes tree. The
+// `help migrate` command reads from the MigrationsDir sub-directory.
+//
+//go:embed templates/migrations/*
+var MigrationsFS embed.FS

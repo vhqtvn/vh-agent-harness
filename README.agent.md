@@ -6,6 +6,11 @@ drive it. The binary is self-guiding: **when in doubt, run `vh-agent-harness
 guide` (or `guide --json`)** — it reports the current state and the exact next
 steps. This document is the static reference behind that.
 
+Running `vh-agent-harness` with **no arguments** prints the root help (exit 0):
+a static command-surface map, the agent-orientation block, the upgrade loop, and
+a pointer to `guide`. It is the quick orientation view; `guide` is the dynamic,
+repo-aware advisor.
+
 ## The loop
 
 ```
@@ -25,6 +30,21 @@ ambiguous/unsafe plan aborts before writing.
   preserved. Preview with `--dry-run` first.
 - **installed** — configure: write the mission, add overlays, set the runtime,
   add deny-rules, then `update`.
+
+## Upgrade loop (after a binary self-update)
+
+When the binary itself changes (`self-update` pulled a new release), re-render the
+corpus and verify health in this order:
+
+```
+vh-agent-harness self-update      # pull the new binary
+vh-agent-harness update --dry-run # ownership-safe preview of the re-render
+vh-agent-harness update           # applies platform_managed + active overlay_extension
+vh-agent-harness doctor           # lint the result
+```
+
+To see what changed in a release and how to migrate, inspect its migration note
+(see "Common tasks" → "Inspect migration notes for a release").
 
 ## Golden rules
 
@@ -99,6 +119,11 @@ compose source), or anything under `.opencode/` that is platform_managed.
 - **Refresh after a new binary or config change:** `vh-agent-harness update`
   (preview with `--dry-run`). Armed-file conflicts are recorded — list them with
   `vh-agent-harness proposals`.
+- **Inspect migration notes for a release:** `vh-agent-harness help migrate`
+  (the note for the locally adopted harness version, detected from lineage) or
+  `vh-agent-harness help migrate vX.Y.Z` (a specific release). With no version
+  and no local install, it prints the latest bundled note. It is **documentation
+  only** — it never modifies files.
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   environment). `vh-agent-harness diff` shows drift vs. the corpus.
 
@@ -258,6 +283,41 @@ agent / dogfood / CI path stays frictionless. It is skipped when any of:
 An **initialized** target (profile present) never prompts, regardless of TTY or
 flags — the guard only guards the adopt-into-uninitialized case. `install`
 remains the explicit "I mean it" path and is unaffected.
+
+## Migration-note convention (releasing)
+
+Every release ships a migration note so operators and agents know what changed
+and how to migrate. Notes are **binary/help-surface docs**, not consumer corpus:
+
+- They live in **`templates/migrations/<vX.Y.Z>.md`** — **outside** `templates/core/`.
+- They are **embedded** in the binary (`//go:embed templates/migrations/*` in
+  `corpus.go`), read by `help migrate` **only from the embedded copy** (never the
+  live filesystem), and **NOT rendered into consumer repos** and get **no
+  ownership class** in `core_manifest.go`.
+- **One note per release**, named `vMAJOR.MINOR.PATCH.md`. A Go test
+  (`TestMigrationNotes_Canonical`) enforces the filename and the canonical
+  heading set, so a malformed note fails CI rather than shipping silently.
+
+Every note must contain these headings (in order):
+
+```
+# Migration: vX.Y.Z
+## Summary
+## What changed (consumer-visible only)
+## How to migrate (automated)        # must include the upgrade-loop command sequence
+## What `update` handles for you
+## Watch-outs
+## Verification commands
+## Rollback
+## Non-consumer changes
+```
+
+The `## How to migrate (automated)` section must include the sequence
+`self-update` → `version` → `update --dry-run` → `update` → `doctor`.
+
+There is **no top-level `migrate` command** — the surface is `help migrate
+[version]` only (intercepted inside the help command), keeping the command list
+free of a `migrate` verb.
 
 When a command prints a "Next steps" footer, follow it. When unsure, re-run
 `vh-agent-harness guide`.
