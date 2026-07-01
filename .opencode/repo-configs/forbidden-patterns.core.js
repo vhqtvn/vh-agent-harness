@@ -1,0 +1,320 @@
+// Deny-pattern backstop for shell-guard — GENERIC CORE ENGINE (platform_managed).
+//
+// ┌──────────────────────────────────────────────────────────────────────────┐
+// │ OWNERSHIP: platform_managed (generic core engine).                        │
+// │ This file ships with the harness starter and is fully owned by it.        │
+// │ A consuming project MUST NOT edit this file — extend instead via          │
+// │ `forbidden-patterns.project.js` (project_owned).                           │
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// This file holds ONLY the GENERIC deny-rule ENGINE (the shared inspector
+// allowIf machinery) and a small set of GENERIC SAFETY rules that apply to any
+// project. It is intentionally free of project-specific deny-rules.
+//
+// Project-specific rules (project-managed infra like cloud-provider lifecycle
+// bans, project auth/identity DB-table enumeration bans, VPS host
+// fingerprints, project JWT-secret env-var names, project-specific image-build-
+// on-VPS bans) belong in the PROJECT overlay file
+// `forbidden-patterns.project.js` (project_owned), NOT here. The harness
+// scaffolds a blank `forbidden-patterns.project.js` on install; the project
+// fills it. Run `vh-agent-harness example .opencode/repo-configs/forbidden-patterns.project.js` for the pattern.
+//
+// These rules apply to the full command string, including everything wrapped
+// inside `vh-agent-harness exec ...`, `bash -c '...'`, or ssh remote payloads. Each
+// rule has a regex (`re`), a short human reason (`why`), and an optional
+// `allowIf` regex that whitelists narrow legitimate uses.
+//
+// Consumption (see `denyByForbiddenPatterns` in shell-guard.js):
+//   if `re.test(cmd)` AND NOT (`allowIf` && `allowIf.test(cmd))` -> DENY.
+// So an `allowIf` CARVES OUT benign forms from an otherwise-broad `re`.
+//
+// FP philosophy: opencode.jsonc grants `"vh-agent-harness *": "allow"` to many agents,
+// which auto-passes the whole command string (including any `bash -c` payload)
+// without inspecting inside it. This file is the ONLY layer catching dangerous
+// ops buried in `vh-agent-harness exec bash -c '...'`. So the regex layer must stay,
+// but each rule must fire on the genuinely-dangerous INVOCATION and carve out
+// benign INSPECTION/REFERENCE forms via `allowIf` (grep/rg/echo/which/ls/test/
+// stat of the trigger is benign; INVOKING the trigger is not).
+//
+// Naming-only patterns (no full AST). The goal is to make the easy/default
+// mistakes hard, not to defeat an actively adversarial agent. Adjust when a
+// legitimate workflow regresses, but document why.
+
+// ── shared inspector-allowIf builders ────────────────────────────────────────
+//
+// When a forbidden trigger appears as the ARGUMENT of a read-only inspector
+// (grep/rg/echo/which/ls/test/stat/man/...) rather than as a real invocation,
+// the command is benign and must be exempted. Two tiers:
+//
+//   - FULL: read-only inspectors including file readers (cat/head/tail). Safe
+//     for rules whose trigger is a TOOL NAME or DESTRUCTIVE VERB — reading a
+//     doc that mentions "useradd" is benign.
+//   - EXISTENCE: only existence/metadata probes (test/[/ls/stat/echo/printf).
+//     Used for credential-file rules where `cat ~/.<provider>/credentials` is the
+//     DANGEROUS form and must NOT be exempted.
+//
+// The regex matches when the inspector verb is in COMMAND POSITION: at the
+// start of the command (after optional leading env-var assignments and an
+// optional `vh-agent-harness exec` wrapper), or right inside a `bash -c '...'` quote.
+// Residual gap: an `echo X && dangerous Y` chain is exempted by the leading
+// echo; this is adversarial, rare in practice, and documented as residual
+// FP-risk in docs/ai/shell-execution.md.
+export const INSPECTOR_FULL =
+    "grep|rg|cat|head|tail|less|more|echo|printf|which|command|type|file|stat|test|\\[|read|ls|man";
+export const INSPECTOR_EXISTENCE = "test|\\[|ls|stat|echo|printf";
+
+// git-mutation-bypass inspector set: INSPECTOR_FULL with the `command` verb
+// REMOVED. `command` is a bash builtin that EXECUTES its argument
+// (`command git commit -m x` runs `git commit`), so it must NOT be treated as
+// a safe inspector in the git-mutation carve-out — otherwise
+// `command git <mutation>` is carved out at scan #1 (the allowIf matches with
+// `command` in command position) and the git mutation actually runs. This is a
+// regression vs HEAD (HEAD's COMMIT_GATE_PREFIX-only allowIf denied it).
+//
+// Every verb remaining in this set is a genuine NON-executor-of-its-argument:
+//   grep/rg       — search input/streams, do not run their args
+//   cat/head/tail/less/more — print/read file contents
+//   echo/printf   — print their args as text
+//   which/type    — locate/report a command's path/builtin-ness
+//   file/stat     — report file type/metadata
+//   test/[        — evaluate a conditional expression, return exit status
+//   read          — read a line from stdin INTO a named variable
+//   ls            — list directory entries
+//   man           — display a manual page
+// None can execute an arbitrary argument. The shared INSPECTOR_FULL keeps
+// `command` for the OTHER rules (apt/usermod/ssh/scp); its `command` gap there
+// is a SEPARATE follow-up, out of this slice.
+export const GIT_MUTATION_INSPECTORS =
+    "grep|rg|cat|head|tail|less|more|echo|printf|which|type|file|stat|test|\\[|read|ls|man";
+
+export function inspectorAllowIf(inspectorGroup) {
+    // Two alternatives:
+    //   1. bare or vh-agent-harness exec-wrapped inspector in command position
+    //   2. inspector right inside `bash -c '...'` / `sh -c "..."` / `zsh -c ...`
+    //
+    // LEADING-INSPECTOR CHAIN GUARD (closes the bypass found in commit review):
+    // a negative lookahead at the very start refuses the carve-out if ANY shell
+    // control / substitution operator appears in the command string. This blocks
+    // `echo x && cat ~/.<provider>/credentials`, `echo x; useradd y`,
+    // `grep p f | base64`, `$(...)` substitution, etc. — i.e. any shape where a
+    // second command leg could carry the dangerous invocation behind a harmless
+    // leading inspector. Narrow FP cost: piped inspectors like `grep foo | head`
+    // are no longer exempt (use `rg` or unpiped `grep`).
+    return new RegExp(
+        "(?![\\s\\S]*(?:&&|\\|\\||[;&|`]|\\$\\())" +
+        "(?:^\\s*" +
+            "(?:[A-Z_][A-Z0-9_]*=\\S*\\s+)*" + // leading env-var assignments
+            "(?:vh-agent-harness\\s+(?:[A-Za-z]+\\s+)*exec\\s+(?:--\\s+)?)?" + // vh-agent-harness [subcmd] exec [--]
+            "(?:" + inspectorGroup + ")(?=\\s|$)" + // inspector verb in command position
+        "|\\b(?:bash|sh|zsh)\\s+-[a-z]*c\\s+['\"]\\s*" + // inside shell -c '...'
+            "(?:[A-Z_][A-Z0-9_]*=\\S*\\s+)*" +
+            "(?:" + inspectorGroup + ")(?=\\s|$)" +
+        ")"
+    );
+}
+
+// Pre-built allowIf objects (reused across rules).
+export const ALLOW_IF_INSPECTOR_FULL = inspectorAllowIf(INSPECTOR_FULL);
+export const ALLOW_IF_INSPECTOR_EXISTENCE = inspectorAllowIf(INSPECTOR_EXISTENCE);
+
+// git-mutation-bypass carve-out union:
+//   (A) the committer agent's commit-gate wrapper invocation (or the dead-but-
+//       live bare-prefix exec alternative — see COMMIT_GATE_PREFIX below), OR
+//       (B) a COMMAND-POSITION-ANCHORED read-only inspector form (echo/cat/printf
+//           prose that merely MENTIONS a git mutation verb — e.g. a commit message
+//           reading "git checkout fix", or `echo "...git checkout / git status..."`).
+//
+// CRITICAL — BOTH alternatives (A) and (B) carry the FULL chain-guard: a leading
+// negative lookahead that refuses the carve-out whenever ANY bash statement
+// separator or command/proc substitution operator appears anywhere in the
+// command string (`&&`/`||`/`;`/newline/CR/`&`/`|`/backtick/`$(`/proc-sub
+// `<(`/`>(`). This is load-bearing: scan #1 is the ONLY layer that catches a
+// composite payload that chains a git mutation after a commit-gate.sh or
+// inspector prefix, because evaluate()'s `vh-agent-harness` startsWith branch
+// returns `allow` for a wrapped second leg BEFORE parseCommands re-scans it.
+// With the chain-guard on BOTH alternatives:
+//   - `.opencode/scripts/commit-gate.sh acquire; vh-agent-harness exec bash -c
+//     'git commit -m pwned'` → alt-A chain-guard refuses the carve-out (`;`
+//     present) → DENY at scan #1.
+//   - `.opencode/scripts/commit-gate.sh acquire && git push origin main` →
+//     alt-A chain-guard refuses (`&&` present) → DENY at scan #1.
+//   - `echo x; git push`, `cat x | git commit -F -`, `echo $(git push)`, etc.
+//     → alt-B chain-guard refuses → DENY at scan #1.
+// A legit single `commit-gate.sh acquire --paths-file X --message-file Y
+// --session-alias A` (no separator) → alt-A carve-out preserved → ALLOW.
+//
+// CRITICAL — why (B) is NOT the generic ALLOW_IF_INSPECTOR_FULL:
+// The generic `inspectorAllowIf` builder's shell-`-c` 2nd alternative is
+// UNANCHORED: `\b(?:bash|sh|zsh)\s+-[a-z]*c\s+['"]\s*<inspector>`. The `\b`
+// lets it match an inspector substring buried ANYWHERE — including inside a
+// GIT ARGUMENT. Unioning it here opened a real bypass:
+//   `vh-agent-harness exec git commit -m "bash -c 'echo ok'"`
+// matched the allowIf (the `bash -c 'echo ok'` lives inside the commit-message
+// arg), so git-mutation-bypass was carved out at scan #1, and evaluate()
+// returned `allow` at the `vh-agent-harness ` startsWith branch (L550) BEFORE
+// parseCommands — i.e. the `git commit` actually ran. Same shape for
+// `git push origin main "bash -c 'echo x'"` and `git reset --hard "sh -c 'cat y'"`.
+//
+// Fix: a git-mutation-SPECIFIC builder (`gitMutationInspectorAllowIf`) where
+// BOTH alternatives (bare inspector, and `bash -c '<inspector payload>'`) share
+// a leading `^\s*` + optional env-vars + optional `vh-agent-harness exec `
+// wrapper. The carve-out can ONLY match when an inspector verb (or a
+// `bash -c '<inspector>'` wrapper) IS the actual command in command position —
+// never an inspector substring buried inside a git command's argument.
+//
+// Why extending (B) this way does NOT re-open the load-bearing evasion cases
+// (which scan #1 in evaluate() is the sole catcher for, since the
+// vh-agent-harness branch returns allow before parse):
+//   - `git` is NOT an inspector verb, so `bash -c 'git commit'` / `sh -c 'git
+//     push'` are NOT carved out and stay DENIED by scan #1.
+//   - `vh-agent-harness exec bash -c 'git reset --hard'` (load-bearing
+//     evasion): the wrapper is consumed, `bash -c '` matches, but the payload
+//     `git reset` has no inspector verb → no carve-out → DENIED by scan #1.
+//   - BOTH (A) and (B) carry the full chain-guard (the leading negative
+//     lookahead): ANY shell control/substitution operator anywhere (`&&`,
+//     `||`, `;`, `\n`, `\r`, `&`, `|`, backtick, `$(`, process substitution
+//     `<(` / `>(`) refuses the carve-out, so `echo x; git push`,
+//     `echo x<NEWLINE>git commit`, `cat x | git commit -F -`, `echo $(git push)`,
+//     `echo x <(git commit ...)`, `echo y >(git push ...)`, AND — via alt-A —
+//     `.opencode/scripts/commit-gate.sh acquire; vh-agent-harness exec bash -c
+//     'git commit -m pwned'` / `... && git push origin main` all stay DENIED.
+//     Bash treats newline/CR as a statement separator (equivalent to `;`), so
+//     both MUST be in the char class — a literal-newline smuggled leg
+//     (`echo step1\ngit commit`) is the bypass this closes. Process
+//     substitution `<(` / `>(` runs the inner command with NO list separator,
+//     so the 2-char sequences must be in the alternation (they cannot live in
+//     the char class, which is single-char) — otherwise `echo x <(git commit
+//     ...)` smuggles the mutation behind a leading echo.
+// NOTE: the generic ALLOW_IF_INSPECTOR_FULL is intentionally left untouched
+// (other rules — apt/usermod/ssh/scp — depend on it); only the git carve-out
+// is re-anchored here, because the `git <verb> -m "<inspector prose>"` shape is
+// the genuinely exploitable surface.
+export function gitMutationInspectorAllowIf(inspectorGroup) {
+    // COMMAND-POSITION-ANCHORED inspector carve-out. The shared leading
+    // `^\s*` + env-vars + optional `vh-agent-harness exec ` wrapper anchors
+    // BOTH the bare-inspector alternative and the shell-`-c` alternative, so
+    // neither can match an inspector substring buried inside a git argument.
+    return new RegExp(
+        "(?![\\s\\S]*(?:&&|\\|\\||[;\n\r&|`]|\\$\\(|<\\(|>\\())" + // chain-guard (whole string): &&, ||, ;, \n, \r, &, |, backtick, $(, process-sub <( / >(
+        "^\\s*" +
+        "(?:[A-Z_][A-Z0-9_]*=\\S*\\s+)*" + // leading env-var assignments
+        "(?:vh-agent-harness\\s+(?:[A-Za-z]+\\s+)*exec\\s+(?:--\\s+)?)?" + // optional vh-agent-harness exec wrapper
+        "(?:" +
+            "(?:" + inspectorGroup + ")(?=\\s|$)" + // bare inspector in command position
+        "|" +
+            "(?:bash|sh|zsh)\\s+-[a-z]*c\\s+['\"]\\s*" + // OR shell -c '<inspector payload>' in command position
+            "(?:[A-Z_][A-Z0-9_]*=\\S*\\s+)*" +
+            "(?:" + inspectorGroup + ")(?=\\s|$)" +
+        ")",
+    );
+}
+
+// alt-A: the commit-gate wrapper prefix. Carries the SAME leading chain-guard
+// as alt-B (`gitMutationInspectorAllowIf`) — a negative lookahead at the very
+// start that refuses the carve-out whenever ANY bash statement separator or
+// command/proc substitution appears anywhere in the command string. Without
+// it, a `;`/`&&` composite (e.g. `commit-gate.sh acquire; vh-agent-harness
+// exec bash -c 'git commit -m pwned'`) matches this prefix, is carved out at
+// scan #1 (allowIf matches), and evaluate()'s `vh-agent-harness` startsWith
+// branch returns `allow` for the second leg before parseCommands re-scans it.
+// A legit single `commit-gate.sh acquire --paths-file X --message-file Y
+// --session-alias A` has no separator → unaffected. `COMMIT_GATE_PREFIX` is
+// used ONLY by `git-mutation-bypass` (no other rule), so this guard is
+// contained to this carve-out.
+const COMMIT_GATE_PREFIX =
+    /(?![\s\S]*(?:&&|\|\||[;\n\r&|`]|\$\(|<\(|>\())^\s*(?:[A-Z_][A-Z0-9_]*=\S*\s+)*(?:\.opencode\/scripts\/commit-gate\.sh|harness\s+exec\b)/;
+export const ALLOW_IF_GIT_MUTATION = new RegExp(
+    "(?:" + COMMIT_GATE_PREFIX.source + "|" + gitMutationInspectorAllowIf(GIT_MUTATION_INSPECTORS).source + ")",
+);
+
+// FORBIDDEN_PATTERNS — GENERIC safety rules only.
+//
+// Project-specific deny-rules (project-managed infra lifecycle bans, project
+// auth/identity DB-table enumeration bans, etc.) are appended at runtime by the
+// aggregator `forbidden-patterns.js`, which merges this core array with the
+// project's `forbidden-patterns.project.js` (project_owned). A consuming project
+// reproduces its own behavior by populating its project file — never by editing
+// this one.
+export const FORBIDDEN_PATTERNS = [
+    {
+        id: "apt-install-ad-hoc",
+        re: /\bapt(-get)?\s+install\b/,
+        allowIf: ALLOW_IF_INSPECTOR_FULL,
+        why:
+            "Do not run apt-get install at runtime. Container packages belong in" +
+            " the Dockerfile. Add the dep and rebuild the image; runtime installs" +
+            " disappear on the next rebuild and create silent drift.",
+    },
+    {
+        id: "user-group-mutation",
+        // Broad trigger: the bare tool name anywhere. The allowIf below carves
+        // out benign INSPECTION forms (`grep usermod README`, `command -v
+        // useradd`, `which usermod`, `ls /usr/sbin/useradd`, `echo "...useradd..."`)
+        // so only real INVOCATIONS (`sudo useradd x`, `usermod -aG ...`) fire.
+        re: /\b(usermod|groupmod|groupadd|useradd|gpasswd|chpasswd)\b/,
+        allowIf: ALLOW_IF_INSPECTOR_FULL,
+        why:
+            "Do not mutate users or groups inside the dev container. Fix the" +
+            " image / compose file, not the running container.",
+    },
+    {
+        id: "ssh-host-key-bypass",
+        // Anchored to the `-o <bypass-flag>` form. FP surface: `grep -o
+        // StrictHostKeyChecking=no file` (grep's `-o` flag, not ssh's). The
+        // allowIf exempts grep/echo/which/etc. in command position.
+        re: /-o\s+(StrictHostKeyChecking=no|UserKnownHostsFile=\/dev\/null)\b/,
+        allowIf: ALLOW_IF_INSPECTOR_FULL,
+        why:
+            "Do not disable SSH host-key verification. The dev container has" +
+            " .local/ssh/ bind-mounted RO, so you cannot append to known_hosts" +
+            " from inside — that is intentional. Run `vh-agent-harness ssh-trust <host>`" +
+            " on the host side once, then ssh from inside with no flags. MITM" +
+            " on a public IP is real.",
+    },
+    {
+        id: "scp-upload",
+        // Anchored to `scp ... user@host:` (upload shape). allowIf exempts
+        // echo/grep/doc references that contain the literal pattern.
+        re: /\bscp\b[^|;&\n]+@[^\s:]+:/,
+        allowIf: ALLOW_IF_INSPECTOR_FULL,
+        why:
+            "Do not upload source via scp. scp uploads leave a remote host out of" +
+            " sync with git and bypass managed releases. Land changes via the" +
+            " configured release flow (git push + on-host pull, or container image" +
+            " rebuild).",
+    },
+    {
+        id: "system-tmp-access",
+        // Deny ANY reference to system /tmp. All scratch + handoff files MUST
+        // live in the repo tmp/ (relative) or the container /workspace/tmp/.
+        //
+        // NO allowIf on purpose: a write via redirection starts with an
+        // inspector verb (`cat > /tmp/x`, `tee /tmp/x`), so the shared
+        // _ALLOW_IF_INSPECTOR_* carve-outs would wrongly exempt the exact
+        // write we are blocking. A blanket deny is the only gap-free form.
+        //
+        // The leading boundary `(^|[^\w.\/~-])` and trailing `(\/|[^\w]|$)` keep
+        // this OFF the sanctioned locations: /workspace/tmp/, ./tmp/, the
+        // repo-absolute .../<project-slug>/tmp/, and relative tmp/ all have
+        // a word/`.`/`/`/`~`/`-` char immediately before "tmp", so none match.
+        // /tmpfoo and /var/tmp are also left alone.
+        re: /(^|[^\w.\/~-])\/tmp(\/|[^\w]|$)/,
+        why:
+            "Do not read or write system /tmp. Out-of-repo writes trigger" +
+            " permission prompts and break unattended runs. Use the repo tmp/" +
+            " (relative) for scratch, or /workspace/tmp/ inside the dev" +
+            " container. Reviewer verdicts are RETURNED as message text, never" +
+            " written to a file.",
+    },
+    {
+        id: "git-mutation-bypass",
+        re: /\bgit\s+(add|commit|push|reset|commit-tree|update-ref|checkout|merge|rebase|stash|branch|restore|cherry-pick|revert|clean|rm|mv|tag|am|apply|switch)\b/,
+        allowIf: ALLOW_IF_GIT_MUTATION,
+        why:
+            "Git mutations must go through the commit-gate wrapper. " +
+            "Only the committer agent (C) may execute git writes, and only " +
+            "through `.opencode/scripts/commit-gate.sh`. " +
+            "SKIP_COMMIT_GATE is operator-only (host terminal). " +
+            "See .opencode/docs/git-execution-routing.md.",
+    },
+];

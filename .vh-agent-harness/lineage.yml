@@ -1,0 +1,24 @@
+# lineage.yml - S1 render lineage (decision D3-B).
+# Shim-owned and lineage-ONLY. This is NOT policy authority: it cannot answer
+# "which profile?" (S3), "is this file safe to overwrite?" (S2), or "which
+# services run?" (S4). See the config-authority model.
+# Do not hand-edit; the harness rewrites this file on render/update.
+lineage_version: "1"
+template:
+    source: templates/core
+    commit: ""
+    ref: harness/0.1.0-dev
+copier:
+    version: ""
+answers:
+    digest: sha256:2512f73b6d39372fea1f882af7a34cee480a2f9cbf40519a758f7f39bb7db7ee
+    selected_keys:
+        - project_name
+        - project_slug
+    values:
+        project_name: Agent Harness
+        project_slug: agent-harness
+render:
+    last_successful_update_id: 009deed2d838acc8
+    last_successful_render_at: "2026-07-01T09:05:18Z"
+    rendered_by: embed-fs
