@@ -194,7 +194,7 @@ func TestReadProfileSelection_MalformedBaselineOnly(t *testing.T) {
 		// Unknown enum would normally fall back to baseline-only via
 		// presetCapabilities, but a SCHEMA-invalid profile short-circuits to nil
 		// before the preset lookup. Either way the result is baseline-only.
-		sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+		sort.Strings(got)
 		t.Errorf("malformed profile: got %v, want nil (baseline-only)", got)
 	}
 }

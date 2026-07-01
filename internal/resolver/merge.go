@@ -120,11 +120,11 @@ func MergeCatalogs(core *Catalog, contribs []PackContribution) (*Catalog, error)
 }
 
 // ResolveContributions applies project-over-embedded shadowing and returns the
-// surviving pack contributions in sorted pack-name order. It is the EXPORTED
-// half of the shadowing rule: unlike the manifest-only projection below, it
-// preserves each survivor's Pack name and Source, so a render caller can build
-// the capability-id -> pack-name map it needs to render the packs owning the
-// resolved capabilities (the Phase-3 capability-installer overlay integration).
+// surviving pack contributions in sorted pack-name order. It is the exported
+// shadowing entry point: it preserves each survivor's Pack name and Source, so
+// a render caller can build the capability-id -> pack-name map it needs to
+// render the packs owning the resolved capabilities (the Phase-3
+// capability-installer overlay integration).
 //
 // Shadowing rule: for each pack name, a project-local contribution (if any)
 // wins and the embedded contribution for that name is dropped. The shadowing
