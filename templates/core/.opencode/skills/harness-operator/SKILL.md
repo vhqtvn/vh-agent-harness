@@ -79,6 +79,27 @@ Notes describe **consumer-visible** changes, the automated migration sequence,
 watch-outs, verification commands, and rollback. Read the note for the version
 you are upgrading to before running the loop above.
 
+## Profile and capabilities (the agent roster)
+
+`vh-agent-harness guide` reports the live roster; the roster itself is selected
+in `.vh-agent-harness/vh-harness-profile.yml` via three cooperating fields:
+
+- `profile:` — the preset enum. `minimal`/`coordination`/`web` → the 8-agent
+  baseline only; `supervised` → baseline + the gated-commit and debate clusters.
+  An unknown value falls back to baseline-only (the safe default).
+- `capabilities:` — an explicit opt-in list of capability IDs (e.g.
+  `core/release`) that **unions onto** the preset (adds, never replaces). The
+  shipped `release` pack is selected this way; selecting `core/release` also
+  pulls the gated-commit cluster via hard-dep closure.
+- `modules:` — **deprecated.** A non-empty `modules:` emits a one-line warning
+  on every `update`/`doctor` nudging migration to `profile:` + `capabilities:`.
+  It still parses (existing profiles keep working) but carries no effect.
+
+Edit the profile, then `vh-agent-harness update` to re-render. The two selection
+paths for an overlay pack converge: `capabilities: [core/release]` and
+`overlays: [release]` render the same cluster. `vh-agent-harness guide` is the
+authority for the live state.
+
 ## Pointers
 
 - `vh-agent-harness guide` — dynamic, state-aware operating manual (authority).

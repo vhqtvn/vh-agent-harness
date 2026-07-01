@@ -104,6 +104,22 @@ The four selection fields and what they mean (implemented in
 cluster without switching preset; reach for `overlays:` only as an expert
 override to force-render a pack regardless of capability resolution.
 
+### Shipped overlay packs
+
+Besides project packs you author under `.vh-agent-harness/overlays/`, one
+overlay pack ships **embedded in the binary**: `release` — the tag-driven
+`releaser` workflow (the first embedded pack). It is selected either way and
+the two paths converge:
+
+- `capabilities: [core/release]` — the explicit capability opt-in, OR
+- `overlays: [release]` — the expert-override pack selection.
+
+Selecting `core/release` also pulls the `core/gated-commit` cluster in via
+hard-dep closure (the releaser delegates to the gated-commit agents), so both
+selection paths render the same cluster. It renders into `.opencode/` on
+`update` exactly like a project-local pack, and is opt-in (a `minimal` profile
+that never names it renders nothing of it).
+
 ## Common tasks
 
 - **Install / adopt:** `vh-agent-harness install --name <Name> --slug <slug>`

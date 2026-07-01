@@ -155,6 +155,14 @@ func nextSteps(st harnessState) []string {
 				"resolves overlay agent permissions + delegateFrom edges from each active pack's "+
 				"permission-pack.jsonc. See `/harness` for the full recipe.")
 		}
+		steps = append(steps, "Choose your agent roster in .vh-agent-harness/vh-harness-profile.yml: "+
+			"`profile:` is the preset enum (`minimal`/`coordination`/`web` → the 8-agent baseline "+
+			"only; `supervised` → baseline + the gated-commit and debate clusters); `capabilities:` "+
+			"unions explicit capability IDs (e.g. `core/release`) onto the preset (adds, never replaces). "+
+			"`modules:` is deprecated — a non-empty `modules:` warns on every `update`/`doctor`, so "+
+			"migrate to `profile:` + `capabilities:`. The shipped `release` pack is selectable the same "+
+			"two ways: `capabilities: [core/release]` OR `overlays: [release]` (both converge). Run "+
+			"`vh-agent-harness update` after editing.")
 		if st.RuntimeBackend == "host-shell" || st.RuntimeBackend == "" {
 			steps = append(steps, "Runtime is host-shell (commands run on the host). To run in a container or via "+
 				"your own wrapper, edit .vh-agent-harness/run-shape.yml: `backend: docker_compose` (set compose_file/"+
