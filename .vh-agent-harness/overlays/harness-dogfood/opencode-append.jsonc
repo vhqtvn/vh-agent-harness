@@ -17,7 +17,7 @@
   // bit the release pack. This mirrors the 20 core agents and the release pack.
   "agent": {
     "harness-release-readiness": {
-      "description": "Harness release-readiness reporter (dogfood) — read-only orchestrator ABOVE the existing tag-driven releaser; answers 'is vh-agent-harness ready to hand off to releaser?' via a G1–G5 evidence checklist. Never tags/commits/pushes/edits.",
+      "description": "Harness release-readiness reporter (dogfood) — read-only orchestrator ABOVE the existing tag-driven releaser; answers 'is vh-agent-harness ready to hand off to releaser?' via a G0–G5 evidence checklist. Never tags/commits/pushes/edits.",
       "mode": "subagent",
       "color": "accent",
       "prompt": "{file:.opencode/agents/harness-release-readiness.md}",

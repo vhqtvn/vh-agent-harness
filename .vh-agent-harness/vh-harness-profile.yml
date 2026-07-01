@@ -1,6 +1,5 @@
 profile: supervised
-modules:
-    - core
+modules: []
 features:
     backlog: true
 overlays:
