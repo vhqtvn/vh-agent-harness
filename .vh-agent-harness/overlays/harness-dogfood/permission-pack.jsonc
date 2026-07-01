@@ -1,0 +1,32 @@
+{
+  // harness-dogfood overlay pack (PROJECT-LOCAL / dogfood) — self-describing
+  // permission descriptor for the `harness-release-readiness` agent. Read by the
+  // Go-native permission emitter (internal/permconfig Emit, via LoadPacks over
+  // the materialized .opencode/sys-scripts/permission-packs/harness-dogfood.jsonc).
+  // The emitter overwrites the agent's permission.bash/task blocks
+  // authoritatively from this descriptor; the opencode-append.jsonc placeholders
+  // are discarded.
+  //
+  // Surface:
+  //   - readonly + git_readonly allowed (discover tags/commits/sha + read
+  //     templates/migrations/, guide.go, README.agent.md, .goreleaser.yml).
+  //   - gate DENIED: the readiness reporter is NOT part of the gated-commit
+  //     protocol and never calls commit-gate.sh. It performs NO mutation — no
+  //     tag, no commit, no push, no edit. The devSh group is DENIED too: it has
+  //     no sanctioned wrapper to invoke (unlike the releaser).
+  //   - wildcard DENIED: no arbitrary commands.
+  //   - task {"*":"deny"}: accepts no downstream delegations — it is a leaf
+  //     reporter that emits one structured report and stops.
+  //   - delegateFrom [build, coordination, project-coordinator]: those three
+  //     orchestrators may delegate a readiness check to this agent.
+  //   - NO gateExempt: this agent is read-only and never delegates to the
+  //     committer, so the validate rule (gate key present + no gateExempt) is
+  //     satisfied by carrying `gate: deny` and omitting `gateExempt`.
+  "agents": {
+    "harness-release-readiness": {
+      "location": { "wildcard": "deny", "readonly": "allow", "git_readonly": "allow", "gate": "deny", "devSh": "deny" },
+      "task": { "*": "deny" },
+      "delegateFrom": ["build", "coordination", "project-coordinator"]
+    }
+  }
+}

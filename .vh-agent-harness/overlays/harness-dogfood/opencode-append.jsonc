@@ -1,0 +1,30 @@
+{
+  // harness-dogfood overlay pack (PROJECT-LOCAL / dogfood) — agent metadata for
+  // `harness-release-readiness`. Permission content (permission.bash /
+  // permission.task) for this agent is emitted by the Go-native permission
+  // emitter (internal/permconfig), which reads this pack's permission-pack.jsonc
+  // (materialized under .opencode/sys-scripts/permission-packs/harness-dogfood.jsonc)
+  // and overwrites the permission block authoritatively. The EMPTY placeholder
+  // objects below let a plain deep-merge produce a structurally-valid
+  // `agent.harness-release-readiness` block with a `permission` object the
+  // emitter then overwrites — they intentionally carry no real permission
+  // decisions (do not edit permissions here; edit permission-pack.jsonc).
+  //
+  // CRITICAL — prompt form: the `prompt` field MUST be the {file:...} reference
+  // form (NOT a bare path). The render validator's promptFileRefRe
+  // (internal/cli/ref_validate.go, anchored to ^\{file:(.+)\}$) skips bare-path
+  // literals entirely, bypassing prompt-file validation — the A-F1 block that
+  // bit the release pack. This mirrors the 20 core agents and the release pack.
+  "agent": {
+    "harness-release-readiness": {
+      "description": "Harness release-readiness reporter (dogfood) — read-only orchestrator ABOVE the existing tag-driven releaser; answers 'is vh-agent-harness ready to hand off to releaser?' via a G1–G5 evidence checklist. Never tags/commits/pushes/edits.",
+      "mode": "subagent",
+      "color": "accent",
+      "prompt": "{file:.opencode/agents/harness-release-readiness.md}",
+      "permission": {
+        "bash": { "__placeholder__": "deny" },
+        "task": { "__placeholder__": "deny" }
+      }
+    }
+  }
+}

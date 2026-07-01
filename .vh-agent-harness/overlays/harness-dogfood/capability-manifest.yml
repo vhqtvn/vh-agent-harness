@@ -1,0 +1,25 @@
+# Capability manifest for the `harness-dogfood` overlay pack — a PROJECT-LOCAL
+# (dogfood) pack that ships the `harness-release-readiness` agent for THIS repo
+# (vh-agent-harness). It is the second overlay pack to ship and the first
+# project-local one; it exercises the project-pack discovery path
+# (`internal/cli/profile.go` `discoverPackContributions` via `OpenPackFor`)
+# against an embedded-pack hard_dep closure.
+#
+# Manifest id grammar: `namespace/name` (the catalog regex
+# `^[a-z][a-z0-9-]*/[a-z][a-z0-9-]*$` requires the slash). The pack DIRECTORY is
+# `harness-dogfood`; the capability ID is `project/harness-dogfood`. The
+# `project/` namespace marks this as repo-local dogfood (NOT generic core and
+# NOT a candidate for promotion into `templates/core/`).
+#
+# Selecting this capability (via `capabilities: [project/harness-dogfood]` OR
+# `overlays: [harness-dogfood]`) causes the resolver to pull this pack's cluster
+# AND, through the hard_dep below, the `core/release` cluster (the existing
+# tag-driven `releaser`), which in turn pulls `core/gated-commit` transitively.
+# The readiness agent is an orchestrator ABOVE the releaser: it answers "is this
+# repo ready to hand off to the releaser?" and never tags/commits/pushes itself.
+id: project/harness-dogfood
+provides:
+  - harness-release-readiness
+hard_deps:
+  - core/release
+optional_deps: []
