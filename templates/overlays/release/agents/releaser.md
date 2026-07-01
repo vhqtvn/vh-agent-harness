@@ -213,6 +213,11 @@ configured or exits non-zero, refuse (`wrapper_result.ok=false`,
 `wrapper_result.error=<reason>`, `tag_pushed=false`) — do NOT fall back to raw
 git.
 
+> **Wrapper is project-supplied.** The `scripts/release-tag.sh` path above is a
+> convention, not a file this harness ships. The wrapper is operator-configured
+> per project (it does not exist in this or any default repo), and the agent
+> refuses when it is absent — there is no fallback to raw git.
+
 ---
 
 ## Delegation edges

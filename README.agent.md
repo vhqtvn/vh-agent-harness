@@ -88,6 +88,22 @@ real target locations.
 Do **not** edit: `lineage.yml` (binary-owned), `AGENTS.core.md` (managed
 compose source), or anything under `.opencode/` that is platform_managed.
 
+### `vh-harness-profile.yml` field contract
+
+The four selection fields and what they mean (implemented in
+`internal/cli/profile.go`):
+
+| Field | What it does |
+| --- | --- |
+| `profile:` | Enum preset. `minimal` / `coordination` / `web` → baseline-only (the 8 universal agents); `supervised` → baseline + `core/gated-commit` + `core/debate` (the gated-commit and debate clusters). Unknown enum value → baseline-only (safe default). |
+| `capabilities:` | Explicit opt-in. A list of capability IDs (e.g. `core/release`) **unions onto** the `profile:` preset — it adds, never replaces. So `profile: minimal` + `capabilities: [core/debate]` = baseline + debate. |
+| `overlays:` | Expert-override pack selection (e.g. `overlays: [release]`). Renders the named pack(s) directly; capability IDs implied by a listed pack's manifest are also folded into the resolver selection, so the two paths converge. |
+| `modules:` | **Deprecated.** A non-empty `modules:` list emits a one-line warning on every render (update/doctor/inventory) nudging migration to `profile:` + `capabilities:`. Still parsed for backward compat (existing profiles keep working); the values carry no effect. |
+
+`profile:` is the normal knob. Reach for `capabilities:` when you want one extra
+cluster without switching preset; reach for `overlays:` only as an expert
+override to force-render a pack regardless of capability resolution.
+
 ## Common tasks
 
 - **Install / adopt:** `vh-agent-harness install --name <Name> --slug <slug>`

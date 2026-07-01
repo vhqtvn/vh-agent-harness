@@ -10,8 +10,6 @@
 # modules/overlays/features in later slices; the schema
 # (internal/schema/harness_profile.go) is the contract.
 profile: minimal
-modules:
-  - core
 features:
   backlog: true
 overlays: []

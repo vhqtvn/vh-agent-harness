@@ -410,10 +410,12 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	}
 	renderAnswers = mergeRenderAnswers(renderAnswers, capAnswers)
 	// Phase 5 modules deprecation: warn (to the swappable profileDeprecationSink)
-	// when the LIVE profile still carries a non-empty `modules:` list. Emitted
-	// here so it fires on BOTH update (seamApply -> renderSeamStaging) and doctor
-	// (checkManagedDrift -> renderSeamStaging). No-op on greenfield (no live
-	// profile yet) so the seeding render stays quiet.
+	// when the LIVE profile still carries a non-empty `modules:` list. Because it
+	// lives here INSIDE renderSeamStaging (the shared render path), it fires on
+	// EVERY render path that sees a live profile with modules — seamApply
+	// (install/update), doctor's managed-drift re-render, and inventory/diff — so
+	// the operator sees the migration nudge from whichever path they run. No-op on
+	// greenfield (no live profile yet) so the seeding render stays quiet.
 	emitModulesDeprecationWarning(target)
 	if err := renderer.Render(staging, substrate.RenderSpec{
 		TemplateSource: corpus.CoreDir,

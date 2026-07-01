@@ -7,11 +7,13 @@ package overlay
 // rendering, the JSONC deep-merge edge cases, or the callable-graph append is
 // caught at the package level rather than only through an end-to-end seam run.
 //
-// PACK FIXTURE POLICY (2026-06-25 pre-publish clearance): the harness ships NO
-// overlay packs (web-overlay was relocated to a non-shipped adoption reference
-// under docs/adoption-examples/web/). KnownPacks therefore returns an empty
-// slice and OpenPack fails closed for every name. To keep exercising the Pack
-// API + merge/render contract without depending on a shipped pack, every
+// PACK FIXTURE POLICY (2026-06-25 pre-publish clearance, updated 2026-07-01):
+// the harness ships ONE embedded overlay pack — `release` (Phase-3
+// capability-installer overlay-integration reference implementation, the first
+// shipped pack). web-overlay was relocated to a non-shipped adoption reference
+// under docs/adoption-examples/web/, so it is NOT a shipped pack. KnownPacks
+// therefore returns ["release"]. To keep exercising the Pack API + merge/render
+// contract against a richer shape than the single shipped pack carries, every
 // pack-touching test below builds a SYNTHETIC pack from testing/fstest.MapFS
 // (mirroring the on-disk layout a real pack would ship) and constructs a *Pack
 // directly. The merge/render/lineage logic under test is identical whether the
@@ -31,12 +33,13 @@ import (
 )
 
 // knownPackNames is the sorted list of overlay packs shipped under
-// templates/overlays. As of the 2026-06-25 pre-publish clearance the harness
-// ships NO packs (web-overlay relocated to docs/adoption-examples/web/), so
-// KnownPacks must return an empty set. The web/ adoption reference lives under
-// docs/adoption-examples/ and is NOT a shipped pack, so it is deliberately
-// absent here.
-var knownPackNames = []string(nil)
+// templates/overlays. As of the Phase-3 capability-installer overlay
+// integration (2026-07-01) the harness ships the `release` pack as its first
+// embedded overlay pack, so KnownPacks returns ["release"]. web-overlay remains
+// relocated to docs/adoption-examples/web/ and is NOT a shipped pack, so it is
+// deliberately absent here. (See TestKnownPacks_ShipsReleasePack for the
+// live assertion that pins this fixture to reality.)
+var knownPackNames = []string{"release"}
 
 // synthWebStyleFS builds an in-memory fs.FS that mirrors the on-disk layout the
 // real web-overlay pack shipped: agent/command/skill UNIT files plus the three

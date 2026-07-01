@@ -211,7 +211,7 @@ func TestModulesDeprecationWarning(t *testing.T) {
 		{name: "nil modules no warning", modules: nil, empty: true},
 		{name: "empty modules no warning", modules: []string{}, empty: true},
 		{name: "single entry warns", modules: []string{"core"}, want: "seam: warning: vh-harness-profile.yml `modules:` (1 entry) is deprecated;"},
-		{name: "multiple entries warn with count", modules: []string{"core", "extra"}, want: "seam: warning: vh-harness-profile.yml `modules:` (2 entry) is deprecated;"},
+		{name: "multiple entries warn with count", modules: []string{"core", "extra"}, want: "seam: warning: vh-harness-profile.yml `modules:` (2 entries) is deprecated;"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

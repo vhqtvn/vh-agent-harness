@@ -371,8 +371,13 @@ func resolveCapabilityAnswers(target string) (answers map[string]string, renderP
 	// Selection = preset(profile) ∪ explicit(capabilities:) ∪ capabilities
 	// implied by overlays:-listed packs that declare a manifest.
 	explicit := readProfileSelection(target) // preset(profile) ∪ capabilities:
+	// activeOverlays re-reads + re-parses the profile YAML, so read it ONCE and
+	// reuse for both the overlay-implied capability path and the explicit
+	// render-packs list below (no behavior change; just avoids the double
+	// disk read).
+	activeList := activeOverlays(target)
 	overlayImplied := make([]resolver.CapabilityID, 0)
-	for _, name := range activeOverlays(target) {
+	for _, name := range activeList {
 		if id, ok := packToID[name]; ok {
 			overlayImplied = append(overlayImplied, id)
 		}
@@ -395,7 +400,7 @@ func resolveCapabilityAnswers(target string) (answers map[string]string, renderP
 	// list). Preserving explicit-list order keeps existing pack-rendering
 	// semantics (shadowing guard sees packs in profile order); the implied
 	// additions are sorted for determinism.
-	explicitList := activeOverlays(target)
+	explicitList := activeList
 	seen := make(map[string]bool, len(explicitList)+len(survivors))
 	packs := make([]string, 0, len(explicitList)+len(survivors))
 	for _, name := range explicitList {
@@ -554,20 +559,26 @@ func modulesDeprecationWarning(modules []string) string {
 	if len(modules) == 0 {
 		return ""
 	}
+	noun := "entry"
+	if len(modules) > 1 {
+		noun = "entries"
+	}
 	return fmt.Sprintf(
-		"seam: warning: vh-harness-profile.yml `modules:` (%d entry) is deprecated; "+
+		"seam: warning: vh-harness-profile.yml `modules:` (%d %s) is deprecated; "+
 			"use the `profile:` enum (presets) and `capabilities:` (opt-in union) instead.\n",
-		len(modules),
+		len(modules), noun,
 	)
 }
 
 // liveProfileModules reads the `modules:` list from the LIVE S3 profile only
 // (NOT the embedded default), returning nil when the live profile is absent.
-// This is deliberate: the embedded default still ships `modules: [core]`, and we
-// do NOT want to warn during the greenfield seeding render (install) where the
-// live profile does not yet exist — only on a real update/doctor where the
-// operator's live profile still carries a now-meaningless `modules:`. A
-// malformed profile yields nil (doctor reports the schema error separately).
+// This keeps the greenfield seeding render (install) quiet: with no live
+// profile yet there is nothing to read, so the warning never fires. The warning
+// surfaces only on a real update/doctor where the operator's live profile still
+// carries a now-meaningless `modules:`. (The embedded default no longer ships a
+// `modules:` block — it was removed once `profile:` presets replaced it — so
+// fresh greenfield profiles never carry the deprecated field.) A malformed
+// profile yields nil (doctor reports the schema error separately).
 func liveProfileModules(target string) []string {
 	raw, err := os.ReadFile(filepath.Join(target, harnessProfileName))
 	if err != nil {

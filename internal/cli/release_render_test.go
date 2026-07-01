@@ -317,3 +317,243 @@ func TestDiscoverPackContributions_NoManifestProjectPackShadowsEmbeddedWholly(t 
 		t.Errorf("Resolve([core/release]) must error on the shadowed-away capability (unknown id under Model X)")
 	}
 }
+
+// TestDiscoverPackContributions_ManifestProjectPackReplacesEmbedded is the
+// symmetric Case-1 companion to
+// TestDiscoverPackContributions_NoManifestProjectPackShadowsEmbeddedWholly
+// (Case-2): a project-local `release` pack WITH a capability-manifest.yml
+// REPLACES the embedded `release` pack's manifest WHOLLY (SourceProject wins)
+// end-to-end through discovery + MergeCatalogs. The embedded core/release
+// contribution is DROPPED and the project's own manifest survives.
+//
+// Where Case-2 (no manifest) drops the capability entirely (overlay-only pack),
+// this Case-1 has the project pack SUBSTITUTE its own capability (different id +
+// provides), so the merged catalog carries the project cap, not the embedded
+// one. This is the end-to-end discovery-layer mirror of the resolver-layer
+// TestResolveContributions_ProjectShadowsEmbeddedByPackName (which covers the
+// same project-over-embedded contract at the ResolveContributions UNIT layer
+// only).
+func TestDiscoverPackContributions_ManifestProjectPackReplacesEmbedded(t *testing.T) {
+	root := t.TempDir()
+	// Project `release` pack WITH a capability-manifest.yml declaring a DIFFERENT
+	// capability (project/release, provides project-releaser). The pack NAME
+	// (`release`) shadows the embedded pack; the project manifest REPLACES it.
+	packDir := filepath.Join(root, filepath.FromSlash(overlay.ProjectOverlaysSubdir), "release")
+	if err := os.MkdirAll(filepath.Join(packDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projManifest := []byte("id: project/release\nprovides:\n  - project-releaser\nhard_deps:\n  - core/gated-commit\noptional_deps: []\n")
+	if err := os.WriteFile(filepath.Join(packDir, "capability-manifest.yml"), projManifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "agents", "releaser.md"), []byte("# project releaser\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	contribs, err := discoverPackContributions(root)
+	if err != nil {
+		t.Fatalf("discoverPackContributions: %v", err)
+	}
+	// Exactly ONE `release` contribution survives, and it is the PROJECT one.
+	var releaseContrib *resolver.PackContribution
+	releaseCount := 0
+	for i := range contribs {
+		if contribs[i].Pack == "release" {
+			releaseCount++
+			releaseContrib = &contribs[i]
+		}
+		if contribs[i].Manifest.ID == "core/release" {
+			t.Errorf("embedded core/release must be DROPPED when a project `release` pack with a manifest shadows by name (SourceProject wins); got %+v", contribs[i])
+		}
+	}
+	if releaseCount != 1 {
+		t.Fatalf("want exactly 1 `release` contribution (project wins, embedded dropped); got %d (%v)", releaseCount, contribs)
+	}
+	if releaseContrib.Source != resolver.SourceProject {
+		t.Errorf("surviving release contribution source: got %v, want project", releaseContrib.Source)
+	}
+	if releaseContrib.Manifest.ID != "project/release" {
+		t.Errorf("surviving release contribution manifest id: got %q, want project/release", releaseContrib.Manifest.ID)
+	}
+	if len(releaseContrib.Manifest.Provides) != 1 || releaseContrib.Manifest.Provides[0] != "project-releaser" {
+		t.Errorf("surviving release contribution provides: got %v, want [project-releaser]", releaseContrib.Manifest.Provides)
+	}
+
+	// Consequence at the catalog layer: core/release is ABSENT (embedded dropped
+	// by project-wins shadowing), project/release is PRESENT. Selecting
+	// core/release is now an unknown-id error; selecting project/release still
+	// pulls core/gated-commit via the hard-dep declared in the project manifest.
+	merged, err := resolver.MergeCatalogs(resolver.CoreCatalog(), contribs)
+	if err != nil {
+		t.Fatalf("MergeCatalogs: %v", err)
+	}
+	if _, ok := merged.Get("core/release"); ok {
+		t.Errorf("merged catalog must NOT carry core/release (project pack replaced it)")
+	}
+	if _, ok := merged.Get("project/release"); !ok {
+		t.Errorf("merged catalog must carry project/release (project pack's manifest wins)")
+	}
+	if _, err := resolver.Resolve([]resolver.CapabilityID{"core/release"}, merged); err == nil {
+		t.Errorf("Resolve([core/release]) must error (embedded dropped by project-wins; unknown id)")
+	}
+	set, err := resolver.Resolve([]resolver.CapabilityID{"project/release"}, merged)
+	if err != nil {
+		t.Fatalf("Resolve([project/release]): %v", err)
+	}
+	if !set.Has("core/gated-commit") {
+		t.Errorf("project/release closure must still pull core/gated-commit (hard_dep in project manifest); got %v", set.All())
+	}
+}
+
+// TestSeamRender_ReleasePathsByteConverge strengthens the convergence invariant
+// (TestSeamRender_ReleaseViaOverlaysConvergesWithCapabilities proves both paths
+// satisfy the same property block) by BYTE-COMPARING the two rendered trees.
+// Rendering once via `capabilities: [core/release]` and once via
+// `overlays: [release]` must produce a byte-identical opencode.jsonc, the same
+// set of rendered paths, and byte-identical agent files. If the two selection
+// paths genuinely converge inside resolveCapabilityAnswers, no downstream render
+// step can tell them apart, so the output trees must be identical.
+func TestSeamRender_ReleasePathsByteConverge(t *testing.T) {
+	// Path A: select release via capabilities.
+	rootA := t.TempDir()
+	seamInstallInto(t, rootA)
+	writeProfile(t, rootA, releaseViaCapabilitiesProfile)
+	if _, err := seamUpdateOut(t, rootA); err != nil {
+		t.Fatalf("update path A (capabilities): %v", err)
+	}
+	// Path B: select release via overlays.
+	rootB := t.TempDir()
+	seamInstallInto(t, rootB)
+	writeProfile(t, rootB, releaseViaOverlaysProfile)
+	if _, err := seamUpdateOut(t, rootB); err != nil {
+		t.Fatalf("update path B (overlays): %v", err)
+	}
+
+	treeA := collectRenderedTree(t, rootA)
+	treeB := collectRenderedTree(t, rootB)
+
+	// 1. Set-equality of rendered paths.
+	if len(treeA.paths) != len(treeB.paths) {
+		t.Errorf("rendered path count differs: capabilities=%d overlays=%d", len(treeA.paths), len(treeB.paths))
+	}
+	onlyA, onlyB := setDiff(treeA.paths, treeB.paths)
+	if len(onlyA) != 0 {
+		t.Errorf("paths rendered ONLY via capabilities (missing from overlays path): %v", onlyA)
+	}
+	if len(onlyB) != 0 {
+		t.Errorf("paths rendered ONLY via overlays (missing from capabilities path): %v", onlyB)
+	}
+
+	// 2. releaser.md must be present in BOTH (sanity on the convergence subject).
+	releaserRel := filepath.FromSlash(".opencode/agents/releaser.md")
+	if _, ok := treeA.files[releaserRel]; !ok {
+		t.Errorf("releaser.md must render via capabilities path")
+	}
+	if _, ok := treeB.files[releaserRel]; !ok {
+		t.Errorf("releaser.md must render via overlays path")
+	}
+
+	// 3. opencode.jsonc must be byte-identical (the headline convergence artifact).
+	if !bytesEqual(treeA.files["opencode.jsonc"], treeB.files["opencode.jsonc"]) {
+		t.Errorf("opencode.jsonc must be byte-identical across the two selection paths (capabilities vs overlays)")
+	}
+
+	// 4. Every shared agent file must be byte-identical.
+	agentsDir := filepath.FromSlash(".opencode/agents")
+	for rel, dataA := range treeA.files {
+		if !strings.HasPrefix(rel, agentsDir+string(filepath.Separator)) {
+			continue
+		}
+		dataB, ok := treeB.files[rel]
+		if !ok {
+			continue // already reported via set-equality above
+		}
+		if !bytesEqual(dataA, dataB) {
+			t.Errorf("agent file %q must be byte-identical across the two selection paths", rel)
+		}
+	}
+}
+
+// collectRenderedTree walks root and returns (a) the sorted set of relative
+// paths and (b) a map of relative path -> file content for every file that
+// landed under root after a seam install+update. Used for byte-comparing two
+// independently-rendered trees.
+func collectRenderedTree(t *testing.T, root string) struct {
+	paths []string
+	files map[string][]byte
+} {
+	t.Helper()
+	out := struct {
+		paths []string
+		files map[string][]byte
+	}{files: map[string][]byte{}}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		out.files[rel] = data
+		out.paths = append(out.paths, rel)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	sortStrings(out.paths)
+	return out
+}
+
+// setDiff returns the elements in a but not b (onlyA) and in b but not a
+// (onlyB). Inputs are treated as sets; duplicates are collapsed.
+func setDiff(a, b []string) (onlyA, onlyB []string) {
+	bs := make(map[string]bool, len(b))
+	for _, x := range b {
+		bs[x] = true
+	}
+	as := make(map[string]bool, len(a))
+	for _, x := range a {
+		as[x] = true
+		if !bs[x] {
+			onlyA = append(onlyA, x)
+		}
+	}
+	for _, x := range b {
+		if !as[x] {
+			onlyB = append(onlyB, x)
+		}
+	}
+	return onlyA, onlyB
+}
+
+// sortStrings sorts s in place (selection sort — lists here are small).
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1] > s[j]; j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
+	}
+}
+
+// bytesEqual is a small helper so the test does not need to import bytes solely
+// for the comparison.
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

@@ -257,9 +257,11 @@ func TestSeamUpdate_PreservesOwnedReconcilesArmed(t *testing.T) {
 	}
 
 	// User edits the armed file to a CLEAN mergeable state: profile=supervised
-	// (valid enum), modules=[web] (platform adds core), backlog=true. After update
-	// the reconciler should keep supervised/web/backlog AND merge in the platform's
-	// core module (union-dedup) -> armed-merged. NOTE: overlays:[] — the seam is
+	// (valid enum), modules=[web] (deprecated; the platform default no longer
+	// ships a `modules:` block — removed once `profile:` presets replaced it — so
+	// the append-only reconcile union contributes nothing and the user's [web]
+	// survives as-is), backlog=true. After update the reconciler should keep
+	// supervised/web/backlog -> armed-merged. NOTE: overlays:[] — the seam is
 	// now fail-closed on a profile-listed overlay that won't open (W9/Q5), so a
 	// fixture must not declare a non-existent pack (the old web-overlay was
 	// relocated out of the shipped set; see overlay.KnownPacks).
@@ -294,7 +296,11 @@ func TestSeamUpdate_PreservesOwnedReconcilesArmed(t *testing.T) {
 		t.Errorf("owned file NOT preserved byte-for-byte across update")
 	}
 
-	// Armed file reconciled: supervised/web retained, core merged in.
+	// Armed file reconciled: supervised/web/backlog retained. The platform default
+	// no longer ships a `modules:` block (deprecated in Phase 5 and removed from
+	// the embedded default), so the armed reconcile's append-only union contributes
+	// nothing to `modules:` — the user's `modules: [web]` survives as-is (the
+	// deprecated field is preserved through reconcile, not added to).
 	armedAfter, err := os.ReadFile(filepath.Join(root, ".vh-agent-harness/vh-harness-profile.yml"))
 	if err != nil {
 		t.Fatalf("read armed after: %v", err)
@@ -304,9 +310,6 @@ func TestSeamUpdate_PreservesOwnedReconcilesArmed(t *testing.T) {
 		if !strings.Contains(armedStr, want) {
 			t.Errorf("armed reconcile lost user value %q; got:\n%s", want, armedStr)
 		}
-	}
-	if !strings.Contains(armedStr, "core") {
-		t.Errorf("armed reconcile did not merge platform module 'core'; got:\n%s", armedStr)
 	}
 	// Doctor must be HEALTHY now (armed is schema-valid after reconcile).
 	docOut := seamDoctorOut(t, root)
