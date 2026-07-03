@@ -40,13 +40,33 @@ func validDecision(d Decision) bool {
 // (build, coordination, project-coordinator, docs-steward) omit the gate key
 // entirely so OpenCode's deriveSubagentSessionPermission does not bleed a
 // parent gate deny into a committer subagent session.
+//
+// Edit is the flat edit-tool decision emitted for the agent when EditOverrides
+// is empty (the common case — every agent except the committer). When
+// EditOverrides is non-empty, edit is emitted as an OBJECT map
+// {"<pattern>": "<action>"}: the "*" entry carries the Edit decision (typically
+// Deny) FIRST, then each EditRule override LAST. OpenCode evaluates object-form
+// edit with findLast semantics (permission/evaluate.ts), so a path matching a
+// narrow allow override resolves to allow while everything else denies. This is
+// how the committer gets Write access to ONE scoped message-file path
+// (tmp/commit-gate-message/**) while edit stays denied everywhere else.
 type LocationRule struct {
-	Wildcard    Decision // "*" entry
-	Readonly    Decision // readonly group decision
-	GitReadonly Decision // git_readonly group decision
-	Gate        Decision // gate group decision (only emitted when HasGate)
-	HasGate     bool     // whether the gate key is present
-	DevSh       Decision // "vh-agent-harness *" entry
+	Wildcard      Decision   // "*" entry
+	Readonly      Decision   // readonly group decision
+	GitReadonly   Decision   // git_readonly group decision
+	Gate          Decision   // gate group decision (only emitted when HasGate)
+	HasGate       bool       // whether the gate key is present
+	DevSh         Decision   // "vh-agent-harness *" entry
+	Edit          Decision   // flat edit decision; also the "*" action when EditOverrides is non-empty
+	EditOverrides []EditRule // when non-empty, edit is emitted as an object map (deny-* first, overrides last)
+}
+
+// EditRule is one pattern→decision pair in an agent's object-form edit block.
+// Ordering is load-bearing: overrides are appended AFTER the "*" deny so that
+// OpenCode's findLast evaluation picks the narrow allow for matching paths.
+type EditRule struct {
+	Pattern  string
+	Decision Decision
 }
 
 // TaskEntry is one target→decision pair in an agent's permission.task block.

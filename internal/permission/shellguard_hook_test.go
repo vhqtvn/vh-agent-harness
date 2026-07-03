@@ -445,6 +445,41 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			cmd:  `.opencode/scripts/commit-gate.sh acquire --paths-file .git/commit-gate/paths-x --message-file .git/commit-gate/msg-x --session-alias A`,
 			want: Allow,
 		},
+		{
+			// Q1a safety (CHANGE 1): `git --no-pager commit` puts `--no-pager`
+			// BETWEEN `git` and the mutation verb, so the git-mutation-bypass
+			// regex (which requires `git\s+(add|commit|...)`) does NOT match at
+			// scan #1 — a real bypass. normalizeGitGlobalFlags strips the flag
+			// on the re-scan reconstruction so the mutation is re-caught. Must
+			// be DENY (mutation bypass closed).
+			name: "git --no-pager commit denied (normalizeGitGlobalFlags + scan #2)",
+			cmd:  `git --no-pager commit -m x`,
+			want: Deny,
+		},
+		{
+			// Q1a safety: --paging=no is the documented synonym for --no-pager;
+			// it must be stripped the same way so the mutation is re-caught.
+			name: "git --paging=no push denied (normalizeGitGlobalFlags synonym)",
+			cmd:  `git --paging=no push origin main`,
+			want: Deny,
+		},
+		{
+			// Q1b prompt fix (CHANGE 2): `git --no-pager log` is a read-only
+			// invocation whose `--no-pager` flag sits between `git` and `log`.
+			// The config table now carries `git --no-pager log *` (git_readonly
+			// group, allow) so the allowlist matches the ORIGINAL tokens and no
+			// permission prompt fires. Must be ALLOW.
+			name: "git --no-pager log allowed (config-table readonly match)",
+			cmd:  `git --no-pager log -1`,
+			want: Allow,
+		},
+		{
+			// Q1b prompt fix: `git --no-pager show` is likewise a read-only
+			// form matched by the new `git --no-pager show *` config entry.
+			name: "git --no-pager show allowed (config-table readonly match)",
+			cmd:  `git --no-pager show HEAD`,
+			want: Allow,
+		},
 	}
 	for _, c := range gitCases {
 		c := c

@@ -53,6 +53,13 @@ func Emit(input []byte, packs []Pack, features Features) ([]byte, error) {
 		if _, ok := perm["bash"]; ok {
 			perm["bash"] = computeBashBlock(locations["default"], "default", features)
 		}
+		// Overwrite the top-level edit decision from the canonical tables.
+		// The "default" location carries flat edit (Ask) and no overrides, so
+		// this is a no-op byte-wise versus the template scaffold — but owning
+		// it here means doctor compares edit for the top-level block too.
+		if _, ok := perm["edit"]; ok {
+			perm["edit"] = computeEditBlock(locations["default"])
+		}
 	}
 
 	// present is the set of agents that have a block in the rendered config.
@@ -89,6 +96,12 @@ func Emit(input []byte, packs []Pack, features Features) ([]byte, error) {
 		}
 		if _, ok := perm["task"]; ok {
 			perm["task"] = computeTaskBlock(tasks[name], present)
+		}
+		// Overwrite the agent's edit decision from the canonical tables. Every
+		// agent emits flat edit EXCEPT the committer, whose EditOverrides
+		// produces the object form { "*": "deny", "tmp/...": "allow" }.
+		if _, ok := perm["edit"]; ok {
+			perm["edit"] = computeEditBlock(rule)
 		}
 	}
 
@@ -213,6 +226,30 @@ func computeBashBlock(rule LocationRule, locationName string, features Features)
 	return om
 }
 
+// computeEditBlock renders the permission.edit value for one location. When
+// EditOverrides is empty, edit is flat: a single decision string ("allow",
+// "deny", "ask") — the common case for every agent except the committer. When
+// EditOverrides is non-empty, edit is an OBJECT map {"<pattern>": "<action>"}
+// consumed by OpenCode with findLast semantics (permission/evaluate.ts): the
+// "*" entry (carrying the Edit decision, typically Deny) is emitted FIRST and
+// each override LAST, so a path matching a narrow allow resolves to allow while
+// everything else denies. This is how the committer gets Write access to ONE
+// scoped message-file path (tmp/commit-gate-message/**) and nothing else.
+func computeEditBlock(rule LocationRule) any {
+	if len(rule.EditOverrides) == 0 {
+		return string(rule.Edit)
+	}
+	om := newOrderedMap()
+	// Deny-* FIRST. findLast picks the LAST matching rule, so the broad deny
+	// must precede every narrow allow.
+	om.set("*", string(rule.Edit))
+	// Narrow allows LAST — they override the deny for matching paths.
+	for _, o := range rule.EditOverrides {
+		om.set(o.Pattern, string(o.Decision))
+	}
+	return om
+}
+
 // computeTaskBlock renders the permission.task orderedMap in insertion order
 // (the resolver's Object.entries order). The core tables encode this order
 // explicitly via []TaskEntry slices; overlay pack tasks are parsed with "*"
@@ -259,6 +296,9 @@ func validate(locations map[string]LocationRule, tasks map[string][]TaskEntry, g
 		}
 		if !validDecision(rule.DevSh) {
 			return fmt.Errorf("agent %q: devSh decision %q invalid", name, rule.DevSh)
+		}
+		if !validDecision(rule.Edit) {
+			return fmt.Errorf("agent %q: edit decision %q invalid", name, rule.Edit)
 		}
 		if gateExempt[name] {
 			if rule.HasGate {
@@ -459,6 +499,30 @@ func parseLocation(m map[string]any) LocationRule {
 	}
 	if v, ok := m["devSh"].(string); ok {
 		rule.DevSh = Decision(v)
+	}
+	if v, ok := m["edit"].(string); ok {
+		rule.Edit = Decision(v)
+	} else {
+		// Overlay packs that omit edit default to Deny (the corpus default for
+		// the majority of agents). Core tables always set Edit explicitly.
+		rule.Edit = Deny
+	}
+	if overrides, ok := m["editOverrides"].(map[string]any); ok {
+		// Preserve insertion determinism: sort override patterns alphabetically
+		// (Go's json.Unmarshal into map[string]any loses key order). Core
+		// tables set EditOverrides as a Go slice (order preserved); this branch
+		// only affects overlay-sourced overrides, where the committer's single
+		// override is the only realistic case.
+		keys := make([]string, 0, len(overrides))
+		for k := range overrides {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if d, ok := overrides[k].(string); ok {
+				rule.EditOverrides = append(rule.EditOverrides, EditRule{Pattern: k, Decision: Decision(d)})
+			}
+		}
 	}
 	return rule
 }

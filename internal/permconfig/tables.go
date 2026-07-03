@@ -47,6 +47,13 @@ var CommandGroups = []CommandGroup{
 		"sleep *",
 		"sed -n *",
 		".opencode/scripts/readonly-scripts.sh *",
+		// commit-gate.sh status is a PURE-READ metadata probe (cmd_status only
+		// reads lock/session metadata and emits JSON); it lives in readonly so
+		// ALL agents — including gate-exempt ones (build/coordination/
+		// project-coordinator/docs-steward) — get prompt-free lock checks. The
+		// mutation verbs (acquire/commit/release/heartbeat/revert/stage-message)
+		// stay in the gate group below = committer-only.
+		".opencode/scripts/commit-gate.sh status",
 	}},
 	{Name: "git_readonly", Commands: []string{
 		"git diff *",
@@ -61,6 +68,26 @@ var CommandGroups = []CommandGroup{
 		"git cat-file *",
 		"git show-ref *",
 		"git rev-parse *",
+		// `git --no-pager <sub>` forms: the `--no-pager` global flag sits between
+		// `git` and the subcommand, so the bare `git <sub> *` patterns above do
+		// NOT match (the matcher compares tokens positionally). These explicit
+		// forms kill the opencode permission prompt for the common
+		// `git --no-pager log` / `git --no-pager show` readonly invocations
+		// (config-table defense-in-depth). The mutation-bypass SAFETY closer for
+		// `git --no-pager commit` lives in shell-guard-core.js
+		// (normalizeGitGlobalFlags), not here.
+		"git --no-pager diff *",
+		"git --no-pager log *",
+		"git --no-pager show *",
+		"git --no-pager grep *",
+		"git --no-pager blame *",
+		"git --no-pager ls-tree *",
+		"git --no-pager status *",
+		"git --no-pager ls-files *",
+		"git --no-pager check-ignore *",
+		"git --no-pager cat-file *",
+		"git --no-pager show-ref *",
+		"git --no-pager rev-parse *",
 	}},
 	{Name: "gate", Commands: []string{
 		".opencode/scripts/commit-gate.sh acquire *",
@@ -69,7 +96,6 @@ var CommandGroups = []CommandGroup{
 		".opencode/scripts/commit-gate.sh heartbeat *",
 		".opencode/scripts/commit-gate.sh revert *",
 		".opencode/scripts/commit-gate.sh stage-message *",
-		".opencode/scripts/commit-gate.sh status",
 		"uuidgen",
 	}},
 }
@@ -88,32 +114,49 @@ var GroupNames = []string{"readonly", "git_readonly", "gate"}
 //
 // The committer is the ONLY agent with Gate=Allow (it commits through the
 // gate wrapper). Every other gate-present agent has Gate=Deny.
+//
+// Edit values mirror the corpus template's flat edit decisions EXACTLY so that
+// bringing edit under emitter ownership is a no-op for every agent except the
+// committer: default=ask, build=allow, docs-steward=allow, all others=deny.
+// The committer is the ONLY agent with EditOverrides, which widens edit to ONE
+// scoped path (tmp/commit-gate-message/**) so it can Write the commit message
+// file that acquire --message-file then consumes. Every other agent stays flat
+// edit; do NOT widen edit beyond this one path for any agent.
 var CoreLocationRules = map[string]LocationRule{
-	"default":             {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
-	"plan":                {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Ask},
-	"build":               {Wildcard: Ask, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Allow},  // gate-exempt
-	"coordination":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Allow}, // gate-exempt
-	"planner":             {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
-	"researcher":          {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
-	"project-coordinator": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Allow}, // gate-exempt
-	"debate":              {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny},
-	"debate-proposer":     {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny},
-	"debate-critic":       {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny},
-	"debate-synth":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny},
-	"solution-brief":      {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny},
-	"repo-explorer":       {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Ask},
-	"docs-steward":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Ask}, // gate-exempt
-	"commit-message":      {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
-	"commit-reviewer":     {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
-	"committer":           {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Allow, HasGate: true, DevSh: Deny},
-	"ship-review":         {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
+	"default":             {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Ask},
+	"plan":                {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Ask, Edit: Deny},
+	"build":               {Wildcard: Ask, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Allow, Edit: Allow}, // gate-exempt
+	"coordination":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Allow, Edit: Deny}, // gate-exempt
+	"planner":             {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	"researcher":          {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	"project-coordinator": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Allow, Edit: Deny}, // gate-exempt
+	"debate":              {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny, Edit: Deny},
+	"debate-proposer":     {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny, Edit: Deny},
+	"debate-critic":       {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny, Edit: Deny},
+	"debate-synth":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny, Edit: Deny},
+	"solution-brief":      {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny, Edit: Deny},
+	"repo-explorer":       {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Ask, Edit: Deny},
+	"docs-steward":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Ask, Edit: Allow}, // gate-exempt
+	"commit-message":      {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	"commit-reviewer":     {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	"committer": {
+		Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Allow, HasGate: true, DevSh: Deny,
+		// Object-form edit: deny-* FIRST, then the ONE scoped allow LAST. The
+		// committer authors its commit message via the Write tool at
+		// tmp/commit-gate-message/msg-${UUID}, which acquire --message-file
+		// consumes. findLast picks the narrow allow for that path; every other
+		// path denies. This is the ONLY object-form edit in the corpus.
+		Edit:          Deny,
+		EditOverrides: []EditRule{{Pattern: CommitGateMessageGlob, Decision: Allow}},
+	},
+	"ship-review": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
 	// Cluster leaves (commit-reviewer-a..d) — the corpus ships these as full
 	// agent blocks. They carry the leafBaseRule (deny wildcard, allow
 	// readonly/git_readonly, deny gate, allow devSh) and a deny-all task rule.
-	"commit-reviewer-a": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
-	"commit-reviewer-b": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
-	"commit-reviewer-c": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
-	"commit-reviewer-d": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
+	"commit-reviewer-a": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	"commit-reviewer-b": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	"commit-reviewer-c": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	"commit-reviewer-d": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
 }
 
 // GateExemptBase is the set of agents that must NOT carry a gate key in their
@@ -248,3 +291,12 @@ const BacklogCommand = "vh-agent-harness exec node .opencode/scripts/normalize-b
 // DevShCommand is the always-last entry in every bash block, keyed by the
 // "vh-agent-harness *" wildcard that matches the binary's own invocations.
 const DevShCommand = "vh-agent-harness *"
+
+// CommitGateMessageGlob is the ONE scoped edit-tool path the committer may
+// Write to. It is repo-relative (the edit tool passes path.relative(worktree,
+// filePath)) and uses the recursive ** glob. The committer authors its commit
+// message at tmp/commit-gate-message/msg-${UUID} via the Write tool, then
+// passes that path to commit-gate.sh acquire --message-file. tmp/ is gitignored
+// so the message file never enters the index. This is the ONLY edit widenning
+// in the corpus — do not add more without an explicit safety review.
+const CommitGateMessageGlob = "tmp/commit-gate-message/**"

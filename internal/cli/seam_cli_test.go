@@ -555,15 +555,22 @@ func TestSeamInstall_GateExemptAgentOmitsGateCommands(t *testing.T) {
 		t.Fatalf("unmarshal canonical opencode.jsonc: %v", err)
 	}
 
-	// build is gate-exempt → must NOT contain any commit-gate entries.
+	// build is gate-exempt → must NOT contain any commit-gate MUTATION entries.
+	// (.opencode/scripts/commit-gate.sh status is a pure-read metadata probe and
+	// lives in the readonly group, so build legitimately carries it with "allow"
+	// — Q2 split. Only mutation verbs stay gate-grouped.)
 	buildBash := doc.Agent["build"].Permission.Bash
 	if buildBash == nil {
 		t.Fatal("build agent permission.bash block is missing")
 	}
 	for cmd := range buildBash {
-		if strings.Contains(cmd, "commit-gate.sh") {
-			t.Errorf("build agent (gate-exempt) must NOT have gate command entries; found %q in its permission.bash", cmd)
+		if !strings.Contains(cmd, "commit-gate.sh") {
+			continue
 		}
+		if strings.HasSuffix(cmd, " status") {
+			continue // read-only status check; allowed for all agents
+		}
+		t.Errorf("build agent (gate-exempt) must NOT have gate mutation entries; found %q in its permission.bash", cmd)
 	}
 
 	// committer is the ONLY gate-enabled agent → must have commit-gate entries

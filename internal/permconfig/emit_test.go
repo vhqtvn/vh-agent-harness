@@ -14,6 +14,7 @@ const miniConfig = `{
   // MANAGED — canonicalized by vh-agent-harness permconfig emitter
   "$schema": "https://opencode.ai/config.json",
   "permission": {
+    "edit": "ask",
     "bash": {
       "__placeholder__": "deny"
     }
@@ -21,24 +22,28 @@ const miniConfig = `{
   "agent": {
     "build": {
       "permission": {
+        "edit": "allow",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
     },
     "committer": {
       "permission": {
+        "edit": "deny",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
     },
     "coordination": {
       "permission": {
+        "edit": "deny",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
     },
     "repo-explorer": {
       "permission": {
+        "edit": "deny",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
@@ -112,7 +117,7 @@ func TestEmit_OverlayCoexistsWithBacklog(t *testing.T) {
 		Name: "test-pack",
 		Agents: map[string]PackAgent{
 			"custom-agent": {
-				Location:     LocationRule{Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
+				Location:     LocationRule{Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
 				Task:         []TaskEntry{{"*", Deny}},
 				DelegateFrom: []string{"build", "coordination"},
 			},
@@ -122,18 +127,21 @@ func TestEmit_OverlayCoexistsWithBacklog(t *testing.T) {
 	configWithOverlay := strings.Replace(miniConfig,
 		`"repo-explorer": {
       "permission": {
+        "edit": "deny",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
     }`,
 		`"repo-explorer": {
       "permission": {
+        "edit": "deny",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
     },
     "custom-agent": {
       "permission": {
+        "edit": "deny",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
@@ -168,7 +176,7 @@ func TestEmit_DelegateFromEdges(t *testing.T) {
 		Name: "test-pack",
 		Agents: map[string]PackAgent{
 			"custom-agent": {
-				Location:     LocationRule{Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
+				Location:     LocationRule{Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
 				Task:         []TaskEntry{{"*", Deny}},
 				DelegateFrom: []string{"build"},
 			},
@@ -177,18 +185,21 @@ func TestEmit_DelegateFromEdges(t *testing.T) {
 	configWithOverlay := strings.Replace(miniConfig,
 		`"repo-explorer": {
       "permission": {
+        "edit": "deny",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
     }`,
 		`"repo-explorer": {
       "permission": {
+        "edit": "deny",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
     },
     "custom-agent": {
       "permission": {
+        "edit": "deny",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
@@ -227,18 +238,25 @@ func TestEmit_OverwritesPlaceholder(t *testing.T) {
 	if bash["ls *"] != "allow" {
 		t.Fatalf("build bash not canonicalized: %v", bash)
 	}
-	// build is gate-exempt → must NOT have a gate command entry.
+	// build is gate-exempt → must NOT carry any gate MUTATION command.
+	// (.opencode/scripts/commit-gate.sh status is a pure-read metadata probe
+	// and lives in the readonly group, so build legitimately gets it with
+	// "allow" — see Q2 split. Only mutation verbs stay gate-grouped.)
 	for k := range bash {
-		if strings.HasPrefix(k, ".opencode/scripts/commit-gate.sh") {
-			t.Fatalf("build (gate-exempt) has gate command %q in bash block", k)
+		if !strings.HasPrefix(k, ".opencode/scripts/commit-gate.sh") {
+			continue
 		}
+		if strings.HasSuffix(k, " status") {
+			continue // read-only status check; allowed for all agents
+		}
+		t.Fatalf("build (gate-exempt) has gate mutation command %q in bash block", k)
 	}
 	// committer is NOT gate-exempt → gate commands present with "allow".
 	committer := agents["committer"].(map[string]any)
 	cperm := committer["permission"].(map[string]any)
 	cbash := cperm["bash"].(map[string]any)
 	if cbash[".opencode/scripts/commit-gate.sh status"] != "allow" {
-		t.Fatalf("committer gate command should be allow, got %v", cbash[".opencode/scripts/commit-gate.sh status"])
+		t.Fatalf("committer readonly status command should be allow, got %v", cbash[".opencode/scripts/commit-gate.sh status"])
 	}
 }
 
@@ -309,12 +327,83 @@ func TestGenerateAllowedCommandsJS_Deterministic(t *testing.T) {
 	}
 }
 
+// Test 9b: the canonical command roster reflects the Q1a/Q1b/Q2 changes —
+// git_readonly carries the 12 `git --no-pager <sub> *` readonly forms (config-
+// table match that kills the prompt for `git --no-pager log` etc.), and
+// commit-gate.sh status lives in readonly (pure-read metadata probe), NOT in
+// gate (which is committer-only and carries only mutation verbs).
+func TestCommandGroups_NoPagerReadonlyAndStatusSplit(t *testing.T) {
+	findGroup := func(name string) CommandGroup {
+		t.Helper()
+		for _, g := range CommandGroups {
+			if g.Name == name {
+				return g
+			}
+		}
+		t.Fatalf("group %q not found", name)
+		return CommandGroup{}
+	}
+	has := func(group CommandGroup, cmd string) bool {
+		for _, c := range group.Commands {
+			if c == cmd {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Q1b: every bare `git <sub> *` readonly subcommand has a paired
+	// `git --no-pager <sub> *` form (so `--no-pager` between `git` and the
+	// sub does not fall through to the permission prompt).
+	bareSubs := []string{
+		"diff", "log", "show", "grep", "blame", "ls-tree",
+		"status", "ls-files", "check-ignore", "cat-file", "show-ref", "rev-parse",
+	}
+	gitReadonly := findGroup("git_readonly")
+	for _, sub := range bareSubs {
+		bare := "git " + sub + " *"
+		noPager := "git --no-pager " + sub + " *"
+		if !has(gitReadonly, bare) {
+			t.Errorf("git_readonly missing bare form %q", bare)
+		}
+		if !has(gitReadonly, noPager) {
+			t.Errorf("git_readonly missing --no-pager form %q (Q1b prompt fix)", noPager)
+		}
+	}
+
+	// Q2: commit-gate.sh status is a pure-read metadata probe → readonly,
+	// available to ALL agents (including gate-exempt ones) without a prompt.
+	readonly := findGroup("readonly")
+	if !has(readonly, ".opencode/scripts/commit-gate.sh status") {
+		t.Errorf("readonly group must contain commit-gate.sh status (Q2 split: pure-read metadata probe)")
+	}
+	// The gate group (committer-only) keeps ONLY mutation verbs; status must
+	// NOT also remain there (it would be a redundant entry and would defeat
+	// the prompt-free read for gate-exempt agents).
+	gate := findGroup("gate")
+	if has(gate, ".opencode/scripts/commit-gate.sh status") {
+		t.Errorf("gate group must NOT contain commit-gate.sh status (moved to readonly in Q2 split)")
+	}
+	for _, mutation := range []string{
+		".opencode/scripts/commit-gate.sh acquire *",
+		".opencode/scripts/commit-gate.sh commit *",
+		".opencode/scripts/commit-gate.sh release *",
+		".opencode/scripts/commit-gate.sh heartbeat *",
+		".opencode/scripts/commit-gate.sh revert *",
+		".opencode/scripts/commit-gate.sh stage-message *",
+	} {
+		if !has(gate, mutation) {
+			t.Errorf("gate group must still contain mutation verb %q", mutation)
+		}
+	}
+}
+
 // Test 10: validate catches gate-exempt agent that wrongly carries a gate key.
 func TestValidate_GateExemptWithGate(t *testing.T) {
 	// "evil" agent is gate-exempt but has HasGate=true.
 	locs := map[string]LocationRule{
-		"default": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
-		"evil":    {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
+		"default": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+		"evil":    {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
 	}
 	tasks := map[string][]TaskEntry{
 		"evil": {{"*", Deny}},
@@ -332,8 +421,8 @@ func TestValidate_GateExemptWithGate(t *testing.T) {
 // Test 11: validate catches task rule referencing an unknown agent.
 func TestValidate_TaskTargetUnknown(t *testing.T) {
 	locs := map[string]LocationRule{
-		"default": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
-		"build":   {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
+		"default": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+		"build":   {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
 	}
 	tasks := map[string][]TaskEntry{
 		"build": {{"*", Deny}, {"ghost", Allow}}, // "ghost" is not a known location
@@ -399,12 +488,12 @@ func TestEmit_MultiAgentDelegateFromDeterministic(t *testing.T) {
 		Name: "multi-pack",
 		Agents: map[string]PackAgent{
 			"agent-zebra": {
-				Location:     LocationRule{Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
+				Location:     LocationRule{Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
 				Task:         []TaskEntry{{"*", Deny}},
 				DelegateFrom: []string{"build"},
 			},
 			"agent-alpha": {
-				Location:     LocationRule{Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
+				Location:     LocationRule{Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
 				Task:         []TaskEntry{{"*", Deny}},
 				DelegateFrom: []string{"build"},
 			},
@@ -413,24 +502,28 @@ func TestEmit_MultiAgentDelegateFromDeterministic(t *testing.T) {
 	configWithOverlay := strings.Replace(miniConfig,
 		`"repo-explorer": {
       "permission": {
+        "edit": "deny",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
     }`,
 		`"repo-explorer": {
       "permission": {
+        "edit": "deny",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
     },
     "agent-zebra": {
       "permission": {
+        "edit": "deny",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
     },
     "agent-alpha": {
       "permission": {
+        "edit": "deny",
         "bash": { "__placeholder__": "deny" },
         "task": { "__placeholder__": "deny" }
       }
@@ -458,8 +551,8 @@ func TestEmit_MultiAgentDelegateFromDeterministic(t *testing.T) {
 // Previously "*" was skipped before decision validation, so {"*":"bogus"} passed.
 func TestValidate_WildcardInvalidDecision(t *testing.T) {
 	locs := map[string]LocationRule{
-		"default": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
-		"build":   {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow},
+		"default": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+		"build":   {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
 	}
 	tasks := map[string][]TaskEntry{
 		"build": {{"*", Decision("bogus")}},
@@ -476,6 +569,92 @@ func TestValidate_WildcardInvalidDecision(t *testing.T) {
 
 // (extractKeys helper removed — key-order is verified via raw byte position
 // inspection in TestEmit_BashBlockOrder, which doesn't lose order to re-parse.)
+
+// Test 19: object-form edit for the committer ONLY. The committer is the sole
+// agent whose edit is emitted as an OBJECT map {"*":"deny","<glob>":"allow"}
+// (findLast semantics — deny-* first, narrow allow last) so it can Write ONE
+// scoped message-file path that acquire --message-file consumes. Every other
+// agent MUST stay flat edit unchanged. This is the load-bearing assertion for
+// the Q3 message-staging rework.
+func TestEmit_CommitterObjectFormEdit(t *testing.T) {
+	out := mustEmit(t, miniConfig, nil, Features{})
+	s := string(out)
+
+	// (a) committer: object-form edit, deny-* FIRST then the scoped allow LAST.
+	committerBlock := extractAgentBlock(t, s, "committer")
+	permIdx := strings.Index(committerBlock, `"edit"`)
+	if permIdx < 0 {
+		t.Fatalf("committer block has no edit key:\n%s", committerBlock)
+	}
+	// The edit value must be an object, not a flat string.
+	editSlice := committerBlock[permIdx:]
+	if !strings.HasPrefix(editSlice, `"edit": {`) {
+		t.Fatalf("committer edit must be object-form, got: %s", firstLine(editSlice))
+	}
+	// findLast semantics: "*" deny must appear BEFORE the narrow allow.
+	starIdx := strings.Index(editSlice, `"*": "deny"`)
+	allowIdx := strings.Index(editSlice, `"`+CommitGateMessageGlob+`": "allow"`)
+	if starIdx < 0 || allowIdx < 0 {
+		t.Fatalf("committer edit object missing deny-* or scoped allow:\n%s", editSlice)
+	}
+	if starIdx > allowIdx {
+		t.Fatalf("deny-* (pos %d) must precede the scoped allow (pos %d) — findLast semantics", starIdx, allowIdx)
+	}
+	// The scoped glob is exactly the ONE allowlisted path; nothing wider.
+	if strings.Contains(editSlice, `"allow"`) && strings.Count(editSlice, `": "allow"`) != 1 {
+		t.Fatalf("committer edit must allow exactly ONE path, got:\n%s", editSlice)
+	}
+
+	// (b) build + coordination stay FLAT edit unchanged (allow / deny).
+	for _, agent := range []struct{ name, want string }{
+		{"build", "allow"},
+		{"coordination", "deny"},
+		{"repo-explorer", "deny"},
+	} {
+		blk := extractAgentBlock(t, s, agent.name)
+		i := strings.Index(blk, `"edit"`)
+		if i < 0 {
+			t.Fatalf("%s block has no edit key", agent.name)
+		}
+		line := firstLine(blk[i:])
+		want := `"edit": "` + agent.want + `"`
+		if !strings.HasPrefix(blk[i:], want) {
+			t.Fatalf("%s edit must be flat %q, got: %s", agent.name, agent.want, line)
+		}
+	}
+}
+
+// extractAgentBlock returns the substring of the emitted config covering one
+// agent block (from `"name": {` to the matching closing brace at the agent
+// level). It is a naive bracket-depth scanner sufficient for the test fixture.
+func extractAgentBlock(t *testing.T, s, name string) string {
+	t.Helper()
+	start := strings.Index(s, `"`+name+`": {`)
+	if start < 0 {
+		t.Fatalf("agent %q block not found in emitted config", name)
+	}
+	depth := 0
+	for i := start; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	t.Fatalf("agent %q block unterminated", name)
+	return ""
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
 
 // Test 17: present-agent filter drops task edges to absent agents (Phase 3
 // capability-gating seam). When the rendered config omits an agent block
