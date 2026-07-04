@@ -297,6 +297,6 @@ const DevShCommand = "vh-agent-harness *"
 // filePath)) and uses the recursive ** glob. The committer authors its commit
 // message at tmp/commit-gate-message/msg-${UUID} via the Write tool, then
 // passes that path to commit-gate.sh acquire --message-file. tmp/ is gitignored
-// so the message file never enters the index. This is the ONLY edit widenning
+// so the message file never enters the index. This is the ONLY edit widening
 // in the corpus — do not add more without an explicit safety review.
 const CommitGateMessageGlob = "tmp/commit-gate-message/**"

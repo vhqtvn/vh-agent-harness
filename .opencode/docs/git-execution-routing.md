@@ -25,8 +25,12 @@ difficult; see the threat model in the gated-commit spec for known residual risk
 
 ### 1. Shell-guard plugin (`.opencode/plugins/shell-guard.js`)
 
-- **Gate commands** (`commit-gate.sh acquire/commit/release/heartbeat/revert/status`) are in
-  `ALLOWED_PATTERNS` and pass through shell-guard.
+- **Gate commands** (`commit-gate.sh acquire/commit/release/heartbeat/revert/stage-message`)
+  are in `ALLOWED_PATTERNS` and pass through shell-guard.
+- **Read-only probe** (`commit-gate.sh status`) is a pure-read metadata lookup (lock/session
+  state) that lives in the readonly group, so ALL agents — including gate-exempt ones
+  (`build`/`coordination`/`project-coordinator`/`docs-steward`) — get prompt-free lock checks.
+  It is not a gate command.
 - **Canonical invocation (single-line message-file form):** The committer authors its
   commit message with the **Write tool** at `tmp/commit-gate-message/msg-${UUID}` — the
   single path its scoped object-form `edit` allows (`{ "*": "deny",

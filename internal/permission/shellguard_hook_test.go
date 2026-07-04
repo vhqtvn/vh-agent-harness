@@ -480,6 +480,50 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			cmd:  `git --no-pager show HEAD`,
 			want: Allow,
 		},
+		{
+			// Multi-flag readonly form, cde2ac94 boundary (empirically DENY, not
+			// ask): under the restored design the allowlist sees ORIGINAL tokens,
+			// and no config entry covers the two-flag prefix
+			// (`git --no-pager --paging=no log`), so it is blocked. The git
+			// routing-hint does NOT rescue it as `ask`, because blocked[1]
+			// (`--no-pager`) is itself a member of GIT_READONLY_SUBCOMMANDS — a
+			// side effect of the 12 `git --no-pager <sub> *` config entries each
+			// contributing `--no-pager` as their parts[1]. So the
+			// `!GIT_READONLY_SUBCOMMANDS.has(blocked[1])` clause is false and
+			// evaluate() falls through to a hard DENY (safe over-block). This is
+			// the load-bearing contrast with a stripped-token design: the 12
+			// single-flag `git --no-pager <sub> *` entries are the ONLY
+			// prompt-free readonly path, and a two-flag prefix is denied, not
+			// allowed. The operator uses the single-flag form.
+			name: "git --no-pager --paging=no log denied (cde2ac94: no two-flag config entry; --no-pager pollutes readonly-sub set)",
+			cmd:  `git --no-pager --paging=no log`,
+			want: Deny,
+		},
+		{
+			// Multi-flag while-loop branch, deny side (scan #2 normalizer): the
+			// re-scan loop's normalizeGitGlobalFlags strips a leading RUN of safe
+			// globals from the reconstruction — not just one flag — so
+			// `git --no-pager --paging=no commit` -> `git commit` and the
+			// mutation verb is re-caught by git-mutation-bypass -> DENY. Locks
+			// the "strips a leading RUN, not just one" contract on the
+			// security-critical path: if only one flag were stripped, the
+			// reconstruction `git --paging=no commit` would NOT match the
+			// mutation regex (the flag sits between `git` and the verb) and the
+			// mutation would bypass.
+			name: "git --no-pager --paging=no commit denied (scan #2 normalizer multi-flag run)",
+			cmd:  `git --no-pager --paging=no commit`,
+			want: Deny,
+		},
+		{
+			// Multi-flag run, order-independence (scan #2 normalizer): the
+			// while-loop in normalizeGitGlobalFlags consumes any leading run of
+			// safe globals regardless of order. Swapped order
+			// (--paging=no --no-pager) still strips both on the reconstruction,
+			// so the mutation `push` is re-caught -> DENY.
+			name: "git --paging=no --no-pager push denied (multi-flag run, order-independent)",
+			cmd:  `git --paging=no --no-pager push origin main`,
+			want: Deny,
+		},
 	}
 	for _, c := range gitCases {
 		c := c

@@ -591,10 +591,10 @@ export async function evaluate(command) {
                 reason:
                     "Gate wrapper (commit-gate.sh) must be invoked directly, not through vh-agent-harness exec. " +
                     "Only the committer agent can use the gate wrapper. " +
-                    "Blessed form: .opencode/scripts/commit-gate.sh acquire " +
-                    "--paths-file .git/commit-gate/paths-${UUID} " +
-                    "--message-file .git/commit-gate/msg-${UUID} " +
-                    "--session-alias ALIAS",
+                    "Blessed form: committer authors the message with the Write tool at " +
+                    "tmp/commit-gate-message/msg-${UUID}, then runs the single-line " +
+                    ".opencode/scripts/commit-gate.sh acquire --paths '<JSON>' " +
+                    "--message-file tmp/commit-gate-message/msg-${UUID} --session-alias ALIAS",
             };
         }
 
