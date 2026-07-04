@@ -125,12 +125,25 @@ func projectConfigAnswers(target string) map[string]string {
 // formatArchitectureSummary renders the architecture_summary field, accepting
 // either a JSON array of strings (-> markdown bullet lines) or a plain string
 // (verbatim). Anything else (or empty) yields "".
+//
+// N/A short-circuit: a single-element list whose sole element is a blessed N/A
+// sentinel (none / n/a / null / na) is returned VERBATIM (not formatted as a
+// bullet), so the existing downstream N/A logic applies uniformly —
+// projectConfigAnswers omits the field (renders empty) and classifyProjectValue
+// classifies it resolved (projectFieldNA). Multi-element lists are NEVER N/A
+// (always a real value), and a bare-JSON-null element unmarshals to "" and is
+// skipped (-> empty, not NA); see classifyProjectValue.
 func formatArchitectureSummary(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
 	var list []string
 	if err := json.Unmarshal(raw, &list); err == nil {
+		// Single-element sentinel list -> N/A path: return the element verbatim
+		// (not "- none") so isBlessedNA(classifyProjectValue(...)) holds.
+		if len(list) == 1 && isBlessedNA(list[0]) {
+			return list[0]
+		}
 		lines := make([]string, 0, len(list))
 		for _, a := range list {
 			if strings.TrimSpace(a) == "" {
@@ -171,11 +184,14 @@ const (
 
 // classifyProjectValue classifies a field's would-be-rendered value. The N/A
 // check runs on the rendered form, so for architecture_summary pass its
-// formatted value (a plain string or the "- bullet\n- bullet" join), not the
-// raw JSON. This means an N/A sentinel on architecture_summary is recognized in
-// string form ("none") but not as a single-element list (["none"] renders as
-// "- none" and is treated as a real value) — scalar fields (db_user/db_name,
-// and mission_summary if you choose) are the normal home for the sentinel.
+// formatted value (a plain string, a single-element sentinel list rendered
+// verbatim, or the "- bullet\n- bullet" join), not the raw JSON. An N/A sentinel
+// on architecture_summary is recognized in STRING form ("none") AND as a
+// SINGLE-ELEMENT list (["none"] is rendered verbatim and classified NA);
+// multi-element lists (e.g. ["none","apps/api"]) are real values, and a bare
+// JSON null (which unmarshals to "") is empty, not NA. Scalar fields (db_user/
+// db_name, and mission_summary if you choose) are the normal home for the
+// sentinel.
 func classifyProjectValue(v string) projectFieldStatus {
 	switch {
 	case v == "":
