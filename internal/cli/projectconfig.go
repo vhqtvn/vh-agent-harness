@@ -12,28 +12,51 @@ import (
 	"github.com/vhqtvn/vh-agent-harness/internal/runshape"
 )
 
-// projectConfigAnswers reads the target's .vh-agent-harness/project.config.json
-// (if present) and returns the render-token values it contributes:
+// blessedNASentinels are the case-insensitive values that mean "this consumed
+// field is intentionally unset" in project.config.json (e.g. db_user / db_name
+// for a project with no database). A field whose value is one of these:
 //
-//	mission_summary       -> {{MISSION_SUMMARY}}      (verbatim string)
-//	architecture_summary  -> {{ARCHITECTURE_SUMMARY}} (list -> "- line\n- line", or a string verbatim)
-//	db_user               -> {{DB_USER}}
-//	db_name               -> {{DB_NAME}}
+//   - renders as EMPTY — the token ({{DB_USER}} etc.) substitutes to "" in a
+//     seeded CLAUDE.md/Makefile, so no literal sentinel ever ships; and
+//   - is treated as RESOLVED by warnUnresolvedProjectConfigTokens (no UNRESOLVED
+//     notice), because the operator explicitly recorded "not applicable".
 //
-// project.config.json is project_owned: the user creates it (e.g.
-// `vh-agent-harness example .vh-agent-harness/project.config.json > …`) and
-// fills it BEFORE install so the seeded CLAUDE.md/Makefile pick up the values.
-// An absent file is the greenfield default (empty map -> tokens resolve empty).
-// A present-but-malformed file warns and is ignored (never fails the render).
-func projectConfigAnswers(target string) map[string]string {
-	out := map[string]string{}
+// Leave a field blank ("") when you want the warning to KEEP reminding you to
+// fill it in; the N/A sentinel is the "I considered it, there is none" answer.
+var blessedNASentinels = map[string]bool{
+	"none": true,
+	"n/a":  true,
+	"null": true,
+	"na":   true,
+}
+
+// isBlessedNA reports whether v is a blessed N/A sentinel (case-insensitive,
+// surrounding whitespace trimmed).
+func isBlessedNA(v string) bool {
+	return blessedNASentinels[strings.ToLower(strings.TrimSpace(v))]
+}
+
+// projectConfigDoc is the parsed `project` block of project.config.json.
+type projectConfigDoc struct {
+	MissionSummary      string
+	ArchitectureSummary json.RawMessage
+	DBUser              string
+	DBName              string
+}
+
+// readProjectConfig reads and parses .vh-agent-harness/project.config.json under
+// target. Returns the parsed doc and true on success. Returns zero and false
+// when the file is absent or unreadable (the greenfield default — an empty doc,
+// so every token resolves empty) OR when it is malformed (a warning is written
+// to stderr and the doc is ignored, never failing the caller).
+func readProjectConfig(target string) (projectConfigDoc, bool) {
 	if target == "" {
-		return out
+		return projectConfigDoc{}, false
 	}
 	path := filepath.Join(target, runshape.DirName, "project.config.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return out // absent (or unreadable): greenfield default
+		return projectConfigDoc{}, false // absent/unreadable: greenfield default
 	}
 	var doc struct {
 		Project struct {
@@ -45,19 +68,51 @@ func projectConfigAnswers(target string) map[string]string {
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: ignoring unparseable %s: %v\n", path, err)
+		return projectConfigDoc{}, false
+	}
+	return projectConfigDoc{
+		MissionSummary:      doc.Project.MissionSummary,
+		ArchitectureSummary: doc.Project.ArchitectureSummary,
+		DBUser:              doc.Project.DBUser,
+		DBName:              doc.Project.DBName,
+	}, true
+}
+
+// projectConfigAnswers reads the target's .vh-agent-harness/project.config.json
+// (if present) and returns the render-token values it contributes:
+//
+//	mission_summary       -> {{MISSION_SUMMARY}}      (verbatim string)
+//	architecture_summary  -> {{ARCHITECTURE_SUMMARY}} (list -> "- line\n- line", or a string verbatim)
+//	db_user               -> {{DB_USER}}
+//	db_name               -> {{DB_NAME}}
+//
+// A field set to a blessed N/A sentinel (none / n/a / null / na — see
+// blessedNASentinels) is OMITTED from the returned map, so the renderer
+// substitutes "" (empty) for its token — "intentionally unset" renders as
+// blank rather than the literal sentinel. The W3 warning treats such a field
+// as resolved (see warnUnresolvedProjectConfigTokens).
+//
+// project.config.json is project_owned: the user creates it (e.g.
+// `vh-agent-harness example .vh-agent-harness/project.config.json > …`) and
+// fills it BEFORE install so the seeded CLAUDE.md/Makefile pick up the values.
+// An absent file is the greenfield default (empty map -> tokens resolve empty).
+// A present-but-malformed file warns and is ignored (never fails the render).
+func projectConfigAnswers(target string) map[string]string {
+	out := map[string]string{}
+	p, ok := readProjectConfig(target)
+	if !ok {
 		return out
 	}
-	p := doc.Project
-	if p.MissionSummary != "" {
+	if p.MissionSummary != "" && !isBlessedNA(p.MissionSummary) {
 		out["mission_summary"] = p.MissionSummary
 	}
-	if arch := formatArchitectureSummary(p.ArchitectureSummary); arch != "" {
+	if arch := formatArchitectureSummary(p.ArchitectureSummary); arch != "" && !isBlessedNA(arch) {
 		out["architecture_summary"] = arch
 	}
-	if p.DBUser != "" {
+	if p.DBUser != "" && !isBlessedNA(p.DBUser) {
 		out["db_user"] = p.DBUser
 	}
-	if p.DBName != "" {
+	if p.DBName != "" && !isBlessedNA(p.DBName) {
 		out["db_name"] = p.DBName
 	}
 	return out
@@ -99,6 +154,37 @@ var consumedProjectConfigFieldsOrdered = []string{
 	"db_name",
 }
 
+// projectFieldStatus classifies a consumed project.config.json field by its
+// would-be-rendered value, for the W3 unresolved-token warning.
+type projectFieldStatus int
+
+const (
+	projectFieldEmpty    projectFieldStatus = iota // absent or "" — needs filling
+	projectFieldSentinel                           // still a literal {{...}} — verbatim-save footgun
+	projectFieldNA                                 // blessed N/A sentinel — intentionally unset
+	projectFieldValue                              // a real value
+)
+
+// classifyProjectValue classifies a field's would-be-rendered value. The N/A
+// check runs on the rendered form, so for architecture_summary pass its
+// formatted value (a plain string or the "- bullet\n- bullet" join), not the
+// raw JSON. This means an N/A sentinel on architecture_summary is recognized in
+// string form ("none") but not as a single-element list (["none"] renders as
+// "- none" and is treated as a real value) — scalar fields (db_user/db_name,
+// and mission_summary if you choose) are the normal home for the sentinel.
+func classifyProjectValue(v string) projectFieldStatus {
+	switch {
+	case v == "":
+		return projectFieldEmpty
+	case strings.Contains(v, "{{"):
+		return projectFieldSentinel
+	case isBlessedNA(v):
+		return projectFieldNA
+	default:
+		return projectFieldValue
+	}
+}
+
 // warnUnresolvedProjectConfigTokens writes a LOUD warning to w (stderr in
 // production) when .vh-agent-harness/project.config.json is absent OR any of the
 // four consumed tokens would resolve to an EMPTY string OR an UNRESOLVED
@@ -115,30 +201,49 @@ var consumedProjectConfigFieldsOrdered = []string{
 //     substituted each sentinel for itself — shipping literal {{TOKEN}}s in the
 //     rendered file (the original incident this epic addresses).
 //
+// A field set to a blessed N/A sentinel (none / n/a / null / na) is treated as
+// RESOLVED — it is the operator's explicit "not applicable" answer for a field
+// the project does not use (e.g. db_user / db_name when there is no database).
+// It renders empty and does NOT trip this notice.
+//
 // The warning is NON-FATAL: it never blocks install/update/guide, but it makes
 // the incomplete render visible and points the operator at the command that
 // creates the config. It surfaces under --dry-run too (install/update invoke it
-// before the dry-run branch). projectConfigAnswers only records a field when its
-// value is non-empty, so a resolved-empty token is simply absent from the
-// returned map.
+// before the dry-run branch).
 func warnUnresolvedProjectConfigTokens(w io.Writer, target string) {
 	path := filepath.Join(target, runshape.DirName, "project.config.json")
 	_, statErr := os.Stat(path)
 	absent := statErr != nil
 
-	answers := projectConfigAnswers(target)
+	// Classify each consumed field from the RAW config (not projectConfigAnswers'
+	// render map, which omits N/A sentinels by design). This is what lets a
+	// blessed N/A count as resolved while a blank or literal-{{...}} value still
+	// warns.
+	doc, parsed := readProjectConfig(target)
+	statuses := map[string]projectFieldStatus{}
+	if parsed {
+		statuses["mission_summary"] = classifyProjectValue(doc.MissionSummary)
+		statuses["architecture_summary"] = classifyProjectValue(formatArchitectureSummary(doc.ArchitectureSummary))
+		statuses["db_user"] = classifyProjectValue(doc.DBUser)
+		statuses["db_name"] = classifyProjectValue(doc.DBName)
+	} else {
+		for _, f := range consumedProjectConfigFieldsOrdered {
+			statuses[f] = projectFieldEmpty
+		}
+	}
+
 	type issue struct {
 		field    string
 		sentinel bool
 	}
 	var unresolved []issue
 	for _, f := range consumedProjectConfigFieldsOrdered {
-		v := answers[f]
-		switch {
-		case v == "":
+		switch statuses[f] {
+		case projectFieldEmpty:
 			unresolved = append(unresolved, issue{field: f})
-		case strings.Contains(v, "{{"):
+		case projectFieldSentinel:
 			unresolved = append(unresolved, issue{field: f, sentinel: true})
+			// projectFieldNA, projectFieldValue: resolved — no warning.
 		}
 	}
 	if len(unresolved) == 0 {
@@ -165,6 +270,9 @@ func warnUnresolvedProjectConfigTokens(w io.Writer, target string) {
 	fmt.Fprintf(w, "    vh-agent-harness example %s > %s\n",
 		filepath.Join(runshape.DirName, "project.config.json"),
 		filepath.Join(runshape.DirName, "project.config.json"))
+	fmt.Fprintln(w, "  A field that does NOT apply (e.g. db_user/db_name when there is no database) may")
+	fmt.Fprintln(w, "  be set to a blessed N/A sentinel (none / n/a / null / na) — it renders empty and")
+	fmt.Fprintln(w, "  silences this notice for that field.")
 	fmt.Fprintln(w, "  This warning is non-fatal — the render proceeded, but the output is incomplete.")
 	fmt.Fprintln(w, "--------------------------------------------------------------------------------")
 }

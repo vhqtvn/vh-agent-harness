@@ -61,6 +61,51 @@ func TestProjectConfigAnswers_AbsentAndMalformed(t *testing.T) {
 	}
 }
 
+// TestProjectConfigAnswers_NASentinels covers the blessed N/A sentinel contract:
+// a field set to none / n/a / null / na (case-insensitive) is OMITTED from the
+// render map, so the renderer substitutes "" for its token (renders empty) rather
+// than the literal sentinel. Real values are unaffected.
+func TestProjectConfigAnswers_NASentinels(t *testing.T) {
+	root := t.TempDir()
+	writeProjectConfig(t, root, `{
+	  "project": {
+	    "mission_summary": "Build it.",
+	    "architecture_summary": ["apps/api - backend"],
+	    "db_user": "none",
+	    "db_name": "N/A"
+	  }
+	}`)
+	got := projectConfigAnswers(root)
+	if got["mission_summary"] != "Build it." {
+		t.Errorf("real mission_summary must be recorded, got %q", got["mission_summary"])
+	}
+	if got["architecture_summary"] != "- apps/api - backend" {
+		t.Errorf("real architecture_summary must be recorded, got %q", got["architecture_summary"])
+	}
+	if _, ok := got["db_user"]; ok {
+		t.Errorf("db_user=none must be OMITTED (render empty), got %q", got["db_user"])
+	}
+	if _, ok := got["db_name"]; ok {
+		t.Errorf("db_name=N/A must be OMITTED (render empty), got %q", got["db_name"])
+	}
+}
+
+// TestProjectConfigAnswers_NAStringArchitecture confirms the N/A sentinel is
+// honored when architecture_summary is a plain string (not a list).
+func TestProjectConfigAnswers_NAStringArchitecture(t *testing.T) {
+	root := t.TempDir()
+	writeProjectConfig(t, root, `{"project":{"mission_summary":"M","architecture_summary":"none","db_user":"none","db_name":"none"}}`)
+	got := projectConfigAnswers(root)
+	if got["mission_summary"] != "M" {
+		t.Errorf("mission_summary should be recorded, got %q", got["mission_summary"])
+	}
+	for _, f := range []string{"architecture_summary", "db_user", "db_name"} {
+		if _, ok := got[f]; ok {
+			t.Errorf("%s=none must be OMITTED (render empty), got %q", f, got[f])
+		}
+	}
+}
+
 // exampleProjectConfigPath is the embedded example project.config.json, relative
 // to this test file's package directory (internal/cli). The contract test below
 // reads it directly from the source tree so a change to the example cannot drift
@@ -171,6 +216,9 @@ func TestWarnUnresolvedProjectConfigTokens(t *testing.T) {
 		wantWarn  bool
 		// substrings that MUST appear when wantWarn; ignored when !wantWarn.
 		wantSubs []string
+		// substrings that must NOT appear when wantWarn (e.g. a resolved field
+		// name that should not leak into the notice); ignored when !wantWarn.
+		wantNotSubs []string
 	}{
 		{
 			name:     "absent config warns all four are empty",
@@ -218,6 +266,30 @@ func TestWarnUnresolvedProjectConfigTokens(t *testing.T) {
 				"still literal {{DB_NAME}}",
 			},
 		},
+		{
+			// Blessed N/A sentinel: db_user/db_name set to "none"/"n/a" for a
+			// no-database project are RESOLVED (render empty, no warning) when
+			// mission_summary + architecture_summary carry real values. This is
+			// the canonical no-DB path the sentinel exists for.
+			name:      "N/A sentinels on db fields are silent",
+			setupJSON: `{"project":{"mission_summary":"Build it.","architecture_summary":["apps/api"],"db_user":"none","db_name":"n/a"}}`,
+			wantWarn:  false,
+		},
+		{
+			// N/A on one field does NOT silence an unresolved sibling, and a real
+			// value + N/A + empty coexist correctly: mission_summary="M" (value),
+			// architecture_summary="none" (NA), db_user="none" (NA), db_name=""
+			// (empty -> unresolved). Only db_name warns. The wantNotSubs use the
+			// per-field TOKEN markers ({{...}}) rather than bare field names,
+			// because the remediation hint names db_user/db_name unconditionally.
+			name:      "N/A on one field does not mask an empty sibling",
+			setupJSON: `{"project":{"mission_summary":"M","architecture_summary":"none","db_user":"none","db_name":""}}`,
+			wantWarn:  true,
+			wantSubs:  []string{"renders as {{DB_NAME}}"},
+			// The resolved fields' per-field markers must NOT appear: db_user (NA),
+			// architecture_summary (NA), mission_summary (real value).
+			wantNotSubs: []string{"{{DB_USER}}", "{{ARCHITECTURE_SUMMARY}}", "{{MISSION_SUMMARY}}"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -237,6 +309,11 @@ func TestWarnUnresolvedProjectConfigTokens(t *testing.T) {
 				for _, sub := range tt.wantSubs {
 					if !strings.Contains(got, sub) {
 						t.Errorf("warning output missing substring %q\n--- output ---\n%s", sub, got)
+					}
+				}
+				for _, sub := range tt.wantNotSubs {
+					if strings.Contains(got, sub) {
+						t.Errorf("warning output must NOT contain %q\n--- output ---\n%s", sub, got)
 					}
 				}
 				if !strings.Contains(got, "non-fatal") {

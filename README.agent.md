@@ -74,7 +74,7 @@ real target locations.
 
 | File | What to do |
 | --- | --- |
-| `.vh-agent-harness/project.config.json` | Fill `project.mission_summary` + `architecture_summary` (and `db_user`/`db_name` if used). Resolved into the seeded `CLAUDE.md`/`Makefile` at install — **create + fill it BEFORE `install`** (those seeds are written once). |
+| `.vh-agent-harness/project.config.json` | Fill `project.mission_summary` + `architecture_summary` (and `db_user`/`db_name` if used). Resolved into the seeded `CLAUDE.md`/`Makefile` at install — **create + fill it BEFORE `install`** (those seeds are written once). A field that does NOT apply (e.g. `db_user`/`db_name` when there is no database) may be set to a blessed N/A sentinel — `none` / `n/a` / `null` / `na` (case-insensitive): it renders empty and silences the `token(s) UNRESOLVED` warning for that field. |
 | `.vh-agent-harness/AGENTS.mission.md` | Write the project's domain mission/architecture/rules; composed into root `AGENTS.md` on `update`. |
 | `.vh-agent-harness/vh-harness-profile.yml` | (armed, seeded) Select features + `overlays: [<pack>]` (S3). |
 | `.vh-agent-harness/run-shape.yml` | (seeded host-shell) Set runtime `backend:` (`host-shell`/`docker_compose`/`proxy`) + `compose_file`/`default_service` or `proxy_command`; lifecycle hooks/verbs (S4). |
@@ -279,6 +279,9 @@ vh-agent-harness update  # re-seeds the deleted file from the current template
   overlay or the composed `AGENTS.md` (core+mission), not `CLAUDE.md`.
 - Re-seed re-reads `.vh-agent-harness/project.config.json` at render time, so
   fill that **before** the `update` if you want the new token values in the seed.
+  A field set to a blessed N/A sentinel (`none` / `n/a` / `null` / `na`) renders
+  empty in the re-seed and does not trip the unresolved-token warning — use that
+  for `db_user`/`db_name` on a project with no database.
 - This is the Slice-1 workaround. Automatic stale-seed detection and a `--reseed`
   flag are deferred (tracked in the backlog); today the operator notices the
   staleness and runs the two commands above.

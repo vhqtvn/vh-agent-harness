@@ -1,15 +1,19 @@
 {
-  "//": "vh-agent-harness :: project.config.json — the project config the seam reads at render time.",
+  "//": "vh-agent-harness :: project.config.json — the project config the seam reads at render time. This is the dogfood config for the vh-agent-harness repo itself.",
   "//_purpose": "Save this to .vh-agent-harness/project.config.json and fill it in BEFORE `install` (or before an `update` that re-seeds). install/update resolve {{MISSION_SUMMARY}}, {{ARCHITECTURE_SUMMARY}}, {{DB_USER}}, {{DB_NAME}} from project.* into the seeded CLAUDE.md/Makefile. Get this template with: vh-agent-harness example .vh-agent-harness/project.config.json",
   "//_fields": "ONLY these four fields under `project` are consumed by the seam (internal/cli/projectconfig.go :: projectConfigAnswers). Other project facts — name/slug (install flags), coordinator_dir, profile, lanes, roles, forbidden patterns, deny-rule fingerprints, instruction docs, product prefixes, ml provider, compose services — are NOT read from this file. Document those in .vh-agent-harness/AGENTS.mission.md instead; do not add inert keys here (a contract test enforces this set).",
   "//_na": "N/A sentinel: a field that does NOT apply to your project (e.g. db_user / db_name when there is NO database) may be set to one of the blessed sentinels — none / n/a / null / na (case-insensitive). A sentinel renders as EMPTY (the token substitutes to \"\", never the literal sentinel) and is treated as RESOLVED, so it does not trip the `project.config.json token(s) UNRESOLVED` warning. Leave a field blank (\"\") when you want that warning to keep reminding you to fill it in. Recognized in string form for mission_summary/architecture_summary/db_user/db_name.",
+  "//_source": "mission_summary and architecture_summary are condensed from .vh-agent-harness/AGENTS.mission.md (the project overlay composed into AGENTS.md). db_user/db_name are set to the N/A sentinel because this project ships a single static Go binary with NO database.",
 
   "project": {
-    "mission_summary": "{{MISSION_SUMMARY}}",
+    "mission_summary": "This repo builds **vh-agent-harness** — a single static Go binary that installs, manages, and runs a repo-resident AI agent harness (OpenCode-first). The repo dogfoods itself, developing the harness with the harness.",
     "architecture_summary": [
-      "{{ARCHITECTURE_SUMMARY}}"
+      "`cmd/vh-agent-harness/` — the binary entrypoint.",
+      "`internal/` — the substrate: ownership, schema, lineage, runshape, runtime, hooks, overlay, proposals, drift, permission, cli.",
+      "`templates/core/` — the embedded corpus via go:embed; kept domain-free (tokens only, no project specifics).",
+      "`corpus.go` / `core_manifest.go` — embed roots + ownership classification."
     ],
-    "db_user": "{{DB_USER}}",
-    "db_name": "{{DB_NAME}}"
+    "db_user": "none",
+    "db_name": "none"
   }
 }
