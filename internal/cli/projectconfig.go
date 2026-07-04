@@ -23,6 +23,10 @@ import (
 //
 // Leave a field blank ("") when you want the warning to KEEP reminding you to
 // fill it in; the N/A sentinel is the "I considered it, there is none" answer.
+//
+// The sentinel is matched on the field's STRING value (string form only — write
+// "null", not bare JSON null): a bare JSON null unmarshals into the Go string
+// fields as "" and is classified projectFieldEmpty (it warns).
 var blessedNASentinels = map[string]bool{
 	"none": true,
 	"n/a":  true,
@@ -271,8 +275,8 @@ func warnUnresolvedProjectConfigTokens(w io.Writer, target string) {
 		filepath.Join(runshape.DirName, "project.config.json"),
 		filepath.Join(runshape.DirName, "project.config.json"))
 	fmt.Fprintln(w, "  A field that does NOT apply (e.g. db_user/db_name when there is no database) may")
-	fmt.Fprintln(w, "  be set to a blessed N/A sentinel (none / n/a / null / na) — it renders empty and")
-	fmt.Fprintln(w, "  silences this notice for that field.")
+	fmt.Fprintln(w, "  be set to a blessed N/A sentinel (none / n/a / null / na; string form only —")
+	fmt.Fprintln(w, "  write \"null\", not bare JSON null) — it renders empty and silences this notice.")
 	fmt.Fprintln(w, "  This warning is non-fatal — the render proceeded, but the output is incomplete.")
 	fmt.Fprintln(w, "--------------------------------------------------------------------------------")
 }

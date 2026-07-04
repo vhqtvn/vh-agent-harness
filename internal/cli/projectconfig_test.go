@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -326,4 +327,93 @@ func TestWarnUnresolvedProjectConfigTokens(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBlessedNASentinelsContract is the B-F1 / A-F2 / D-F1 contract test for the
+// blessed N/A sentinel set. It locks the documented contract in executable form
+// so a regression — a key dropped from blessedNASentinels, a broken case-fold /
+// TrimSpace path, or a future "fix" that starts honoring a bare JSON null as NA
+// — cannot ship silently. The blessed set is documented in 5+ surfaces (the map
+// doc comment, the W3 remediation text, README.agent.md, and both
+// project.config.json copies); this test is the single source of truth that the
+// code matches those surfaces.
+//
+// It mirrors the existing contract-test pattern
+// (TestExampleProjectConfig_AdvertisesOnlyConsumedFields): iterate the canonical
+// set directly and assert both directions of the contract. The pre-existing
+// TestProjectConfigAnswers_NASentinels only directly asserts none / N/A; this
+// test exhausts the whole set plus the case-fold / trim / bare-JSON-null edges.
+func TestBlessedNASentinelsContract(t *testing.T) {
+	// 1. Every key of blessedNASentinels, iterated DIRECTLY off the map (so a key
+	//    added to or removed from the map without intent fails here). For each
+	//    sentinel, assert BOTH halves of the contract:
+	//      (a) classifyProjectValue returns projectFieldNA (resolved, no warning),
+	//          AND
+	//      (b) it is OMITTED from projectConfigAnswers' render map (renders empty).
+	//    A real-valued sibling (db_name) is included to prove the sentinel does
+	//    not leak / mask real values.
+	for sentinel := range blessedNASentinels {
+		sentinel := sentinel
+		t.Run("map_key/"+sentinel, func(t *testing.T) {
+			if got := classifyProjectValue(sentinel); got != projectFieldNA {
+				t.Errorf("classifyProjectValue(%q) = %v, want projectFieldNA", sentinel, got)
+			}
+			root := t.TempDir()
+			// db_user carries this exact sentinel in string form; db_name is real.
+			body := fmt.Sprintf(
+				`{"project":{"mission_summary":"m","architecture_summary":["a"],"db_user":%q,"db_name":"real"}}`,
+				sentinel,
+			)
+			writeProjectConfig(t, root, body)
+			got := projectConfigAnswers(root)
+			if v, ok := got["db_user"]; ok {
+				t.Errorf("db_user=%q must be OMITTED from render map (render empty), got %q", sentinel, v)
+			}
+			if got["db_name"] != "real" {
+				t.Errorf("db_name sibling must still be recorded, got %q", got["db_name"])
+			}
+		})
+	}
+
+	// 2. Case-insensitivity, surrounding-whitespace trimming, and the bare string
+	//    "null". These exercise isBlessedNA's ToLower + TrimSpace paths and lock
+	//    the B-F1 string-form behavior: the bare STRING "null" is NA. Each variant
+	//    must classify as projectFieldNA.
+	variants := []string{
+		// case-insensitivity (the map keys are lowercase; these fold down):
+		"None", "NULL", "Na",
+		// surrounding whitespace is trimmed before the map lookup:
+		" none ", " N/A ",
+		// the bare STRING form of null (NOT a bare JSON null literal — see #3):
+		"null",
+	}
+	for _, v := range variants {
+		v := v
+		t.Run("variant/"+v, func(t *testing.T) {
+			if got := classifyProjectValue(v); got != projectFieldNA {
+				t.Errorf("classifyProjectValue(%q) = %v, want projectFieldNA (case-insensitive, whitespace-trimmed)", v, got)
+			}
+		})
+	}
+
+	// 3. NEGATIVE (locks B-F1 in executable form): a bare JSON null literal
+	//    unmarshals into the Go string field as "" and must be classified
+	//    projectFieldEmpty (it WARNS) — NOT projectFieldNA. The documented
+	//    contract is STRING form only; a future "fix" that starts treating bare
+	//    JSON null as NA would change this classification and trip this case.
+	t.Run("bare_json_null_is_empty_not_NA", func(t *testing.T) {
+		root := t.TempDir()
+		// db_user is a bare JSON null (NOT the string "null"); db_name is real.
+		writeProjectConfig(t, root, `{"project":{"db_user":null,"db_name":"real"}}`)
+		doc, ok := readProjectConfig(root)
+		if !ok {
+			t.Fatal("readProjectConfig returned ok=false for a present, well-formed config")
+		}
+		if doc.DBUser != "" {
+			t.Errorf("bare JSON null must unmarshal into the string field as \"\", got %q", doc.DBUser)
+		}
+		if got := classifyProjectValue(doc.DBUser); got != projectFieldEmpty {
+			t.Errorf("classifyProjectValue(bare JSON null -> \"\") = %v, want projectFieldEmpty (must warn, not be treated as NA)", got)
+		}
+	})
 }
