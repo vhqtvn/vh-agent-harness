@@ -307,19 +307,26 @@ func additionalSchemaPaths() []schemaPath {
 // absence => FAIL (run `vh-agent-harness update`). It exercises the renderer + classifier
 // the seam uses, so a doctor pass is a faithful integrity probe.
 //
-// Ownership-override-aware (decision A2): the byte-compare filter uses the
-// EFFECTIVE ownership class (platform defaults reconciled with the project's
-// raise-only harness-ownership.yml overrides via ownership.Resolve), mirroring
-// seamInventory/computeSeamDrift. A path whose effective class is raised above
-// platform_managed (e.g. project_owned via override) is NEVER counted as drift:
-// update (substrate.Apply) already routes it to ActionProjectPreserved, so the
-// live bytes are intentionally divergent. Such a present-and-divergent raised
-// path is surfaced as a non-failing `preserved` (tierInfo) signal instead of a
-// perpetual FAIL — closing the gap where doctor re-rendered, byte-compared, and
-// failed forever on a divergence the update it points at is a no-op-by-design on.
+// Ownership-override-aware (decision A2, narrowed by the F3 fix / P1-DRIFT-002):
+// the byte-compare filter gates on the EFFECTIVE ownership ORIGIN, not merely
+// the effective class. ownership.Resolve reconciles platform defaults with the
+// project's raise-only harness-ownership.yml overrides, and each EffectiveEntry
+// records how its class was derived. Only a path whose effective class was
+// GENUINELY RAISED above its platform default by an override
+// (EffectiveEntry.Origin == OriginOverrideRaise) is treated as preserved — NOT
+// every path whose effective class differs from platform_managed. update
+// (substrate.Apply) already routes a raised path to ActionProjectPreserved, so
+// its live bytes are intentionally divergent; doctor surfaces such a present-
+// and-divergent raised path as a non-failing `preserved` (tierInfo) signal
+// instead of a perpetual FAIL — closing the gap where doctor re-rendered,
+// byte-compared, and failed forever on a divergence the update it points at is a
+// no-op-by-design on. Default-class non-managed files (project_owned seeds like
+// README.md/Makefile, the platform_armed profile, external_generated recon data)
+// diverge by design and are silently skipped — they are NOT overrides.
 //
-// An absent override file (the common case) resolves to nil overrides, so
-// behavior is byte-identical to the raw-class check for repos without overrides.
+// An absent override file (the common case) resolves to nil overrides, so every
+// path keeps OriginDefault and behavior is byte-identical to the raw-class check
+// for repos without overrides.
 func checkManagedDrift(target string) checkResult {
 	defaults, err := corpus.CoreOwnershipDefaults()
 	if err != nil {
@@ -363,18 +370,35 @@ func checkManagedDrift(target string) checkResult {
 	drifted, missing, preserved := 0, 0, 0
 	checked := 0
 	for path := range defaults {
-		effClass, _ := eff.ClassOf(path)
+		// Resolve seeds every default path, so eff[path] is always present; its
+		// Origin records whether an override genuinely raised the class.
+		entry := eff[path]
 		staged, serr := os.ReadFile(filepath.Join(staging, filepath.FromSlash(path)))
 		live, lerr := os.ReadFile(filepath.Join(target, filepath.FromSlash(path)))
-		if effClass != ownership.ClassPlatformManaged {
-			// Raised via override (e.g. project_owned). update preserves it; doctor
-			// must not flag byte divergence as drift. A present-and-divergent raised
-			// path is surfaced as non-failing `preserved`. Absence is silent: a
-			// raised path is the operator's concern (update never seeds/touches it),
-			// so a missing project_owned file is neither drift nor preservation.
+		if entry.Origin == ownership.OriginOverrideRaise {
+			// Genuinely RAISED above its platform default by an ownership override
+			// (e.g. platform_managed -> project_owned). update (substrate.Apply)
+			// routes such a path to ActionProjectPreserved, so the live bytes are
+			// intentionally divergent. A present-and-divergent raised path is
+			// surfaced as a non-failing `preserved` (tierInfo) signal instead of a
+			// perpetual FAIL. Absence is silent: a raised path is the operator's
+			// concern (update never seeds/touches it), so a missing raised file is
+			// neither drift nor preservation.
 			if serr == nil && lerr == nil && string(live) != string(staged) {
 				preserved++
 			}
+			continue
+		}
+		if entry.Class != ownership.ClassPlatformManaged {
+			// Default (non-raised) non-managed class: project_owned seeds
+			// (README.md, Makefile, backlog.md…), the platform_armed profile
+			// (vh-harness-profile.yml), or external_generated recon data. These
+			// legitimately diverge from a fresh render BY DESIGN (operator-curated
+			// / armed-and-editable / externally built) and are NOT ownership
+			// overrides, so they are silently skipped — never counted as drift or
+			// preserved. This restores pre-A2 behavior for the common no-override
+			// install (F3 fix: the preserved gate is "origin == override-raise",
+			// NOT "effective class != platform_managed").
 			continue
 		}
 		checked++
