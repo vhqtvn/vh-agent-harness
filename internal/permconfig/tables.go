@@ -68,14 +68,15 @@ var CommandGroups = []CommandGroup{
 		"git cat-file *",
 		"git show-ref *",
 		"git rev-parse *",
-		// `git --no-pager <sub>` forms: the `--no-pager` global flag sits between
-		// `git` and the subcommand, so the bare `git <sub> *` patterns above do
-		// NOT match (the matcher compares tokens positionally). These explicit
-		// forms kill the opencode permission prompt for the common
-		// `git --no-pager log` / `git --no-pager show` readonly invocations
-		// (config-table defense-in-depth). The mutation-bypass SAFETY closer for
-		// `git --no-pager commit` lives in shell-guard-core.js
-		// (normalizeGitGlobalFlags), not here.
+		// `git --no-pager <sub>` forms are RETAINED as config-table defense-in-
+		// depth. shell-guard's `walkGitGlobals` is now the PRIMARY prompt-free
+		// path: it strips the `--no-pager` global flag (and `-p` / `--paginate`
+		// / `-P`) and rewrites `git --no-pager <sub>` -> `git <sub>` BEFORE the
+		// opencode matcher runs, so the bare `git <sub> *` patterns above already
+		// cover the rewritten form. These explicit entries are belt-and-
+		// suspenders for any caller that bypasses the plugin. The mutation-slip
+		// guard for `git --no-pager commit` lives in shell-guard-core.js
+		// (walkGitGlobals verb extraction), not here.
 		"git --no-pager diff *",
 		"git --no-pager log *",
 		"git --no-pager show *",
@@ -116,16 +117,39 @@ var GroupNames = []string{"readonly", "git_readonly", "gate"}
 // gate wrapper). Every other gate-present agent has Gate=Deny.
 //
 // Edit values mirror the corpus template's flat edit decisions EXACTLY so that
-// bringing edit under emitter ownership is a no-op for every agent except the
-// committer: default=ask, build=allow, docs-steward=allow, all others=deny.
-// The committer is the ONLY agent with EditOverrides, which widens edit to ONE
-// scoped path (tmp/commit-gate-message/**) so it can Write the commit message
-// file that acquire --message-file then consumes. Every other agent stays flat
-// edit; do NOT widen edit beyond this one path for any agent.
+// bringing edit under emitter ownership is a no-op for every flat-edit agent:
+// default=ask, all others=deny, EXCEPT as noted below for the three
+// object-form agents.
+//
+// Three agents carry EditOverrides (object-form edit, findLast semantics —
+// permission/evaluate.ts picks the LAST matching pattern):
+//
+//   - committer: Edit=Deny + scoped allow for tmp/commit-gate-message/** so it
+//     can Write the commit message file that acquire --message-file consumes.
+//     Pattern: BROAD DENY + NARROW ALLOW.
+//   - build and docs-steward: Edit=Allow + scoped deny for
+//     docs/planning/backlog.md (BacklogPromoterDenyPath). This is the W1
+//     single-writer-promotion enforcement seam: worker agents cannot directly
+//     edit the canonical backlog, forcing status updates through
+//     .local/coordinator/tasks/ as status transport. Only a designated
+//     promoter (initially the operator via coordination) writes the backlog.
+//     Pattern: BROAD ALLOW + NARROW DENY — the inverse of the committer.
+//
+// Every other agent stays flat edit. Do not add more EditOverrides without an
+// explicit safety review of the findLast interaction (key order is load-
+// bearing: "*" first, overrides last).
 var CoreLocationRules = map[string]LocationRule{
-	"default":             {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Ask},
-	"plan":                {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Ask, Edit: Deny},
-	"build":               {Wildcard: Ask, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Allow, Edit: Allow}, // gate-exempt
+	"default": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Ask},
+	"plan":    {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Ask, Edit: Deny},
+	"build": {
+		Wildcard: Ask, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Allow, Edit: Allow, // gate-exempt
+		// Object-form edit: allow-* FIRST, then the W1 backlog deny LAST.
+		// findLast picks the narrow deny for docs/planning/backlog.md; every
+		// other path resolves to the broad allow. This blocks build from
+		// directly editing the canonical backlog, forcing status updates
+		// through .local/coordinator/tasks/ for promoter-mediated writes.
+		EditOverrides: []EditRule{{Pattern: BacklogPromoterDenyPath, Decision: Deny}},
+	},
 	"coordination":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Allow, Edit: Deny}, // gate-exempt
 	"planner":             {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
 	"researcher":          {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
@@ -136,16 +160,25 @@ var CoreLocationRules = map[string]LocationRule{
 	"debate-synth":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny, Edit: Deny},
 	"solution-brief":      {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny, Edit: Deny},
 	"repo-explorer":       {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Ask, Edit: Deny},
-	"docs-steward":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Ask, Edit: Allow}, // gate-exempt
-	"commit-message":      {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
-	"commit-reviewer":     {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	"docs-steward": {
+		Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Ask, Edit: Allow, // gate-exempt
+		// Object-form edit: same W1 single-writer-promotion model as build —
+		// allow-* FIRST, then the backlog deny LAST. docs-steward owns durable
+		// repo GUIDANCE (AGENTS.md, docs/ai/, docs/checkpoints/) but NOT the
+		// canonical backlog, which stays promoter-mediated. See build's
+		// comment and BacklogPromoterDenyPath for the rationale.
+		EditOverrides: []EditRule{{Pattern: BacklogPromoterDenyPath, Decision: Deny}},
+	},
+	"commit-message":  {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	"commit-reviewer": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
 	"committer": {
 		Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Allow, HasGate: true, DevSh: Deny,
 		// Object-form edit: deny-* FIRST, then the ONE scoped allow LAST. The
 		// committer authors its commit message via the Write tool at
 		// tmp/commit-gate-message/msg-${UUID}, which acquire --message-file
 		// consumes. findLast picks the narrow allow for that path; every other
-		// path denies. This is the ONLY object-form edit in the corpus.
+		// path denies. Pattern: broad deny + narrow allow (the inverse of
+		// build/docs-steward's broad allow + narrow deny for the W1 backlog).
 		Edit:          Deny,
 		EditOverrides: []EditRule{{Pattern: CommitGateMessageGlob, Decision: Allow}},
 	},
@@ -297,6 +330,23 @@ const DevShCommand = "vh-agent-harness *"
 // filePath)) and uses the recursive ** glob. The committer authors its commit
 // message at tmp/commit-gate-message/msg-${UUID} via the Write tool, then
 // passes that path to commit-gate.sh acquire --message-file. tmp/ is gitignored
-// so the message file never enters the index. This is the ONLY edit widening
-// in the corpus — do not add more without an explicit safety review.
+// so the message file never enters the index. This is the committer's edit
+// widening (broad deny + narrow allow); the inverse pattern (broad allow +
+// narrow deny) lives on build/docs-steward via BacklogPromoterDenyPath. Do not
+// add more EditOverrides without an explicit safety review of the findLast
+// interaction.
 const CommitGateMessageGlob = "tmp/commit-gate-message/**"
+
+// BacklogPromoterDenyPath is the canonical-backlog path that worker agents
+// (build, docs-steward) are DENIED from editing directly. It is the W1
+// single-writer-promotion enforcement seam: blocking worker edits forces status
+// updates through .local/coordinator/tasks/ as status transport, so only a
+// designated promoter (initially the operator via coordination) writes
+// docs/planning/backlog.md. The path is repo-relative and exact (no glob) —
+// the edit tool passes path.relative(worktree, filePath), and this matches
+// that single canonical file. Pair with Edit=Allow on the agent so the
+// wildcard broad decision stays allow (findLast picks the narrow deny for
+// this path; every other path resolves to allow). This is the inverse of the
+// committer's CommitGateMessageGlob pattern (broad deny + narrow allow); here
+// it is broad allow + narrow deny.
+const BacklogPromoterDenyPath = "docs/planning/backlog.md"
