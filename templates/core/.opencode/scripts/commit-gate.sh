@@ -8,8 +8,8 @@
 #   heartbeat --uuid UUID
 #   status
 #   revert    --paths '<JSON_ARRAY>' | --paths-file FILE | <path> [<path>...]
-#   stage-message --uuid UUID    # reads message from STDIN, writes msg-${UUID}
-#                                # atomically (temp + rename)
+#   stage-message --uuid UUID    # (deprecated) reads message from STDIN,
+#                                # writes msg-${UUID} atomically (temp + rename)
 #
 # Subcommands (legacy — inline form, avoid for messages with newlines/backticks):
 #   acquire   --paths JSON_ARRAY [--message MSG] [--session-alias ALIAS]
@@ -1342,31 +1342,35 @@ print(json.dumps(sys.argv[1:]))
 }
 
 # ---------------------------------------------------------------------------
-# Subcommand: stage-message
+# Subcommand: stage-message   (DEPRECATED — see rationale below)
 #
-# Atomic commit-message writer (INFRA-GATE-004a). The committer agent has
-# edit:deny and cannot use the Write tool for .git/* paths; inline
-# `--message "..."` breaks shell-guard's tree-sitter safe-parser on
-# newlines/backticks; and the prior per-line `echo >> msg-${UUID}` mandate
-# exhausted the agent step budget on long messages. This subcommand lets the
-# committer stage the full message in ONE tool call:
+# DEPRECATED (decision C3; v0.2.1 migration). The mandated commit-message
+# flow since v0.2.1 is: the committer authors the message with the Write tool
+# at tmp/commit-gate-message/msg-${UUID}, then passes it via
+# `acquire --message-file FILE` / `commit --message-file FILE` (--message-file
+# is accepted symmetrically on BOTH subcommands). That path is one Write call
+# + one --message-file flag and does not need this subcommand.
 #
-#   commit-gate.sh stage-message --uuid UUID <<'GATE_MSG_EOF'
-#   <full message body, including backticks/$/quotes/newlines>
-#   GATE_MSG_EOF
+# This subcommand is retained for backward compatibility and for symmetry in
+# the SKIP_COMMIT_GATE dispatch path; it is NOT removed. The v0.2.1 migration
+# BANS the heredoc form (the STDIN <<'GATE_MSG_EOF' idiom this command was
+# built around) — new committer code MUST use the Write-tool -> --message-file
+# flow instead. Invoking it prints a one-line deprecation notice to stderr.
 #
-# tree-sitter-bash honors the QUOTED heredoc delimiter: the body is literal
-# (no spurious command nodes from `git commit` / $(...) / $VAR inside it) and
-# commandParts skips the redirect token, so the invocation parses to a single
-# command `[commit-gate.sh, stage-message, --uuid, UUID]` — allowlisted under
-# the `gate` array in .opencode/repo-configs/allowed-commands.js. The
-# git-mutation-bypass allowIf exempts the gate-wrapper prefix, so a body that
-# literally contains `git commit`/`git reset` does not trigger a deny.
+# Historical context (INFRA-GATE-004a): stage-message predates the scoped
+# edit-permission model. The original rationale claimed the committer had
+# flat edit:deny — that was never accurate for the rendered output:
+# internal/permconfig emits the committer's edit permission as the scoped
+# object form {"*":"deny","tmp/commit-gate-message/**":"allow"} (see
+# internal/permconfig/tables.go: EditOverrides + CommitGateMessageGlob, and
+# emit.go: computeEditBlock), so the committer CAN Write the message file
+# directly. (Note: templates/core/opencode.jsonc.tmpl still carries a flat
+# "edit":"deny" literal and disagrees with the emitter; that template seam
+# is tracked separately and is NOT fixed here.)
 #
-# The message is written ATOMICALLY: STDIN -> sibling temp file -> rename
-# into ${GATE_INDEX_DIR}/msg-${UUID}. On ANY failure the temp file is removed
-# and a JSON error is returned -- a partial msg-${UUID} is never left in place.
-#
+# The write itself is still ATOMIC: STDIN -> sibling temp file -> rename into
+# ${GATE_INDEX_DIR}/msg-${UUID}. On ANY failure the temp file is removed and
+# a JSON error is returned -- a partial msg-${UUID} is never left in place.
 # This is a pure scratch-file write (no gating to bypass), so it routes to
 # cmd_stage_message unchanged in BOTH the normal and SKIP_COMMIT_GATE
 # dispatch paths.
@@ -1375,6 +1379,12 @@ print(json.dumps(sys.argv[1:]))
 #   commit-gate.sh stage-message --uuid UUID    # reads message from STDIN
 # ---------------------------------------------------------------------------
 cmd_stage_message() {
+  # Deprecation notice (decision C3): routed to stderr so the JSON status
+  # object on stdout is not corrupted. The v0.2.1-mandated flow is the
+  # Write tool -> acquire/commit --message-file; this subcommand is retained
+  # for backward compatibility and SKIP_COMMIT_GATE symmetry only.
+  echo "stage-message: deprecated; use Write tool -> acquire/commit --message-file" >&2
+
   local uuid=""
 
   while [[ $# -gt 0 ]]; do
