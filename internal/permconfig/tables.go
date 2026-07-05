@@ -68,14 +68,16 @@ var CommandGroups = []CommandGroup{
 		"git cat-file *",
 		"git show-ref *",
 		"git rev-parse *",
-		// `git --no-pager <sub>` forms are RETAINED as config-table defense-in-
-		// depth. shell-guard's `walkGitGlobals` is now the PRIMARY prompt-free
-		// path: it strips the `--no-pager` global flag (and `-p` / `--paginate`
-		// / `-P`) and rewrites `git --no-pager <sub>` -> `git <sub>` BEFORE the
-		// opencode matcher runs, so the bare `git <sub> *` patterns above already
-		// cover the rewritten form. These explicit entries are belt-and-
-		// suspenders for any caller that bypasses the plugin. The mutation-slip
-		// guard for `git --no-pager commit` lives in shell-guard-core.js
+		// `git --no-pager <sub>` forms are the PRIMARY config-table prompt-free
+		// path for `--no-pager` readonly invocations. shell-guard's
+		// `walkGitGlobals` classifies these commands for the security DECISION
+		// (mutation-slip guard for `git --no-pager commit`) but does NOT rewrite
+		// the command — the plugin is detect/parse-only by design, because
+		// rewriting the command string would mutate EXECUTION and shell syntax
+		// (pipelines, subshells, sequences, redirects) makes that unsafe. So
+		// without these explicit entries, `git --no-pager <sub>` would prompt
+		// (the bare `git <sub> *` patterns above only match a stripped form that
+		// no longer happens). The mutation-slip guard lives in shell-guard-core.js
 		// (walkGitGlobals verb extraction), not here.
 		"git --no-pager diff *",
 		"git --no-pager log *",

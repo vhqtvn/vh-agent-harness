@@ -496,18 +496,21 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			want: Deny,
 		},
 		{
-			// walkGitGlobals strips the `always`-policy `--no-pager` global and
-			// rewrites `git --no-pager log -1` -> `git log -1`; the allowlist
-			// then matches `git log *`. The config-table `git --no-pager log *`
-			// entry is now belt-and-suspenders. Must be ALLOW.
-			name: "git --no-pager log allowed (walkGitGlobals rewrites to `git log -1`)",
+			// walkGitGlobals classifies `--no-pager` as always-strip, so the
+			// INTERNAL allowlist matches the stripped `git log -1` form against
+			// `git log *` -> allow. Under Option A no rewrite is emitted; the
+			// prompt-free path at opencode's L2 is the config-table
+			// `git --no-pager log *` rule (load-bearing, not redundant). Must
+			// be ALLOW.
+			name: "git --no-pager log allowed (internal stripped match, no rewrite)",
 			cmd:  `git --no-pager log -1`,
 			want: Allow,
 		},
 		{
-			// walkGitGlobals strips `--no-pager` and rewrites to
-			// `git show HEAD`, matched by `git show *`.
-			name: "git --no-pager show allowed (walkGitGlobals rewrites to `git show HEAD`)",
+			// walkGitGlobals classifies `--no-pager` as always-strip; the
+			// internal allowlist matches the stripped `git show HEAD` against
+			// `git show *`. No rewrite emitted.
+			name: "git --no-pager show allowed (internal stripped match, no rewrite)",
 			cmd:  `git --no-pager show HEAD`,
 			want: Allow,
 		},
@@ -567,11 +570,10 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 	// --- git global-flag walker matrix ---------------------------------------
 	//
 	// These cases exercise walkGitGlobals end-to-end through eval.js. They use
-	// runNode (NOT h.Evaluate) so the rewrite field emitted by eval.js can be
-	// asserted directly — the Go hook struct only surfaces action/reason; the
-	// write-back of rewrite into output.args.command happens in the JS plugin's
-	// tool.execute.before wrapper (shell-guard.js), one layer above eval.js, so
-	// eval.js emits rewrite as a hint and the wrapper consumes it.
+	// runNode (NOT h.Evaluate) so the JSON emitted by eval.js can be asserted
+	// directly — specifically that NO `rewrite` field is present (Option A: the
+	// engine decides allow/deny/ask via parse, it never produces a command
+	// rewrite and the plugin wrapper never mutates output.args.command).
 	//
 	// commandCwd inside eval.js resolves to repoRoot() = scratch (plugins/ ->
 	// two up), so `git -C <scratch-abs> ...` is the absolute-commandCwd shape
@@ -579,39 +581,39 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 	// NEVER /tmp, which system-tmp-access would deny before the walker runs.
 	scratchSub := filepath.Join(scratch, "subdir")
 	globalFlagCases := []struct {
-		name        string
-		cmd         string
-		wantAction  string // "allow" | "deny" | "ask"
-		wantRewrite string // "" asserts eval.js emitted NO rewrite field
+		name       string
+		cmd        string
+		wantAction string // "allow" | "deny" | "ask"
 	}{
-		// 1. always-strip flag -> rewrite -> allow.
-		{name: "--no-pager diff rewrites to `git diff x`", cmd: `git --no-pager diff x`, wantAction: "allow", wantRewrite: `git diff x`},
-		// 2. combo always + conditional(strip) -> rewrite -> allow.
-		{name: "--no-pager -C <commandCwd> log rewrites to `git log`", cmd: fmt.Sprintf(`git --no-pager -C %s log`, scratch), wantAction: "allow", wantRewrite: `git log`},
-		// 3. conditional(strip) alone -> rewrite -> allow.
-		{name: "-C <abs commandCwd> diff rewrites to `git diff`", cmd: fmt.Sprintf(`git -C %s diff`, scratch), wantAction: "allow", wantRewrite: `git diff`},
-		// 4. conditional(keep): abs in-project subdir != commandCwd -> no rewrite -> ask.
-		{name: "-C <abs in-project subdir> diff asks (no rewrite)", cmd: fmt.Sprintf(`git -C %s diff`, scratchSub), wantAction: "ask", wantRewrite: ""},
+		// 1. always-strip flag -> internal stripped match -> allow. NO rewrite
+		//    is emitted (Option A: detect/parse for the decision only).
+		{name: "--no-pager diff allow (internal stripped match, no rewrite)", cmd: `git --no-pager diff x`, wantAction: "allow"},
+		// 2. combo always + conditional(strip) -> internal stripped match -> allow.
+		{name: "--no-pager -C <commandCwd> log allow (no rewrite)", cmd: fmt.Sprintf(`git --no-pager -C %s log`, scratch), wantAction: "allow"},
+		// 3. conditional(strip) alone -> internal stripped match -> allow.
+		{name: "-C <abs commandCwd> diff allow (no rewrite)", cmd: fmt.Sprintf(`git -C %s diff`, scratch), wantAction: "allow"},
+		// 4. conditional(keep): abs in-project subdir != commandCwd -> ask.
+		{name: "-C <abs in-project subdir> diff asks", cmd: fmt.Sprintf(`git -C %s diff`, scratchSub), wantAction: "ask"},
 		// 5. external -C readonly -> ask (verb extracted, not fully strippable).
-		{name: "-C <abs external> diff asks", cmd: `git -C /var/x diff`, wantAction: "ask", wantRewrite: ""},
+		{name: "-C <abs external> diff asks", cmd: `git -C /var/x diff`, wantAction: "ask"},
 		// 6. external -C mutation -> deny (mutation-slip guard; must NOT be ask).
-		{name: "-C <abs external> commit denied (mutation-slip guard)", cmd: `git -C /var/x commit -m x`, wantAction: "deny", wantRewrite: ""},
+		{name: "-C <abs external> commit denied (mutation-slip guard)", cmd: `git -C /var/x commit -m x`, wantAction: "deny"},
 		// 7. relative -C -> deny + notice.
-		{name: "-C ./subdir diff denied (relative -C notice)", cmd: `git -C ./subdir diff`, wantAction: "deny", wantRewrite: ""},
-		// 8. never-strip flag present -> no rewrite -> ask.
-		{name: "--git-dir=/x diff asks (never-strip flag blocks rewrite)", cmd: `git --git-dir=/x diff`, wantAction: "ask", wantRewrite: ""},
+		{name: "-C ./subdir diff denied (relative -C notice)", cmd: `git -C ./subdir diff`, wantAction: "deny"},
+		// 8. never-strip flag present -> ask.
+		{name: "--git-dir=/x diff asks (never-strip flag)", cmd: `git --git-dir=/x diff`, wantAction: "ask"},
 		// 9. mutation overrides strippability: abs commandCwd + mutation -> deny.
-		{name: "-C <abs commandCwd> commit denied (mutation overrides strip)", cmd: fmt.Sprintf(`git -C %s commit -m x`, scratch), wantAction: "deny", wantRewrite: ""},
+		{name: "-C <abs commandCwd> commit denied (mutation overrides strip)", cmd: fmt.Sprintf(`git -C %s commit -m x`, scratch), wantAction: "deny"},
 		// 10. relative -C + mutation -> deny (relative path wins; mutation never reached).
-		{name: "-C . commit denied (relative -C, case 10)", cmd: `git -C . commit -m x`, wantAction: "deny", wantRewrite: ""},
+		{name: "-C . commit denied (relative -C, case 10)", cmd: `git -C . commit -m x`, wantAction: "deny"},
 		// Bonus A: --paging=no is not a real flag -> not stripped -> ask.
-		{name: "--paging=no log asks (--paging=no is not a real git flag)", cmd: `git --paging=no log`, wantAction: "ask", wantRewrite: ""},
+		{name: "--paging=no log asks (--paging=no is not a real git flag)", cmd: `git --paging=no log`, wantAction: "ask"},
 		// Bonus B: info-flag with no verb -> allow (read-only terminal info).
-		{name: "--help allowed (info-flag terminal request)", cmd: `git --help`, wantAction: "allow", wantRewrite: ""},
+		{name: "--help allowed (info-flag terminal request)", cmd: `git --help`, wantAction: "allow"},
 		// Bonus C: --version info-flag -> allow.
-		{name: "--version allowed (info-flag terminal request)", cmd: `git --version`, wantAction: "allow", wantRewrite: ""},
-		// Bonus D: bare readonly (no globals) -> allow with NO rewrite.
-		{name: "bare git diff allow with no rewrite", cmd: `git diff`, wantAction: "allow", wantRewrite: ""},
+		{name: "--version allowed (info-flag terminal request)", cmd: `git --version`, wantAction: "allow"},
+		// Bonus D: bare readonly (no globals) -> allow.
+		{name: "bare git diff allow", cmd: `git diff`, wantAction: "allow"},
 	}
 	for _, c := range globalFlagCases {
 		c := c
@@ -624,10 +626,9 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			if act != c.wantAction {
 				t.Errorf("action = %q, want %q (cmd=%q; stdout=%q)", act, c.wantAction, c.cmd, out)
 			}
-			rw := jsonRewrite(t, out)
-			if rw != c.wantRewrite {
-				t.Errorf("rewrite = %q, want %q (cmd=%q; stdout=%q)", rw, c.wantRewrite, c.cmd, out)
-			}
+			// Option A contract: the engine NEVER emits a `rewrite` field.
+			// Assert it is absent (not merely empty) from the JSON.
+			jsonRewriteAbsent(t, out)
 		})
 	}
 }
@@ -701,22 +702,22 @@ func jsonAction(t *testing.T, stdout string) string {
 	return res.Action
 }
 
-// jsonRewrite extracts the "rewrite" field from the single JSON line eval.js
-// emits. Returns "" both when the field is absent (eval.js omits rewrite when
-// there is nothing to rewrite, so the wrapper leaves output.args.command
-// untouched) and when it is explicitly empty. The distinction does not matter
-// to callers: both mean "no command rewrite occurred".
-func jsonRewrite(t *testing.T, stdout string) string {
+// jsonRewriteAbsent asserts that the single JSON line eval.js emits on stdout
+// contains NO "rewrite" field. Under Option A the engine never produces a
+// command rewrite (detect/parse drives the decision only); the plugin wrapper
+// never writes back to output.args.command. Proving the field is ABSENT (not
+// merely empty) nails the contract.
+func jsonRewriteAbsent(t *testing.T, stdout string) {
 	t.Helper()
 	line := strings.TrimSpace(stdout)
 	if line == "" {
 		t.Fatalf("eval.js produced no stdout; cannot read rewrite")
 	}
-	var res struct {
-		Rewrite string `json:"rewrite"`
-	}
-	if err := json.Unmarshal([]byte(line), &res); err != nil {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(line), &raw); err != nil {
 		t.Fatalf("eval.js stdout not JSON: %q (%v)", line, err)
 	}
-	return res.Rewrite
+	if _, ok := raw["rewrite"]; ok {
+		t.Errorf("eval.js emitted a `rewrite` field; under Option A it must be absent (stdout=%q)", line)
+	}
 }

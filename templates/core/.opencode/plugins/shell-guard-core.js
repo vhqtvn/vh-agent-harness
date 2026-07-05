@@ -23,16 +23,24 @@
 // fault (WASM load failure, rule-import fault) so the caller (eval.js / the Go
 // hook) fails safe.
 //
-// Global-flag rewrite (git -C / --no-pager / etc.): evaluate(command, commandCwd)
-// walks leading git global flags via a registry-driven walker. When the command
-// is read-only AND every consumed flag is execution-safe to drop (paging flags,
-// or a `-C <abs commandCwd>` that is a semantic no-op), evaluate returns
-// `{ action:"allow", reason:"", rewrite:"<stripped command>" }`. The plugin
-// wrapper (shell-guard.js) writes `output.args.command = rewrite` IN PLACE so
-// opencode's path-blind permission matcher sees the bare `git <verb> ...` form
-// and matches the existing `git <verb> *` allow rule — NO operator prompt. The
-// rewrite also changes what executes, so it is gated strictly to semantic
-// no-ops. eval.js emits `rewrite` as an extra JSON field (backward-compatible).
+// Global-flag detect/parse (git -C / --no-pager / etc.): evaluate(command,
+// commandCwd) walks leading git global flags via a registry-driven walker to
+// extract the verb past them and classify any `-C` path. This powers the
+// security DECISIONS and NOTHING else — evaluate NEVER returns a command
+// rewrite and the plugin wrapper (shell-guard.js) NEVER mutates
+// output.args.command:
+//   - mutation-slip guard: verb in GIT_MUTATION_VERBS past any leading flag
+//     -> deny (covers `git -C <ext> commit`, `git --git-dir=/x commit`,
+//     `git --no-pager commit`).
+//   - relative `-C` (`.`, `..`, subdir) -> deny + actionable notice.
+//   - external `-C` readonly -> ask; external `-C` mutation -> deny (via the
+//     mutation-slip guard above).
+//   - info flags (`--help`/`--version`/...) with no verb -> allow.
+// For the internal allowlist check, when every consumed flag is execution-safe
+// to drop (paging flags, or `-C <abs commandCwd>` that is a no-op), evaluate
+// matches the STRIPPED token form so `git --no-pager diff x` is recognized as
+// the readonly `git diff x`. This classification is INTERNAL to the decision —
+// it does not escape as a rewrite. eval.js emits `{action, reason}` only.
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -255,20 +263,24 @@ export function stripLeadingEnvVarsFromString(cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// Generic git global-flag normalization (registry-driven walker).
+// Generic git global-flag detect/parse (registry-driven walker).
 //
 // Background: opencode's permission matcher is path-blind glob over the raw
 // command text (`git diff *` matches `git diff x`, but NOT `git -C <root> diff`
-// or `git --no-pager diff`). shell-guard ALLOWS these internally, but the agent
-// still sees a permission PROMPT because the matcher has no `git -C *` /
-// `git --no-pager *` rule that fires after the global flag. The fix is to
-// REWRITE the command in the `tool.execute.before` hook: strip the
-// execution-safe global flags so the bare `git <verb> ...` form matches the
-// existing allow rule.
+// or `git --no-pager diff`). shell-guard's `tool.execute.before` hook DOES NOT
+// rewrite the command — a detector has a safe fallback (ask) but a rewriter
+// does not, and real agent commands (pipelines, sequences, subshells) make a
+// safe whole-command rewrite unprovable. Instead the walker POWERS THE
+// DECISION: it extracts the verb past leading global flags and classifies any
+// `-C` path so the security verdicts (mutation-slip guard, relative-`-C`
+// deny+notice, external-`-C` routing, info-flag allow) fire correctly. For
+// shell-guard's INTERNAL allowlist check only, when every consumed flag is
+// execution-safe to drop the stripped token form is matched so a readonly
+// `git --no-pager diff` is recognized; this classification never escapes as a
+// command rewrite.
 //
-// Binding constraint: the rewrite changes what EXECUTES (not just what the
-// matcher sees), so a flag may be stripped ONLY when dropping it is a semantic
-// no-op:
+// Droppable-vs-keep classification (decision-internal; what EXECUTES is never
+// changed):
 //   - paging flags (`-p`,`--paginate`,`-P`,`--no-pager`)        -> always safe
 //   - `-C <abs path>` where path === commandCwd                  -> no-op (cwd)
 //   - everything else (config/repo-location/behavior flags, or a
@@ -282,7 +294,8 @@ export function stripLeadingEnvVarsFromString(cmd) {
 //
 // `commandCwd` is the command's real working directory (the plugin wrapper
 // derives it from output.args.workdir, falling back to repoRoot()). A `-C`
-// path equal to it is a no-op; anything else is preserved.
+// path equal to it is the in-project no-op reference; anything else is
+// in-project-subdir or external.
 // ---------------------------------------------------------------------------
 
 // Repo root derived from this file's location (.opencode/plugins/shell-guard-core.js
@@ -351,11 +364,13 @@ export function unquoteToken(text) {
 //     "none"        — boolean flag, no value (`--no-pager`)
 //
 //   stripPolicy:
-//     "always"      — display-only; safe to DROP from the rewrite (paging)
+//     "always"      — display-only; safe to DROP from the internal stripped
+//                     form (paging)
 //     "conditional" — drop only if a predicate holds (only `-C`: strip iff the
 //                     path is absolute AND === commandCwd)
 //     "never"       — skip PAST it for verb-reach but NEVER drop it from the
-//                     rewrite (config / repo-location / behavior flags)
+//                     internal stripped form (config / repo-location / behavior
+//                     flags)
 //     "info"        — terminal read-only info request (`--help`/`--version`);
 //                     no verb follows; allow without an allowlist match
 // ---------------------------------------------------------------------------
@@ -421,13 +436,14 @@ function lookupGitGlobalFlag(token) {
 // (tokens[0] MUST === "git"; the caller guards this). Returns:
 //   {
 //     verb: string|null,          // first non-flag token, or null if none
-//     rewrittenTokens: string[],  // rebuilt token list; valid as a rewrite ONLY
-//                                 // when fullyStrippable is true
+//     rewrittenTokens: string[],  // stripped token list (globals removed per
+//                                 // stripPolicy); used for INTERNAL allowlist
+//                                 // matching only — NEVER emitted as a rewrite
 //     fullyStrippable: bool,      // true ONLY if every consumed flag was "always"
 //                                 // or a satisfied "conditional" AND no
 //                                 // "never"/"info"/unsatisfied-conditional flag
-//                                 // was consumed (i.e. dropping all consumed
-//                                 // flags is a semantic no-op)
+//                                 // was consumed (i.e. the stripped form is
+//                                 // semantically equivalent for the decision)
 //     deny: string|null,          // set when a relative `-C` is seen
 //     infoOnly: bool,             // true when an "info" flag was consumed and
 //                                 // no verb followed (e.g. `git --help`)
@@ -437,7 +453,7 @@ function lookupGitGlobalFlag(token) {
 // never-strip booleans (consume exactly 1 token) so a mutation hidden behind an
 // unrecognized flag is STILL caught: the verb is extracted past it and tested
 // against GIT_MUTATION_VERBS by evaluate(). This is conservative — an unknown
-// flag can never produce a rewrite, so it falls through to a prompt.
+// flag yields a non-strippable classification, so the original form prompts.
 export function walkGitGlobals(tokens, commandCwd) {
     const out = ["git"]; // rebuilt token list
     let fullyStrippable = true;
@@ -510,7 +526,8 @@ export function walkGitGlobals(tokens, commandCwd) {
             i += 1;
         }
 
-        // Apply the strip policy to decide whether the flag survives the rewrite.
+        // Apply the strip policy to decide whether the flag survives the
+        // internal stripped form.
         if (stripPolicy === "always") {
             continue; // drop (do not push)
         }
@@ -547,8 +564,9 @@ export function walkGitGlobals(tokens, commandCwd) {
         if (resolvedC === cwdNorm) {
             continue; // absolute and === commandCwd: no-op, strip it
         }
-        // Absolute in-project subdir OR external: KEEP (no rewrite). The verb is
-        // still extracted past it for the mutation guard (handled by evaluate).
+        // Absolute in-project subdir OR external: KEEP (no internal strip).
+        // The verb is still extracted past it for the mutation guard and the
+        // routing hint (handled by evaluate).
         fullyStrippable = false;
         out.push(tok, valueToken);
     }
@@ -610,18 +628,18 @@ function isAllowedCommand(tokens) {
 //
 // commandCwd is the command's real working directory (the plugin wrapper
 // derives it from output.args.workdir, falling back to repoRoot()). It is the
-// no-op reference for `-C <abs path>`: a `-C` equal to it is stripped (cwd does
-// not change execution); anything else is preserved. It defaults to repoRoot()
-// when omitted (eval.js / the Go bridge have no workdir, so they use repoRoot).
+// reference for classifying `-C <abs path>`: a `-C` equal to it is an
+// in-project no-op; anything else is in-project-subdir or external. It
+// defaults to repoRoot() when omitted (eval.js / the Go bridge have no
+// workdir, so they use repoRoot).
 //
-// Rewrite return: when a single read-only git command has ALL its leading
-// global flags execution-safe to drop, evaluate returns
-//   { action:"allow", reason:"", rewrite:"<stripped command>" }
-// The plugin wrapper writes `output.args.command = rewrite` IN PLACE so the
-// path-blind permission matcher sees the bare `git <verb> ...` form (no prompt).
-// `rewrite` is present ONLY on an allow with a single fully-strippable git
-// command; absent otherwise (the plugin wrapper treats a missing/empty rewrite
-// as "no rewrite").
+// Return shape: { action:"allow"|"deny"|"ask", reason:"..." }. evaluate NEVER
+// returns a `rewrite` field and the plugin wrapper NEVER mutates the command —
+// detection/parse drives the DECISION only (see the file header). When every
+// consumed git global flag is execution-safe to drop, the STRIPPED token form
+// is matched against the internal allowlist so a readonly `git --no-pager
+// diff` is recognized as allow; this classification is internal and does not
+// escape as a command rewrite.
 //
 // contract:
 //   - NEVER throws on a deny — returns it.
@@ -718,7 +736,7 @@ export async function evaluate(command, commandCwd) {
         };
     }
 
-    // Per-command git global-flag normalization via the registry walker.
+    // Per-command git global-flag detect/parse via the registry walker.
     //
     // The walker consumes leading git global flags (value-form aware) and
     // produces the verb + a rebuilt token list. Outcomes per command:
@@ -733,9 +751,11 @@ export async function evaluate(command, commandCwd) {
     //                                              extracted PAST any leading
     //                                              flag so adjacency no longer
     //                                              matters)
-    //   - readonly + fullyStrippable            -> record a rewrite so the
-    //                                              plugin can strip the flags
-    //                                              (single-command case only)
+    //   - readonly + fullyStrippable            -> push STRIPPED tokens so the
+    //                                              internal allowlist matches
+    //                                              the bare `git <verb> ...`
+    //                                              form (decision-internal; NO
+    //                                              command rewrite is produced)
     //   - otherwise                             -> push ORIGINAL env-stripped
     //                                              tokens (allowlist sees the
     //                                              original -> prompt if unmatched)
@@ -747,7 +767,6 @@ export async function evaluate(command, commandCwd) {
     // config entries). `autoAllow` marks info-only commands that skip the
     // allowlist.
     const normalizedCommands = [];
-    let singleRewrite = null; // set only when exactly one fully-strippable git cmd
     for (const tokens of commands) {
         const envStripped = stripLeadingEnvVars(tokens);
 
@@ -786,28 +805,23 @@ export async function evaluate(command, commandCwd) {
                 };
             }
             if (w.fullyStrippable) {
-                // Execution-safe to drop every consumed flag. Push the STRIPPED
-                // tokens so the allowlist sees the bare `git <verb> ...` form
-                // (matches `git <verb> *` even for multi-flag prefixes). Record
-                // a rewrite for the single-command case so the plugin wrapper
-                // can strip the flags in output.args.command (avoiding a
-                // prompt); only when the rewrite actually CHANGES the command
-                // (something was stripped), so a bare `git diff` carries no
-                // spurious rewrite.
-                const rewritten = w.rewrittenTokens.join(" ");
-                if (
-                    commands.length === 1 &&
-                    rewritten !== envStripped.join(" ")
-                ) {
-                    singleRewrite = rewritten;
-                }
+                // Execution-safe to drop every consumed flag. Match the
+                // STRIPPED token form against the internal allowlist so a
+                // readonly `git --no-pager diff x` is recognized as
+                // `git diff x` (matches `git diff *`). This classification is
+                // INTERNAL to the allow/deny/ask decision — it does NOT produce
+                // a rewrite and the plugin wrapper does NOT mutate the command.
+                // opencode's L2 matcher still sees the ORIGINAL command text;
+                // prompt-free coverage for `git --no-pager <sub>` comes from
+                // the config-table `git --no-pager <sub> *` L2 rules, not a
+                // rewrite.
                 normalizedCommands.push({ tokens: w.rewrittenTokens, verb: w.verb, autoAllow: false });
                 continue;
             }
             // Not fully strippable (a `never`/`info` flag present, or `-C`
-            // pointing elsewhere): NO rewrite. The allowlist sees the ORIGINAL
-            // tokens below, so the command prompts as before. The walker verb
-            // is still carried for the routing hint.
+            // pointing elsewhere): the allowlist sees the ORIGINAL tokens
+            // below, so the command prompts as before. The walker verb is
+            // still carried for the routing hint.
             normalizedCommands.push({ tokens: envStripped, verb: w.verb, autoAllow: false });
             continue;
         }
@@ -820,11 +834,9 @@ export async function evaluate(command, commandCwd) {
     );
     if (!blocked) {
         // Every parsed command was auto-allowed (info) or matched the read-only
-        // allowlist: allow. Carry the rewrite (singleRewrite) so the plugin
-        // wrapper can strip the global flags and avoid an operator prompt.
-        // Missing/empty rewrite means "no rewrite" (the wrapper checks before
-        // writing back).
-        return { action: "allow", reason: "", rewrite: singleRewrite || "" };
+        // allowlist: allow. NO rewrite is returned — the plugin wrapper never
+        // mutates the command (detect/parse for the decision only).
+        return { action: "allow", reason: "" };
     }
 
     // Git routing hint — O3 hint-only design (no agent identity).

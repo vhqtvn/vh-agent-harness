@@ -6,12 +6,10 @@
 //                argv joined with single spaces = the command string
 //                (mirrors opencode's output.args.command that the plugin sees).
 //   stdout:      exactly ONE JSON line
-//                {"action":"allow|deny|ask","reason":"...","rewrite":"..."}
-//                `rewrite` is OPTIONAL — present (non-empty) only when the
-//                engine produced a command rewrite (stripped git global flags).
-//                The Go bridge ignores unknown/extra fields, so adding
-//                `rewrite` is backward-compatible. Tests parse it to verify
-//                the rewrite text.
+//                {"action":"allow|deny|ask","reason":"..."}
+//                The engine NEVER emits a `rewrite` field — detection/parse
+//                drives the decision only; the plugin wrapper never mutates
+//                the command (Option A).
 //   stderr:      engine diagnostics only (never the decision).
 //   exit 0:      a decision was emitted (action authoritative for ALL three:
 //                allow / deny / ask). The Go hook maps each to its Action.
@@ -21,8 +19,8 @@
 // cwd = HarnessRoot but passes no per-command workdir), so commandCwd defaults
 // to repoRoot() inside evaluate(). The plugin wrapper (shell-guard.js) is the
 // only caller that can supply the real output.args.workdir; this shim cannot,
-// so rewrite tests here use -C paths equal to repoRoot() (the scratch install
-// root) to exercise the strip path.
+// so the in-project `-C <repoRoot()>` classification (the conditional-strip
+// case) resolves to the scratch install root.
 //
 // cwd: the caller (ShellGuardHook) sets cwd = the project root containing
 // .opencode (the harness root). repoRoot() in the core derives the root from
@@ -70,20 +68,9 @@ async function main(argv) {
     const reason =
         r && typeof r.reason === "string" ? r.reason : "no reason provided";
 
-    // `rewrite` is optional: present only when the engine stripped git global
-    // flags (single fully-strippable readonly git command). Omit it from the
-    // JSON when empty so the line stays minimal; include it non-empty
-    // otherwise. The Go bridge ignores extra fields (backward-compatible).
-    const rewrite =
-        r && typeof r.rewrite === "string" && r.rewrite.length > 0
-            ? r.rewrite
-            : "";
-
-    // Exactly ONE JSON line on stdout. exit 0 = decision emitted.
-    if (rewrite) {
-        process.stdout.write(JSON.stringify({ action, reason, rewrite }) + "\n");
-    } else {
-        process.stdout.write(JSON.stringify({ action, reason }) + "\n");
-    }
+    // Exactly ONE JSON line on stdout: {action, reason}. The engine NEVER
+    // produces a `rewrite` field (detect/parse for the decision only — the
+    // plugin wrapper never mutates the command). exit 0 = decision emitted.
+    process.stdout.write(JSON.stringify({ action, reason }) + "\n");
     process.exit(0);
 }

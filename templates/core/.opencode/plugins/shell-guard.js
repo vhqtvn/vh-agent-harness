@@ -12,15 +12,25 @@
 //     {action,reason} verdict back to the OpenCode verbs (throw=deny,
 //     console.error+return=ask-passthrough, return=allow).
 //
-// Global-flag rewrite (git -C / --no-pager / etc.): when evaluate returns a
-// non-empty `rewrite`, the wrapper writes `output.args.command = rewrite` IN
-// PLACE. This propagates to BOTH opencode's permission matcher (which then
-// matches the existing `git <verb> *` allow rule — no prompt) AND what
-// executes. The rewrite is gated by the engine to semantic no-ops only.
+// Global-flag detect/parse (git -C / --no-pager / etc.): the wrapper delegates
+// to `evaluate(output.args.command, commandCwd)` for the allow/deny/ask
+// DECISION only. It NEVER mutates output.args.command — the engine's parse
+// (walkGitGlobals) extracts the verb past leading git global flags and
+// classifies any `-C` path so the security decisions (mutation-slip guard,
+// relative-`-C` deny+notice, external-`-C` routing, info-flag allow) fire
+// correctly. There is no command rewrite: a detector has a safe fallback
+// ("I don't know -> ask") but a rewriter does not, and real agent commands
+// (pipelines, sequences, subshells) make a safe whole-command rewrite
+// unprovable. opencode's path-blind L2 matcher still sees the ORIGINAL command
+// text, so in-project `git -C <cwd> <ro>` and `--paginate`/`-p`/`-P` readonly
+// forms will prompt (accepted tradeoff; the load-bearing prompt-free path for
+// `git --no-pager <sub>` is the config-table `git --no-pager <sub> *` L2
+// rules, NOT a rewrite).
 //
 // commandCwd: derived from output.args.workdir (the command's real cwd,
 // resolved to absolute), falling back to repoRoot() when workdir is absent.
-// This is the no-op reference for `-C <abs path>` stripping.
+// evaluate needs it to classify `-C` paths (in-project vs external vs
+// relative).
 //
 // Back-compat: this module re-exports the prior public API surface so anything
 // that imported the primitives from "shell-guard.js" keeps working. The
@@ -95,12 +105,16 @@ export const server = async () => {
             }
 
             if (input.tool === "bash") {
-                // Delegate to the shared engine. Translate the {action,reason}
-                // verdict back to the OpenCode verbs the plugin must emit:
+                // Delegate to the shared engine for the DECISION only. The
+                // wrapper NEVER mutates output.args.command — a detector has a
+                // safe fallback (ask) but a rewriter does not, and real agent
+                // commands (pipelines, sequences, subshells) make a safe
+                // whole-command rewrite unprovable. Translate the {action,
+                // reason} verdict to the OpenCode verbs:
                 //   deny  -> throw (OpenCode treats thrown errors as a block)
                 //   ask   -> console.error(hint) + bare return (passthrough to
                 //            opencode's per-agent permission table)
-                //   allow -> bare return (after applying any rewrite)
+                //   allow -> bare return (passthrough; L2 sees the original)
                 const commandCwd = commandCwdFrom(output?.args?.workdir);
                 const r = await evaluate(output.args.command, commandCwd);
                 if (r.action === "deny") throw new Error(r.reason);
@@ -108,14 +122,7 @@ export const server = async () => {
                     console.error(r.reason);
                     return; // let opencode's permission table decide
                 }
-                // allow: if the engine produced a rewrite, write it back IN
-                // PLACE so BOTH the permission matcher AND execution see the
-                // stripped form. Whole-object replace (output.args={...}) does
-                // NOT propagate — only an in-place mutation does.
-                if (r.rewrite && typeof r.rewrite === "string" && r.rewrite !== output.args.command) {
-                    output.args.command = r.rewrite;
-                }
-                return;
+                return; // allow: passthrough; no command mutation
             }
         },
     };
