@@ -143,11 +143,15 @@ that never names it renders nothing of it).
   as a host prefix.
 - **Use an existing wrapper for execution:** in `run-shape.yml` set
   `backend: proxy` and `proxy_command: ["./dev.sh", "exec"]`.
-- **Track work:** the backlog at `docs/planning/backlog.md` is seeded on install
-  (source of task truth). Before/after work, update the matching row's status;
-  run `/backlog-cleanup` (or `vh-agent-harness exec node
-  .opencode/scripts/normalize-backlog.js`) to tidy/archive. Roadmap intent lives
-  in `docs/planning/roadmap.md`. Both are `project_owned` (never clobbered).
+- **Track work:** `docs/planning/backlog.md` is the canonical task-status source
+  of truth (seeded on install, `project_owned`). Worker agents (`build`/
+  `docs-steward`) are DENIED direct edits to it — route status intents through
+  the W1 single-writer-promotion transport: `/task-update` (or `/write-task`)
+  before/after work, `/task-closeout` when done. Only the promoter batch-writes
+  `backlog.md` each cycle (an intentional stale-status window between runs).
+  Run `/backlog-cleanup` (or `vh-agent-harness exec node
+  .opencode/scripts/normalize-backlog.js`) to tidy/archive after a promotion.
+  Roadmap intent lives in `docs/planning/roadmap.md`.
 - **Refresh after a new binary or config change:** `vh-agent-harness update`
   (preview with `--dry-run`). Armed-file conflicts are recorded — list them with
   `vh-agent-harness proposals`.
@@ -252,6 +256,9 @@ blocks + `delegateFrom` edges via the Go-native emitter — no separate step) �
   `Makefile`, and any `AGENTS.md`; it refreshes only generic managed files.
 - `exec`/`shell` always run the shell-guard permission gate before touching the
   runtime, including the `proxy` backend.
+- `doctor`/`preflight` surface an ownership-raised divergent path (a managed
+  file taken to `project_owned` via `harness-ownership.yml`) as a non-failing
+  `preserved` (INFO) signal — never a FAIL, never blocks install/update.
 
 ## Git global-flag normalization (shell-guard)
 
