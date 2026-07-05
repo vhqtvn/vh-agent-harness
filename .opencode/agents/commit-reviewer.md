@@ -288,11 +288,9 @@ This orchestrator implements Phase 1 of the Commit-Gate Disposition (CGD) system
 - **BLOCK-only gating:** DEFER and DROP never block a commit, regardless of severity.
 - **Evidence-grounded disagreement:** Cross-leaf BLOCK disagreements are resolved by checking evidence verifiability, not by voting.
 - **Resolved-categories:** Prevents re-block-after-approve within a session.
-- **DEFER not persisted:** DEFER findings are recorded in the output but have no persistence mechanism in Phase 1. They serve as an audit trail.
+- **DEFER routes to the holding area:** DEFER findings are non-blocking. They are NOT transcribed into `docs/planning/backlog.md` directly. The DEFER grammar (trigger.predicate + trigger.params) IS the intake predicate: a DEFER finding is captured into `.local/coordinator/tasks/` (via `/write-task`) as a conditional candidate with Notes provenance (`source:review-defer`, the trigger expression, `studied:YYYY-MM-DD`), and reaches the backlog only after the trigger fires + the promoter applies the Definition of Ready. The promoter runs `check-defer-triggers.js` as a review aid. See the `backlog` skill.
 - **Success criteria:** <3 review rounds average, <15% block rate. If >80% of reviews are blocked, disposition calibration is too strict.
 - **Restart-gated:** These changes take effect only after opencode restart.
-
-Reference: `researches/decisions/2026-06-09-review-finding-disposition-design.md`
 
 ## Summary of key differences from v1 orchestrator
 

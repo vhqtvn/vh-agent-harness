@@ -223,8 +223,6 @@ during long reviews.
 - `.opencode/docs/git-execution-routing.md` — full routing documentation
 - `.opencode/agents/committer.md` — committer agent prompt (the actor, not a consumer of this skill)
 - `.opencode/scripts/commit-gate.sh` — the gate wrapper script
-- `researches/decisions/2026-06-03-gated-commit-brief.md` — full spec
-- `researches/decisions/2026-06-09-concurrent-commit-gate-design.md` — lock-free concurrent commit design
 
 ## Scratch-space hygiene
 

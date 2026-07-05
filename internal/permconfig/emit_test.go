@@ -575,11 +575,12 @@ func TestValidate_WildcardInvalidDecision(t *testing.T) {
 // Test 19: object-form edit for the committer. The committer's edit is emitted
 // as an OBJECT map {"*":"deny","<glob>":"allow"} (findLast semantics — deny-*
 // first, narrow allow last) so it can Write ONE scoped message-file path that
-// acquire --message-file consumes. build and docs-steward ALSO carry object-form
-// edit (broad allow + narrow deny for docs/planning/backlog.md — the W1 single-
-// writer-promotion model); that is asserted separately in Test 20. Here we pin
-// the committer's broad-deny+narrow-allow pattern and verify that the flat-edit
-// agents (coordination, repo-explorer) stay flat unchanged.
+// acquire --message-file consumes. The committer is the SOLE agent carrying
+// EditOverrides now (build/docs-steward reverted to broad flat Edit=Allow when
+// the W1 single-writer edit-blocking was unwound). This test pins the
+// committer's broad-deny+narrow-allow pattern and verifies that the flat-edit
+// agents (coordination, repo-explorer) stay flat unchanged, and that build is
+// flat allow (NOT object-form — the W1 backlog deny is gone).
 func TestEmit_CommitterObjectFormEdit(t *testing.T) {
 	out := mustEmit(t, miniConfig, nil, Features{})
 	s := string(out)
@@ -609,8 +610,7 @@ func TestEmit_CommitterObjectFormEdit(t *testing.T) {
 		t.Fatalf("committer edit must allow exactly ONE path, got:\n%s", editSlice)
 	}
 
-	// (b) flat-edit agents stay FLAT edit unchanged (deny). build is now
-	// object-form (see Test 20) so it is NOT in this list.
+	// (b) flat-edit agents stay FLAT edit unchanged (deny).
 	for _, agent := range []struct{ name, want string }{
 		{"coordination", "deny"},
 		{"repo-explorer", "deny"},
@@ -626,160 +626,26 @@ func TestEmit_CommitterObjectFormEdit(t *testing.T) {
 			t.Fatalf("%s edit must be flat %q, got: %s", agent.name, agent.want, line)
 		}
 	}
-}
 
-// Test 20: W1 single-writer-promotion — build and docs-steward carry an
-// object-form edit that DENIES docs/planning/backlog.md while allowing every
-// other path. This forces worker agents to use .local/coordinator/tasks/ as
-// status transport; only a designated promoter writes the canonical backlog.
-// Pattern: broad allow (* FIRST) + narrow deny (backlog path LAST) — the
-// inverse of the committer's broad deny + narrow allow (Test 19). findLast
-// (last-match-wins) semantics in opencode's permission/evaluate.ts pick the
-// deny for the backlog path and the allow for everything else.
-//
-// Key-order is load-bearing: "*" allow MUST precede the backlog deny, or
-// findLast would resolve the backlog path to allow (defeating the enforcement).
-// This test pins both the structural ordering AND the simulated verdict.
-func TestEmit_W1BacklogPromoterDeny(t *testing.T) {
-	// Fixture includes build AND docs-steward (miniConfig lacks docs-steward).
-	const cfg = `{
-  "$schema": "https://opencode.ai/config.json",
-  "permission": { "edit": "ask", "bash": { "__placeholder__": "deny" } },
-  "agent": {
-    "build":        { "permission": { "edit": "allow", "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
-    "docs-steward": { "permission": { "edit": "allow", "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
-    "committer":    { "permission": { "edit": "deny",  "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
-    "coordination": { "permission": { "edit": "deny",  "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }
-  }
-}`
-	out := mustEmit(t, cfg, nil, Features{})
-	s := string(out)
-
-	// (a) For build and docs-steward: object-form edit, allow-* FIRST then the
-	// backlog deny LAST. Then simulate findLast to confirm the verdict.
-	for _, name := range []string{"build", "docs-steward"} {
-		blk := extractAgentBlock(t, s, name)
-		i := strings.Index(blk, `"edit"`)
-		if i < 0 {
-			t.Fatalf("%s block has no edit key", name)
-		}
-		editSlice := blk[i:]
-		if !strings.HasPrefix(editSlice, `"edit": {`) {
-			t.Fatalf("%s edit must be object-form, got: %s", name, firstLine(editSlice))
-		}
-		// findLast ordering: "*" allow must precede the backlog deny.
-		starIdx := strings.Index(editSlice, `"*": "allow"`)
-		denyIdx := strings.Index(editSlice, `"`+BacklogPromoterDenyPath+`": "deny"`)
-		if starIdx < 0 || denyIdx < 0 {
-			t.Fatalf("%s edit object missing allow-* or backlog deny:\n%s", name, editSlice)
-		}
-		if starIdx > denyIdx {
-			t.Fatalf("%s: allow-* (pos %d) must precede backlog deny (pos %d) — findLast semantics", name, starIdx, denyIdx)
-		}
-		// The edit object has exactly TWO entries: the broad allow and the
-		// narrow backlog deny. parseEditEntries scopes to the edit {…} object
-		// only (NOT the trailing task block, which also carries denies).
-		entries := parseEditEntries(t, editSlice)
-		if len(entries) != 2 {
-			t.Fatalf("%s edit must have exactly 2 entries (* allow + backlog deny), got %d: %v", name, len(entries), entries)
-		}
-		denies := 0
-		for _, e := range entries {
-			if e.decision == "deny" {
-				denies++
-			}
-		}
-		if denies != 1 {
-			t.Fatalf("%s edit must have exactly ONE deny entry, got %d: %v", name, denies, entries)
-		}
-		// findLast verdict simulation over the ordered entries.
-		for _, tc := range []struct{ path, want string }{
-			{"docs/planning/backlog.md", "deny"},      // matches * AND literal → last wins → deny
-			{"internal/foo.go", "allow"},              // matches only * → allow
-			{"tmp/x.md", "allow"},                     // matches only * → allow
-			{"docs/planning/archive/old.md", "allow"}, // NOT the exact backlog path → only * matches
-			{"docs/ai/shell-execution.md", "allow"},   // docs-steward may still edit its own guidance docs
-		} {
-			got := findLastVerdict(entries, tc.path)
-			if got != tc.want {
-				t.Fatalf("%s findLastVerdict(%q) = %q, want %q (entries: %v)", name, tc.path, got, tc.want, entries)
-			}
-		}
+	// (c) build is FLAT allow (NOT object-form) — the W1 backlog deny
+	// EditOverrides has been removed. This is the regression guard for the
+	// unwind: build must NOT carry an object-form edit and must NOT carry the
+	// backlog-path deny. If this fails, the W1 edit-blocking was re-added.
+	buildBlock := extractAgentBlock(t, s, "build")
+	bi := strings.Index(buildBlock, `"edit"`)
+	if bi < 0 {
+		t.Fatalf("build block has no edit key")
 	}
-
-	// (b) committer UNCHANGED — its object-form edit (broad deny + narrow
-	// allow) is NOT affected by the W1 addition. It must NOT carry the backlog
-	// deny (only build/docs-steward do).
-	committerBlock := extractAgentBlock(t, s, "committer")
-	ci := strings.Index(committerBlock, `"edit"`)
-	cedit := committerBlock[ci:]
-	if !strings.HasPrefix(cedit, `"edit": {`) {
-		t.Fatalf("committer edit must still be object-form, got: %s", firstLine(cedit))
+	bEdit := buildBlock[bi:]
+	if !strings.HasPrefix(bEdit, `"edit": "allow"`) {
+		t.Fatalf("build edit must be FLAT allow (W1 backlog deny removed), got: %s", firstLine(bEdit))
 	}
-	if !strings.Contains(cedit, `"*": "deny"`) {
-		t.Fatalf("committer edit must still be broad deny-*, got:\n%s", cedit)
+	if strings.Contains(bEdit, `"edit": {`) {
+		t.Fatalf("build edit must NOT be object-form (W1 EditOverrides removed), got: %s", firstLine(bEdit))
 	}
-	if strings.Contains(cedit, BacklogPromoterDenyPath) {
-		t.Fatalf("committer edit must NOT carry the W1 backlog deny (only build/docs-steward do):\n%s", cedit)
+	if strings.Contains(bEdit, BacklogLedgerPath) {
+		t.Fatalf("build edit must NOT reference the backlog path (W1 deny removed), got:\n%s", bEdit)
 	}
-
-	// (c) coordination stays flat deny (regression: the W1 change does not
-	// accidentally widen edit for non-target agents).
-	coordBlock := extractAgentBlock(t, s, "coordination")
-	coi := strings.Index(coordBlock, `"edit"`)
-	if !strings.HasPrefix(coordBlock[coi:], `"edit": "deny"`) {
-		t.Fatalf("coordination edit must stay flat deny, got: %s", firstLine(coordBlock[coi:]))
-	}
-}
-
-// editEntry is one pattern→decision pair in an object-form edit block, used by
-// the findLast verdict simulation in Test 20.
-type editEntry struct{ pattern, decision string }
-
-// parseEditEntries extracts the ordered (pattern, decision) pairs from a raw
-// emitted edit block substring (e.g. `"edit": { "*": "allow", "..." : "deny" }`).
-// It preserves key order, which json.Unmarshal into map[string]any would lose.
-// Test-only helper for the findLast verdict simulation.
-func parseEditEntries(t *testing.T, editSlice string) []editEntry {
-	t.Helper()
-	start := strings.Index(editSlice, "{")
-	end := strings.Index(editSlice, "}")
-	if start < 0 || end < 0 || end < start {
-		t.Fatalf("parseEditEntries: no object braces in: %s", editSlice)
-	}
-	body := editSlice[start+1 : end]
-	pairs := strings.Split(body, ",")
-	var entries []editEntry
-	for _, p := range pairs {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		colon := strings.Index(p, ":")
-		if colon < 0 {
-			t.Fatalf("parseEditEntries: malformed entry %q in: %s", p, editSlice)
-		}
-		key := strings.Trim(strings.TrimSpace(p[:colon]), `"`)
-		val := strings.Trim(strings.TrimSpace(p[colon+1:]), `"`)
-		entries = append(entries, editEntry{key, val})
-	}
-	return entries
-}
-
-// findLastVerdict simulates opencode's findLast (last-match-wins) edit
-// evaluation. It scans the ordered entries and returns the decision of the
-// LAST entry whose pattern matches the path. "*" matches everything; any other
-// pattern is an exact string match (the edit tool passes exact repo-relative
-// paths and `.` is literal-escaped in opencode's matcher — so the backlog
-// pattern matches ONLY that one canonical file).
-func findLastVerdict(entries []editEntry, path string) string {
-	verdict := ""
-	for _, e := range entries {
-		if e.pattern == "*" || e.pattern == path {
-			verdict = e.decision
-		}
-	}
-	return verdict
 }
 
 // extractAgentBlock returns the substring of the emitted config covering one
@@ -900,33 +766,36 @@ func TestEmit_PresentAgentFilterNoopWhenAllPresent(t *testing.T) {
 }
 
 // Test 21: D-F2 cross-constant equivalence — the JS-side PROTECTED_PATH in the
-// edit-guard plugin MUST equal the Go-side BacklogPromoterDenyPath constant.
+// backlog-reminder plugin MUST equal the Go-side BacklogLedgerPath constant.
 // Both literals hold the canonical backlog path, but they live in different
 // languages/trees with no codegen coupling them, so a future edit to either
 // could silently desync. This test pins them.
 //
-// Severity: layer C (permconfig) still hard-denies the path even on desync, so
-// drift degrades UX (the curated edit-guard message fails to fire → bare gate
-// dump), NOT correctness. The test keeps the curated UX aligned with the
-// backstop.
+// Severity: the reminder plugin is NON-BLOCKING (it only console.errors a
+// nudge, then lets the edit proceed), so drift degrades UX (the curated
+// reminder fails to fire on the canonical path → no nudge), NOT correctness.
+// The test keeps the curated reminder aligned with the canonical ledger path.
 func TestEditGuardProtectedPathMatchesPermconfigConstant(t *testing.T) {
 	// go test runs with cwd = internal/permconfig/; repo root is ../../.
-	const editGuardRel = "../../templates/core/.opencode/plugins/edit-guard.js"
-	src, err := os.ReadFile(editGuardRel)
+	// The plugin was renamed edit-guard.js -> backlog-reminder.js when the W1
+	// throw-based edit-blocking was unwound into a non-blocking nudge.
+	const reminderRel = "../../templates/core/.opencode/plugins/backlog-reminder.js"
+	src, err := os.ReadFile(reminderRel)
 	if err != nil {
-		t.Fatalf("read %s: %v (is the test cwd the permconfig package dir?)", editGuardRel, err)
+		t.Fatalf("read %s: %v (is the test cwd the permconfig package dir?)", reminderRel, err)
 	}
 	// Match the declaration: const PROTECTED_PATH = "<value>";
 	re := regexp.MustCompile(`PROTECTED_PATH\s*=\s*"([^"]+)"`)
 	m := re.FindSubmatch(src)
 	if m == nil {
-		t.Fatalf("PROTECTED_PATH declaration not found in %s", editGuardRel)
+		t.Fatalf("PROTECTED_PATH declaration not found in %s", reminderRel)
 	}
 	got := string(m[1])
-	if got != BacklogPromoterDenyPath {
-		t.Fatalf("PROTECTED_PATH in %s = %q does NOT match BacklogPromoterDenyPath in "+
+	if got != BacklogLedgerPath {
+		t.Fatalf("PROTECTED_PATH in %s = %q does NOT match BacklogLedgerPath in "+
 			"internal/permconfig/tables.go = %q — the two literals have desynced "+
-			"(layer C still backstops, but the curated edit-guard UX is misaligned)",
-			editGuardRel, got, BacklogPromoterDenyPath)
+			"(the reminder is non-blocking, but the curated nudge is misaligned "+
+			"with the canonical ledger path)",
+			reminderRel, got, BacklogLedgerPath)
 	}
 }

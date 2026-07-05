@@ -100,12 +100,15 @@ De-escalate when fan-in has been reduced enough that:
 ## Non-Negotiable Rules
 
 1. Transport is not truth.
-2. One writer promotes fan-in results back to canon. This applies **during
-   execution**, not only at fan-in closeout: the canonical status file
-   (`docs/planning/backlog.md`) has a single promoter who batch-promotes live
-   status intents from `.local/coordinator/tasks/` per cycle. Workers
-   route status to transport; they do not edit canon directly (denied via the
-   per-agent permission map). See [PROMOTER_RUNBOOK.md](PROMOTER_RUNBOOK.md).
+2. Commit backlog SEPARATELY from code (hybrid split-commit). This applies
+   **during execution** as well as at fan-in: an agent editing
+   `docs/planning/backlog.md` keeps that edit in a backlog commit distinct from
+   its code commit, so a concurrent backlog edit can never block a clean code
+   commit. On `cas_conflict`, re-read from the new HEAD, re-apply only your
+   rows, and retry — never revert `backlog.md`. DEFER/p2 follow-ups route to
+   `.local/coordinator/tasks/` as conditional candidates and reach the
+   backlog only after trigger + Definition of Ready. See
+   [PROMOTER_RUNBOOK.md](PROMOTER_RUNBOOK.md).
 3. Subagent reports capture facts first; synthesis resolves conflicts.
 4. Raw runtime notes stay local unless promoted into backlog or checkpoints.
 5. Coordinator context stays thin; concrete work moves to owned specialists or

@@ -20,32 +20,37 @@ Use the existing source of truth that already owns each kind of state.
 
 | State | Canonical location | Notes |
 | --- | --- | --- |
-| Active task status | `docs/planning/backlog.md` | The backlog remains the canonical task queue and status ledger. Written by a **single promoter** (operator/coordination initially); worker agents are denied direct edits (W1 single-writer-promotion). |
+| Active task status | `docs/planning/backlog.md` | The backlog is the canonical task queue and status ledger. Agents edit it **freely**; conflict discipline (commit backlog separately from code; re-read before edit; on `cas_conflict` re-read + re-apply + retry, never revert) is enforced at the commit/workflow layer. |
 | Durable decisions, blockers, completions | `docs/checkpoints/` | Commit only durable snapshots worth reopening later. |
 | Release and environment facts | `docs/deployment/` | Keep provider/demo state in release docs, not in generic coordination files. |
 | Live task execution state | `.opencode/state/sessions/<alias>/` | Session-scoped task contracts, checkpoints, handoffs, and open questions. |
 | Live cross-session theme state | `.opencode/state/workstreams/<slug>/` | Long-lived local theme context that should not become backlog rows by default. |
-| Live task-card transport | `.local/{{COORDINATOR_DIR}}/tasks/` | Gitignored transport for worker status intents (`/write-task`, `/task-update`, `/task-closeout`, `/task-review`). NOT truth — the promoter promotes consolidated results into `backlog.md` per cycle. |
+| Conditional candidate holding area | `.local/{{COORDINATOR_DIR}}/tasks/` | Gitignored **transport, not truth** for DEFER/p2 follow-up candidates awaiting curation. Unpromoted candidates may be lost (intentionally fine). The promoter curates DoR-meeting candidates into `backlog.md`. |
 | Local operator overlays | `.local/{{COORDINATOR_DIR}}/` | Private, gitignored operator state and preferences. |
 
-### Single-writer-promotion model (W1)
+### Free-edits + curation model
 
-The canonical task-status file (`docs/planning/backlog.md`) has **one writer**:
-the promoter. Worker agents fan status intents to the gitignored transport
-(`.local/{{COORDINATOR_DIR}}/tasks/`) via the lifecycle commands; the promoter
-batch-promotes consolidated results back to canon per cycle. This decouples
-worker progress from shared-file commit contention: workers never commit a
-backlog blob, so a backlog conflict can never block a clean code commit.
+Agents edit `docs/planning/backlog.md` directly. Two disciplines keep this safe:
 
-- **Fan-out:** workers route status intents to transport, not to canon.
-- **Fan-in:** one promoter reads closeouts, batch-edits the backlog, and commits
-  via a single gated commit (the committer).
-- **Stale-status window:** `backlog.md` lags live state between promoter runs.
-  This is intentional and bounded. Workers reading `backlog.md` mid-cycle may see
-  stale `in_progress`/assignment; the `.local` task cards are the live view.
+1. **Hybrid split-commit conflict discipline.** Code commits exclude incidental
+   backlog changes; the backlog is committed **separately** (one backlog commit
+   per cycle). Dirty backlog edits are **preserved before any restore** — never
+   blind-revert `backlog.md`. On `cas_conflict`, re-read from the new HEAD,
+   re-apply only your rows, and retry. See [PROMOTER_RUNBOOK.md](PROMOTER_RUNBOOK.md).
+2. **Intake curation.** DEFER findings and p2 follow-ups NEVER become backlog
+   rows directly. They land in `.local/{{COORDINATOR_DIR}}/tasks/` as
+   conditional candidates and reach the backlog only after a trigger fires AND
+   the promotion Definition of Ready is met (concrete area + file scope +
+   validation plan + clear slice + provenance). The promoter runs the
+   `check-defer-triggers.js` predicate checker as a review aid (promoter-use-
+   only; never a commit hook; never blocking).
 
-See [PROMOTER_RUNBOOK.md](PROMOTER_RUNBOOK.md) for the promoter procedure and
-recovery behavior.
+The **promoter** curates candidates and batch-promotes a cycle's consolidated
+status transitions (normalize + archive + one backlog commit). It is a curator
+and cycle-consolidator, not the sole writer — agents write their own rows.
+
+See [PROMOTER_RUNBOOK.md](PROMOTER_RUNBOOK.md) for the promoter procedure,
+conflict resolution, and the Definition of Ready.
 
 ## Coordination Planes
 
@@ -102,8 +107,10 @@ Use:
 ## Coordination Rules
 
 1. Keep `docs/planning/backlog.md` as the only committed task-status source of
-   truth, written by a single promoter. Workers route status intents to
-   `.local/{{COORDINATOR_DIR}}/tasks/` (transport), never direct backlog edits.
+   truth. Agents edit it freely; commit backlog changes SEPARATELY from code so
+   a concurrent backlog edit can never block a clean code commit. DEFER/p2
+   follow-ups route to `.local/{{COORDINATOR_DIR}}/tasks/` as conditional
+   candidates, not direct backlog rows.
 2. Keep `docs/checkpoints/` as the durable record for meaningful blockers,
    decisions, and closeouts.
 3. Keep `.opencode/state/` as local runtime coordination state.
@@ -121,11 +128,10 @@ Use:
    or perform inline research that belongs in a researcher session.
 7. For medium and long tasks, use structured report envelopes instead of freeform
    chat summaries.
-8. Only one writer (the promoter) edits `docs/planning/backlog.md` per cycle —
-   both during execution (batch promotion of live status intents) and at fan-in
-   closeout (consolidated results). The same single-writer principle applies to
-   `docs/checkpoints/` at fan-in: one synthesizer writes the durable closeout,
-   not every worker. Workers fan status intents to transport.
+8. Commit backlog SEPARATELY from code each cycle (hybrid split-commit). At
+   fan-in, one synthesizer writes the durable closeout in `docs/checkpoints/`,
+   not every worker. DEFER/p2 candidates are curated into the backlog by the
+   promoter only after trigger + Definition of Ready.
 9. When a coordination change alters durable operating rules, update the
    matching OpenCode or GitHub instruction surface in the same slice.
 

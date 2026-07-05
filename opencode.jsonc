@@ -55,10 +55,7 @@
                     ".opencode/scripts/readonly-scripts.sh *": "allow",
                     "vh-agent-harness *": "allow"
                 },
-                "edit": {
-                    "*": "allow",
-                    "docs/planning/backlog.md": "deny"
-                },
+                "edit": "allow",
                 "skill": {
                     "*": "allow"
                 },
@@ -998,10 +995,7 @@
                     ".opencode/scripts/readonly-scripts.sh *": "allow",
                     "vh-agent-harness *": "ask"
                 },
-                "edit": {
-                    "*": "allow",
-                    "docs/planning/backlog.md": "deny"
-                },
+                "edit": "allow",
                 "task": {
                     "*": "deny",
                     "committer": "allow"

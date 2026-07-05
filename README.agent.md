@@ -144,13 +144,23 @@ that never names it renders nothing of it).
 - **Use an existing wrapper for execution:** in `run-shape.yml` set
   `backend: proxy` and `proxy_command: ["./dev.sh", "exec"]`.
 - **Track work:** `docs/planning/backlog.md` is the canonical task-status source
-  of truth (seeded on install, `project_owned`). Worker agents (`build`/
-  `docs-steward`) are DENIED direct edits to it — route status intents through
-  the W1 single-writer-promotion transport: `/task-update` (or `/write-task`)
-  before/after work, `/task-closeout` when done. Only the promoter batch-writes
-  `backlog.md` each cycle (an intentional stale-status window between runs).
-  Run `/backlog-cleanup` (or `vh-agent-harness exec node
-  .opencode/scripts/normalize-backlog.js`) to tidy/archive after a promotion.
+  of truth (seeded on install, `project_owned`). Agents edit it **freely** under
+  the hybrid split-commit discipline: re-read from disk before editing, edit
+  only your own task rows (stable IDs), and **commit backlog separately from
+  code** so a concurrent backlog edit can't `cas_conflict` your code commit. On
+  `cas_conflict`, re-read from the new HEAD, re-apply your row, and retry — **do
+  NOT revert `backlog.md`** (that discards a collaborator's update); in
+  particular, `commit-gate.sh revert docs/planning/backlog.md` is the
+  blind-revert anti-pattern on the ledger. Load the `backlog` skill before
+  editing. DEFER / p2 / follow-up findings route to the holding area
+  (`.local/coordinator/tasks/` via `/write-task` with Notes provenance),
+  never directly to a backlog row; the promoter promotes them only after the
+  predicate checker (`.opencode/scripts/check-defer-triggers.js`,
+  promoter-use-only, never blocking) confirms the trigger and the Definition of
+  Ready is met. A non-blocking `backlog-reminder` plugin nudges once per session
+  when any agent edits the ledger (edit/write/apply_patch/bash substring). Run
+  `/backlog-cleanup` (or `vh-agent-harness exec node
+  .opencode/scripts/normalize-backlog.js`) to tidy/archive after a batch edit.
   Roadmap intent lives in `docs/planning/roadmap.md`.
 - **Refresh after a new binary or config change:** `vh-agent-harness update`
   (preview with `--dry-run`). Armed-file conflicts are recorded — list them with

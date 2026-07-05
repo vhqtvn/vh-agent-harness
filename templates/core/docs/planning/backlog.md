@@ -2,20 +2,27 @@
 
 Source of truth for task status — the harness coordination model reads this file.
 
-**Workers (`build`, `docs-steward`):** direct edits to this file are DENIED via
-the per-agent permission map (W1 single-writer-promotion). Route status intents
-through the local task-card lifecycle instead:
+**Agents edit this file freely.** Two disciplines keep a backlog edit from
+blocking a code commit (enforced at the commit/workflow layer, not by blocking
+edits):
 
-- before work — `/task-update` (or `/write-task` if no card yet) to record
-  `in_progress` + owner + date
-- on finish — `/task-closeout <id>` with changed files + verification
-- if blocked — `/task-update` with the exact blocker + next decision
-- new follow-ups — new task card with a new ID, never overload an existing task
+- **Commit backlog SEPARATELY from code.** A code commit carries code (+ tests +
+  the docs that justify it); a backlog commit carries backlog rows. One backlog
+  commit per work cycle is the target. Never bundle a backlog-status change into
+  a code commit.
+- **On `cas_conflict`, re-read + re-apply + retry — do NOT revert this file.**
+  Reverting discards other agents' promoted state. Re-read from the new HEAD,
+  re-apply only your rows (by stable ID), and retry.
 
-This file **lags live state** between promoter runs; `.local/{{COORDINATOR_DIR}}/tasks/`
-is the live view during a work cycle. The **promoter** (operator/coordination
-initially) is the sole writer of this file and batch-promotes consolidated
-results per cycle, then runs `/backlog-cleanup` (or `vh-agent-harness exec node
+**DEFER / p2 follow-up items NEVER become rows here directly.** Capture them in
+`.local/{{COORDINATOR_DIR}}/tasks/` as conditional candidates (transport, not
+truth) with Notes provenance (`source:review-defer`/`source:p2-followup`,
+`trigger:...`, `studied:YYYY-MM-DD`). They reach this file only after a trigger
+fires AND the promotion Definition of Ready is met. See
+`docs/coordination/PROMOTER_RUNBOOK.md`.
+
+Load the `backlog` skill before substantial backlog work. After a batch edit,
+run `/backlog-cleanup` (or `vh-agent-harness exec node
 .opencode/scripts/normalize-backlog.js`) to keep the active sections tidy and
 archive `done`/`cancelled` rows under `docs/planning/archive/`.
 

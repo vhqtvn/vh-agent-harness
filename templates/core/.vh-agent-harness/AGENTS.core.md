@@ -264,57 +264,86 @@ When making changes:
 The canonical planning documents live under `docs/planning/` and `docs/checkpoints/`.
 
 ### Canonical files
-- `docs/planning/backlog.md` is the source of truth for task status. It is written by a **single promoter** (initially the operator via coordination; a dedicated promoter agent may come later), not by worker agents.
+- `docs/planning/backlog.md` is the source of truth for task status. Agents
+  edit it **freely**; conflict discipline is enforced at the commit/workflow
+  layer, not by blocking edits (see "Conflict discipline" below).
 - `docs/planning/archive/` stores older `done` / `cancelled` rows moved out of the active backlog for on-demand retrieval.
 - `docs/planning/roadmap.md` describes phase ordering and milestone intent.
 - `docs/checkpoints/` stores dated progress snapshots only when a checkpoint is worth committing.
 
-### Single-writer-promotion model (W1)
+### Conflict discipline (hybrid split-commit)
 
-Worker agents (`build`, `docs-steward`) are **denied** direct edits to
-`docs/planning/backlog.md` via the per-agent permission map. This is intentional
-and enforced. Status intents during a work cycle are NOT written to the backlog
-directly; they flow through the existing local task-card lifecycle commands to
-`.local/{{COORDINATOR_DIR}}/tasks/` (gitignored transport). The promoter then
-batch-promotes consolidated results back into the canonical backlog per cycle.
+Agents edit `docs/planning/backlog.md` freely. The disciplines that keep a
+backlog edit from blocking a code commit live at the **commit/workflow layer**,
+not in the permission map:
 
-- **Workers route status intents to transport**, reusing the existing lifecycle
-  commands — do NOT invent a parallel transport:
-  - `/write-task` to create or update a local task card
-  - `/task-update` to record status intent without changing lifecycle state
-  - `/task-closeout <id>` to persist a closeout report when work finishes
-  - `/task-review <id>` to record the coordinator-side decision
-- **`docs/planning/backlog.md` remains the canonical task-status source of
-  truth.** It is written only by the promoter (operator/coordination initially).
-- **`.local/{{COORDINATOR_DIR}}/tasks/` is transport, not truth.** It is
-  gitignored; the canonical record is `backlog.md` plus `docs/checkpoints/`.
+- **Re-read from disk before editing** — the file is a shared ledger; always
+  load the latest content from disk immediately before your edit so you build
+  on current state, not a stale copy.
+- **Edit only your own task rows** — scope your edit to the rows you own
+  (matched by stable task ID). Do not touch unrelated rows.
+- **Commit backlog SEPARATELY from code** — never bundle a backlog-status
+  change into a code commit. A code commit carries code (+ tests + the docs
+  that justify the code); a backlog commit carries backlog rows. One backlog
+  commit per work cycle is the target. This is what keeps a concurrent
+  backlog edit from blocking a clean code commit.
+- **On `cas_conflict`, re-read + re-apply + retry — do NOT revert
+  `backlog.md` to unblock.** Reverting the shared ledger to HEAD discards
+  other agents' promoted state. The canonical recovery is to re-read the file
+  from the new HEAD, re-apply only your rows, and retry. The
+  `commit-gate.sh revert` path is for stray CODE files this session does not
+  own; it must NOT be used on `backlog.md`.
 
-### Stale-status window (intentional)
+Load the `backlog` skill (`.opencode/skills/backlog/SKILL.md`) for the full
+quick-reference before substantial backlog work. A non-blocking reminder fires
+on the first edit of `backlog.md` per session.
 
-`docs/planning/backlog.md` **lags live state during a work cycle** (between
-promoter runs). This is intentional and bounded, not a bug to hide. A worker
-reading `backlog.md` mid-cycle may see stale `in_progress` / assignment rows;
-the `.local/{{COORDINATOR_DIR}}/tasks/` cards are the live view during that
-window. The promoter closes the gap at each promotion cycle. See
-`docs/coordination/PROMOTER_RUNBOOK.md` for the procedure and recovery behavior.
+### DEFER / follow-up curation (intake, not direct rows)
 
-### Agent update requirements (status via transport, not backlog edits)
-- Before substantial work, record the status intent (`in_progress`, owner/date)
-  on the matching local task card via `/task-update` (or `/write-task` if no card
-  exists yet). Do NOT edit `docs/planning/backlog.md` directly — that is now
-  denied for workers and will be promoted by the promoter.
-- When finishing work, file the closeout via `/task-closeout <id>` with the
-  changed files and verification performed. The promoter promotes the `done`
-  transition into the canonical backlog.
-- If new follow-up work is discovered, create a new task card with a new ID
-  instead of overloading the current task.
-- If blocked, record the exact blocker and the next decision needed on the task
-  card via `/task-update`; the promoter reflects `blocked` in the backlog.
-- Do not delete old tasks silently. The promoter moves abandoned items to
-  `cancelled` with a short reason.
-- After the promoter batch-edits `backlog.md` in a way that completes/cancels
-  work or creates section drift, run the backlog normalizer (`/backlog-cleanup`
-  or `vh-agent-harness exec node .opencode/scripts/normalize-backlog.js`) so
+DEFER findings and p2 follow-up/cleanup items NEVER become backlog rows
+directly. They land in `.local/{{COORDINATOR_DIR}}/tasks/` as **conditional
+candidates** (transport, not truth) and reach `backlog.md` only after a
+trigger fires AND the promoter applies the promotion Definition of Ready:
+
+- **Capture** a DEFER/follow-up via `/write-task` into
+  `.local/{{COORDINATOR_DIR}}/tasks/` with Notes-prefix provenance:
+  `source:review-defer` (or `source:p2-followup`), `trigger:path_touched(<path>)`
+  (or another approved predicate), `studied:YYYY-MM-DD`.
+- **Holding area is transport, not truth.** Unpromoted candidates may be lost —
+  this is intentionally fine, because they are not trusted work yet. Do not
+  create a parallel committed ledger for them.
+- **Promotion Definition of Ready (DoR):** a candidate reaches `backlog.md`
+  only if ALL of: trigger has fired (or operator override) + concrete area +
+  file scope + validation plan + clear slice + provenance Notes. Run the
+  predicate checker (`node .opencode/scripts/check-defer-triggers.js`) as a
+  promotion-review aid — it is **promoter-use-only**, never wired into a commit
+  hook, never blocking.
+- **Reviewer DEFER never becomes a direct backlog row.** A `/commit-review`
+  DEFER finding is captured to `.local/` and curated later; it is not
+  transcribed into `backlog.md` in the same slice.
+
+### Picking contract (R1)
+
+Before acting on any backlog row, **re-study the cited files/state**. A backlog
+row is a pointer, not a complete specification: re-read the referenced code,
+docs, and prior decisions, then act on the current reality rather than the
+row's summary.
+
+### Agent update requirements
+- Before substantial work, set the row to `in_progress` (+ owner + date) with a
+  direct edit. Re-read from disk first; edit only your row.
+- When finishing work, set the row to `done` with the changed files and
+  verification performed, in a backlog commit SEPARATE from the code commit.
+- If new follow-up work is discovered, capture it as a conditional candidate in
+  `.local/{{COORDINATOR_DIR}}/tasks/` (see "DEFER / follow-up curation"); do
+  NOT add it to `backlog.md` unless its trigger has fired and it meets the DoR.
+- If blocked, set the row to `blocked` with the exact blocker and the next
+  decision needed.
+- Do not delete old tasks silently. Move abandoned items to `cancelled` with a
+  short reason.
+- After batch-editing `backlog.md` in a way that completes/cancels work or
+  creates section drift, run the backlog normalizer (`/backlog-cleanup` or
+  `vh-agent-harness exec node .opencode/scripts/normalize-backlog.js`) so
   `Now` / `Next` / `Later` stay active-only and older history is archived under
   `docs/planning/archive/`.
 - Do not rewrite unrelated task history while updating the backlog.
