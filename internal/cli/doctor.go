@@ -306,11 +306,35 @@ func additionalSchemaPaths() []schemaPath {
 // and byte-compares every platform_managed path against the live tree. Drift or
 // absence => FAIL (run `vh-agent-harness update`). It exercises the renderer + classifier
 // the seam uses, so a doctor pass is a faithful integrity probe.
+//
+// Ownership-override-aware (decision A2): the byte-compare filter uses the
+// EFFECTIVE ownership class (platform defaults reconciled with the project's
+// raise-only harness-ownership.yml overrides via ownership.Resolve), mirroring
+// seamInventory/computeSeamDrift. A path whose effective class is raised above
+// platform_managed (e.g. project_owned via override) is NEVER counted as drift:
+// update (substrate.Apply) already routes it to ActionProjectPreserved, so the
+// live bytes are intentionally divergent. Such a present-and-divergent raised
+// path is surfaced as a non-failing `preserved` (tierInfo) signal instead of a
+// perpetual FAIL — closing the gap where doctor re-rendered, byte-compared, and
+// failed forever on a divergence the update it points at is a no-op-by-design on.
+//
+// An absent override file (the common case) resolves to nil overrides, so
+// behavior is byte-identical to the raw-class check for repos without overrides.
 func checkManagedDrift(target string) checkResult {
 	defaults, err := corpus.CoreOwnershipDefaults()
 	if err != nil {
 		return checkResult{name: "managed-drift", tier: tierFail,
 			detail: fmt.Sprintf("core ownership: %v", err)}
+	}
+	overrides, oerr := readOwnershipOverrides(target)
+	if oerr != nil {
+		return checkResult{name: "managed-drift", tier: tierFail,
+			detail: fmt.Sprintf("read ownership overrides: %v", oerr)}
+	}
+	eff, rverr := ownership.Resolve(defaults, overrides)
+	if rverr != nil {
+		return checkResult{name: "managed-drift", tier: tierFail,
+			detail: fmt.Sprintf("ownership resolve (raise-only): %v", rverr)}
 	}
 	sub, err := coreSubFSImpl()
 	if err != nil {
@@ -336,21 +360,29 @@ func checkManagedDrift(target string) checkResult {
 		return checkResult{name: "managed-drift", tier: tierFail,
 			detail: fmt.Sprintf("render staging: %v", err)}
 	}
-	drifted, missing := 0, 0
+	drifted, missing, preserved := 0, 0, 0
 	checked := 0
-	for path, rule := range defaults {
-		if rule.Class != ownership.ClassPlatformManaged {
+	for path := range defaults {
+		effClass, _ := eff.ClassOf(path)
+		staged, serr := os.ReadFile(filepath.Join(staging, filepath.FromSlash(path)))
+		live, lerr := os.ReadFile(filepath.Join(target, filepath.FromSlash(path)))
+		if effClass != ownership.ClassPlatformManaged {
+			// Raised via override (e.g. project_owned). update preserves it; doctor
+			// must not flag byte divergence as drift. A present-and-divergent raised
+			// path is surfaced as non-failing `preserved`. Absence is silent: a
+			// raised path is the operator's concern (update never seeds/touches it),
+			// so a missing project_owned file is neither drift nor preservation.
+			if serr == nil && lerr == nil && string(live) != string(staged) {
+				preserved++
+			}
 			continue
 		}
 		checked++
-		stagedPath := filepath.Join(staging, filepath.FromSlash(path))
-		staged, serr := os.ReadFile(stagedPath)
 		if serr != nil {
 			// A managed path that fails to render is a platform/template bug.
 			drifted++
 			continue
 		}
-		live, lerr := os.ReadFile(filepath.Join(target, filepath.FromSlash(path)))
 		if lerr != nil {
 			if os.IsNotExist(lerr) {
 				missing++
@@ -370,6 +402,9 @@ func checkManagedDrift(target string) checkResult {
 	case missing > 0:
 		return checkResult{name: "managed-drift", tier: tierFail,
 			detail: fmt.Sprintf("%d missing of %d managed — run `vh-agent-harness update`", missing, checked)}
+	case preserved > 0:
+		return checkResult{name: "managed-drift", tier: tierInfo,
+			detail: fmt.Sprintf("%d managed file(s) in sync; %d project-preserved (ownership override)", checked, preserved)}
 	default:
 		return checkResult{name: "managed-drift", tier: tierPass,
 			detail: fmt.Sprintf("%d managed file(s) in sync", checked)}

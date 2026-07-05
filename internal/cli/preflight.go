@@ -60,6 +60,14 @@ const (
 	tierFail = "FAIL"
 	tierWarn = "WARN"
 	tierSkip = "SKIP"
+	// tierInfo is a non-failing, non-warning informational signal. It neither
+	// increments the problem count nor the warning count, and never blocks a
+	// command. doctor's managed-drift check uses it to surface ownership-preserved
+	// divergences (a path raised to project_owned via harness-ownership.yml whose
+	// live bytes intentionally differ from the re-rendered template — update
+	// correctly preserves them, so they are not drift). A tierInfo result is
+	// treated as a pass for exit-code / blocking purposes.
+	tierInfo = "INFO"
 )
 
 type checkResult struct {
@@ -118,8 +126,11 @@ func runPreflight(cmd *cobra.Command, _ []string) error {
 			warned++
 		}
 	}
+	// tierInfo is a non-failing signal treated as a pass for blocking and summary
+	// purposes (e.g. an ownership-preserved managed file). Counting it with passed
+	// keeps the summary arithmetic honest: passed+warned+failed == len(results).
 	fmt.Fprintf(out, "summary: %d passed, %d warned, %d failed\n",
-		countTier(results, tierPass), warned, failed)
+		countTier(results, tierPass)+countTier(results, tierInfo), warned, failed)
 	if failed > 0 {
 		fmt.Fprintf(out, "result: FAIL — fix the failing checks before proceeding.\n")
 		return errSilent{}
