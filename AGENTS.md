@@ -264,18 +264,59 @@ When making changes:
 The canonical planning documents live under `docs/planning/` and `docs/checkpoints/`.
 
 ### Canonical files
-- `docs/planning/backlog.md` is the source of truth for task status.
+- `docs/planning/backlog.md` is the source of truth for task status. It is written by a **single promoter** (initially the operator via coordination; a dedicated promoter agent may come later), not by worker agents.
 - `docs/planning/archive/` stores older `done` / `cancelled` rows moved out of the active backlog for on-demand retrieval.
 - `docs/planning/roadmap.md` describes phase ordering and milestone intent.
 - `docs/checkpoints/` stores dated progress snapshots only when a checkpoint is worth committing.
 
-### Agent update requirements
-- Before substantial work, update the matching row in `docs/planning/backlog.md` to `in_progress` and add owner/date notes. If no matching row exists, add a new task instead of reusing an unrelated one.
-- When finishing work, move the task to `done` and record the changed files and verification performed.
-- If new follow-up work is discovered, add a new task with a new ID instead of overloading the current task.
-- If blocked, move the task to `blocked` with the exact blocker and the next decision needed.
-- Do not delete old tasks silently. Move abandoned items to `cancelled` and leave a short reason.
-- After backlog edits that complete/cancel work or otherwise create section drift, run the backlog normalizer (`/backlog-cleanup` or `vh-agent-harness exec node .opencode/scripts/normalize-backlog.js`) so `Now` / `Next` / `Later` stay active-only and older history is archived under `docs/planning/archive/`.
+### Single-writer-promotion model (W1)
+
+Worker agents (`build`, `docs-steward`) are **denied** direct edits to
+`docs/planning/backlog.md` via the per-agent permission map. This is intentional
+and enforced. Status intents during a work cycle are NOT written to the backlog
+directly; they flow through the existing local task-card lifecycle commands to
+`.local/coordinator/tasks/` (gitignored transport). The promoter then
+batch-promotes consolidated results back into the canonical backlog per cycle.
+
+- **Workers route status intents to transport**, reusing the existing lifecycle
+  commands — do NOT invent a parallel transport:
+  - `/write-task` to create or update a local task card
+  - `/task-update` to record status intent without changing lifecycle state
+  - `/task-closeout <id>` to persist a closeout report when work finishes
+  - `/task-review <id>` to record the coordinator-side decision
+- **`docs/planning/backlog.md` remains the canonical task-status source of
+  truth.** It is written only by the promoter (operator/coordination initially).
+- **`.local/coordinator/tasks/` is transport, not truth.** It is
+  gitignored; the canonical record is `backlog.md` plus `docs/checkpoints/`.
+
+### Stale-status window (intentional)
+
+`docs/planning/backlog.md` **lags live state during a work cycle** (between
+promoter runs). This is intentional and bounded, not a bug to hide. A worker
+reading `backlog.md` mid-cycle may see stale `in_progress` / assignment rows;
+the `.local/coordinator/tasks/` cards are the live view during that
+window. The promoter closes the gap at each promotion cycle. See
+`docs/coordination/PROMOTER_RUNBOOK.md` for the procedure and recovery behavior.
+
+### Agent update requirements (status via transport, not backlog edits)
+- Before substantial work, record the status intent (`in_progress`, owner/date)
+  on the matching local task card via `/task-update` (or `/write-task` if no card
+  exists yet). Do NOT edit `docs/planning/backlog.md` directly — that is now
+  denied for workers and will be promoted by the promoter.
+- When finishing work, file the closeout via `/task-closeout <id>` with the
+  changed files and verification performed. The promoter promotes the `done`
+  transition into the canonical backlog.
+- If new follow-up work is discovered, create a new task card with a new ID
+  instead of overloading the current task.
+- If blocked, record the exact blocker and the next decision needed on the task
+  card via `/task-update`; the promoter reflects `blocked` in the backlog.
+- Do not delete old tasks silently. The promoter moves abandoned items to
+  `cancelled` with a short reason.
+- After the promoter batch-edits `backlog.md` in a way that completes/cancels
+  work or creates section drift, run the backlog normalizer (`/backlog-cleanup`
+  or `vh-agent-harness exec node .opencode/scripts/normalize-backlog.js`) so
+  `Now` / `Next` / `Later` stay active-only and older history is archived under
+  `docs/planning/archive/`.
 - Do not rewrite unrelated task history while updating the backlog.
 
 ### Task formatting rules

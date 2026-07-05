@@ -100,7 +100,12 @@ De-escalate when fan-in has been reduced enough that:
 ## Non-Negotiable Rules
 
 1. Transport is not truth.
-2. One writer promotes fan-in results back to canon.
+2. One writer promotes fan-in results back to canon. This applies **during
+   execution**, not only at fan-in closeout: the canonical status file
+   (`docs/planning/backlog.md`) has a single promoter who batch-promotes live
+   status intents from `.local/coordinator/tasks/` per cycle. Workers
+   route status to transport; they do not edit canon directly (denied via the
+   per-agent permission map). See [PROMOTER_RUNBOOK.md](PROMOTER_RUNBOOK.md).
 3. Subagent reports capture facts first; synthesis resolves conflicts.
 4. Raw runtime notes stay local unless promoted into backlog or checkpoints.
 5. Coordinator context stays thin; concrete work moves to owned specialists or
