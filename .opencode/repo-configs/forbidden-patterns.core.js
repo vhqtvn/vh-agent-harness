@@ -227,6 +227,29 @@ export const ALLOW_IF_GIT_MUTATION = new RegExp(
     "(?:" + COMMIT_GATE_PREFIX.source + "|" + gitMutationInspectorAllowIf(GIT_MUTATION_INSPECTORS).source + ")",
 );
 
+// GIT_MUTATION_VERBS — the SINGLE source of truth for the set of git verbs that
+// mutate repo state and are therefore forbidden to every agent except the
+// committer (via commit-gate.sh). The `git-mutation-bypass` forbidden regex
+// (below) is built FROM this list, and shell-guard-core.js imports this same
+// array to power its uniform mutation-slip guard (the walker extracts the verb
+// past any git global flags and tests it against this set — so
+// `git -C <ext> commit`, `git --git-dir=/x commit`, and
+// `git --no-pager commit` are all denied regardless of the intervening flags,
+// WITHOUT duplicating the verb list). Keep this list in sync with the verbs
+// the commit-gate wrapper accepts; do NOT inline the alternation elsewhere.
+export const GIT_MUTATION_VERBS = [
+    "add", "commit", "push", "reset", "commit-tree", "update-ref",
+    "checkout", "merge", "rebase", "stash", "branch", "restore",
+    "cherry-pick", "revert", "clean", "rm", "mv", "tag", "am", "apply", "switch",
+];
+
+// Regex built FROM GIT_MUTATION_VERBS so there is exactly one verb set. Escapes
+// any verb containing a regex metacharacter (e.g. the `-` in `commit-tree`).
+const GIT_MUTATION_VERB_ALT = GIT_MUTATION_VERBS
+    .map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
+const GIT_MUTATION_RE = new RegExp("\\bgit\\s+(?:" + GIT_MUTATION_VERB_ALT + ")\\b");
+
 // FORBIDDEN_PATTERNS — GENERIC safety rules only.
 //
 // Project-specific deny-rules (project-managed infra lifecycle bans, project
@@ -308,7 +331,7 @@ export const FORBIDDEN_PATTERNS = [
     },
     {
         id: "git-mutation-bypass",
-        re: /\bgit\s+(add|commit|push|reset|commit-tree|update-ref|checkout|merge|rebase|stash|branch|restore|cherry-pick|revert|clean|rm|mv|tag|am|apply|switch)\b/,
+        re: GIT_MUTATION_RE,
         allowIf: ALLOW_IF_GIT_MUTATION,
         why:
             "Git mutations must go through the commit-gate wrapper. " +

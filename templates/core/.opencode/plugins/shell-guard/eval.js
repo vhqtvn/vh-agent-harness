@@ -1,21 +1,33 @@
 // eval.js — node CLI shim that exposes the shell-guard engine as a stable
 // subprocess contract for the Go permission bridge (ShellGuardHook).
 //
-// Contract (MUST stay stable; the Go side parses this exactly):
+// Contract (MUST stay stable; the Go side parses action/reason exactly):
 //   Invocation:  node <abs>/eval.js <argv...>
 //                argv joined with single spaces = the command string
 //                (mirrors opencode's output.args.command that the plugin sees).
-//   stdout:      exactly ONE JSON line {"action":"allow|deny|ask","reason":"..."}
-//                and nothing else.
+//   stdout:      exactly ONE JSON line
+//                {"action":"allow|deny|ask","reason":"...","rewrite":"..."}
+//                `rewrite` is OPTIONAL — present (non-empty) only when the
+//                engine produced a command rewrite (stripped git global flags).
+//                The Go bridge ignores unknown/extra fields, so adding
+//                `rewrite` is backward-compatible. Tests parse it to verify
+//                the rewrite text.
 //   stderr:      engine diagnostics only (never the decision).
 //   exit 0:      a decision was emitted (action authoritative for ALL three:
 //                allow / deny / ask). The Go hook maps each to its Action.
 //   exit 2:      engine fault (empty stdout). The Go hook denies by default.
 //
+// NOTE: the subprocess contract has NO workdir (the Go bridge spawns node with
+// cwd = HarnessRoot but passes no per-command workdir), so commandCwd defaults
+// to repoRoot() inside evaluate(). The plugin wrapper (shell-guard.js) is the
+// only caller that can supply the real output.args.workdir; this shim cannot,
+// so rewrite tests here use -C paths equal to repoRoot() (the scratch install
+// root) to exercise the strip path.
+//
 // cwd: the caller (ShellGuardHook) sets cwd = the project root containing
 // .opencode (the harness root). repoRoot() in the core derives the root from
 // __dirname (plugins/ -> two up), so it is cwd-robust, but passing a sane cwd
-// keeps any fs-based probe (git -C realpath, path resolution) anchored.
+// keeps any fs-based probe anchored.
 //
 // ESM: lives under the .opencode/ "type":"module" scope (W2). Top-level await
 // is permitted; evaluate is async so the body is an async IIFE.
@@ -58,7 +70,20 @@ async function main(argv) {
     const reason =
         r && typeof r.reason === "string" ? r.reason : "no reason provided";
 
+    // `rewrite` is optional: present only when the engine stripped git global
+    // flags (single fully-strippable readonly git command). Omit it from the
+    // JSON when empty so the line stays minimal; include it non-empty
+    // otherwise. The Go bridge ignores extra fields (backward-compatible).
+    const rewrite =
+        r && typeof r.rewrite === "string" && r.rewrite.length > 0
+            ? r.rewrite
+            : "";
+
     // Exactly ONE JSON line on stdout. exit 0 = decision emitted.
-    process.stdout.write(JSON.stringify({ action, reason }) + "\n");
+    if (rewrite) {
+        process.stdout.write(JSON.stringify({ action, reason, rewrite }) + "\n");
+    } else {
+        process.stdout.write(JSON.stringify({ action, reason }) + "\n");
+    }
     process.exit(0);
 }

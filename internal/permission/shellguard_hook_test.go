@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -192,7 +193,25 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 	tmplOpencode := filepath.Join(modRoot, "templates", "core", ".opencode")
 
 	// Stage a scratch install: only the files eval.js pulls in.
-	scratch := t.TempDir()
+	//
+	// IMPORTANT: scratch MUST live under the repo (modRoot/tmp), NOT under
+	// t.TempDir() (which returns a /tmp/... path). The `system-tmp-access`
+	// forbidden rule denies ANY command that references /tmp, so any
+	// `git -C <scratch> ...` case would be DENIED by system-tmp-access before
+	// the git global-flag walker could classify it. Repo-scoped
+	// /home/.../tmp/ paths do NOT trip that rule (the `tmp` is preceded by a
+	// word char, failing the rule's boundary class). repoRoot() inside
+	// eval.js resolves to scratch (plugins/ -> two up), so scratch doubles as
+	// commandCwd for the walker.
+	scratchParent := filepath.Join(modRoot, "tmp")
+	if err := os.MkdirAll(scratchParent, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", scratchParent, err)
+	}
+	scratch, err := os.MkdirTemp(scratchParent, "sglive-")
+	if err != nil {
+		t.Fatalf("mkdtemp %s: %v", scratchParent, err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
 	scratchOpencode := filepath.Join(scratch, ".opencode")
 	files := []string{
 		"package.json",
@@ -271,7 +290,9 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 	// load-bearing security invariants that must NOT regress:
 	//   - bash -c / sh -c / vh-agent-harness exec / eval evasion still DENIED,
 	//   - every chain-guard shape (&&, |, ;, $()) still DENIED,
-	//   - git -C <path> <mutation> still DENIED via normalizeGitC + scan #2,
+	//   - git -C <path> <mutation> still DENIED: walkGitGlobals extracts the
+	//     verb past any leading global flag and the UNIFORM mutation-slip guard
+	//     denies it before the allowlist is consulted,
 	//   - the commit-gate carve-out path still ALLOWS end-to-end.
 	// Each command is passed as a single-element argv so eval.js's
 	// argv.join(" ") yields exactly the intended command string.
@@ -388,7 +409,14 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			want: Deny,
 		},
 		{
-			name: "git -C . commit denied (normalizeGitC + scan #2)",
+			// Relative -C: walkGitGlobals denies ANY relative -C path (`.`,
+			// `..`, subdir) with an actionable notice, because normalizing a
+			// relative path would require resolving against commandCwd and
+			// invites symlink / `..` / normalization bugs. The mutation verb
+			// behind it is therefore never reached; this is a deliberate
+			// risk-reduction over the old normalizeGitC path (which also denied
+			// this form, just via a different mechanism).
+			name: "git -C . commit denied (relative -C notice)",
 			cmd:  `git -C . commit -m x`,
 			want: Deny,
 		},
@@ -446,81 +474,77 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			want: Allow,
 		},
 		{
-			// Q1a safety (CHANGE 1): `git --no-pager commit` puts `--no-pager`
-			// BETWEEN `git` and the mutation verb, so the git-mutation-bypass
-			// regex (which requires `git\s+(add|commit|...)`) does NOT match at
-			// scan #1 — a real bypass. normalizeGitGlobalFlags strips the flag
-			// on the re-scan reconstruction so the mutation is re-caught. Must
-			// be DENY (mutation bypass closed).
-			name: "git --no-pager commit denied (normalizeGitGlobalFlags + scan #2)",
+			// Mutation-slip guard: `git --no-pager commit` puts an `always`-strip
+			// global flag between `git` and the mutation verb. walkGitGlobals
+			// extracts verb=`commit` past the flag and the UNIFORM mutation-slip
+			// guard denies it before the allowlist sees it. Must be DENY.
+			name: "git --no-pager commit denied (mutation-slip guard via walkGitGlobals)",
 			cmd:  `git --no-pager commit -m x`,
 			want: Deny,
 		},
 		{
-			// Q1a safety: --paging=no is the documented synonym for --no-pager;
-			// it must be stripped the same way so the mutation is re-caught.
-			name: "git --paging=no push denied (normalizeGitGlobalFlags synonym)",
+			// `--paging=no` is NOT a real git flag (absent from `git --help`).
+			// walkGitGlobals treats it as an unknown `-flag` (never-strip
+			// boolean, consumed in place), so the verb `push` is still
+			// extracted and the mutation-slip guard denies it. Pins the bonus
+			// fix that REMOVED `--paging=no` from GIT_SAFE_GLOBAL_FLAGS (the old
+			// set was `["--no-pager","--paging=no"]` — the second entry was a
+			// fiction). The correct `always`-strip set is now
+			// `["-p","--paginate","-P","--no-pager"]`.
+			name: "git --paging=no push denied (unknown global flag; mutation-slip guard)",
 			cmd:  `git --paging=no push origin main`,
 			want: Deny,
 		},
 		{
-			// Q1b prompt fix (CHANGE 2): `git --no-pager log` is a read-only
-			// invocation whose `--no-pager` flag sits between `git` and `log`.
-			// The config table now carries `git --no-pager log *` (git_readonly
-			// group, allow) so the allowlist matches the ORIGINAL tokens and no
-			// permission prompt fires. Must be ALLOW.
-			name: "git --no-pager log allowed (config-table readonly match)",
+			// walkGitGlobals strips the `always`-policy `--no-pager` global and
+			// rewrites `git --no-pager log -1` -> `git log -1`; the allowlist
+			// then matches `git log *`. The config-table `git --no-pager log *`
+			// entry is now belt-and-suspenders. Must be ALLOW.
+			name: "git --no-pager log allowed (walkGitGlobals rewrites to `git log -1`)",
 			cmd:  `git --no-pager log -1`,
 			want: Allow,
 		},
 		{
-			// Q1b prompt fix: `git --no-pager show` is likewise a read-only
-			// form matched by the new `git --no-pager show *` config entry.
-			name: "git --no-pager show allowed (config-table readonly match)",
+			// walkGitGlobals strips `--no-pager` and rewrites to
+			// `git show HEAD`, matched by `git show *`.
+			name: "git --no-pager show allowed (walkGitGlobals rewrites to `git show HEAD`)",
 			cmd:  `git --no-pager show HEAD`,
 			want: Allow,
 		},
 		{
-			// Multi-flag readonly form, cde2ac94 boundary (empirically DENY, not
-			// ask): under the restored design the allowlist sees ORIGINAL tokens,
-			// and no config entry covers the two-flag prefix
-			// (`git --no-pager --paging=no log`), so it is blocked. The git
-			// routing-hint does NOT rescue it as `ask`, because blocked[1]
-			// (`--no-pager`) is itself a member of GIT_READONLY_SUBCOMMANDS — a
-			// side effect of the 12 `git --no-pager <sub> *` config entries each
-			// contributing `--no-pager` as their parts[1]. So the
-			// `!GIT_READONLY_SUBCOMMANDS.has(blocked[1])` clause is false and
-			// evaluate() falls through to a hard DENY (safe over-block). This is
-			// the load-bearing contrast with a stripped-token design: the 12
-			// single-flag `git --no-pager <sub> *` entries are the ONLY
-			// prompt-free readonly path, and a two-flag prefix is denied, not
-			// allowed. The operator uses the single-flag form.
-			name: "git --no-pager --paging=no log denied (cde2ac94: no two-flag config entry; --no-pager pollutes readonly-sub set)",
+			// Multi-flag readonly form. walkGitGlobals consumes `--no-pager`
+			// (always, strip) then `--paging=no` (unknown -> never-strip
+			// boolean). NOT fully strippable -> NO rewrite -> allowlist sees the
+			// ORIGINAL two-flag form -> blocked -> routing hint ASK (the walker
+			// extracted verb=`log`, a known-readonly verb, so the hint fires).
+			// This CHANGED from the old design, which hard-DENIED: previously
+			// `--no-pager` polluted GIT_READONLY_SUBCOMMANDS (the 12
+			// `git --no-pager <sub> *` config entries each contributed
+			// `--no-pager` as parts[1]), so the
+			// `!GIT_READONLY_SUBCOMMANDS.has(blocked[1])` clause was false and
+			// evaluate() fell through to a hard deny (over-block). The
+			// walker-based hint now correctly routes a benign read to ASK. The
+			// operator still sees a prompt, but no longer a hard deny.
+			name: "git --no-pager --paging=no log asked (walker verb=log, not fully strippable; was Deny pre-walker)",
 			cmd:  `git --no-pager --paging=no log`,
-			want: Deny,
+			want: Ask,
 		},
 		{
-			// Multi-flag while-loop branch, deny side (scan #2 normalizer): the
-			// re-scan loop's normalizeGitGlobalFlags strips a leading RUN of safe
-			// globals from the reconstruction — not just one flag — so
-			// `git --no-pager --paging=no commit` -> `git commit` and the
-			// mutation verb is re-caught by git-mutation-bypass -> DENY. Locks
-			// the "strips a leading RUN, not just one" contract on the
-			// security-critical path: if only one flag were stripped, the
-			// reconstruction `git --paging=no commit` would NOT match the
-			// mutation regex (the flag sits between `git` and the verb) and the
-			// mutation would bypass.
-			name: "git --no-pager --paging=no commit denied (scan #2 normalizer multi-flag run)",
+			// Multi-flag mutation: walkGitGlobals consumes `--no-pager` (strip)
+			// and `--paging=no` (unknown, never-strip), then extracts verb=
+			// `commit`. The UNIFORM mutation-slip guard denies before the
+			// allowlist is consulted. Pins that an unknown flag between `git`
+			// and a mutation verb does NOT hide the mutation.
+			name: "git --no-pager --paging=no commit denied (mutation-slip guard past unknown flag)",
 			cmd:  `git --no-pager --paging=no commit`,
 			want: Deny,
 		},
 		{
-			// Multi-flag run, order-independence (scan #2 normalizer): the
-			// while-loop in normalizeGitGlobalFlags consumes any leading run of
-			// safe globals regardless of order. Swapped order
-			// (--paging=no --no-pager) still strips both on the reconstruction,
-			// so the mutation `push` is re-caught -> DENY.
-			name: "git --paging=no --no-pager push denied (multi-flag run, order-independent)",
+			// Order-independence of the mutation-slip guard: swapping the
+			// unknown flag and the `--no-pager` flag still extracts verb=`push`
+			// and denies. The walker consumes any leading run of globals
+			// regardless of order before identifying the verb.
+			name: "git --paging=no --no-pager push denied (order-independent mutation-slip guard)",
 			cmd:  `git --paging=no --no-pager push origin main`,
 			want: Deny,
 		},
@@ -536,6 +560,73 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			// so the committer-flow allowlist carve-out cannot mask a regression.
 			if got != c.want {
 				t.Errorf("Evaluate(%q) = %s; want %s", c.cmd, got, c.want)
+			}
+		})
+	}
+
+	// --- git global-flag walker matrix ---------------------------------------
+	//
+	// These cases exercise walkGitGlobals end-to-end through eval.js. They use
+	// runNode (NOT h.Evaluate) so the rewrite field emitted by eval.js can be
+	// asserted directly — the Go hook struct only surfaces action/reason; the
+	// write-back of rewrite into output.args.command happens in the JS plugin's
+	// tool.execute.before wrapper (shell-guard.js), one layer above eval.js, so
+	// eval.js emits rewrite as a hint and the wrapper consumes it.
+	//
+	// commandCwd inside eval.js resolves to repoRoot() = scratch (plugins/ ->
+	// two up), so `git -C <scratch-abs> ...` is the absolute-commandCwd shape
+	// (the conditional strip case). External paths use /var/x deliberately —
+	// NEVER /tmp, which system-tmp-access would deny before the walker runs.
+	scratchSub := filepath.Join(scratch, "subdir")
+	globalFlagCases := []struct {
+		name        string
+		cmd         string
+		wantAction  string // "allow" | "deny" | "ask"
+		wantRewrite string // "" asserts eval.js emitted NO rewrite field
+	}{
+		// 1. always-strip flag -> rewrite -> allow.
+		{name: "--no-pager diff rewrites to `git diff x`", cmd: `git --no-pager diff x`, wantAction: "allow", wantRewrite: `git diff x`},
+		// 2. combo always + conditional(strip) -> rewrite -> allow.
+		{name: "--no-pager -C <commandCwd> log rewrites to `git log`", cmd: fmt.Sprintf(`git --no-pager -C %s log`, scratch), wantAction: "allow", wantRewrite: `git log`},
+		// 3. conditional(strip) alone -> rewrite -> allow.
+		{name: "-C <abs commandCwd> diff rewrites to `git diff`", cmd: fmt.Sprintf(`git -C %s diff`, scratch), wantAction: "allow", wantRewrite: `git diff`},
+		// 4. conditional(keep): abs in-project subdir != commandCwd -> no rewrite -> ask.
+		{name: "-C <abs in-project subdir> diff asks (no rewrite)", cmd: fmt.Sprintf(`git -C %s diff`, scratchSub), wantAction: "ask", wantRewrite: ""},
+		// 5. external -C readonly -> ask (verb extracted, not fully strippable).
+		{name: "-C <abs external> diff asks", cmd: `git -C /var/x diff`, wantAction: "ask", wantRewrite: ""},
+		// 6. external -C mutation -> deny (mutation-slip guard; must NOT be ask).
+		{name: "-C <abs external> commit denied (mutation-slip guard)", cmd: `git -C /var/x commit -m x`, wantAction: "deny", wantRewrite: ""},
+		// 7. relative -C -> deny + notice.
+		{name: "-C ./subdir diff denied (relative -C notice)", cmd: `git -C ./subdir diff`, wantAction: "deny", wantRewrite: ""},
+		// 8. never-strip flag present -> no rewrite -> ask.
+		{name: "--git-dir=/x diff asks (never-strip flag blocks rewrite)", cmd: `git --git-dir=/x diff`, wantAction: "ask", wantRewrite: ""},
+		// 9. mutation overrides strippability: abs commandCwd + mutation -> deny.
+		{name: "-C <abs commandCwd> commit denied (mutation overrides strip)", cmd: fmt.Sprintf(`git -C %s commit -m x`, scratch), wantAction: "deny", wantRewrite: ""},
+		// 10. relative -C + mutation -> deny (relative path wins; mutation never reached).
+		{name: "-C . commit denied (relative -C, case 10)", cmd: `git -C . commit -m x`, wantAction: "deny", wantRewrite: ""},
+		// Bonus A: --paging=no is not a real flag -> not stripped -> ask.
+		{name: "--paging=no log asks (--paging=no is not a real git flag)", cmd: `git --paging=no log`, wantAction: "ask", wantRewrite: ""},
+		// Bonus B: info-flag with no verb -> allow (read-only terminal info).
+		{name: "--help allowed (info-flag terminal request)", cmd: `git --help`, wantAction: "allow", wantRewrite: ""},
+		// Bonus C: --version info-flag -> allow.
+		{name: "--version allowed (info-flag terminal request)", cmd: `git --version`, wantAction: "allow", wantRewrite: ""},
+		// Bonus D: bare readonly (no globals) -> allow with NO rewrite.
+		{name: "bare git diff allow with no rewrite", cmd: `git diff`, wantAction: "allow", wantRewrite: ""},
+	}
+	for _, c := range globalFlagCases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			out, code := runNode(t, nodeBin, evalPath, scratch, c.cmd)
+			if code != 0 {
+				t.Fatalf("runNode exit %d stdout=%q; expected exit 0 (decision, not engine fault)", code, out)
+			}
+			act := jsonAction(t, out)
+			if act != c.wantAction {
+				t.Errorf("action = %q, want %q (cmd=%q; stdout=%q)", act, c.wantAction, c.cmd, out)
+			}
+			rw := jsonRewrite(t, out)
+			if rw != c.wantRewrite {
+				t.Errorf("rewrite = %q, want %q (cmd=%q; stdout=%q)", rw, c.wantRewrite, c.cmd, out)
 			}
 		})
 	}
@@ -608,4 +699,24 @@ func jsonAction(t *testing.T, stdout string) string {
 		t.Fatalf("eval.js stdout not JSON: %q (%v)", line, err)
 	}
 	return res.Action
+}
+
+// jsonRewrite extracts the "rewrite" field from the single JSON line eval.js
+// emits. Returns "" both when the field is absent (eval.js omits rewrite when
+// there is nothing to rewrite, so the wrapper leaves output.args.command
+// untouched) and when it is explicitly empty. The distinction does not matter
+// to callers: both mean "no command rewrite occurred".
+func jsonRewrite(t *testing.T, stdout string) string {
+	t.Helper()
+	line := strings.TrimSpace(stdout)
+	if line == "" {
+		t.Fatalf("eval.js produced no stdout; cannot read rewrite")
+	}
+	var res struct {
+		Rewrite string `json:"rewrite"`
+	}
+	if err := json.Unmarshal([]byte(line), &res); err != nil {
+		t.Fatalf("eval.js stdout not JSON: %q (%v)", line, err)
+	}
+	return res.Rewrite
 }
