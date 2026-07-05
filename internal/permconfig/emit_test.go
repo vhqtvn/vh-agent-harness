@@ -2,6 +2,8 @@ package permconfig
 
 import (
 	"encoding/json"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -894,5 +896,37 @@ func TestEmit_PresentAgentFilterNoopWhenAllPresent(t *testing.T) {
 		if task[e.Target] != string(e.Decision) {
 			t.Fatalf(`build.task[%q] = %v, want %q (full roster → no filtering)`, e.Target, task[e.Target], e.Decision)
 		}
+	}
+}
+
+// Test 21: D-F2 cross-constant equivalence — the JS-side PROTECTED_PATH in the
+// edit-guard plugin MUST equal the Go-side BacklogPromoterDenyPath constant.
+// Both literals hold the canonical backlog path, but they live in different
+// languages/trees with no codegen coupling them, so a future edit to either
+// could silently desync. This test pins them.
+//
+// Severity: layer C (permconfig) still hard-denies the path even on desync, so
+// drift degrades UX (the curated edit-guard message fails to fire → bare gate
+// dump), NOT correctness. The test keeps the curated UX aligned with the
+// backstop.
+func TestEditGuardProtectedPathMatchesPermconfigConstant(t *testing.T) {
+	// go test runs with cwd = internal/permconfig/; repo root is ../../.
+	const editGuardRel = "../../templates/core/.opencode/plugins/edit-guard.js"
+	src, err := os.ReadFile(editGuardRel)
+	if err != nil {
+		t.Fatalf("read %s: %v (is the test cwd the permconfig package dir?)", editGuardRel, err)
+	}
+	// Match the declaration: const PROTECTED_PATH = "<value>";
+	re := regexp.MustCompile(`PROTECTED_PATH\s*=\s*"([^"]+)"`)
+	m := re.FindSubmatch(src)
+	if m == nil {
+		t.Fatalf("PROTECTED_PATH declaration not found in %s", editGuardRel)
+	}
+	got := string(m[1])
+	if got != BacklogPromoterDenyPath {
+		t.Fatalf("PROTECTED_PATH in %s = %q does NOT match BacklogPromoterDenyPath in "+
+			"internal/permconfig/tables.go = %q — the two literals have desynced "+
+			"(layer C still backstops, but the curated edit-guard UX is misaligned)",
+			editGuardRel, got, BacklogPromoterDenyPath)
 	}
 }

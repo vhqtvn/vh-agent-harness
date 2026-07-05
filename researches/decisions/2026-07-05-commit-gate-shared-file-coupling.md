@@ -155,7 +155,11 @@ for the canonical status file.
   `docs/coordination/README.md` pointed at `researches/decisions/` paths. This
   memo and its source packet establish the directory and the record-of-decision
   convention. (Note: pre-existing dated refs to other memo filenames remain
-  dangling; they are dogfood-specific and out of scope for this slice.)
+  dangling; those citations live under `templates/core/` and render into every
+  consumer's `.opencode/` and `docs/` on `update` — a consumer agent reading
+  e.g. `maxoutputtokens.js` hits the dangling ref in its own repo, so this is
+  consumer-shipped debt, not dogfood-only. They remain out of scope for this
+  slice.)
 - **Benchmark:** DEV.to (Feb 2025) — git `diff3` produces false conflicts on
   ~52% of independent same-file edits. This is the empirical motivation for
   treating backlog coupling as a real, not theoretical, failure mode. See the
