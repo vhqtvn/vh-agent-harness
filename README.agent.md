@@ -141,6 +141,18 @@ that never names it renders nothing of it).
   commands are allowed; only forbidden-patterns and the commit-gate are blocked.
   Put env vars / `timeout` INSIDE the command (`exec bash -c 'FOO=1 cmd'`), never
   as a host prefix.
+  - **Git mutations are denied at both layers.** `vh-agent-harness exec git
+    <mutation>` — with OR without a leading global flag (`exec git --no-pager
+    commit`, `exec git -C /x push`, `exec git --git-dir=/x commit`, `exec git
+    commit`) — is denied by the Go binary backstop (before the JS gate runs) AND
+    by the shell-guard JS gate, and must route through the commit-gate /
+    committer agent. Read-only git through exec (`exec git --no-pager status`,
+    `exec git -C /repo log`) and all non-git exec mutations (`exec mkdir`,
+    `exec pytest`, `exec npm test`, `exec bash -c '...'`) are unaffected — the
+    guard is git-mutation-scoped only and does not default-deny. Nested-shell
+    git (`exec bash -c 'git …'`) is governed by the existing forbidden-pattern
+    chain-guard scan, not this guard. (F1 fix, v0.4.2; see
+    `templates/migrations/v0.4.2.md`.)
 - **Use an existing wrapper for execution:** in `run-shape.yml` set
   `backend: proxy` and `proxy_command: ["./dev.sh", "exec"]`.
 - **Run a STRICTLY read-only command (no prompt):** `vh-agent-harness exec-ro -- <cmd>`.
@@ -199,6 +211,86 @@ that never names it renders nothing of it).
   Use exec-ro when an agent wants prompt-free read-only inspection (git or
   non-git). Use `exec` for anything mutating, anything with shell plumbing, or
   anything exec-ro's allowlist does not cover.
+- **Run a command under a kernel-enforced Linux sandbox:** `vh-agent-harness exec-sandbox [--sandbox=off|best-effort|strict] [--net=deny|allow|ask] -- <cmd>`.
+  exec-sandbox is the authoritative OS-level defense-in-depth layer behind
+  exec-ro. It composes two pure-Go, unprivileged, kernel-enforcing primitives:
+  **Landlock** (filesystem integrity) + **pure-Go seccomp-BPF** (network +
+  high-risk syscall hardening). It is layered WITH exec-ro (they compose, exec-
+  sandbox does NOT replace it): exec-ro is the script-level heuristic pre-filter
+  (fast, spoofable by complex shell); exec-sandbox is the kernel-enforced
+  authoritative layer (survives bypass attempts because it is enforced in the
+  kernel, not in Go user-space). Single static Go binary — no bwrap, no cgo, no
+  libseccomp.
+
+  **HONESTY FRAMING (read this):** exec-sandbox is an **integrity + network**
+  boundary, NOT a confidentiality/path-hiding boundary. Landlock is additive:
+  denied paths stay **visible** (stat-able, metadata exposed) but unwritable
+  (EACCES on open-for-write). The promise is "the command cannot WRITE or
+  NETWORK outside the contract," NOT "the command cannot SEE anything." `stat
+  ~/.ssh` succeeds (metadata visible); `ls ~/.ssh` fails (cannot open directory
+  for listing); `touch ~/.ssh/foo` fails (EACCES). This is by design — v1
+  accepts "inaccessible but visible" rather than adding bwrap path-hiding
+  (deferred to roadmap as O3).
+
+  **Architecture (two-stage re-exec trampoline):** the parent feature-detects
+  (raw `landlock_create_ruleset` probe + `seccomp.Supported()`), serializes the
+  profile to env vars, then fork/execs itself as a hidden
+  `__exec_sandbox_child` in a new session/process group (`Setsid`). The child
+  installs protections in order — `PR_SET_PDEATHSIG(SIGKILL)` (dies if parent
+  harness dies) → `SetNoNewPrivs` → seccomp filter (`FlagTsync`) →
+  `landlock.V9.BestEffort().RestrictPaths` → `syscall.Exec` — then replaces its
+  process image with the target. Landlock is per-process/irreversible so it
+  MUST be in the child, not the parent. The child also sets
+  `GIT_OPTIONAL_LOCKS=0` in the target environment (parent sets before fork).
+
+  **Default profile (Profile B):**
+  - Read: repo root, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/lib32`,
+    `/etc`, `/dev`
+  - Write: `./tmp/` only (plus `/dev/null` as RW — writes discarded by kernel)
+  - Network: denied (seccomp blocks socket/connect/bind/listen/accept/sendto/
+    recvfrom)
+  - `.git`: read-only (inherited from repo root — Landlock is additive: a
+    subpath cannot be less restrictive than its parent in one layer)
+  - Sibling repos / home-sensitive paths: denied (not in ruleset → EACCES on
+    open; metadata may still be visible via `stat`)
+
+  **Modes (`--sandbox`):**
+  - `off` — no sandbox; run directly.
+  - `best-effort` (default) — use OS sandbox if available; otherwise print a
+    LOUD warning and fall back to exec-ro classification level (import
+    `execro.Classify` read-only, run if allowed, deny if not).
+  - `strict` — require OS primitives; fail-closed (exit non-zero, do not run)
+    if unavailable.
+
+  **Network (`--net`):** At the syscall layer this is a binary filter: seccomp
+  blocks network syscalls when denied, permits when allowed. Default = deny.
+  - `deny` — block socket/connect/bind/listen/accept/sendto/recvfrom via
+    seccomp (ActionErrno; the command gets EPERM/ENOSYS on the syscall).
+  - `allow` — permit network (no network blocklist; high-risk syscalls like
+    ptrace/bpf/mount/unshare remain blocked).
+  - `ask` — interactive `[Y/n]` prompt to stderr (TTY only). **Non-TTY →
+    hard-deny + stderr notice + exit non-zero** (agents CANNOT auto-accept).
+    The ask decision is resolved in the PARENT before forking the child, so the
+    child trampoline only ever sees deny or allow.
+
+  **Seccomp policy = focused BLOCKLIST, not broad allowlist.** Default action
+  is ALLOW; the blocklist covers (a) network syscalls when `--net=deny`, and
+  (b) always-blocked high-risk syscalls: ptrace, process_vm_readv/writev, bpf,
+  perf_event_open, open_by_handle_at, mount/umount2/pivot_root/move_mount/
+  fsopen/fsmount/fsconfig/open_tree, unshare/setns, swapon/swapoff, reboot,
+  settimeofday/clock_settime, kexec_load/kexec_file_load, init_module/
+  finit_module/delete_module, vmsplice. clone/clone3 are intentionally LEFT
+  ALLOWED (blocking them breaks normal fork/thread creation); namespace defense
+  relies on blocking unshare/setns/mount/pivot_root/move_mount/fs* instead.
+
+  **macOS = Linux-first.** No Seatbelt profile in v1. On macOS, strict fails
+  closed (no primitives); best-effort prints a loud warning and falls back to
+  exec-ro classification. macOS must NEVER pretend protected.
+
+  Use exec-sandbox when you want kernel-enforced guarantees that the command
+  cannot write outside the repo/tmp contract or make unauthorized network
+  connections. Compose with exec-ro: exec-ro is the fast pre-filter; exec-sandbox
+  is the authoritative backstop.
 - **Track work:** `docs/planning/backlog.md` is the canonical task-status source
   of truth (seeded on install, `project_owned`). Agents edit it **freely** under
   the hybrid split-commit discipline: re-read from disk before editing, edit
@@ -334,6 +426,12 @@ blocks + `delegateFrom` edges via the Go-native emitter — no separate step) �
   command-surface entry above. The two share the same Go source of truth for git
   mutation verbs (`internal/permconfig/tables.go` → emitted `allowed-commands.js`
   → consumed by both the exec-ro classifier and the shell-guard plugin).
+  `exec-sandbox` is the authoritative OS-level defense-in-depth layer behind
+  exec-ro: pure-Go Landlock (filesystem integrity) + seccomp-BPF (network +
+  syscall hardening), kernel-enforced, single static binary. It is an INTEGRITY
+  + NETWORK boundary, NOT a confidentiality boundary (denied paths stay visible
+  but unwritable). See its command-surface entry above for profiles, modes, and
+  the honesty framing.
 - `doctor`/`preflight` surface an ownership-raised divergent path (a managed
   file taken to `project_owned` via `harness-ownership.yml`) as a non-failing
   `preserved` (INFO) signal — never a FAIL, never blocks install/update.

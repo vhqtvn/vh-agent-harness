@@ -94,6 +94,7 @@ func init() {
 		// runtime
 		execCmd,
 		execRoCmd,
+		execSandboxCmd,
 		shellCmd,
 		upCmd,
 		downCmd,
@@ -108,6 +109,9 @@ func init() {
 		helpCmd,
 	)
 	rootCmd.SetHelpCommand(helpCmd)
+
+	// Hidden internal trampoline subcommand (not user-facing).
+	rootCmd.AddCommand(execSandboxChildCmd)
 }
 
 // Execute runs the root command and exits the process on error.

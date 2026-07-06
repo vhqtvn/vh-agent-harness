@@ -460,3 +460,113 @@ func TestClassify_NonGitWriteFlagNoFalsePositive(t *testing.T) {
 		}
 	}
 }
+
+// TestClassifyArgs locks the B1 fix: the argv-aware ClassifyArgs entrypoint
+// (target + args) MUST run the per-binary write/exec flag denylist over the FULL
+// argv slice, mirroring what Classify catches via strings.Fields. This is the
+// regression guard for exec-sandbox's best-effort graceful-skip fallback, which
+// previously called Classify(target) and lost the args — so `find . -delete`
+// classified only the bare `find` (ALLOW) and the mutating payload executed
+// unclassified via runDirect with NO kernel isolation. ClassifyArgs preserves
+// the real argv so the denylist fires.
+//
+// The mutating cases (all MUST DENY) mirror the strings.Fields-driven cases in
+// TestClassify / TestClassify_NonGitWriteFlagDeny; the ALLOW controls mirror
+// TestClassify_NonGitWriteFlagNoFalsePositive. The refactor-equivalence
+// sub-test locks that Classify("find . -delete") and ClassifyArgs("find", [...])
+// return the SAME verdict (the refactor extracted a shared token-level core, so
+// the two entrypoints must agree on identical argv).
+func TestClassifyArgs(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	t.Run("deny_mutating_args", func(t *testing.T) {
+		denyCases := []struct {
+			name   string
+			target string
+			args   []string
+		}{
+			// find: write/exec flags (the exact B1 reachable bypass payload).
+			{"find -delete", "find", []string{".", "-delete"}},
+			{"find -exec (plus terminator)", "find", []string{".", "-exec", "rm", "{}", "+"}},
+			{"find -execdir", "find", []string{".", "-execdir", "true"}},
+			{"find -fls", "find", []string{".", "-fls", "/path"}},
+			// sort: write flag.
+			{"sort -o", "sort", []string{"-o", "out", "in"}},
+			{"sort --output", "sort", []string{"--output", "out", "in"}},
+			{"sort --output=attached", "sort", []string{"--output=out", "in"}},
+			// git: readonly verb + write/exec SUBCOMMAND flag (b-F1 vector).
+			{"git diff --output=attached", "git", []string{"diff", "--output=x"}},
+			{"git diff --output space", "git", []string{"diff", "--output", "x"}},
+			{"git diff --ext-diff", "git", []string{"diff", "--ext-diff"}},
+			{"git grep -O (pager exec)", "git", []string{"grep", "-O", "foo"}},
+			// sed: --sandbox required (absent fires first); and the b-F1-style
+			// sed write vector via the `w` command (only reachable as an arg
+			// because the space in 'w /path' is a literal inside the arg, not
+			// a token boundary in the argv form).
+			{"sed without --sandbox", "sed", []string{"-n", "10p", "f"}},
+			{"sed w-command write vector", "sed", []string{"-n", "w /path", "f"}},
+			{"sed e-command exec vector", "sed", []string{"-n", "e cmd", "f"}},
+			{"sed -i not blocked by --sandbox", "sed", []string{"-n", "--sandbox", "-i", "f"}},
+			// git mutations (default-deny at the verb level).
+			{"git commit", "git", []string{"commit"}},
+			{"git push", "git", []string{"push"}},
+		}
+		for _, tc := range denyCases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := ClassifyArgs(tc.target, tc.args, repoRoot)
+				if got.Allow {
+					t.Fatalf("ClassifyArgs(%q, %v) ALLOWED — mutating args must hard-deny (B1 bypass)", tc.target, tc.args)
+				}
+				if got.Notice == "" {
+					t.Fatalf("ClassifyArgs(%q, %v) denied with EMPTY notice — exec-ro must explain every deny", tc.target, tc.args)
+				}
+			})
+		}
+	})
+
+	t.Run("allow_readonly_controls", func(t *testing.T) {
+		allowCases := []struct {
+			name   string
+			target string
+			args   []string
+		}{
+			{"find readonly", "find", []string{".", "-name", "*.go"}},
+			{"find readonly type", "find", []string{".", "-type", "f"}},
+			{"sort readonly", "sort", []string{"-n", "f"}},
+			{"git status", "git", []string{"status"}},
+			{"git log oneline", "git", []string{"log", "--oneline"}},
+			{"git diff HEAD", "git", []string{"diff", "HEAD"}},
+			{"sed with --sandbox", "sed", []string{"-n", "--sandbox", "10,20p", "f"}},
+		}
+		for _, tc := range allowCases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := ClassifyArgs(tc.target, tc.args, repoRoot)
+				if !got.Allow {
+					t.Errorf("ClassifyArgs(%q, %v) denied — control case must ALLOW (false positive?): %q", tc.target, tc.args, got.Notice)
+				}
+			})
+		}
+	})
+
+	t.Run("refactor_equivalence_Classify_vs_ClassifyArgs", func(t *testing.T) {
+		// The refactor extracted a shared token-level core (classifyTokens);
+		// Classify and ClassifyArgs must return IDENTICAL verdicts for argv
+		// that split identically. `find . -delete` splits via strings.Fields
+		// into ["find", ".", "-delete"], which equals the ClassifyArgs target
+		// "find" + args [".", "-delete"]. Both must DENY (the B1 payload). We
+		// compare both Allow AND Notice so the refactor cannot silently change
+		// the notice wording either.
+		strVerdict := Classify("find . -delete", repoRoot)
+		argsVerdict := ClassifyArgs("find", []string{".", "-delete"}, repoRoot)
+		if strVerdict.Allow != argsVerdict.Allow {
+			t.Fatalf("refactor equivalence broken: Classify(\"find . -delete\").Allow=%v but ClassifyArgs(\"find\", [...]).Allow=%v",
+				strVerdict.Allow, argsVerdict.Allow)
+		}
+		if strVerdict.Allow {
+			t.Fatalf("refactor equivalence check used a case that should DENY but both ALLOWED — pick a mutating payload")
+		}
+		if strVerdict.Notice != argsVerdict.Notice {
+			t.Fatalf("refactor equivalence broken: notices differ.\nClassify   : %q\nClassifyArgs: %q", strVerdict.Notice, argsVerdict.Notice)
+		}
+	})
+}
