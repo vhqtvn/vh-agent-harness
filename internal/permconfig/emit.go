@@ -226,27 +226,46 @@ func computeBashBlock(rule LocationRule, locationName string, features Features)
 	return om
 }
 
-// computeEditBlock renders the permission.edit value for one location. When
-// EditOverrides is empty, edit is flat: a single decision string ("allow",
-// "deny", "ask") — the common case for every agent except the committer. When
-// EditOverrides is non-empty, edit is an OBJECT map {"<pattern>": "<action>"}
-// consumed by OpenCode with findLast semantics (permission/evaluate.ts): the
-// "*" entry (carrying the Edit decision, typically Deny) is emitted FIRST and
-// each override LAST, so a path matching a narrow allow resolves to allow while
-// everything else denies. This is how the committer gets Write access to ONE
-// scoped message-file path (tmp/commit-gate-message/**) and nothing else.
+// computeEditBlock renders the permission.edit value for one location.
+//
+// Flat case: when the agent has a BROAD Edit=Allow AND no EditOverrides, edit
+// is a single decision string "allow" (build, docs-steward). tmp/** is already
+// covered by their broad allow, so no object form is needed.
+//
+// Object case (every other agent): edit is an OBJECT map {"<pattern>":
+// "<action>"} consumed by OpenCode with findLast semantics
+// (permission/evaluate.ts). The "*" entry (carrying the Edit decision — Deny
+// for read-only agents, Ask for the top-level default) is emitted FIRST, then
+// any EditOverrides (the committer's scoped commit-gate message glob), then
+// the UNIVERSAL disposable-scratch carve-out TmpWriteGlob="tmp/**": allow LAST.
+// findLast picks the LAST matching pattern, so the broad decision must precede
+// every narrow allow. This lets every agent Write the gitignored, watcher-
+// ignored `tmp/**` scratch surface (the sanctioned disposable area) while every
+// OTHER edit decision stays exactly as it was — read-only agents still cannot
+// touch the source tree, the committer still cannot Write outside its message
+// glob + tmp, and overlay-pack agents lacking an edit key (e.g. the releaser)
+// inherit the top-level default's tmp carve-out.
 func computeEditBlock(rule LocationRule) any {
-	if len(rule.EditOverrides) == 0 {
+	if rule.Edit == Allow && len(rule.EditOverrides) == 0 {
 		return string(rule.Edit)
 	}
 	om := newOrderedMap()
-	// Deny-* FIRST. findLast picks the LAST matching rule, so the broad deny
+	// Broad decision FIRST (Deny for read-only agents, Ask for the top-level
+	// default). findLast picks the LAST matching rule, so the broad decision
 	// must precede every narrow allow.
 	om.set("*", string(rule.Edit))
-	// Narrow allows LAST — they override the deny for matching paths.
+	// EditOverrides (the committer's scoped commit-gate message glob) in
+	// declared order, before the universal tmp carve-out so the more specific
+	// glob stays adjacent to its rationale.
 	for _, o := range rule.EditOverrides {
 		om.set(o.Pattern, string(o.Decision))
 	}
+	// UNIVERSAL disposable-scratch carve-out LAST. tmp/ is gitignored
+	// (.gitignore) and watcher-ignored, so every agent may Write there without
+	// a prompt and without broadening any other edit decision. Emitted LAST so
+	// findLast resolves tmp paths to allow even when a later EditOverride
+	// existed (the committer carries both its scoped glob AND this one).
+	om.set(TmpWriteGlob, string(Allow))
 	return om
 }
 

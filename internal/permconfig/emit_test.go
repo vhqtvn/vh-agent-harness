@@ -2,6 +2,7 @@ package permconfig
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -585,14 +586,16 @@ func TestValidate_WildcardInvalidDecision(t *testing.T) {
 // inspection in TestEmit_BashBlockOrder, which doesn't lose order to re-parse.)
 
 // Test 19: object-form edit for the committer. The committer's edit is emitted
-// as an OBJECT map {"*":"deny","<glob>":"allow"} (findLast semantics — deny-*
-// first, narrow allow last) so it can Write ONE scoped message-file path that
-// acquire --message-file consumes. The committer is the SOLE agent carrying
-// EditOverrides now (build/docs-steward reverted to broad flat Edit=Allow when
-// the W1 single-writer edit-blocking was unwound). This test pins the
-// committer's broad-deny+narrow-allow pattern and verifies that the flat-edit
-// agents (coordination, repo-explorer) stay flat unchanged, and that build is
-// flat allow (NOT object-form — the W1 backlog deny is gone).
+// as an OBJECT map {"*":"deny","<commit-gate-glob>":"allow","tmp/**":"allow"}
+// (findLast semantics — deny-* first, narrow allows last) so it can Write its
+// scoped message-file path that acquire --message-file consumes, plus the
+// universal tmp/** disposable-scratch carve-out. The committer is the SOLE
+// agent carrying EditOverrides now (build/docs-steward reverted to broad flat
+// Edit=Allow when the W1 single-writer edit-blocking was unwound). This test
+// pins the committer's broad-deny+narrow-allows pattern and verifies that the
+// read-only (Deny) agents (coordination, repo-explorer) emit the object form
+// {"*":"deny","tmp/**":"allow"}, and that build is flat allow (NOT object-form
+// — the tmp carve-out is skipped for Edit==Allow agents).
 func TestEmit_CommitterObjectFormEdit(t *testing.T) {
 	out := mustEmit(t, miniConfig, nil, Features{})
 	s := string(out)
@@ -608,34 +611,53 @@ func TestEmit_CommitterObjectFormEdit(t *testing.T) {
 	if !strings.HasPrefix(editSlice, `"edit": {`) {
 		t.Fatalf("committer edit must be object-form, got: %s", firstLine(editSlice))
 	}
-	// findLast semantics: "*" deny must appear BEFORE the narrow allow.
-	starIdx := strings.Index(editSlice, `"*": "deny"`)
-	allowIdx := strings.Index(editSlice, `"`+CommitGateMessageGlob+`": "allow"`)
-	if starIdx < 0 || allowIdx < 0 {
-		t.Fatalf("committer edit object missing deny-* or scoped allow:\n%s", editSlice)
+	// Isolate ONLY the edit object (exclude the task block that follows — it
+	// would pollute the allow-count assertion with task edges).
+	editObj := extractEditObjectValue(committerBlock, permIdx)
+	// findLast semantics: "*" deny must appear BEFORE the narrow allows.
+	starIdx := strings.Index(editObj, `"*": "deny"`)
+	allowIdx := strings.Index(editObj, `"`+CommitGateMessageGlob+`": "allow"`)
+	tmpIdx := strings.Index(editObj, `"`+TmpWriteGlob+`": "allow"`)
+	if starIdx < 0 || allowIdx < 0 || tmpIdx < 0 {
+		t.Fatalf("committer edit object missing deny-* / scoped allow / tmp allow:\n%s", editObj)
 	}
 	if starIdx > allowIdx {
 		t.Fatalf("deny-* (pos %d) must precede the scoped allow (pos %d) — findLast semantics", starIdx, allowIdx)
 	}
-	// The scoped glob is exactly the ONE allowlisted path; nothing wider.
-	if strings.Contains(editSlice, `"allow"`) && strings.Count(editSlice, `": "allow"`) != 1 {
-		t.Fatalf("committer edit must allow exactly ONE path, got:\n%s", editSlice)
+	if allowIdx > tmpIdx {
+		t.Fatalf("scoped allow (pos %d) must precede the universal tmp allow (pos %d) — findLast + tmp-last", allowIdx, tmpIdx)
+	}
+	// The committer allows exactly TWO paths: its scoped commit-gate message
+	// glob plus the universal tmp/** carve-out. Nothing wider, nothing extra.
+	if strings.Count(editObj, `": "allow"`) != 2 {
+		t.Fatalf("committer edit must allow exactly TWO paths (commit-gate glob + tmp/**), got:\n%s", editObj)
 	}
 
-	// (b) flat-edit agents stay FLAT edit unchanged (deny).
-	for _, agent := range []struct{ name, want string }{
-		{"coordination", "deny"},
-		{"repo-explorer", "deny"},
-	} {
-		blk := extractAgentBlock(t, s, agent.name)
+	// (b) read-only (Deny) agents are now OBJECT-FORM edit: deny-* first, then
+	// the universal tmp/** allow last. They were flat "deny" before the tmp
+	// carve-out; the carve-out flips them to object form. The broad deny still
+	// gates every non-tmp path.
+	for _, agent := range []string{"coordination", "repo-explorer"} {
+		blk := extractAgentBlock(t, s, agent)
 		i := strings.Index(blk, `"edit"`)
 		if i < 0 {
-			t.Fatalf("%s block has no edit key", agent.name)
+			t.Fatalf("%s block has no edit key", agent)
 		}
-		line := firstLine(blk[i:])
-		want := `"edit": "` + agent.want + `"`
-		if !strings.HasPrefix(blk[i:], want) {
-			t.Fatalf("%s edit must be flat %q, got: %s", agent.name, agent.want, line)
+		editVal := blk[i:]
+		if !strings.HasPrefix(editVal, `"edit": {`) {
+			t.Fatalf("%s edit must be object-form {\"*\":\"deny\",\"tmp/**\":\"allow\"}, got: %s", agent, firstLine(editVal))
+		}
+		editObj := extractEditObjectValue(blk, i)
+		roStar := strings.Index(editObj, `"*": "deny"`)
+		roTmp := strings.Index(editObj, `"`+TmpWriteGlob+`": "allow"`)
+		if roStar < 0 || roTmp < 0 {
+			t.Fatalf("%s edit object missing deny-* or tmp allow:\n%s", agent, editObj)
+		}
+		if roStar > roTmp {
+			t.Fatalf("%s deny-* (pos %d) must precede tmp allow (pos %d) — findLast", agent, roStar, roTmp)
+		}
+		if strings.Count(editObj, `": "allow"`) != 1 {
+			t.Fatalf("%s edit must allow exactly ONE path (tmp/**), got:\n%s", agent, editObj)
 		}
 	}
 
@@ -657,6 +679,113 @@ func TestEmit_CommitterObjectFormEdit(t *testing.T) {
 	}
 	if strings.Contains(bEdit, BacklogLedgerPath) {
 		t.Fatalf("build edit must NOT reference the backlog path (W1 deny removed), got:\n%s", bEdit)
+	}
+}
+
+// Test 20: the UNIVERSAL tmp/** disposable-scratch carve-out. Every agent in
+// CoreLocationRules whose Edit decision is NOT broad Allow (i.e. every Deny or
+// Ask agent) PLUS the top-level default MUST emit a tmp/**: allow entry in its
+// object-form edit block; build and docs-steward (broad flat Edit=Allow) MUST
+// NOT — they stay flat allow because their broad allow already covers tmp. This
+// is the comprehensive pin for the single-chokepoint tmp carve-out in
+// computeEditBlock, which lets every agent (including overlay-pack agents that
+// lack an edit key, via the top-level default) Write the gitignored, watcher-
+// ignored tmp/** scratch surface without a prompt while leaving every other
+// edit decision unchanged.
+func TestEmit_TmpWriteCarveOut(t *testing.T) {
+	// Build a config carrying the top-level permission.edit AND one agent block
+	// per CoreLocationRules entry (so the emitter processes every agent).
+	const agentBlockTpl = `"%[1]s": { "permission": { "edit": "deny", "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`
+	var agentBlocks []string
+	agentBlocks = append(agentBlocks, `"build": { "permission": { "edit": "allow", "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+		`"docs-steward": { "permission": { "edit": "allow", "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`)
+	for name := range CoreLocationRules {
+		if name == "default" || name == "build" || name == "docs-steward" {
+			continue
+		}
+		agentBlocks = append(agentBlocks, fmt.Sprintf(agentBlockTpl, name))
+	}
+	cfg := `{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": { "edit": "ask", "bash": { "__placeholder__": "deny" } },
+  "agent": {
+` + strings.Join(agentBlocks, ",\n") + `
+  }
+}`
+	out := mustEmit(t, cfg, nil, Features{})
+	s := string(out)
+
+	// (a) Top-level default: {"*":"ask","tmp/**":"allow"}. Use json.Unmarshal
+	// to robustly reach root["permission"]["edit"] — the emitted output is
+	// key-sorted ($schema, agent, permission), so the top-level permission
+	// block comes AFTER all agent blocks and a naive string scan would land on
+	// an agent's permission block instead.
+	var root map[string]any
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatalf("parse output: %v", err)
+	}
+	topEdit, ok := root["permission"].(map[string]any)["edit"].(map[string]any)
+	if !ok {
+		t.Fatalf("top-level edit must be object-form, got: %T", root["permission"].(map[string]any)["edit"])
+	}
+	if topEdit["*"] != "ask" {
+		t.Fatalf(`top-level edit["*"] = %v, want "ask"`, topEdit["*"])
+	}
+	if topEdit[TmpWriteGlob] != "allow" {
+		t.Fatalf(`top-level edit[%q] = %v, want "allow"`, TmpWriteGlob, topEdit[TmpWriteGlob])
+	}
+	if len(topEdit) != 2 {
+		t.Fatalf("top-level edit must have exactly TWO keys (* + tmp/**), got: %v", topEdit)
+	}
+
+	// (b) Iterate every CoreLocationRules agent. Isolate ONLY the edit object
+	// so order/count assertions are not polluted by the task block that follows
+	// (permission is key-sorted: bash, edit, task).
+	for name, rule := range CoreLocationRules {
+		if name == "default" {
+			continue
+		}
+		blk := extractAgentBlock(t, s, name)
+		i := strings.Index(blk, `"edit"`)
+		if i < 0 {
+			t.Fatalf("%s block has no edit key", name)
+		}
+		editVal := blk[i:]
+		if rule.Edit == Allow && len(rule.EditOverrides) == 0 {
+			// build / docs-steward: flat "allow" (tmp covered by broad allow;
+			// no object form).
+			if !strings.HasPrefix(editVal, `"edit": "allow"`) {
+				t.Fatalf("%s edit must be FLAT allow (broad Edit=Allow skips tmp carve-out), got: %s", name, firstLine(editVal))
+			}
+			if strings.Contains(editVal, TmpWriteGlob) {
+				t.Fatalf("%s flat-allow edit must NOT carry an explicit tmp/** entry, got: %s", name, firstLine(editVal))
+			}
+			continue
+		}
+		// Every other agent: object-form {\"*\":<Edit>,...,\"tmp/**\":\"allow\"}.
+		if !strings.HasPrefix(editVal, `"edit": {`) {
+			t.Fatalf("%s edit must be object-form, got: %s", name, firstLine(editVal))
+		}
+		editObj := extractEditObjectValue(blk, i)
+		wantStar := `"*": "` + string(rule.Edit) + `"`
+		if !strings.Contains(editObj, wantStar) {
+			t.Fatalf("%s edit object missing %s:\n%s", name, wantStar, editObj)
+		}
+		if !strings.Contains(editObj, `"`+TmpWriteGlob+`": "allow"`) {
+			t.Fatalf("%s edit object missing the universal tmp/** allow:\n%s", name, editObj)
+		}
+		// tmp/** must be the LAST allow (findLast + tmp-last invariant): no
+		// `": "allow"` may appear after the tmp line. (Comparing lastIndexOf
+		// positions directly is wrong because the `": "allow"` suffix pattern
+		// is itself a substring of the `"tmp/**": "allow"` line.)
+		tmpLine := `"` + TmpWriteGlob + `": "allow"`
+		tmpPos := strings.LastIndex(editObj, tmpLine)
+		if tmpPos < 0 {
+			t.Fatalf("%s tmp/** allow missing:\n%s", name, editObj)
+		}
+		if strings.Contains(editObj[tmpPos+len(tmpLine):], `": "allow"`) {
+			t.Fatalf("%s tmp/** must be the LAST allow; found allows after it:\n%s", name, editObj)
+		}
 	}
 }
 
@@ -690,6 +819,35 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// extractEditObjectValue returns the substring of s covering ONLY the object
+// value immediately following the "edit" key at index editIdx. It scans from
+// the first '{' after editIdx to its matching '}' (bracket-depth), so the
+// returned span does NOT include subsequent keys (bash/task) in the same
+// permission block — the emitted permission object is key-sorted
+// (bash, edit, task), so a naive blk[i:] from "edit" would leak into task and
+// pollute allow-count assertions with task edges. Returns "" if the edit value
+// is flat (not an object); callers handle that case via HasPrefix on the raw.
+func extractEditObjectValue(s string, editIdx int) string {
+	relBrace := strings.Index(s[editIdx:], "{")
+	if relBrace < 0 {
+		return ""
+	}
+	start := editIdx + relBrace
+	depth := 0
+	for i := start; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return s[start:]
 }
 
 // Test 17: present-agent filter drops task edges to absent agents (Phase 3

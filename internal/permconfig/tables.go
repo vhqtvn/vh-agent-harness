@@ -209,17 +209,28 @@ func splitFields(s string) []string {
 // The committer is the ONLY agent with Gate=Allow (it commits through the
 // gate wrapper). Every other gate-present agent has Gate=Deny.
 //
-// Edit values mirror the corpus template's flat edit decisions EXACTLY so that
-// bringing edit under emitter ownership is a no-op for every flat-edit agent:
-// default=ask, all others=deny, EXCEPT as noted below for the one object-form
-// agent.
+// Edit values mirror the corpus template's edit decisions, extended by a
+// UNIVERSAL disposable-scratch carve-out: every agent may Write the gitignored,
+// watcher-ignored `tmp/**` scratch surface (see TmpWriteGlob). The emitter's
+// computeEditBlock appends `tmp/**: allow` as the LAST entry of every
+// object-form edit block, so it overrides the broad deny/ask for tmp paths
+// while leaving every OTHER edit decision exactly as it was. This is the
+// single chokepoint that lets read-only agents (and overlay-pack agents that
+// lack an edit key, like the releaser) drop disposable artifacts under tmp/
+// without a permission prompt — tmp/ is the sanctioned scratch area, never
+// committed, never watched.
 //
-// One agent carries EditOverrides (object-form edit, findLast semantics —
-// permission/evaluate.ts picks the LAST matching pattern):
+// Resulting shapes (findLast semantics — permission/evaluate.ts picks the LAST
+// matching pattern; key order is load-bearing: broad decision FIRST, every
+// narrow allow LAST):
 //
-//   - committer: Edit=Deny + scoped allow for tmp/commit-gate-message/** so it
-//     can Write the commit message file that acquire --message-file consumes.
-//     Pattern: BROAD DENY + NARROW ALLOW.
+//   - build / docs-steward: flat "allow" (tmp is already covered by their broad
+//     allow — no object form needed, computeEditBlock skips the carve-out).
+//   - committer: {"*":"deny", "tmp/commit-gate-message/**":"allow",
+//     "tmp/**":"allow"} — its ONE EditOverride (the commit-gate message glob)
+//     plus the universal tmp carve-out.
+//   - top-level default: {"*":"ask", "tmp/**":"allow"}.
+//   - every other (read-only) agent: {"*":"deny", "tmp/**":"allow"}.
 //
 // build and docs-steward carry a BROAD flat Edit=Allow — agents edit
 // docs/planning/backlog.md freely. Backlog conflict discipline is enforced at
@@ -227,9 +238,12 @@ func splitFields(s string) []string {
 // plugin), NOT by blocking edits here. See BacklogLedgerPath for the canonical
 // path constant shared with the reminder plugin + cross-constant test.
 //
-// Every other agent stays flat edit. Do not add more EditOverrides without an
-// explicit safety review of the findLast interaction (key order is load-
-// bearing: "*" first, overrides last).
+// The committer is the only agent that carries EditOverrides today (its scoped
+// commit-gate message glob). The tmp/** carve-out is added UNCONDITIONALLY in
+// computeEditBlock for every non-flat-allow agent — it is NOT an EditOverride
+// in this table. Do not add more EditOverrides without an explicit safety
+// review of the findLast interaction (key order is load-bearing: "*" first,
+// then EditOverrides, then tmp/** last).
 var CoreLocationRules = map[string]LocationRule{
 	"default": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Ask},
 	"plan":    {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Ask, Edit: Deny},
@@ -408,16 +422,32 @@ const BacklogCommand = "vh-agent-harness exec node .opencode/scripts/normalize-b
 const DevShCommand = "vh-agent-harness *"
 
 // CommitGateMessageGlob is the ONE scoped edit-tool path the committer may
-// Write to. It is repo-relative (the edit tool passes path.relative(worktree,
-// filePath)) and uses the recursive ** glob. The committer authors its commit
-// message at tmp/commit-gate-message/msg-${UUID} via the Write tool, then
-// passes that path to commit-gate.sh acquire --message-file. tmp/ is gitignored
-// so the message file never enters the index. The committer is the SOLE agent
-// carrying EditOverrides (broad deny + narrow allow); build/docs-steward
+// Write to (in addition to the universal TmpWriteGlob carve-out). It is
+// repo-relative (the edit tool passes path.relative(worktree, filePath)) and
+// uses the recursive ** glob. The committer authors its commit message at
+// tmp/commit-gate-message/msg-${UUID} via the Write tool, then passes that
+// path to commit-gate.sh acquire --message-file. tmp/ is gitignored so the
+// message file never enters the index. The committer is the SOLE agent
+// carrying EditOverrides (broad deny + narrow allows); build/docs-steward
 // reverted to broad flat Edit=Allow when the W1 single-writer edit-blocking
 // was unwound. Do not add more EditOverrides without an explicit safety review
 // of the findLast interaction.
 const CommitGateMessageGlob = "tmp/commit-gate-message/**"
+
+// TmpWriteGlob is the UNIVERSAL disposable-scratch carve-out: every agent may
+// Write paths under `tmp/**` with no permission prompt. tmp/ is gitignored
+// (.gitignore) and watcher-ignored, so it is the sanctioned disposable scratch
+// surface — run artifacts, scratch scripts, captured traces, message files all
+// live there and never enter the index or trigger a watch rebuild. It is
+// repo-relative and uses the recursive ** glob (matching the edit-tool
+// path-relative convention). computeEditBlock appends this as the LAST entry of
+// every object-form edit block so findLast resolves tmp paths to allow; flat-
+// allow agents (build, docs-steward) skip it because their broad allow already
+// covers tmp. This is the single chokepoint that covers overlay-pack agents
+// that lack an edit key (e.g. the releaser) — they inherit the top-level
+// default's {"*":"ask","tmp/**":"allow"} and so can drop release-tag message
+// files under tmp/ without a prompt.
+const TmpWriteGlob = "tmp/**"
 
 // BacklogLedgerPath is the canonical task-status ledger path. It is the shared
 // "backlog path" reference point for the consumers that must stay aligned with

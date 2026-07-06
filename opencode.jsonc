@@ -142,7 +142,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "allow"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny",
                     "commit-reviewer": "allow"
@@ -212,7 +215,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "allow"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny",
                     "commit-reviewer-a": "allow",
@@ -286,7 +292,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "allow"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny"
                 },
@@ -357,7 +366,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "allow"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny"
                 },
@@ -428,7 +440,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "allow"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny"
                 },
@@ -499,7 +514,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "allow"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny"
                 },
@@ -572,7 +590,8 @@
                 },
                 "edit": {
                     "*": "deny",
-                    "tmp/commit-gate-message/**": "allow"
+                    "tmp/commit-gate-message/**": "allow",
+                    "tmp/**": "allow"
                 },
                 "task": {
                     "*": "deny",
@@ -637,7 +656,10 @@
                     ".opencode/scripts/readonly-scripts.sh *": "allow",
                     "vh-agent-harness *": "allow"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny",
                     "build": "allow",
@@ -722,7 +744,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "deny"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny",
                     "debate-proposer": "allow",
@@ -798,7 +823,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "deny"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny"
                 },
@@ -871,7 +899,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "deny"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny"
                 },
@@ -944,7 +975,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "deny"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny"
                 },
@@ -1147,7 +1181,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "ask"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "skill": {
                     "*": "allow"
                 },
@@ -1219,7 +1256,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "allow"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny"
                 },
@@ -1284,7 +1324,10 @@
                     ".opencode/scripts/readonly-scripts.sh *": "allow",
                     "vh-agent-harness *": "allow"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny",
                     "build": "allow",
@@ -1435,7 +1478,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "ask"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny"
                 },
@@ -1506,7 +1552,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "allow"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny"
                 },
@@ -1578,7 +1627,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "allow"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny"
                 },
@@ -1648,7 +1700,10 @@
                     ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "deny"
                 },
-                "edit": "deny",
+                "edit": {
+                    "*": "deny",
+                    "tmp/**": "allow"
+                },
                 "task": {
                     "*": "deny",
                     "researcher": "allow",
@@ -1730,7 +1785,10 @@
             "vh-agent-harness exec node .opencode/scripts/normalize-backlog.js": "allow",
             "vh-agent-harness *": "allow"
         },
-        "edit": "ask",
+        "edit": {
+            "*": "ask",
+            "tmp/**": "allow"
+        },
         "read": {
             "*": "allow",
             "*.env": "deny",
