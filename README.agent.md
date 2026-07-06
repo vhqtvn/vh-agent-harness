@@ -151,8 +151,8 @@ that never names it renders nothing of it).
     `exec pytest`, `exec npm test`, `exec bash -c '...'`) are unaffected — the
     guard is git-mutation-scoped only and does not default-deny. Nested-shell
     git (`exec bash -c 'git …'`) is governed by the existing forbidden-pattern
-    chain-guard scan, not this guard. (F1 fix, v0.4.2; see
-    `templates/migrations/v0.4.2.md`.)
+    chain-guard scan, not this guard. (F1 fix, v0.5.0; see
+    `templates/migrations/v0.5.0.md`.)
 - **Use an existing wrapper for execution:** in `run-shape.yml` set
   `backend: proxy` and `proxy_command: ["./dev.sh", "exec"]`.
 - **Run a STRICTLY read-only command (no prompt):** `vh-agent-harness exec-ro -- <cmd>`.
@@ -220,7 +220,10 @@ that never names it renders nothing of it).
   (fast, spoofable by complex shell); exec-sandbox is the kernel-enforced
   authoritative layer (survives bypass attempts because it is enforced in the
   kernel, not in Go user-space). Single static Go binary — no bwrap, no cgo, no
-  libseccomp.
+  libseccomp. **Build prerequisite:** source builds require Go 1.25+ (`go.mod`
+  requires `go 1.25.0`, bumped from 1.22 for the new OS-primitive deps); the
+  binary remains a single static build via `CGO_ENABLED=0`. Binary self-update
+  (`vh-agent-harness update` from the installed binary) is unaffected.
 
   **HONESTY FRAMING (read this):** exec-sandbox is an **integrity + network**
   boundary, NOT a confidentiality/path-hiding boundary. Landlock is additive:
