@@ -107,6 +107,18 @@ func runExec(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("pre_exec hook: %w", err)
 	}
 
+	// A1 Go backstop for the F1 bypass: deny a wrapped git mutation routed past
+	// a global flag (`vh-agent-harness exec git --no-pager commit`,
+	// `exec git -C /x push`, `exec git --git-dir=/x commit`) BEFORE the JS gate
+	// runs. args is the BARE payload (cobra already stripped wrapper flags via
+	// SetInterspersed(false)). This is defense in depth alongside the A2
+	// source-of-truth fix in shell-guard-core.js; it is git-mutation-scoped
+	// only (does NOT default-deny regular exec mutations like mkdir/pytest).
+	if deny, reason := denyExecGitMutationPayload(args); deny {
+		fmt.Fprintf(os.Stderr, "denied: %s\n", reason)
+		return fmt.Errorf("denied by git mutation guard: %s", reason)
+	}
+
 	// Evaluate the command AS INVOKED — wrapped in `vh-agent-harness exec` — so
 	// the shell-guard "harness branch" applies: it trusts the exec boundary and
 	// guards the payload via the forbidden-patterns scan + the commit-gate rule.

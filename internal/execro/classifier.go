@@ -91,12 +91,48 @@ func Classify(cmd, repoRoot string) Verdict {
 				"run the bare command directly." + denyFooter,
 		}
 	}
-
 	tokens := strings.Fields(cmd)
+	return classifyTokens(tokens, repoRoot)
+}
+
+// ClassifyArgs classifies an already-split argv (target + args). It is the
+// argv-aware variant of Classify for callers (e.g. exec-sandbox's best-effort
+// graceful-skip fallback) that hold the REAL argv slice and must not lose args
+// to strings.Fields.
+//
+// B1 fix: exec-sandbox's graceful-skip fallback previously called
+// Classify(target, repoRoot) passing ONLY the bare executable. Because the
+// per-binary write/exec flag denylist (scanNonGitWriteFlags / scanGitWriteFlags)
+// runs over the classifier's token slice, a bare `find` matched the `find *`
+// readonly group with an EMPTY arg tail → no flag scan → ALLOW — so mutating
+// payloads (`find . -delete`, `sort -o out in`, `git diff --output=x`,
+// `sed -n 'w /path' f`) executed unclassified through runDirect with NO kernel
+// isolation and NO exec-ro arg-level protection. ClassifyArgs reconstructs the
+// FULL argv slice so those args reach the denylist and correctly DENY.
+//
+// Unlike Classify, ClassifyArgs does NOT run the shell-metacharacter gate: the
+// argv is already split by the shell, so a metacharacter inside one arg is a
+// LITERAL character (there is no shell left to interpret a pipe/redirect at this
+// layer), not a pipeline/redirect/sequence. The git global-flag walker, the
+// readonly-verb mutation guard, the git write/exec SUBCOMMAND-flag denylist, and
+// the non-git per-binary write/exec flag denylist ALL run over the full argv
+// slice — that is the classification contract the graceful-skip fallback needs.
+func ClassifyArgs(target string, args []string, repoRoot string) Verdict {
+	tokens := append([]string{target}, args...)
+	return classifyTokens(tokens, repoRoot)
+}
+
+// classifyTokens is the token-level core shared by Classify (which splits a
+// command string via strings.Fields) and ClassifyArgs (which holds an
+// already-split argv). It runs the git / non-git readonly classification over
+// the FULL token slice, including the per-binary write/exec flag denylist. An
+// empty token slice DENIES (mirrors Classify's post-Fields empty guard; for
+// Classify this is defensive because the TrimSpace check already returned, but
+// ClassifyArgs may pass an empty target and must still fail-closed).
+func classifyTokens(tokens []string, repoRoot string) Verdict {
 	if len(tokens) == 0 {
 		return Verdict{Allow: false, Notice: "exec-ro: empty command." + denyFooter}
 	}
-
 	if tokens[0] == "git" {
 		return classifyGit(tokens, repoRoot)
 	}
@@ -430,6 +466,74 @@ func walkGitGlobals(tokens []string, repoRoot string) walkResult {
 		}
 	}
 	return res
+}
+
+// GitVerbPastGlobals extracts the first git verb past any leading global flags
+// from a `git …` token list, treating EVERY recognized global flag (including
+// the config/exec-affecting ones -c/--config-env/--exec-path that exec-ro's
+// walkGitGlobals hard-denies early) as consume-and-continue. It performs NO
+// path classification and NO deny — it exists for the A1 exec backstop
+// (internal/cli/exec_git_guard.go denyExecGitMutationPayload), whose only goal
+// is to reach the verb so a mutation hidden behind ANY global flag is caught.
+//
+// It reuses lookupGitGlobalFlag + gitGlobalFlagRegistry (the canonical flag
+// table shared with walkGitGlobals and shell-guard-core.js) so there is NO
+// second hand-maintained flag list — only the DECISION diverges
+// (consume-and-continue vs exec-ro's hard-deny), and that divergence is
+// intentional and scoped to this function.
+//
+// args[0] MUST == "git" (caller guards). Returns "" when no verb is reached
+// (only flags consumed, or a value-bearing flag with no following value, or a
+// terminal info flag like `--help` with nothing after it).
+func GitVerbPastGlobals(args []string) string {
+	i := 1
+	for i < len(args) {
+		tok := args[i]
+
+		// Verb boundary: bare `-`, `--` (options terminator → verb is the token
+		// after it), or a non-flag token.
+		if tok == "-" || tok == "--" || !strings.HasPrefix(tok, "-") {
+			if tok == "--" {
+				if i+1 < len(args) {
+					return args[i+1]
+				}
+				return ""
+			}
+			return tok
+		}
+
+		entry, _, isAttached, ok := lookupGitGlobalFlag(tok)
+		if !ok {
+			// Unknown flag: consume 1, proceed (verb stays reachable — a
+			// mutation hidden behind an unrecognized flag is STILL caught
+			// because the verb is extracted past it).
+			i++
+			continue
+		}
+
+		switch entry.form {
+		case vfNext:
+			// Consumes the NEXT token as its value (e.g. -C <path>, -c <kv>).
+			i += 2
+		case vfEq:
+			if isAttached {
+				// Value attached via `=` in the same token.
+				i += 1
+			} else {
+				// git accepts a space-separated value for --git-dir / --work-tree
+				// / --namespace / --config-env; defensively consume the next
+				// token when no `=` is present (mirrors walkGitGlobals).
+				i += 2
+			}
+		case vfOptionalEq:
+			// Value optional via `=`; NEVER consumes a separate next token
+			// (--exec-path / --exec-path=/x).
+			i += 1
+		case vfNone:
+			i += 1
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------

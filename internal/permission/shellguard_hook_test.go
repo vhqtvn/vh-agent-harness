@@ -551,6 +551,113 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			cmd:  `git --paging=no --no-pager push origin main`,
 			want: Deny,
 		},
+
+		// --- F1 wrapped-mutation-bypass fix (A2 JS source-of-truth) -----------
+		//
+		// These cases pin the F1 closure at the JS gate: a payload
+		// `vh-agent-harness exec git <global-flag> <mutation>` is now denied by
+		// detectWrappedGitMutation BEFORE the harness branch's allow. Before the
+		// fix, the harness branch returned `{action:"allow"}` for these because
+		// the adjacency regex (`\bgit\s+<mutation-verb>`) could not match a flag
+		// between `git` and the verb, and walkGitGlobals never ran for wrapped
+		// payloads. The Go A1 backstop covers the same shape; these JS cases
+		// pin the source-of-truth layer the rendered tree ships.
+		{
+			name: "vh-agent-harness exec git --no-pager commit denied (F1 wrapped bypass)",
+			cmd:  `vh-agent-harness exec git --no-pager commit -m x`,
+			want: Deny,
+		},
+		{
+			name: "vh-agent-harness exec git -C /var/x push denied (F1 wrapped bypass)",
+			cmd:  `vh-agent-harness exec git -C /var/x push origin main`,
+			want: Deny,
+		},
+		{
+			name: "vh-agent-harness exec git --git-dir=/var/x commit denied (F1 wrapped bypass)",
+			cmd:  `vh-agent-harness exec git --git-dir=/var/x commit -m x`,
+			want: Deny,
+		},
+		{
+			// Space-separated form of --git-dir (e.g. `git --git-dir /x commit`).
+			// Same vector as the attached `--git-dir=/x` shape above, but the
+			// flag and its value are two separate argv tokens. Pinned explicitly
+			// so a future walkGitGlobals / detectWrappedGitMutation refactor
+			// cannot silently drop this declared F1 vector (it is currently
+			// covered only transitively via the walker's consume-and-continue
+			// path for value-bearing globals).
+			name: "vh-agent-harness exec git --git-dir /var/x commit denied (F1 wrapped bypass, space-separated)",
+			cmd:  `vh-agent-harness exec git --git-dir /var/x commit -m x`,
+			want: Deny,
+		},
+		{
+			// Regression guard: the adjacent form (`exec git commit`) was
+			// already caught by the regex; the A2 parser must not regress it.
+			name: "vh-agent-harness exec git commit denied (adjacency regression)",
+			cmd:  `vh-agent-harness exec git commit -m x`,
+			want: Deny,
+		},
+		{
+			name: "vh-agent-harness exec git --no-pager push denied (F1 wrapped bypass, push variant)",
+			cmd:  `vh-agent-harness exec git --no-pager push origin main`,
+			want: Deny,
+		},
+		{
+			// exec-ro path is also covered: it routes through the same harness
+			// branch but its payload starts with `--` (optional) then the bare
+			// payload. detectWrappedGitMutation handles the exec-ro form too.
+			name: "vh-agent-harness exec-ro git --no-pager commit denied (F1 wrapped bypass, exec-ro)",
+			cmd:  `vh-agent-harness exec-ro git --no-pager commit -m x`,
+			want: Deny,
+		},
+
+		// F1 ALLOW controls: the A2 parser must NOT over-deny.
+		{
+			name: "vh-agent-harness exec git --no-pager status allowed (readonly git + global flag)",
+			cmd:  `vh-agent-harness exec git --no-pager status`,
+			want: Allow,
+		},
+		{
+			name: "vh-agent-harness exec git -C /var/x status allowed (readonly git + path-bearing flag)",
+			cmd:  `vh-agent-harness exec git -C /var/x status`,
+			want: Allow,
+		},
+		{
+			// Legitimate non-git mutations through exec MUST stay allowed — A2
+			// is git-mutation-scoped only and must not reproduce the over-deny
+			// that calling execro.Classify would cause.
+			name: "vh-agent-harness exec mkdir tmp/x allowed (non-git mutation, F1 no-over-deny)",
+			cmd:  `vh-agent-harness exec mkdir tmp/x`,
+			want: Allow,
+		},
+		{
+			name: "vh-agent-harness exec pytest allowed (non-git mutation, F1 no-over-deny)",
+			cmd:  `vh-agent-harness exec pytest`,
+			want: Allow,
+		},
+		{
+			// Nested-shell git is OUT OF SCOPE for A2's wrapped-mutation parser
+			// (it does not parse `bash -c '...'` strings); it stays governed
+			// by the existing forbidden-pattern chain-guard scan, which denies
+			// the inner git mutation. Pinning both invariants: exec wrapping
+			// is allowed (no over-deny) AND the inner mutation is still denied.
+			name: "vh-agent-harness exec bash -c 'echo hi' allowed (nested shell OUT OF SCOPE for A2)",
+			cmd:  `vh-agent-harness exec bash -c 'echo hi'`,
+			want: Allow,
+		},
+
+		// Existing-behavior preservation: direct `vh-agent-harness git <verb>`
+		// (NOT through exec) is denied at the `startsWith("vh-agent-harness git ")`
+		// branch and must NOT conflict with the new wrapped-mutation parser.
+		{
+			name: "vh-agent-harness git status denied (direct, existing-behavior preservation)",
+			cmd:  `vh-agent-harness git status`,
+			want: Deny,
+		},
+		{
+			name: "vh-agent-harness git commit denied (direct, existing-behavior preservation)",
+			cmd:  `vh-agent-harness git commit -m x`,
+			want: Deny,
+		},
 	}
 	for _, c := range gitCases {
 		c := c
