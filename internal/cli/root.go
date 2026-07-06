@@ -93,6 +93,7 @@ func init() {
 		diffCmd,
 		// runtime
 		execCmd,
+		execRoCmd,
 		shellCmd,
 		upCmd,
 		downCmd,

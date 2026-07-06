@@ -143,6 +143,62 @@ that never names it renders nothing of it).
   as a host prefix.
 - **Use an existing wrapper for execution:** in `run-shape.yml` set
   `backend: proxy` and `proxy_command: ["./dev.sh", "exec"]`.
+- **Run a STRICTLY read-only command (no prompt):** `vh-agent-harness exec-ro -- <cmd>`.
+  This is a general read-only execution gate enforced INSIDE the Go binary (a
+  separate, narrower gate than `exec`). It is allowlisted in `opencode.jsonc` as
+  `vh-agent-harness exec-ro *: allow` for every agent, so opencode NEVER prompts
+  for it — which means **exec-ro itself is the only gate** and hard-DENIES
+  anything dangerous. Classifier = curated allowlist + default-deny:
+  - **Non-git:** the binary must be a known read-only inspection tool from the
+    `readonly` command group (`ls`, `cat`, `jq`, `grep`, `rg`, `wc`, `head`,
+    `tail`, `find`, …). Anything else (`npm install`, `rm foo`, `curl`,
+    `python script.py`) → DENY. A matching binary ALSO cannot carry a known
+    write/exec-capable flag — exec-ro denies find's `-delete`/`-exec`/`-execdir`/
+    `-ok`/`-okdir`/`-fls`/`-fprint`/`-fprint0`/`-fprintf` (delete files, run a
+    program, or write the listing to a file), sort's `-o`/`--output[=file]`
+    (writes sorted output to a file), and requires `sed` to carry `--sandbox`
+    (which disables its `e`/`r`/`w` commands) AND independently denies `sed`'s
+    `-i`/`--in-place` (which `--sandbox` does NOT disable) — so under exec-ro
+    the only ALLOWED sed form is `sed -n --sandbox …`. (Binary-level heuristic
+    denylist of the known prompt-free non-git write/exec vectors; a per-binary
+    safe-flag allowlist is deferred and the OS-level exec-sandbox is the
+    authoritative layer for the long tail of unknown flags. The `readonly`
+    group entry itself is left as `find *` / `sort *` / `sed -n *` on purpose:
+    it also feeds the shell-guard L2 permission.bash emission for ALL agents,
+    and widening it would emit a broader prompt-free rule for every agent and
+    reopen the vector at the L2 layer — the flag rules are exec-ro-internal.)
+  - **Git:** the verb is isolated past global flags (a Go port of the
+    shell-guard `walkGitGlobals` walker — same flag registry, same `-C`
+    classification). The verb must be in `git_readonly`; mutation verbs
+    (`commit`, `push`, `reset`, `rm`, …) and unknown verbs → DENY. A readonly
+    verb ALSO cannot carry a known write/exec-capable SUBCOMMAND flag — exec-ro
+    denies `--output`/`--output=<path>` (writes diff/show/log output to a file),
+    `--ext-diff` (invokes the configured external diff driver), grep's
+    `-O`/`--open-files-in-pager[=<pager>]` (runs a pager binary over the matching
+    files), and the textconv/filter family `--textconv`/`--filters` (invoke
+    configured diff/filter driver programs) across all readonly verbs
+    (verb-level heuristic denylist of the known prompt-free write/exec vectors;
+    a per-verb safe-flag allowlist is deferred and the OS-level exec-sandbox is
+    the authoritative layer for the long tail of unknown flags — including
+    diff/log textconv, which is default-on when configured via gitattributes and
+    is therefore a residual the flag-level denylist cannot fully close).
+  - **Shell metacharacters are refused** (conservative deny-on-unparseable): any
+    of `|`, `;`, `&`, `$`, backtick, `>`, `<`, newline → DENY. exec-ro is a fast
+    script-level heuristic (spoofable by complex shell), so it refuses pipelines
+    / sequences / subshells / redirects outright. For those, run the BARE command
+    via `exec` (which will prompt) — the deny notice says so.
+  - **`-C` handling** matches shell-guard's contract: relative `-C` (`-C .`,
+    `-C ./sub`) → DENY+notice (not auto-normalized); external absolute `-C`
+    (`-C /external`, `-C ../`, `--git-dir=/external`) → DENY+notice (exec-ro is
+    allowlisted and cannot prompt, so it cannot reach external repos); an
+    in-repo absolute `-C` (a subdir of the repo root) → ignored for
+    classification, ALLOW if the verb is read-only.
+  - exec-ro **executes the command exactly as given or DENIES** — it never
+    rewrites the command. On DENY it prints a human-readable notice to stderr and
+    exits non-zero (no prompt, since the outer invocation is allowlisted).
+  Use exec-ro when an agent wants prompt-free read-only inspection (git or
+  non-git). Use `exec` for anything mutating, anything with shell plumbing, or
+  anything exec-ro's allowlist does not cover.
 - **Track work:** `docs/planning/backlog.md` is the canonical task-status source
   of truth (seeded on install, `project_owned`). Agents edit it **freely** under
   the hybrid split-commit discipline: re-read from disk before editing, edit
@@ -273,7 +329,11 @@ blocks + `delegateFrom` edges via the Go-native emitter — no separate step) �
 - Adopting an existing repo preserves `.gitignore`, `README.md`, `CLAUDE.md`,
   `Makefile`, and any `AGENTS.md`; it refreshes only generic managed files.
 - `exec`/`shell` always run the shell-guard permission gate before touching the
-  runtime, including the `proxy` backend.
+  runtime, including the `proxy` backend. `exec-ro` is a SEPARATE, narrower gate
+  (read-only only, enforced inside the Go binary, never prompts) — see its
+  command-surface entry above. The two share the same Go source of truth for git
+  mutation verbs (`internal/permconfig/tables.go` → emitted `allowed-commands.js`
+  → consumed by both the exec-ro classifier and the shell-guard plugin).
 - `doctor`/`preflight` surface an ownership-raised divergent path (a managed
   file taken to `project_owned` via `harness-ownership.yml`) as a non-failing
   `preserved` (INFO) signal — never a FAIL, never blocks install/update.

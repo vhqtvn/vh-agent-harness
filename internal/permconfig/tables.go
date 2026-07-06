@@ -1,5 +1,7 @@
 package permconfig
 
+import "strings"
+
 // This file is the SINGLE CANONICAL SOURCE for the permission content that
 // ships into opencode.jsonc. The legacy Node resolver
 // (templates/core/.opencode/sys-scripts/update-opencode-config.js) previously
@@ -54,6 +56,15 @@ var CommandGroups = []CommandGroup{
 		// mutation verbs (acquire/commit/release/heartbeat/revert/stage-message)
 		// stay in the gate group below = committer-only.
 		".opencode/scripts/commit-gate.sh status",
+		// exec-ro is the script-level STRICTLY READ-ONLY execution verb
+		// (internal/execro classifier + internal/cli/exec_ro.go). It is allowlisted
+		// here as `vh-agent-harness exec-ro *` so opencode NEVER prompts for it —
+		// which means exec-ro itself is the ONLY gate for its payload and MUST
+		// hard-deny dangerous inner commands (mutations, out-of-repo reads,
+		// shell metacharacters). Adding it to the readonly group gives EVERY agent
+		// prompt-free read-only inspection (safe: exec-ro denies all mutations
+		// regardless of caller, so even the committer having it is harmless).
+		"vh-agent-harness exec-ro *",
 	}},
 	{Name: "git_readonly", Commands: []string{
 		"git diff *",
@@ -106,6 +117,86 @@ var CommandGroups = []CommandGroup{
 // GroupNames lists the group names in canonical iteration order, for consumers
 // that need to enumerate groups (e.g. diagnostics, future JSON-schema emission).
 var GroupNames = []string{"readonly", "git_readonly", "gate"}
+
+// GitMutationVerbs is the SINGLE CANONICAL SOURCE for the set of git verbs that
+// mutate repo state and are therefore forbidden to every agent except the
+// committer (via commit-gate.sh). This Go slice owns the list; it is emitted to
+// allowed-commands.js (GenerateAllowedCommandsJS) as `GIT_MUTATION_VERBS` and
+// consumed by BOTH:
+//
+//   - the exec-ro classifier (internal/execro.Classify) — to deny git mutations
+//     routed past any leading global flag (`git -C <ext> commit`,
+//     `git --no-pager commit`, `git --git-dir=/x commit`);
+//   - shell-guard-core.js — which imports the Go-generated `GIT_MUTATION_VERBS`
+//     from allowed-commands.js (NOT a hardcoded JS array) to build the
+//     `git-mutation-bypass` regex and power its mutation-slip guard.
+//
+// Single-source discipline: do NOT inline this alternation anywhere else. The
+// previous JS-only definition lived in forbidden-patterns.core.js; it moved here
+// so Go (exec-ro) and JS (shell-guard) cannot drift. Keep this list in sync with
+// the verbs the commit-gate wrapper accepts (the committer's mutation surface).
+var GitMutationVerbs = []string{
+	"add", "commit", "push", "reset", "commit-tree", "update-ref",
+	"checkout", "merge", "rebase", "stash", "branch", "restore",
+	"cherry-pick", "revert", "clean", "rm", "mv", "tag", "am", "apply", "switch",
+}
+
+// GitMutationVerbsSet is the set form of GitMutationVerbs for O(1) membership
+// lookup by the exec-ro classifier (and any Go consumer). Built once at init;
+// the slice above stays the canonical ordered source for JS emission.
+var GitMutationVerbsSet = func() map[string]bool {
+	m := make(map[string]bool, len(GitMutationVerbs))
+	for _, v := range GitMutationVerbs {
+		m[v] = true
+	}
+	return m
+}()
+
+// GitReadonlyVerbs is the set of git verbs recognized as read-only inspection,
+// derived from the `git_readonly` command group (the `<verb>` in `git <verb> *`).
+// The exec-ro classifier tests the walker-extracted verb against this set: a
+// readonly verb ALLOWs (subject to `-C`/`--git-dir` path classification); any
+// other verb (mutation OR unknown) DEFAULT-DENIES. Paging flags (`--no-pager`)
+// are stripped by the walker before verb extraction, so `git --no-pager log`
+// yields verb `log` and matches here — the explicit `git --no-pager <sub> *`
+// entries in the config table are NOT consulted by exec-ro (the walker handles
+// them). Built once at package init from CommandGroups so there is no second
+// hand-maintained list.
+var GitReadonlyVerbs = func() map[string]bool {
+	m := map[string]bool{}
+	for _, cmd := range groupByName("git_readonly") {
+		// Each entry is `git <verb> *` or `git --no-pager <verb> *`. Extract the
+		// verb: the token after `git`, skipping a leading `--no-pager`.
+		parts := splitFields(cmd)
+		if len(parts) < 2 || parts[0] != "git" {
+			continue
+		}
+		verb := parts[1]
+		if verb == "--no-pager" && len(parts) >= 3 {
+			verb = parts[2]
+		}
+		if verb != "" && verb != "*" {
+			m[verb] = true
+		}
+	}
+	return m
+}()
+
+// groupByName returns the command list of one group, or nil if absent.
+func groupByName(name string) []string {
+	for _, g := range CommandGroups {
+		if g.Name == name {
+			return g.Commands
+		}
+	}
+	return nil
+}
+
+// splitFields splits s on runs of whitespace (no quote handling — used only on
+// the curated command-table literals, which contain no spaces inside tokens).
+func splitFields(s string) []string {
+	return strings.Fields(s)
+}
 
 // CoreLocationRules maps each agent location name (plus "default" for the
 // top-level permission.bash block) to its bash decisions. Gate-exempt agents

@@ -44,8 +44,8 @@
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { COMMANDS } from "../repo-configs/allowed-commands.js";
-import { FORBIDDEN_PATTERNS, GIT_MUTATION_VERBS } from "../repo-configs/forbidden-patterns.js";
+import { COMMANDS, GIT_MUTATION_VERBS } from "../repo-configs/allowed-commands.js";
+import { FORBIDDEN_PATTERNS } from "../repo-configs/forbidden-patterns.js";
 // NOTE: web-tree-sitter is imported LAZILY inside getBashParser() (dynamic
 // import), so the engine loads even when the optional WASM parser is absent.
 // parseCommands() then degrades to a naive tokenizer (see fallbackParse). The
