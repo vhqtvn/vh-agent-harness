@@ -44,7 +44,20 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { repoRoot } from "../../plugins/shell-guard-core.js";
+import { fileURLToPath } from "node:url";
+
+// ESM has no global __dirname; derive it from import.meta.url (mirrors the
+// proven shim in state-lib.js) so repoRoot() is cwd-robust when node is
+// spawned by the opencode plugin server / Go bridge with an explicit cwd.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// repoRoot() is inlined here (zero-dep, mirrors state-lib.js's definition)
+// instead of imported, so this promoter-use-only MVP predicate checker stays
+// self-contained and does not couple to a larger module for one helper.
+function repoRoot() {
+    return path.resolve(__dirname, "..", "..");
+}
 
 // The coordinator dir token is rendered by the harness on `update`; at
 // runtime the literal here is the real dir name. Mirrors state-lib.js's
