@@ -281,6 +281,23 @@ If all leaves in a tier fail after retry, the tier verdict is `blocked` and esca
 
 NEVER silently proceed past a failed leaf. ALWAYS surface the failure in the output.
 
+## Hard rule: backlog-split (defense-in-depth before the gate)
+
+Before invoking any tier, inspect the exact file list. If it contains
+`docs/planning/backlog.md` AND any other file, return verdict `split`
+immediately (do NOT run the cascade). Emit a finding with
+`disposition: "block"`, `category: "process"`, and this issue text:
+
+> docs/planning/backlog.md must be committed separately from code/docs changes
+> (W1 conflict-prevention policy). Split: commit code first (without the
+> ledger), then commit the backlog alone.
+
+Rationale: the commit-gate O1 preflight would refuse this `acquire` anyway
+(status `path_error` / `backlog_must_commit_separately`), so flagging it here
+is defense-in-depth that fails the worker faster and avoids a wasted gate
+round. The one exception — `docs/planning/backlog.md` ALONE in the file list —
+is a legitimate backlog-only commit and MUST proceed through the normal cascade.
+
 ## CGD Phase-1 notes
 
 This orchestrator implements Phase 1 of the Commit-Gate Disposition (CGD) system:

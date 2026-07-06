@@ -2,8 +2,6 @@ package permconfig
 
 import (
 	"encoding/json"
-	"os"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -762,40 +760,5 @@ func TestEmit_PresentAgentFilterNoopWhenAllPresent(t *testing.T) {
 		if task[e.Target] != string(e.Decision) {
 			t.Fatalf(`build.task[%q] = %v, want %q (full roster → no filtering)`, e.Target, task[e.Target], e.Decision)
 		}
-	}
-}
-
-// Test 21: D-F2 cross-constant equivalence — the JS-side PROTECTED_PATH in the
-// backlog-reminder plugin MUST equal the Go-side BacklogLedgerPath constant.
-// Both literals hold the canonical backlog path, but they live in different
-// languages/trees with no codegen coupling them, so a future edit to either
-// could silently desync. This test pins them.
-//
-// Severity: the reminder plugin is NON-BLOCKING (it only console.errors a
-// nudge, then lets the edit proceed), so drift degrades UX (the curated
-// reminder fails to fire on the canonical path → no nudge), NOT correctness.
-// The test keeps the curated reminder aligned with the canonical ledger path.
-func TestEditGuardProtectedPathMatchesPermconfigConstant(t *testing.T) {
-	// go test runs with cwd = internal/permconfig/; repo root is ../../.
-	// The plugin was renamed edit-guard.js -> backlog-reminder.js when the W1
-	// throw-based edit-blocking was unwound into a non-blocking nudge.
-	const reminderRel = "../../templates/core/.opencode/plugins/backlog-reminder.js"
-	src, err := os.ReadFile(reminderRel)
-	if err != nil {
-		t.Fatalf("read %s: %v (is the test cwd the permconfig package dir?)", reminderRel, err)
-	}
-	// Match the declaration: const PROTECTED_PATH = "<value>";
-	re := regexp.MustCompile(`PROTECTED_PATH\s*=\s*"([^"]+)"`)
-	m := re.FindSubmatch(src)
-	if m == nil {
-		t.Fatalf("PROTECTED_PATH declaration not found in %s", reminderRel)
-	}
-	got := string(m[1])
-	if got != BacklogLedgerPath {
-		t.Fatalf("PROTECTED_PATH in %s = %q does NOT match BacklogLedgerPath in "+
-			"internal/permconfig/tables.go = %q — the two literals have desynced "+
-			"(the reminder is non-blocking, but the curated nudge is misaligned "+
-			"with the canonical ledger path)",
-			reminderRel, got, BacklogLedgerPath)
 	}
 }

@@ -110,6 +110,38 @@ Because agents edit the backlog freely, a content conflict on
   new HEAD, re-apply only your rows (matched by stable ID), and retry the
   commit. Reconcile manually from the task cards if two sessions both promoted.
 
+### 4. Eventual-consistency pass (each cycle)
+
+Without a real-time per-edit nudge (unachievable in opencode v1.14.x), drift
+accumulates between the backlog and reality. The promoter closes that gap each
+cycle with a narrow reconciliation pass. Run ALL of:
+
+1. **Normalize check.** Run
+   `node .opencode/scripts/normalize-backlog.js --check`. It MUST pass. If it
+   reports drift (stale `Now`/`Next`/`Later` sections, un-archived history, or
+   status/owner inconsistencies), fix the drift first — do NOT commit a backlog
+   that fails `--check`.
+2. **Reconcile holding area ↔ backlog.** Open
+   `.local/coordinator/tasks/` and match cards + closeouts against
+   backlog rows:
+   - **Promote** candidates whose trigger has fired AND that meet the Definition
+     of Ready (concrete area + file scope + validation plan + clear slice +
+     provenance). Apply step 1 of the main procedure.
+   - **Detect orphans.** A backlog row with no corresponding card, no closeout,
+     and no recent activity is an anomaly — either close it (`cancelled` with a
+     reason) or flag it for the operator. Do NOT silently delete history.
+3. **Detect blind-revert symptoms.** Compare the current backlog against the
+   last cycle's committed state (`git log -- docs/planning/backlog.md`). A row
+   that regressed (e.g. `done` → `todo`) or went MISSING vs last cycle is the
+   signature of a blind-revert of the ledger (the anti-pattern from section 3).
+   If detected, restore the lost rows from the prior commit and note the repair
+   in the row's Notes.
+4. **Land backlog changes as a backlog-only commit.** Every backlog change from
+   this pass MUST be a single backlog-only gated commit (path list =
+   `["docs/planning/backlog.md"]` and nothing else). The commit-gate O1 preflight
+   would refuse a mixed acquire anyway; keep the pass clean by never bundling
+   backlog with code. Code commits never wait on a backlog blob.
+
 ## What the promoter does NOT do
 
 - Does not edit code, tests, or non-backlog docs (that is worker territory).

@@ -435,6 +435,71 @@ print('\n'.join(paths))
   fi
 
   # -------------------------------------------------------------------
+  # O1 packaging-policy preflight (W2/split-commit enforcement).
+  #
+  # This is NOT a merge-algorithm change — it is a pre-acquire path-list
+  # guard. The shared docs/planning/backlog.md ledger MUST NOT travel in the
+  # same commit as code/docs changes: a concurrent backlog edit would
+  # cas_conflict the entire code commit (the original W1 problem). With no
+  # real-time per-edit nudge achievable in opencode v1.14.x, agents learn the
+  # discipline HERE, at the commit boundary — the rejection message below IS
+  # the teaching, which makes split-commit ENFORCED rather than advisory.
+  #
+  # ALLOW: docs/planning/backlog.md alone, OR a path list with no backlog file.
+  # REJECT: docs/planning/backlog.md appears alongside any other path.
+  #
+  # Path comparison is NORMALIZED, not exact-string: a git-valid but
+  # non-canonical spelling (./prefix, embedded /./, /../ collapse) must still
+  # trip the guard. Reuses the same lexical stack algorithm as
+  # _validate_in_repo_path (ports normalizeGitCPath): split on '/', drop "."
+  # and empty segments, pop the stack on "..". No fs reads (lexical only).
+  # -------------------------------------------------------------------
+  local _has_backlog=0 _total_paths=0 _p _seg _part
+  local -a _stk
+  while IFS= read -r _p; do
+    [[ -z "$_p" ]] && continue
+    _total_paths=$((_total_paths + 1))
+    # Lexical normalization to canonical repo-relative form.
+    _stk=()
+    _seg="$_p"
+    while [[ -n "$_seg" ]]; do
+      [[ "$_seg" == /* ]] && _seg="${_seg:1}"
+      if [[ "$_seg" == */* ]]; then
+        _part="${_seg%%/*}"
+        _seg="${_seg#*/}"
+      else
+        _part="$_seg"
+        _seg=""
+      fi
+      case "$_part" in
+        ""|".") continue ;;
+        "..")
+          ((${#_stk[@]})) && unset '_stk[${#_stk[@]}-1]'
+          ;;
+        *) _stk+=("$_part") ;;
+      esac
+    done
+    local _norm=""
+    ((${#_stk[@]})) && _norm="$(IFS=/; printf '%s' "${_stk[*]}")"
+    [[ "$_norm" == "docs/planning/backlog.md" ]] && _has_backlog=1
+  done <<< "$path_list"
+  if [[ $_has_backlog -eq 1 && $_total_paths -gt 1 ]]; then
+    cat >&2 <<'EOF'
+docs/planning/backlog.md must be committed separately from code/docs changes (W1 conflict-prevention policy).
+Recovery:
+  1. Split this slice: commit the code without the backlog ledger first.
+  2. Re-read the current docs/planning/backlog.md from disk.
+  3. Re-apply ONLY your owned row changes (stable IDs; never rewrite another lane's row).
+  4. Run: node .opencode/scripts/normalize-backlog.js --check
+  5. Commit the backlog alone (backlog-only acquire).
+  6. Load the `backlog` skill for the full procedure.
+Do NOT `commit-gate.sh revert docs/planning/backlog.md` to resolve a conflict.
+EOF
+    json_out "{\"status\":\"path_error\",\"reason\":\"backlog_must_commit_separately\",\"backlog_path\":\"docs/planning/backlog.md\",\"path_count\":${_total_paths}}"
+    return 1
+  fi
+
+  # -------------------------------------------------------------------
   # State mutation begins here: lock acquire, index reset, staging
   # -------------------------------------------------------------------
 

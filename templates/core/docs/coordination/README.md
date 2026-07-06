@@ -20,7 +20,7 @@ Use the existing source of truth that already owns each kind of state.
 
 | State | Canonical location | Notes |
 | --- | --- | --- |
-| Active task status | `docs/planning/backlog.md` | The backlog is the canonical task queue and status ledger. Agents edit it **freely**; conflict discipline (commit backlog separately from code; re-read before edit; on `cas_conflict` re-read + re-apply + retry, never revert) is enforced at the commit/workflow layer. |
+| Active task status | `docs/planning/backlog.md` | The backlog is the canonical task queue and status ledger — an **eventually-consistent** shared file. Agents edit it **freely**; split-commit is ENFORCED at the commit boundary by the commit-gate O1 preflight (`acquire` refuses any path list that mixes the ledger with code/docs), and residual drift is reconciled each cycle by the promoter (normalize-check + holding-area reconciliation + backlog-only commit). Code commits never wait on a backlog blob. |
 | Durable decisions, blockers, completions | `docs/checkpoints/` | Commit only durable snapshots worth reopening later. |
 | Release and environment facts | `docs/deployment/` | Keep provider/demo state in release docs, not in generic coordination files. |
 | Live task execution state | `.opencode/state/sessions/<alias>/` | Session-scoped task contracts, checkpoints, handoffs, and open questions. |
@@ -28,15 +28,21 @@ Use the existing source of truth that already owns each kind of state.
 | Conditional candidate holding area | `.local/{{COORDINATOR_DIR}}/tasks/` | Gitignored **transport, not truth** for DEFER/p2 follow-up candidates awaiting curation. Unpromoted candidates may be lost (intentionally fine). The promoter curates DoR-meeting candidates into `backlog.md`. |
 | Local operator overlays | `.local/{{COORDINATOR_DIR}}/` | Private, gitignored operator state and preferences. |
 
-### Free-edits + curation model
+### Free-edits + curation model (eventual consistency)
 
-Agents edit `docs/planning/backlog.md` directly. Two disciplines keep this safe:
+Agents edit `docs/planning/backlog.md` directly. The ledger is
+**eventually-consistent**: there is no real-time per-edit nudge (none is
+achievable in opencode v1.14.x), so safety is delivered by two layers that
+converge on correctness without blocking edits:
 
-1. **Hybrid split-commit conflict discipline.** Code commits exclude incidental
-   backlog changes; the backlog is committed **separately** (one backlog commit
-   per cycle). Dirty backlog edits are **preserved before any restore** — never
-   blind-revert `backlog.md`. On `cas_conflict`, re-read from the new HEAD,
-   re-apply only your rows, and retry. See [PROMOTER_RUNBOOK.md](PROMOTER_RUNBOOK.md).
+1. **Hybrid split-commit conflict discipline (gate-enforced).** The commit-gate
+   O1 preflight refuses an `acquire` whose `--paths` mixes
+   `docs/planning/backlog.md` with any other path — so a backlog change can
+   never `cas_conflict` a code commit. The rejection message is the teaching:
+   agents learn split-commit at the commit boundary. On `cas_conflict` for a
+   backlog-only commit, re-read from the new HEAD, re-apply only your rows, and
+   retry. Dirty backlog edits are **preserved before any restore** — never
+   blind-revert `backlog.md`. See [PROMOTER_RUNBOOK.md](PROMOTER_RUNBOOK.md).
 2. **Intake curation.** DEFER findings and p2 follow-ups NEVER become backlog
    rows directly. They land in `.local/{{COORDINATOR_DIR}}/tasks/` as
    conditional candidates and reach the backlog only after a trigger fires AND
@@ -45,12 +51,16 @@ Agents edit `docs/planning/backlog.md` directly. Two disciplines keep this safe:
    `check-defer-triggers.js` predicate checker as a review aid (promoter-use-
    only; never a commit hook; never blocking).
 
-The **promoter** curates candidates and batch-promotes a cycle's consolidated
-status transitions (normalize + archive + one backlog commit). It is a curator
-and cycle-consolidator, not the sole writer — agents write their own rows.
+The **promoter** curates candidates, batch-promotes a cycle's consolidated
+status transitions (normalize + archive + one backlog commit), and runs the
+narrow eventual-consistency pass (normalize `--check`, holding-area ↔ backlog
+reconciliation, blind-revert-symptom detection) that repairs residual drift.
+It is a curator and cycle-consolidator, not the sole writer — agents write
+their own rows.
 
 See [PROMOTER_RUNBOOK.md](PROMOTER_RUNBOOK.md) for the promoter procedure,
-conflict resolution, and the Definition of Ready.
+the eventual-consistency pass, conflict resolution, and the Definition of
+Ready.
 
 ## Coordination Planes
 

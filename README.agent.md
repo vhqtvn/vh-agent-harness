@@ -157,11 +157,19 @@ that never names it renders nothing of it).
   never directly to a backlog row; the promoter promotes them only after the
   predicate checker (`.opencode/scripts/check-defer-triggers.js`,
   promoter-use-only, never blocking) confirms the trigger and the Definition of
-  Ready is met. A non-blocking `backlog-reminder` plugin nudges once per session
-  when any agent edits the ledger (edit/write/apply_patch/bash substring). Run
-  `/backlog-cleanup` (or `vh-agent-harness exec node
+  Ready is met. Run `/backlog-cleanup` (or `vh-agent-harness exec node
   .opencode/scripts/normalize-backlog.js`) to tidy/archive after a batch edit.
-  Roadmap intent lives in `docs/planning/roadmap.md`.
+  Roadmap intent lives in `docs/planning/roadmap.md`. The backlog is an
+  **eventually-consistent ledger**: the safety model is (a) the **commit-gate
+  preflight** — `acquire` refuses any path list that mixes
+  `docs/planning/backlog.md` with code/docs changes, so split-commit is
+  ENFORCED, not advisory (no real-time per-edit nudge is achievable in opencode
+  v1.14.x, so agents learn the discipline at the commit boundary from the
+  rejection message); (b) the **promoter-cycle reconciliation** — each cycle the
+  promoter runs `normalize-backlog.js --check`, reconciles holding-area cards
+  against backlog rows, and lands backlog changes as a backlog-only commit; and
+  (c) the **`backlog` skill** as the agent's procedure reference. Code commits
+  never wait on a backlog blob.
 - **Refresh after a new binary or config change:** `vh-agent-harness update`
   (preview with `--dry-run`). Armed-file conflicts are recorded — list them with
   `vh-agent-harness proposals`.

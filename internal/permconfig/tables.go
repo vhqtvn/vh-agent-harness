@@ -329,14 +329,14 @@ const DevShCommand = "vh-agent-harness *"
 const CommitGateMessageGlob = "tmp/commit-gate-message/**"
 
 // BacklogLedgerPath is the canonical task-status ledger path. It is the shared
-// "backlog path" reference point used by three consumers that must stay in
-// sync: (1) this permconfig table (historical context for the W1 edit-blocking
+// "backlog path" reference point for the consumers that must stay aligned with
+// it: (1) this permconfig table (historical context for the W1 edit-blocking
 // that has been unwound — agents now edit the backlog freely, with conflict
 // discipline enforced at the commit/workflow layer instead); (2) the
-// non-blocking `backlog-reminder` plugin (.opencode/plugins/backlog-reminder.js),
-// whose PROTECTED_PATH constant is cross-checked against this one by
-// TestEditGuardProtectedPathMatchesPermconfigConstant so a future edit to
-// either cannot silently desync; (3) the backlog skill and promoter runbook,
-// which cite this path as the canonical status ledger. The path is repo-
-// relative and exact (no glob).
+// commit-gate.sh O1 packaging-policy preflight, which refuses an acquire whose
+// --paths mixes this ledger with code/docs changes (the literal
+// docs/planning/backlog.md lives in that shell guard; this Go constant is the
+// canonical reference for any Go-side consumer); (3) the backlog skill and the
+// promoter runbook's eventual-consistency pass, which cite this path as the
+// canonical status ledger. The path is repo-relative and exact (no glob).
 const BacklogLedgerPath = "docs/planning/backlog.md"
