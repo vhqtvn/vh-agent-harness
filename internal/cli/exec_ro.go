@@ -29,7 +29,13 @@ import (
 var execRoCmd = &cobra.Command{
 	Use:   "exec-ro [--] <cmd> [args...]",
 	Short: "Run a read-only command inside the harness runtime (exec-ro classifier gates it)",
-	Long: `Run a strictly read-only command inside the configured runtime backend.
+	Long: `exec-ro is a HOST-SIDE INTENT CLASSIFIER that runs BEFORE backend dispatch.
+It classifies the requested command against the host repo path, then delegates
+execution to the selected runtime backend. It is NOT proof that the backend
+payload is OS-sandboxed or running on read-only mounts; backend filesystem and
+security enforcement depend on the selected runtime. Under host-shell the
+classified command runs locally; under proxy/docker_compose it runs inside the
+container against the container's filesystem view.
 
 Unlike ` + "`vh-agent-harness exec`" + ` (which routes through the shell-guard permission gate
 and may prompt), exec-ro is allowlisted in opencode.jsonc as ` + "`vh-agent-harness exec-ro *`" + `

@@ -19,26 +19,47 @@ var (
 
 // execSandboxCmd implements `vh-agent-harness exec-sandbox <cmd>`.
 //
-// exec-sandbox is the authoritative OS-level defense-in-depth layer behind the
-// script-level exec-ro. It composes Landlock (filesystem integrity) with
-// pure-Go seccomp-BPF (network + syscall hardening) in a two-stage re-exec
-// trampoline. Layered WITH exec-ro — it does NOT replace it.
+// exec-sandbox is a HOST-LOCAL Linux sandbox front door. It does NOT resolve or
+// dispatch through the configured runtime backend (host-shell / proxy /
+// docker_compose) — it always runs on the host. It composes Landlock
+// (filesystem integrity) with pure-Go seccomp-BPF (network + syscall
+// hardening) in a two-stage re-exec trampoline. The Landlock/seccomp
+// restrictions apply only to the host process tree directly launched by the
+// trampoline; they do NOT become Docker, proxy, or remote-backend security
+// policy (a daemon-created container process does not inherit the caller's
+// Landlock/seccomp profile). It is layered WITH exec-ro — it does NOT replace
+// it — but it is NOT a universal OS backstop for exec-ro across all backends,
+// because exec-ro dispatches through the runtime backend (in-container under
+// proxy/docker_compose) while exec-sandbox is host-local-only.
 var execSandboxCmd = &cobra.Command{
 	Use:   "exec-sandbox <command> [args...]",
 	Short: "Run a command under a kernel-enforced Linux sandbox (Landlock + seccomp)",
-	Long: `exec-sandbox runs a command inside a pure-Go, unprivileged, kernel-enforcing
-Linux sandbox composed of Landlock (filesystem integrity) and pure-Go seccomp-BPF
-(network + high-risk syscall hardening).
+	Long: `exec-sandbox is a HOST-LOCAL Linux sandbox front door. It does NOT resolve
+or dispatch through the configured runtime backend (host-shell / proxy /
+docker_compose) — it always runs on the host. The Landlock (filesystem
+integrity) + pure-Go seccomp-BPF (network + high-risk syscall hardening)
+restrictions apply to the host process tree directly launched by the
+sandbox trampoline. They do NOT become Docker, proxy, or remote-backend
+security policy: Docker is client/server, so a daemon-created container
+process is governed by the container's own security policy, NOT by the
+caller's Landlock/seccomp profile. Treat this as an integrity + coarse
+network boundary for HOST-LOCAL execution — NOT a confidentiality boundary,
+NOT a selective egress-control system, and NOT a sandbox that follows the
+payload into a container runtime.
 
-It is the authoritative defense-in-depth layer behind exec-ro. exec-ro is a
-script-level heuristic pre-filter; exec-sandbox provides kernel-enforced
-guarantees that survive even if the target command tries to bypass shell-level
-checks.
+It composes two pure-Go, unprivileged, kernel-enforcing primitives in a
+two-stage re-exec trampoline. It is layered WITH exec-ro — it does NOT
+replace it — but it is NOT the authoritative OS layer behind exec-ro across
+all backends: exec-ro classifies the command host-side and then dispatches
+through the runtime backend (under proxy/docker_compose the classified
+command runs in-container), while exec-sandbox is host-local-only and never
+reaches the backend. Use exec-sandbox when you want kernel-enforced
+host-local write/network containment.
 
-HONESTY: exec-sandbox is an INTEGRITY + NETWORK boundary, NOT a confidentiality
-boundary. Denied paths remain VISIBLE (ls-able) but are unwritable (EACCES).
-The guarantee is "the command cannot WRITE or NETWORK outside the contract,"
-NOT "the command cannot SEE anything."
+HONESTY: exec-sandbox is an INTEGRITY + NETWORK boundary, NOT a
+confidentiality boundary. Denied paths remain VISIBLE (ls-able) but are
+unwritable (EACCES). The guarantee is "the command cannot WRITE or NETWORK
+outside the contract," NOT "the command cannot SEE anything."
 
 Default profile (Profile B):
   Read:    repo root, /usr, /bin, /sbin, /lib, /lib64, /lib32, /etc

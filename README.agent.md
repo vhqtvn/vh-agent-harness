@@ -155,9 +155,14 @@ that never names it renders nothing of it).
     `templates/migrations/v0.5.0.md`.)
 - **Use an existing wrapper for execution:** in `run-shape.yml` set
   `backend: proxy` and `proxy_command: ["./dev.sh", "exec"]`.
-- **Run a STRICTLY read-only command (no prompt):** `vh-agent-harness exec-ro -- <cmd>`.
-  This is a general read-only execution gate enforced INSIDE the Go binary (a
-  separate, narrower gate than `exec`). It is allowlisted in `opencode.jsonc` as
+- **Run a command as read-only intent, classified host-side (no prompt):** `vh-agent-harness exec-ro -- <cmd>`.
+  exec-ro is a HOST-SIDE INTENT CLASSIFIER that runs BEFORE backend dispatch: it
+  classifies the command against the host repo path, then delegates to the
+  selected runtime backend. It is NOT proof that the backend payload is
+  OS-sandboxed or on read-only mounts — under proxy/docker_compose the classified
+  command runs in-container against the container's filesystem view. This is a
+  general read-only execution gate enforced INSIDE the Go binary (a separate,
+  narrower gate than `exec`). It is allowlisted in `opencode.jsonc` as
   `vh-agent-harness exec-ro *: allow` for every agent, so opencode NEVER prompts
   for it — which means **exec-ro itself is the only gate** and hard-DENIES
   anything dangerous. Classifier = curated allowlist + default-deny:
@@ -174,7 +179,9 @@ that never names it renders nothing of it).
     the only ALLOWED sed form is `sed -n --sandbox …`. (Binary-level heuristic
     denylist of the known prompt-free non-git write/exec vectors; a per-binary
     safe-flag allowlist is deferred and the OS-level exec-sandbox is the
-    authoritative layer for the long tail of unknown flags. The `readonly`
+    authoritative layer for the long tail of unknown flags ON THE HOST-SHELL
+    BACKEND — exec-sandbox is host-local-only and does not follow the payload
+    into a proxy/docker_compose container. The `readonly`
     group entry itself is left as `find *` / `sort *` / `sed -n *` on purpose:
     it also feeds the shell-guard L2 permission.bash emission for ALL agents,
     and widening it would emit a broader prompt-free rule for every agent and
@@ -191,9 +198,11 @@ that never names it renders nothing of it).
     configured diff/filter driver programs) across all readonly verbs
     (verb-level heuristic denylist of the known prompt-free write/exec vectors;
     a per-verb safe-flag allowlist is deferred and the OS-level exec-sandbox is
-    the authoritative layer for the long tail of unknown flags — including
-    diff/log textconv, which is default-on when configured via gitattributes and
-    is therefore a residual the flag-level denylist cannot fully close).
+    the authoritative layer for the long tail of unknown flags ON THE HOST-SHELL
+    BACKEND (exec-sandbox is host-local-only and does not follow the payload into
+    a proxy/docker_compose container) — including diff/log textconv, which is
+    default-on when configured via gitattributes and is therefore a residual the
+    flag-level denylist cannot fully close).
   - **Shell metacharacters are refused** (conservative deny-on-unparseable): any
     of `|`, `;`, `&`, `$`, backtick, `>`, `<`, newline → DENY. exec-ro is a fast
     script-level heuristic (spoofable by complex shell), so it refuses pipelines
@@ -211,16 +220,29 @@ that never names it renders nothing of it).
   Use exec-ro when an agent wants prompt-free read-only inspection (git or
   non-git). Use `exec` for anything mutating, anything with shell plumbing, or
   anything exec-ro's allowlist does not cover.
-- **Run a command under a kernel-enforced Linux sandbox:** `vh-agent-harness exec-sandbox [--sandbox=off|best-effort|strict] [--net=deny|allow|ask] -- <cmd>`.
-  exec-sandbox is the authoritative OS-level defense-in-depth layer behind
-  exec-ro. It composes two pure-Go, unprivileged, kernel-enforcing primitives:
+- **Run a command under a kernel-enforced HOST-LOCAL Linux sandbox:** `vh-agent-harness exec-sandbox [--sandbox=off|best-effort|strict] [--net=deny|allow|ask] -- <cmd>`.
+
+  **Two execution planes (read this).** The exec commands look like one family
+  but sit on two disjoint planes. `exec` and `exec-ro` dispatch through
+  `resolveBackend()` and are runtime-backend-aware: under `host-shell` they run
+  on the host; under `proxy`/`docker_compose` they run INSIDE the container.
+  `exec-sandbox` is a HOST-LOCAL Landlock+seccomp trampoline that NEVER calls
+  `resolveBackend` and always runs on the host. The Landlock/seccomp
+  restrictions apply only to the host process tree directly launched by the
+  trampoline; they do NOT become Docker, proxy, or remote-backend security
+  policy (Docker is client/server, so a daemon-created container process is
+  governed by the container's own policy, NOT the caller's Landlock/seccomp
+  profile). Wrapping a `docker compose exec`/proxy payload in `exec-sandbox`
+  constrains the local client process but NOT the in-container payload.
+
+  exec-sandbox composes two pure-Go, unprivileged, kernel-enforcing primitives:
   **Landlock** (filesystem integrity) + **pure-Go seccomp-BPF** (network +
   high-risk syscall hardening). It is layered WITH exec-ro (they compose, exec-
   sandbox does NOT replace it): exec-ro is the script-level heuristic pre-filter
   (fast, spoofable by complex shell); exec-sandbox is the kernel-enforced
-  authoritative layer (survives bypass attempts because it is enforced in the
-  kernel, not in Go user-space). Single static Go binary — no bwrap, no cgo, no
-  libseccomp. **Build prerequisite:** source builds require Go 1.25+ (`go.mod`
+  authoritative layer for HOST-LOCAL execution (survives bypass attempts because
+  it is enforced in the kernel, not in Go user-space). Single static Go binary —
+  no bwrap, no cgo, no libseccomp. **Build prerequisite:** source builds require Go 1.25+ (`go.mod`
   requires `go 1.25.0`, bumped from 1.22 for the new OS-primitive deps); the
   binary remains a single static build via `CGO_ENABLED=0`. Binary self-update
   (`vh-agent-harness update` from the installed binary) is unaffected.
@@ -290,10 +312,13 @@ that never names it renders nothing of it).
   closed (no primitives); best-effort prints a loud warning and falls back to
   exec-ro classification. macOS must NEVER pretend protected.
 
-  Use exec-sandbox when you want kernel-enforced guarantees that the command
-  cannot write outside the repo/tmp contract or make unauthorized network
-  connections. Compose with exec-ro: exec-ro is the fast pre-filter; exec-sandbox
-  is the authoritative backstop.
+  Use exec-sandbox when you want kernel-enforced HOST-LOCAL guarantees that the
+  command cannot write outside the repo/tmp contract or make unauthorized network
+  connections. Compose with exec-ro on the host-shell backend: exec-ro is the
+  fast pre-filter; exec-sandbox is the authoritative backstop — but ONLY for
+  host-local execution. Under proxy/docker_compose, exec-ro's classified command
+  runs in-container and exec-sandbox cannot follow it; use backend-native
+  container security for in-container containment.
 - **Track work:** `docs/planning/backlog.md` is the canonical task-status source
   of truth (seeded on install, `project_owned`). Agents edit it **freely** under
   the hybrid split-commit discipline: re-read from disk before editing, edit
@@ -429,11 +454,14 @@ blocks + `delegateFrom` edges via the Go-native emitter — no separate step) �
   command-surface entry above. The two share the same Go source of truth for git
   mutation verbs (`internal/permconfig/tables.go` → emitted `allowed-commands.js`
   → consumed by both the exec-ro classifier and the shell-guard plugin).
-  `exec-sandbox` is the authoritative OS-level defense-in-depth layer behind
-  exec-ro: pure-Go Landlock (filesystem integrity) + seccomp-BPF (network +
-  syscall hardening), kernel-enforced, single static binary. It is an INTEGRITY
-  + NETWORK boundary, NOT a confidentiality boundary (denied paths stay visible
-  but unwritable). See its command-surface entry above for profiles, modes, and
+  `exec-sandbox` is a HOST-LOCAL Linux sandbox front door (NOT a backend peer to
+  exec/exec-ro): pure-Go Landlock (filesystem integrity) + seccomp-BPF (network +
+  syscall hardening), kernel-enforced, single static binary. It never dispatches
+  through the runtime backend and never follows a payload into a container; the
+  Landlock/seccomp restrictions apply only to the host process tree directly
+  launched by the trampoline. It is an INTEGRITY + NETWORK boundary, NOT a
+  confidentiality boundary (denied paths stay visible but unwritable). See its
+  command-surface entry above for the two execution planes, profiles, modes, and
   the honesty framing.
 - `doctor`/`preflight` surface an ownership-raised divergent path (a managed
   file taken to `project_owned` via `harness-ownership.yml`) as a non-failing
