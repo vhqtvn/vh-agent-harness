@@ -32,6 +32,8 @@
 # Lock dir: .git/commit-gate.lock/ (mkdir-based atomic lock, held only during acquire)
 # Lock metadata: .git/commit-gate.lock/meta (JSON v2)
 # Private index: .git/commit-gate/index-${UUID} (GIT_INDEX_FILE)
+# Agent msg scratch: tmp/commit-gate-message/msg-${UUID} (committer-authored via the
+#   Write tool; reclaimed by this gate on success/release/no_changes + aged-orphan GC)
 #
 # NOTE: SKIP_COMMIT_GATE acquire path still uses `git add -A`.
 #       The gated cmd_acquire path stages via private index (GIT_INDEX_FILE).
@@ -64,8 +66,17 @@ GATE_INDEX_DIR=".git/commit-gate"
 CAS_MAX_RETRY=3
 # GC: scratch files (msg-/paths-/meta-/index-/merge-) older than this many
 # seconds are eligible for best-effort orphan sweep on successful commit and
-# at the end of release. Env: COMMIT_GATE_GC_MAX_AGE.
+# at the end of release. Env: COMMIT_GATE_GC_MAX_AGE. The GC also reclaims the
+# AGENT-OWNED message scratch at $MSG_SCRATCH_DIR/msg-${UUID} (the committer
+# writes this path with the Write tool; `rm` is not in any agent's bash
+# permission map, so the gate owns its reclamation). Same age gate +
+# protected-UUID skip apply there.
 DEFAULT_GC_MAX_AGE=3600
+# Agent-owned commit-message scratch dir (cwd-relative on purpose — tracks
+# the target repo = current working dir, mirroring $GATE_INDEX_DIR). The
+# committer authors the message here with the Write tool; the gate reclaims
+# msg-${UUID} on success/release/no_changes AND sweeps aged orphans here.
+MSG_SCRATCH_DIR="tmp/commit-gate-message"
 # Persistent session metadata survives the lock-free review phase.
 # Each session stores its metadata at ${GATE_INDEX_DIR}/meta-${UUID}.
 _session_meta_path() { echo "${GATE_INDEX_DIR}/meta-${1}"; }
@@ -180,6 +191,10 @@ _cleanup_own_scratch() {
   local uuid="$1"
   [[ -z "$uuid" ]] && return 0
   rm -f "${GATE_INDEX_DIR}/msg-${uuid}" "${GATE_INDEX_DIR}/paths-${uuid}" 2>/dev/null || true
+  # Also reclaim the AGENT-OWNED message scratch ($MSG_SCRATCH_DIR/msg-${UUID}).
+  # `rm` is not in any agent's bash permission map, so the gate owns this path.
+  # Best-effort; the dir may be absent in test/scratch repos.
+  rm -f "${MSG_SCRATCH_DIR}/msg-${uuid}" 2>/dev/null || true
 }
 
 # Sweep aged orphan scratch files (msg-/paths-/meta-/index-/merge-) from
@@ -196,7 +211,10 @@ _cleanup_own_scratch() {
 _gate_gc_sweep() {
   local max_age="${COMMIT_GATE_GC_MAX_AGE:-$DEFAULT_GC_MAX_AGE}"
 
-  [[ ! -d "$GATE_INDEX_DIR" ]] && return 0
+  # Early-out only when BOTH scratch surfaces are absent. $MSG_SCRATCH_DIR may
+  # hold agent-owned message orphans even when $GATE_INDEX_DIR was cleaned, so
+  # the gate must still get a chance to sweep it.
+  [[ ! -d "$GATE_INDEX_DIR" && ! -d "$MSG_SCRATCH_DIR" ]] && return 0
 
   # Build the protected-UUID set (active lock UUID + _current_uuid value).
   local protected_uuids=()
@@ -252,6 +270,36 @@ _gate_gc_sweep() {
       fi
     done < <(ls -1 "${GATE_INDEX_DIR}/${prefix}"* 2>/dev/null)
   done
+
+  # Sweep aged orphans in the AGENT-OWNED message scratch dir. The committer
+  # writes $MSG_SCRATCH_DIR/msg-${UUID} with the Write tool; `rm` is not in
+  # any agent's bash permission map, so the gate owns reclamation here. Only
+  # the msg-* prefix is swept — never touch other tmp/ content (other tooling
+  # may use tmp/). Same age gate + protected-UUID skip as $GATE_INDEX_DIR.
+  if [[ -d "$MSG_SCRATCH_DIR" ]]; then
+    local f
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      local fuuid
+      fuuid="${f#${MSG_SCRATCH_DIR}/msg-}"
+      local is_protected=false
+      if [[ ${#protected_uuids[@]} -gt 0 ]]; then
+        local prot
+        for prot in "${protected_uuids[@]}"; do
+          if [[ "$fuuid" == "$prot" ]]; then
+            is_protected=true
+            break
+          fi
+        done
+      fi
+      [[ "$is_protected" == "true" ]] && continue
+      local age
+      age=$(_file_age_seconds "$f" 2>/dev/null || echo "0")
+      if [[ $age -gt $max_age ]]; then
+        rm -f "$f" 2>/dev/null || true
+      fi
+    done < <(ls -1 "${MSG_SCRATCH_DIR}"/msg-* 2>/dev/null)
+  fi
 
   return 0
 }
@@ -654,6 +702,11 @@ print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))
     # No changes to commit
     rm -f "$private_index" 2>/dev/null || true
     rm -f "$(_session_meta_path "$uuid")" 2>/dev/null || true
+    # Reclaim this session's own scratch (incl. the agent-authored msg file at
+    # $MSG_SCRATCH_DIR/msg-${uuid}) immediately — mirrors the success sites.
+    # Safe here: no commit/update-ref happened, so the msg file is leftover
+    # scratch with no durability ordering to preserve.
+    _cleanup_own_scratch "$uuid"
     _gate_gc_sweep || true
     json_out "{\"status\":\"no_changes\",\"tree_hash\":\"${tree_hash}\"}"
     return 0
