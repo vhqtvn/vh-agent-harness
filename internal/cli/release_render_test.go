@@ -92,6 +92,30 @@ func assertReleaserRendered(t *testing.T, root string) {
 	//    validation entirely and could ship an agent whose safety-critical
 	//    prompt fails to load under the OpenCode config contract. Pin it.
 	assertReleaserPromptContract(t, root)
+
+	// 5. Outbound task edge (Part B — the permission materialization proof):
+	//    the rendered releaser must carry the `releaser -> committer` allow
+	//    edge (the migration-note commit delegation) AND keep `*: deny` (leaf
+	//    specialist otherwise). This is the pack-only authorization the Part-A
+	//    prompt contract depends on; without it the `releaser -> committer`
+	//    delegation is a runtime no-op. parseRenderedTaskEdges (the helper that
+	//    extracts each rendered agent's allow task map) is reused for the
+	//    committer:allow half; the *:deny half needs the raw map because that
+	//    helper deliberately drops deny entries.
+	if !edges[releaserAgent]["committer"] {
+		t.Errorf("releaser -> committer task edge must render when release is selected (the migration-note commit delegation is pack-authorized); releaser.task allow-set=%v", sortedKeysOf(edges[releaserAgent]))
+	}
+	assertReleaserTaskWildcardDenied(t, root)
+	// 6. The gateExempt delegator render shape (B-F1 fix): the releaser's bash
+	//    block must OMIT every gate-group command (the 6 commit-gate.sh mutation
+	//    subcommands + uuidgen) because the pack declares gateExempt:true and
+	//    omits the gate key — matching the canonical committer-delegator
+	//    contract (skeleton permission-pack.jsonc + web-builder). The readonly
+	//    commit-gate.sh status probe MUST stay (it is in the readonly group, not
+	//    gate), proving the omission is scoped to the gate group, not the whole
+	//    commit-gate.sh surface. No gateExempt field renders into opencode.jsonc
+	//    — its effect is the omission itself.
+	assertReleaserGateExemptShape(t, root)
 }
 
 func sortedKeysOf(m map[string]bool) []string {
@@ -135,6 +159,118 @@ func assertReleaserPromptContract(t *testing.T, root string) {
 	}
 	if got, want := rel.Prompt, "{file:.opencode/agents/releaser.md}"; got != want {
 		t.Errorf("agent.releaser.prompt must use the {file:...} reference form (matches the 20 core agents and the overlay-new scaffolder, and is required for prompt-file validation to stat-resolve it); got %q, want %q", got, want)
+	}
+}
+
+// assertReleaserTaskWildcardDenied pins the `*: deny` half of the releaser's
+// outbound task contract. parseRenderedTaskEdges (reused in
+// assertReleaserRendered for the committer:allow half) captures allow edges
+// only, so the deny half needs its own raw read. The releaser must stay a leaf
+// except for the narrow committer delegation: `*: deny` must hold (no other
+// downstream delegations). The releaser is a gateExempt committer-delegator
+// (gate omitted — see assertReleaserGateExemptShape); the committer, not the
+// releaser, independently holds the gate.
+func assertReleaserTaskWildcardDenied(t *testing.T, root string) {
+	t.Helper()
+	cfg, err := os.ReadFile(filepath.Join(root, "opencode.jsonc"))
+	if err != nil {
+		t.Fatalf("read opencode.jsonc: %v", err)
+	}
+	var doc struct {
+		Agent map[string]struct {
+			Permission struct {
+				Task map[string]string `json:"task"`
+			} `json:"permission"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(cfg, &doc); err != nil {
+		t.Fatalf("unmarshal opencode.jsonc: %v\n--- cfg ---\n%s", err, cfg)
+	}
+	rel, ok := doc.Agent[releaserAgent]
+	if !ok {
+		t.Fatalf("releaser agent must be registered before asserting *:deny task contract")
+	}
+	if got := rel.Permission.Task["*"]; got != "deny" {
+		t.Errorf("releaser task map must keep *:deny (leaf specialist; narrow committer delegation only); got *=%q", got)
+	}
+}
+
+// gateGroupCommands mirrors the `gate` command group from
+// internal/permconfig/tables.go (CommandGroups). A gateExempt agent's rendered
+// bash block must OMIT every one of these (the emitter's computeBashBlock
+// `continue`s past the gate group when HasGate is false). The committed
+// committer->releaser edge depends on this: a gate:deny entry on the releaser
+// would bleed into the delegated committer session via OpenCode's
+// deriveSubagentSessionPermission (findLast) and override the committer's
+// gate:allow, breaking the gated-commit message-as-file protocol the note commit
+// runs through. Asserting their ABSENCE here pins the B-F1 fix (the prior slice
+// shipped `gate:deny` + no gateExempt — the forbidden middle — and
+// commit-reviewer blocked it).
+var gateGroupCommands = []string{
+	".opencode/scripts/commit-gate.sh acquire *",
+	".opencode/scripts/commit-gate.sh commit *",
+	".opencode/scripts/commit-gate.sh release *",
+	".opencode/scripts/commit-gate.sh heartbeat *",
+	".opencode/scripts/commit-gate.sh revert *",
+	".opencode/scripts/commit-gate.sh stage-message *",
+	"uuidgen",
+}
+
+// assertReleaserGateExemptShape pins the gateExempt committer-delegator render
+// contract: the releaser's rendered permission.bash block OMITS every gate-group
+// command (the 6 commit-gate.sh mutation subcommands + uuidgen) while KEEPING
+// the readonly commit-gate.sh status probe (it lives in the readonly group, so
+// every agent — gate-exempt or not — gets prompt-free lock metadata reads).
+//
+// No `gateExempt` field renders into opencode.jsonc: gateExempt is a BUILD-TIME
+// concept (internal/permconfig/emit.go resolveRules → validate →
+// computeBashBlock's gate-group skip) whose observable effect is the omission of
+// the gate-group entries. So this assertion checks the omission directly — the
+// gate-group keys must be absent from the bash map.
+//
+// The companion presence check (commit-gate.sh status stays allow) proves the
+// omission is scoped to the gate group, not a wholesale drop of the
+// commit-gate.sh surface or a render failure.
+func assertReleaserGateExemptShape(t *testing.T, root string) {
+	t.Helper()
+	cfg, err := os.ReadFile(filepath.Join(root, "opencode.jsonc"))
+	if err != nil {
+		t.Fatalf("read opencode.jsonc: %v", err)
+	}
+	var doc struct {
+		Agent map[string]struct {
+			Permission struct {
+				Bash map[string]string `json:"bash"`
+			} `json:"permission"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(cfg, &doc); err != nil {
+		t.Fatalf("unmarshal opencode.jsonc: %v\n--- cfg ---\n%s", err, cfg)
+	}
+	rel, ok := doc.Agent[releaserAgent]
+	if !ok {
+		t.Fatalf("releaser agent must be registered before asserting gateExempt shape")
+	}
+	bash := rel.Permission.Bash
+	if bash == nil {
+		t.Fatalf("releaser permission.bash block missing")
+	}
+	// 1. Every gate-group command must be ABSENT (the gateExempt render effect).
+	for _, cmd := range gateGroupCommands {
+		if _, present := bash[cmd]; present {
+			t.Errorf("releaser bash block must OMIT gate-group command %q (gateExempt delegator — gate omitted so its deny cannot bleed into the delegated committer session); found %q=%q", cmd, cmd, bash[cmd])
+		}
+	}
+	// 2. The readonly commit-gate.sh status probe MUST stay present + allow
+	//    (proves the omission is scoped to the gate group, not the whole
+	//    commit-gate.sh surface). It lives in the readonly group, which every
+	//    agent receives regardless of gate posture.
+	if got, want := bash[".opencode/scripts/commit-gate.sh status"], "allow"; got != want {
+		t.Errorf("releaser bash block must keep commit-gate.sh status=allow (readonly group, present for every agent); got %q", got)
+	}
+	// 3. exec-ro stays (readonly) — sanity that the readonly group rendered.
+	if got, want := bash["vh-agent-harness exec-ro *"], "allow"; got != want {
+		t.Errorf("releaser bash block must keep vh-agent-harness exec-ro *=allow (readonly group); got %q", got)
 	}
 }
 

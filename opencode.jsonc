@@ -1372,7 +1372,6 @@
                     "true *": "allow",
                     "uniq *": "allow",
                     "sleep *": "allow",
-                    "uuidgen": "deny",
                     "printf *": "allow",
                     "sed -n *": "allow",
                     "git log *": "allow",
@@ -1402,16 +1401,11 @@
                     "git --no-pager check-ignore *": "allow",
                     ".opencode/scripts/commit-gate.sh status": "allow",
                     ".opencode/scripts/readonly-scripts.sh *": "allow",
-                    ".opencode/scripts/commit-gate.sh commit *": "deny",
-                    ".opencode/scripts/commit-gate.sh revert *": "deny",
-                    ".opencode/scripts/commit-gate.sh acquire *": "deny",
-                    ".opencode/scripts/commit-gate.sh release *": "deny",
-                    ".opencode/scripts/commit-gate.sh heartbeat *": "deny",
-                    ".opencode/scripts/commit-gate.sh stage-message *": "deny",
                     "vh-agent-harness *": "allow"
                 },
                 "task": {
-                    "*": "deny"
+                    "*": "deny",
+                    "committer": "allow"
                 }
             },
             "prompt": "{file:.opencode/agents/releaser.md}"

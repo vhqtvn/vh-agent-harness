@@ -8,18 +8,38 @@
   //
   // Surface:
   //   - readonly + git_readonly allowed (discover tags/commits/sha read-only).
-  //   - gate DENIED: the releaser is NOT part of the gated-commit protocol and
-  //     never calls commit-gate.sh. Its only mutation is the single release-tag
-  //     wrapper invocation, executed via the devSh:allow group
-  //     (vh-agent-harness exec <wrapper>).
+  //   - gateExempt committer-delegator: the releaser is a gateExempt agent that
+  //     OMITS the gate decision (no gate key in location). Its two sanctioned
+  //     mutations are (a) ONE narrow task delegation to `committer` (the
+  //     migration-note commit — the committer, NOT the releaser, runs the
+  //     gated-commit message-as-file protocol and holds the gate), and (b) the
+  //     single release-tag wrapper invocation via the devSh:allow group
+  //     (vh-agent-harness exec <wrapper>). The wrapper is tag-only; it never
+  //     stages or commits the migration note. The releaser itself never runs
+  //     commit-gate.sh — its bash block carries NONE of the commit-gate.sh
+  //     mutation subcommands (acquire/commit/release/heartbeat/revert/
+  //     stage-message) and no uuidgen; the committer independently holds the
+  //     gate. gateExempt is WHY gate is omitted: OpenCode's
+  //     deriveSubagentSessionPermission merges parent denies into a subagent
+  //     session via findLast, so a parent gate:deny on the releaser would bleed
+  //     into the delegated committer session and override the committer's
+  //     gate:allow — breaking the gated-commit protocol the note commit depends
+  //     on. Omitting gate keeps the releaser's posture out of the committer's
+  //     session; it does NOT make the releaser itself a gate caller.
   //   - wildcard DENIED: no arbitrary commands.
-  //   - task {"*":"deny"}: leaf specialist — accepts no downstream delegations.
+  //   - task {"committer":"allow","*":"deny"}: leaf specialist that delegates
+  //     ONLY the migration-note commit (`templates/migrations/v<next>.md`) to
+  //     committer; every other downstream delegation is denied. The committer
+  //     edge is dropped at render time when core/gated-commit is unselected
+  //     (permconfig.Emit's present-agent filter), so the edge is inert in any
+  //     profile where the committer does not render.
   //   - delegateFrom [build, coordination, project-coordinator]: those three
   //     orchestrators may delegate a release task to the releaser.
   "agents": {
     "releaser": {
-      "location": { "wildcard": "deny", "readonly": "allow", "git_readonly": "allow", "gate": "deny", "devSh": "allow" },
-      "task": { "*": "deny" },
+      "location": { "wildcard": "deny", "readonly": "allow", "git_readonly": "allow", "devSh": "allow" },
+      "task": { "*": "deny", "committer": "allow" },
+      "gateExempt": true,
       "delegateFrom": ["build", "coordination", "project-coordinator"]
     }
   }

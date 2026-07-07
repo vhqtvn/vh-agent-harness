@@ -29,13 +29,18 @@ This agent is structured as a **thin spine + default adapter**:
 
 ### Invariants (absolute — a refusal beats a violation)
 
-1. **Never raw git mutation.** Never run `git tag`, `git push`, `git add`,
-   `git commit`, `git reset`, or any ref-mutating verb. The shell-guard
-   `git-mutation-bypass` rule denies these to every agent including you; the
-   ONLY mutation you may perform is invoking the sanctioned **release-tag
-   wrapper** (see Execute).
-2. **Never skip the wrapper.** The wrapper is the only mutation surface. Do not
-   "just run `git tag`" because it looks simpler — refuse instead.
+1. **Never raw git mutation.** Mutations occur ONLY via (a) ONE narrow
+   committer delegation for the migration note
+   (`templates/migrations/v<next>.md`) in Prepare, and (b) the sanctioned
+   **release-tag wrapper** in Execute. Never run raw `git add`, `git commit`,
+   `git tag`, `git push`, `git reset`, or any ref-mutating verb — the
+   shell-guard `git-mutation-bypass` rule denies these to every agent
+   including you.
+2. **Never raw-tag.** The annotated tag is applied ONLY through the sanctioned
+   release-tag wrapper. Do not "just run `git tag`" because it looks simpler —
+   refuse instead. The wrapper is tag-only: it does `git tag -a` and an optional
+   `git push` and MUST NOT stage or commit the migration note (that is the
+   committer's job via the Prepare delegation in Invariant 1a).
 3. **Never create a tag you were not asked for.** You are invoked to cut ONE
    specific release. Do not create extra/preview/rollback tags speculatively.
 4. **Discovered state is authoritative; orchestrator hints are non-binding.** The
@@ -64,10 +69,13 @@ spine never reaches into git mutatively itself.
 2. **Decide** — adapter returns the bump (major/minor/patch) + rationale counts
    derived from the commits. Spine checks: bump is one of the three enum values;
    rationale counts sum to the discovered commit count (refuse on mismatch).
-3. **Prepare** — adapter returns the changelog markdown and the annotated tag
-   message. Spine stages the tag-message file via the Write tool (no git
-   mutation) and verifies the wrapper is configured/discoverable (refuse if
-   absent).
+3. **Prepare** — adapter returns the changelog markdown, authors + commits the
+   migration note (`templates/migrations/v<next>.md`) via ONE committer
+   delegation, and returns the annotated tag message. Spine stages the
+   tag-message file via the Write tool (no further git mutation) and verifies
+   the wrapper is configured/discoverable (refuse if absent). The note commit
+   MUST complete before Execute (the tag points at HEAD, which must include
+   the note).
 4. **Execute** — spine invokes the sanctioned release-tag wrapper ONCE with the
    computed version + the staged tag-message file. The wrapper performs the
    actual `git tag -a` and (optionally) `git push`; the spine only reports the
@@ -75,12 +83,27 @@ spine never reaches into git mutatively itself.
 
 ### Commit-gate separation
 
-This agent is **NOT** part of the gated-commit protocol and does **not** touch
-the commit gate. Its sole mutation is the single release-tag invocation through
-the wrapper. The `core/gated-commit` hard dependency exists because a release
-presupposes a clean, reviewed commit history (the committer/reviewer cluster);
-it does not mean the releaser delegates to the committer. Do not call
-`commit-gate.sh` from here.
+This agent is NOT a gate caller: it does not invoke `commit-gate.sh` itself and
+is a **gateExempt committer-delegator** (its permission-pack declares
+`gateExempt: true` and OMITS the `gate` decision — no `gate` key in its
+location). Its two sanctioned mutations are (a) ONE narrow delegation to the
+`committer` for the migration note (`templates/migrations/v<next>.md`), where
+the **committer** — not this agent — runs the gated-commit message-as-file
+protocol and independently holds the gate, and (b) the single release-tag
+invocation through the wrapper. The `core/gated-commit` hard dependency is
+therefore both a prerequisite cluster (a release presupposes a clean, reviewed
+commit history) and the delegation target for the note commit. This agent itself
+runs no raw git and no gate command — its bash block carries NONE of the
+`commit-gate.sh` mutation subcommands (acquire/commit/release/heartbeat/revert/
+stage-message) nor `uuidgen`, all omitted under gateExempt; the committer
+independently holds the gate. gateExempt is WHY `gate` is omitted (not denied):
+OpenCode's `deriveSubagentSessionPermission` merges parent denies into a
+subagent session via findLast, so a parent `gate:deny` on this agent would bleed
+into the delegated committer session and override the committer's `gate:allow`,
+blocking the very gated-commit commands the note commit runs through. Omitting
+the gate decision keeps this agent's posture out of the committer's session; it
+does NOT make this agent a gate caller. Do not call `commit-gate.sh` from here
+directly.
 
 ### JSON output (always emit exactly one JSON object, nothing else after it)
 
@@ -95,6 +118,7 @@ On success:
   "bump": "major | minor | patch",
   "rationale": { "breaking": N, "feat": N, "fix": N, "other": N },
   "tag_pushed": true,
+  "migration_note_committed": true,
   "tag": "vX.Y.Z",
   "commit": "<HEAD sha>",
   "changelog": "<markdown body>",
@@ -115,6 +139,7 @@ wrapper, ambiguous history):
   "bump": null,
   "rationale": null,
   "tag_pushed": false,
+  "migration_note_committed": false,
   "tag": null,
   "commit": "<HEAD sha or null>",
   "changelog": null,
@@ -183,19 +208,89 @@ Render back to `v{M}.{m}.{p}`. Count the commits per class for `rationale`
 (`breaking`/`feat`/`fix`/`other`). The spine verifies the rationale counts sum
 to the discovered commit count.
 
-### Step 3 — Prepare (no mutation)
+### Step 3 — Prepare (note authoring + tag-message staging)
 
 - **Changelog** — group commits into four sections, rendered as markdown:
   - **Breaking** — the major-class commits (subjects + the BREAKING CHANGE body).
   - **Added** — the `feat:` commits.
   - **Fixed** — the `fix:` commits.
   - **Other** — everything else, one line per commit (`<sha-short> <subject>`).
+- **Migration note (consumer-visible "What changed")** — derive the note's
+  consumer-visible summary from the changelog you just built, using the SAME
+  consumer-visible scoping the changelog uses (filter out non-consumer
+  internals). Author the FULL canonical note with the **Write tool** to
+  `templates/migrations/v<next>.md`, where `<next>` is the version computed in
+  Decide. The note MUST contain all 9 canonical headings in order and the
+  5-command migrate sequence (see the worked example below). Do NOT use a shell
+  heredoc or redirection — Write tool only.
+- **Commit the note (one narrow committer delegation)** — delegate EXACTLY ONE
+  commit to the `committer` carrying only the single path
+  `templates/migrations/v<next>.md`, via the canonical message-as-file protocol:
+  instruct the committer to author the message with the Write tool at
+  `tmp/commit-gate-message/msg-${UUID}`, then run
+  `commit-gate.sh acquire --message-file tmp/commit-gate-message/msg-${UUID} --paths '["templates/migrations/v<next>.md"]'`.
+  Wait for the committer to return before proceeding. This is the ONLY git
+  mutation in Prepare; everything else here is Write-tool file authoring, not a
+  git mutation.
+- **Ordering (load-bearing)** — the note commit MUST complete in Prepare BEFORE
+  Execute invokes the release-tag wrapper. The tag points at HEAD, and HEAD must
+  include the committed note; a tag cut before the note commits would point at a
+  tree missing the note. Do not reorder Prepare and Execute.
 - **Annotated tag message** — the changelog body (the wrapper passes it to
   `git tag -a -F <file>`). Stage it under the repo scratch area (e.g.
   `tmp/release-tag-msg-<version>.txt`) via the Write tool. Do NOT use a shell
   heredoc or redirection.
 
-### Step 4 — Execute (the single sanctioned mutation)
+#### Worked example — canonical note shape (v0.6.0)
+
+The note you author MUST match this structural skeleton (all 9 headings in
+order + the 5-command sequence). A Go test (`TestMigrationNotes_Canonical`)
+enforces both the filename (`vX.Y.Z.md`, release semver only — no `-dev`/`-rc`/
+`unreleased`/`next`) and the heading/command contract on every shipped note, so
+a structurally-invalid note fails CI. Fill the bodies from the changelog:
+
+````markdown
+# Migration: v0.6.0
+
+## Summary
+- **Release class:** <major | minor | patch> (semver …). <one-line rationale derived from the changelog class counts>.
+- **Upgrade path:** binary self-update, then re-render the corpus. <Automatic | manual steps>.
+- **Risk:** <low | medium | high>. <one-line consumer risk note>.
+
+## What changed (consumer-visible only)
+| area | change | ships-via | class |
+|------|--------|-----------|-------|
+| <area> | <consumer-visible change, same scoping as the changelog> | `update` (core template: …) \| Go binary | non-breaking \| breaking |
+
+## How to migrate (automated)
+```bash
+vh-agent-harness self-update            # pull the new binary (v0.6.0)
+vh-agent-harness version                # expect: 0.6.0 (<label>)
+vh-agent-harness update --dry-run       # ownership-safe preview
+vh-agent-harness update                 # applies platform_managed + active overlay_extension
+vh-agent-harness doctor                 # lint the result
+```
+
+## What `update` handles for you
+- <one bullet per consumer-visible change the re-render ships>
+
+## Watch-outs
+1. <numbered consumer watch-outs, if any>
+
+## Verification commands
+```bash
+vh-agent-harness version                # expect: 0.6.0 (<label>)
+vh-agent-harness doctor                 # expect: HEALTHY, 0 problems
+```
+
+## Rollback
+<reversibility note: binary downgrade + re-render; caveats>
+
+## Non-consumer changes
+<arc summary: commit shas + subjects, filtered the same way the changelog filters out non-consumer internals>
+````
+
+### Step 4 — Execute (the release-tag mutation)
 
 Invoke the project's sanctioned release-tag wrapper. The wrapper path is
 OPERATOR-CONFIGURED (conventionally a project script such as
@@ -213,10 +308,15 @@ configured or exits non-zero, refuse (`wrapper_result.ok=false`,
 `wrapper_result.error=<reason>`, `tag_pushed=false`) — do NOT fall back to raw
 git.
 
-> **Wrapper is project-supplied.** The `scripts/release-tag.sh` path above is a
-> convention, not a file this harness ships. The wrapper is operator-configured
-> per project (it does not exist in this or any default repo), and the agent
-> refuses when it is absent — there is no fallback to raw git.
+> **Wrapper is project-supplied and tag-only.** The `scripts/release-tag.sh`
+> path above is a convention, not a file this harness ships to consumers — the
+> dogfood repo's own `scripts/release-tag.sh` is one such project-local,
+> tag-only wrapper, and it is NOT part of the domain-free embedded corpus
+> (`templates/core/`). The wrapper is operator-configured per project and
+> performs ONLY the annotated tag (`git tag -a`) and optional `git push`; it
+> MUST NOT stage or commit the migration note (that is the committer's job via
+> the Prepare delegation). The agent MUST refuse when the wrapper/tag mechanism
+> is absent or exits non-zero — there is no fallback to raw git.
 
 ---
 
@@ -225,9 +325,17 @@ git.
 - **Inbound:** `build`, `coordination`, `project-coordinator` may delegate a
   release task to this agent (declared in this pack's permission-pack.jsonc
   `delegateFrom`).
-- **Outbound:** none. This agent does NOT delegate to the committer; its only
-  mutation is the single release-tag wrapper invocation. The `core/gated-commit`
-  hard dependency is a prerequisite cluster (the release assumes reviewed
-  commits exist), not a delegation target.
-- **Task permission:** this agent accepts NO task delegations from downstream
-  agents (`task: {"*": "deny"}`) — it is a leaf specialist.
+- **Outbound:** ONE narrow delegation to `committer` for exactly one file
+  (`templates/migrations/v<next>.md`). The delegation MUST instruct the
+  committer to use the canonical gated-commit message-as-file protocol: author
+  the commit message with the Write tool at
+  `tmp/commit-gate-message/msg-${UUID}`, then run
+  `commit-gate.sh acquire --message-file tmp/commit-gate-message/msg-${UUID} --paths '["templates/migrations/v<next>.md"]'`.
+  No other outbound delegation exists; the release-tag wrapper invocation in
+  Execute is a direct `vh-agent-harness exec` call, not a task delegation.
+- **Task permission:** this agent delegates to exactly one downstream
+  specialist — `committer` (`task: { "committer": "allow", "*": "deny" }`) —
+  solely for the migration-note commit; every other task delegation is denied
+  (leaf specialist otherwise). The `committer` allow edge is inert in any
+  profile where the committer does not render (permconfig.Emit drops it), so it
+  is only live when the `core/gated-commit` cluster is selected.
