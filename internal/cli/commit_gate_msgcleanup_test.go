@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -39,6 +40,14 @@ import (
 //     (commit forwards $message_file into _cleanup_own_scratch on success)
 //   - release_rejects_traversal_uuid: B-UUID-F1 guard — release --uuid with
 //     traversal payload rejected by ^[A-Za-z0-9_-]+$ uuid shape guard
+//     (exercises the _cleanup_own_scratch msg-${uuid} rm sink)
+//   - release_rejects_traversal_meta_uuid: SECDATA-1 guard — release --uuid
+//     traversal rejected at the DISTINCT _session_meta_path meta-${uuid}
+//     construction feeding release's no-lock `rm -f "$session_meta"` (the
+//     arbitrary-file-deletion class via meta- paths; centralized guard)
+//   - heartbeat_rejects_traversal_meta_uuid: SECDATA-1 overwrite class —
+//     heartbeat --uuid traversal rejected at _session_meta_path so the
+//     lock-free read+write ('w') python3 block cannot corrupt a victim file
 func TestCommitGate_MessageCleanup(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
@@ -575,6 +584,114 @@ func TestCommitGate_MessageCleanup(t *testing.T) {
 		// THE B-UUID-F1 assertion: .git/config survives the privileged rm.
 		if _, err := os.Stat(filepath.Join(dir, ".git", "config")); err != nil {
 			t.Fatalf("B-UUID-F1 regression: release --uuid traversal deleted .git/config (uuid shape guard failed); stat err=%v", err)
+		}
+	})
+
+	// ---------------------------------------------------------------------
+	// Subtest 9: release rejects a TRAVERSAL --uuid at the _session_meta_path
+	// rm sink (SECDATA-1 arbitrary-file-deletion class). This is a DISTINCT
+	// sink from subtest 8: subtest 8 exercises _cleanup_own_scratch's
+	// msg-${uuid} rm; this subtest exercises _session_meta_path's meta-${uuid}
+	// construction feeding release's no-lock branch `rm -f "$session_meta"`
+	// (~line 1035). Without the centralized uuid-shape guard inside
+	// _session_meta_path, a traversal payload like 'x/../../config' makes
+	// meta-x/../../config resolve (when .git/commit-gate/meta-x/ exists as a
+	// dir) to .git/config, and `rm -f` deletes it. The guard makes
+	// _session_meta_path echo "" + return 0 (NOT 1 — the var="$(...)"
+	// assignment sites run under `set -e`, so a non-zero return would kill
+	// the shell; the empty string is the reject signal), so `[[ -f "" ]]` is
+	// false (no cat read) and `rm -f ""` is a no-op.
+	// ---------------------------------------------------------------------
+	releaseMetaMustNotDelete := func(t *testing.T, uuidArg string) {
+		t.Helper()
+		dir, dstScripts := setupScratchRepo(t)
+		seedAndCommit(t, dir, "v1\n")
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("v2\n"), 0o644); err != nil {
+			t.Fatalf("modify: %v", err)
+		}
+		// Pre-create the traversal dir the payload climbs through. Without it
+		// the `..` segments cannot resolve and rm -f is already a no-op; WITH
+		// it, the unguarded path resolves out of .git/commit-gate/ to .git/config.
+		metaXDir := filepath.Join(dir, ".git", "commit-gate", "meta-x")
+		if err := os.MkdirAll(metaXDir, 0o755); err != nil {
+			t.Fatalf("mkdir meta-x traversal dir: %v", err)
+		}
+		// Legit acquire (establishes a session; the release below uses a
+		// DIFFERENT traversal uuid with no matching session → no-lock branch).
+		uuidA := genUUID(t, dstScripts)
+		msgRel := writeAgentMsg(t, dir, uuidA)
+		acq := runGate(t, dstScripts, dir, "acquire",
+			"--paths", `["file.txt"]`,
+			"--message-file", msgRel,
+			"--session-alias", "cleanup-test")
+		uuidG, _ := acq["uuid"].(string)
+		if uuidG == "" {
+			t.Fatalf("acquire did not return a uuid: %v", acq)
+		}
+		// release with the TRAVERSAL uuid. Without the guard, .git/config is
+		// deleted by `rm -f "$session_meta"` in the no-lock branch.
+		rel := runGate(t, dstScripts, dir, "release",
+			"--uuid", uuidArg,
+			"--message-file", msgRel)
+		if status, _ := rel["status"].(string); !strings.HasPrefix(status, "released") {
+			t.Fatalf("expected status released*, got %v", rel)
+		}
+		// THE SECDATA-1 assertion: .git/config survives the privileged rm.
+		if _, err := os.Stat(filepath.Join(dir, ".git", "config")); err != nil {
+			t.Fatalf("SECDATA-1 regression: release --uuid %q deleted .git/config (_session_meta_path guard failed); stat err=%v", uuidArg, err)
+		}
+	}
+	t.Run("release_rejects_traversal_meta_uuid", func(t *testing.T) {
+		releaseMetaMustNotDelete(t, "x/../../config")
+		releaseMetaMustNotDelete(t, "x/../../../.git/config")
+	})
+
+	// ---------------------------------------------------------------------
+	// Subtest 10: heartbeat rejects a TRAVERSAL --uuid at the
+	// _session_meta_path write sink (SECDATA-1 arbitrary-file-OVERWRITE
+	// class). cmd_heartbeat's lock-free branch (~line 1277) does
+	// `session_meta="$(_session_meta_path "$uuid")"`, then `[[ -f ... ]]`
+	// enters a python3 read+WRITE ('w') block that re-dumps the file as JSON
+	// (injecting heartbeat_at), with an `|| touch` mtime fallback. Without
+	// the guard, a traversal uuid resolving to a JSON victim CORRUPTS it.
+	// The guard makes _session_meta_path echo "" → `[[ -f "" ]]` false → the
+	// write block is skipped entirely. The victim here is a JSON file inside
+	// .git/commit-gate/ that the traversal resolves to (meta-x/../victim.json),
+	// so the assertion is byte-equality (no heartbeat_at injection).
+	// ---------------------------------------------------------------------
+	t.Run("heartbeat_rejects_traversal_meta_uuid", func(t *testing.T) {
+		dir, dstScripts := setupScratchRepo(t)
+		seedAndCommit(t, dir, "v1\n")
+		// Pre-create the traversal dir the payload climbs through.
+		if err := os.MkdirAll(filepath.Join(dir, ".git", "commit-gate", "meta-x"), 0o755); err != nil {
+			t.Fatalf("mkdir meta-x traversal dir: %v", err)
+		}
+		// JSON victim the traversal resolves to:
+		// .git/commit-gate/meta-x/../victim.json = .git/commit-gate/victim.json
+		// python3's json.load + dump would inject heartbeat_at and re-serialize,
+		// corrupting it without the guard.
+		victimPath := filepath.Join(dir, ".git", "commit-gate", "victim.json")
+		victimBody := []byte("{\"uuid\":\"victim\",\"heartbeat_at\":\"old\"}\n")
+		if err := os.WriteFile(victimPath, victimBody, 0o644); err != nil {
+			t.Fatalf("write victim: %v", err)
+		}
+		// heartbeat with the TRAVERSAL uuid. The heartbeat may legitimately
+		// return an error status (no_lock_or_session — there is no real
+		// session for the traversal uuid once guarded); the assertion is that
+		// the victim is NOT corrupted regardless of status, so we do not use
+		// the runGate helper (which fatals on non-zero exit).
+		cmd := exec.Command("bash", filepath.Join(dstScripts, "commit-gate.sh"),
+			"heartbeat", "--uuid", "x/../victim.json")
+		cmd.Dir = dir
+		_, _ = cmd.CombinedOutput()
+		// THE SECDATA-1 assertion: victim content is byte-unchanged (no
+		// heartbeat_at injection, no JSON re-dump).
+		after, err := os.ReadFile(victimPath)
+		if err != nil {
+			t.Fatalf("read victim after: %v", err)
+		}
+		if !bytes.Equal(victimBody, after) {
+			t.Fatalf("SECDATA-1 regression: heartbeat --uuid traversal overwrote victim JSON (_session_meta_path guard failed)\nbefore: %q\nafter:  %q", victimBody, after)
 		}
 	})
 }

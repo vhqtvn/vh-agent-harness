@@ -79,7 +79,31 @@ DEFAULT_GC_MAX_AGE=3600
 MSG_SCRATCH_DIR="tmp/commit-gate-message"
 # Persistent session metadata survives the lock-free review phase.
 # Each session stores its metadata at ${GATE_INDEX_DIR}/meta-${UUID}.
-_session_meta_path() { echo "${GATE_INDEX_DIR}/meta-${1}"; }
+#
+# SECURITY: $1 can be CALLER-CONTROLLED (release's no-lock branch forwards
+# the raw --uuid here verbatim at ~line 1030; cmd_heartbeat at ~line 1277;
+# cmd_commit at ~line 855). Refuse to interpolate a malformed value into the
+# path — a traversal payload like 'x/../../config' would make meta-${u}
+# resolve out of ${GATE_INDEX_DIR} and reach an arbitrary file, and the
+# result feeds rm -f / cat / write at the call sites (deletion, read, AND
+# overwrite classes). Same charset convention as the _cleanup_own_scratch
+# uuid guard (~line 245) and cmd_stage_message (~line 1606). A non-conforming
+# uuid echoes "" and returns 0 (NOT 1 — `var="$(...)"` call sites like the
+# release/commit/heartbeat branches run under `set -e`, so a non-zero return
+# would kill the shell; the empty string is the reject signal) so every
+# downstream sink becomes a safe no-op: `rm -f ""` is a no-op (and call sites
+# add `|| true`); read sites guard with `[[ -f "$session_meta" ]]` (empty fails
+# -f); the one bare write redirect (~line 804) uses the internal _uuid, whose
+# gen-uuid output is standard [0-9a-f-]+ UUIDs — a strict subset — so the
+# guard never trips in the legit acquire→commit→release flow.
+_session_meta_path() {
+  local u="$1"
+  if [[ -n "$u" && ! "$u" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo ""
+    return 0
+  fi
+  echo "${GATE_INDEX_DIR}/meta-${u}"
+}
 
 # cwd-independent anchors — commit-gate.sh is invoked from temp/scratch git
 # repos during tests and from subdirectories in production, so paths to its
