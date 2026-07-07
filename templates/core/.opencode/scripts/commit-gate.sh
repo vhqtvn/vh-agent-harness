@@ -4,7 +4,7 @@
 # Subcommands (recommended — file-based form):
 #   acquire   --paths-file FILE --message-file FILE [--session-alias ALIAS]
 #   commit    --uuid UUID --tree-hash HASH --message-file FILE
-#   release   [--uuid UUID]
+#   release   [--uuid UUID] [--message-file FILE]
 #   heartbeat --uuid UUID
 #   status
 #   revert    --paths '<JSON_ARRAY>' | --paths-file FILE | <path> [<path>...]
@@ -183,6 +183,49 @@ _cleanup_private_index() {
 # GC: best-effort scratch-file cleanup (post-success commit + release only)
 # ---------------------------------------------------------------------------
 
+# Validate a caller-supplied --message-file path for PRIVILEGED reclamation.
+# Echoes the raw path iff it is repo-relative AND lexically normalizes to
+# ${MSG_SCRATCH_DIR}/msg-* (i.e. tmp/commit-gate-message/msg-<suffix>); echoes
+# nothing (safe-reject) otherwise. Rejects: empty, absolute paths, and any path
+# containing a '..' segment (a legit agent-authored scratch path never does).
+# Pure lexical (no fs reads); mirrors the backlog-preflight normalization.
+# SECURITY: this is the chokepoint that lets cmd_commit/cmd_release forward a
+# CALLER-CONTROLLED --message-file into the gate's privileged rm (rm is denied
+# to all agents; the gate owns it). Without this, `release --message-file
+# README.md` or `.git/config` would reach rm -f and delete an arbitrary file.
+_safe_msg_reclaim_path() {
+  local raw="${1:-}"
+  [[ -z "$raw" ]] && return 0
+  # Reject absolute paths outright.
+  [[ "$raw" == /* ]] && return 0
+  local seg="$raw" part
+  local -a stk=()
+  while [[ -n "$seg" ]]; do
+    [[ "$seg" == /* ]] && seg="${seg:1}"
+    if [[ "$seg" == */* ]]; then
+      part="${seg%%/*}"
+      seg="${seg#*/}"
+    else
+      part="$seg"
+      seg=""
+    fi
+    case "$part" in
+      ""|".") continue ;;
+      "..")
+        # Any '..' either escapes (empty stack) or climbs above the prefix;
+        # either way the path cannot remain under ${MSG_SCRATCH_DIR}/msg-, so
+        # reject the whole path. Legit scratch paths have no '..'.
+        return 0
+        ;;
+      *) stk+=("$part") ;;
+    esac
+  done
+  local norm=""
+  ((${#stk[@]})) && norm="$(IFS=/; printf '%s' "${stk[*]}")"
+  [[ "$norm" == "${MSG_SCRATCH_DIR}/msg-"* ]] && printf '%s' "$raw"
+  return 0
+}
+
 # Remove this session's own message/paths scratch files. Best-effort and
 # post-success ONLY — never called before the gate has finished reading them
 # (cmd_commit reads --message-file at commit time, so own-UUID removal must
@@ -190,21 +233,39 @@ _cleanup_private_index() {
 _cleanup_own_scratch() {
   local uuid="$1"
   [[ -z "$uuid" ]] && return 0
-  rm -f "${GATE_INDEX_DIR}/msg-${uuid}" "${GATE_INDEX_DIR}/paths-${uuid}" 2>/dev/null || true
-  # Also reclaim the AGENT-OWNED message scratch ($MSG_SCRATCH_DIR/msg-${UUID}).
-  # `rm` is not in any agent's bash permission map, so the gate owns this path.
-  # Best-effort; the dir may be absent in test/scratch repos.
-  rm -f "${MSG_SCRATCH_DIR}/msg-${uuid}" 2>/dev/null || true
+  # SECURITY: $uuid can be CALLER-CONTROLLED (release's no-lock branch forwards
+  # the raw --uuid here verbatim at line ~1035). Refuse to interpolate a value
+  # containing path or shell-dangerous chars into the privileged rm below —
+  # blocks traversal payloads like 'x/../../../.git/config' that would otherwise
+  # resolve out of the scratch dir and delete an arbitrary file (rm is denied to
+  # all agents; the gate owns this primitive). Same charset guard as
+  # cmd_stage_message's uuid validation (~line 1595). A non-conforming uuid
+  # skips the uuid-derived rms (no-ops on benign paths); the message_file
+  # reclaim below is independent and validated separately via _safe_msg_reclaim_path.
+  if [[ "$uuid" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    rm -f "${GATE_INDEX_DIR}/msg-${uuid}" "${GATE_INDEX_DIR}/paths-${uuid}" 2>/dev/null || true
+    # Also reclaim the AGENT-OWNED message scratch ($MSG_SCRATCH_DIR/msg-${UUID}).
+    # `rm` is not in any agent's bash permission map, so the gate owns this path.
+    # Best-effort; the dir may be absent in test/scratch repos.
+    rm -f "${MSG_SCRATCH_DIR}/msg-${uuid}" 2>/dev/null || true
+  fi
   # Optionally reclaim the ACTUAL --message-file path (caller passes $message_file
-  # from cmd_commit). Needed because acquire generates its OWN gate-session uuid
-  # (stored as the session uuid), which differs from the agent's pre-acquire
-  # gen-uuid used to NAME the msg scratch file — so the uuid-derived rm above is
-  # a no-op for agent-authored files. Passing the real path reclaims it promptly
-  # at commit time instead of waiting for aged GC. The guard makes inline
-  # --message (empty message_file) a safe no-op, and a backward-compat
-  # .git/commit-gate/msg-* path is removed idempotently.
+  # from cmd_commit/cmd_release). Needed because acquire generates its OWN
+  # gate-session uuid (stored as the session uuid), which differs from the
+  # agent's pre-acquire gen-uuid used to NAME the msg scratch file — so the
+  # uuid-derived rm above is a no-op for agent-authored files. Passing the real
+  # path reclaims it promptly at commit/release time instead of waiting for aged
+  # GC. The guard makes inline --message (empty message_file) a safe no-op.
+  #
+  # SECURITY: the rm below is the gate's privileged primitive. _safe_msg_reclaim_path
+  # constrains $msg_file to the agent-owned scratch surface (${MSG_SCRATCH_DIR}/msg-*)
+  # AFTER lexical normalization (rejecting absolute + '..'), so a caller-supplied
+  # --message-file README.md / .git/config CANNOT reach rm. This single chokepoint
+  # protects commit/no_changes/release uniformly. Best-effort (|| true).
   local msg_file="${2:-}"
-  [[ -n "$msg_file" ]] && rm -f "$msg_file" 2>/dev/null || true
+  local safe_path
+  safe_path="$(_safe_msg_reclaim_path "$msg_file")"
+  [[ -n "$safe_path" ]] && rm -f "$safe_path" 2>/dev/null || true
 }
 
 # Sweep aged orphan scratch files (msg-/paths-/meta-/index-/merge-) from
@@ -952,10 +1013,12 @@ cmd_commit() {
 # ---------------------------------------------------------------------------
 cmd_release() {
   local uuid=""
+  local message_file=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --uuid) uuid="$2"; shift 2 ;;
+      --message-file) message_file="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
@@ -972,7 +1035,15 @@ cmd_release() {
         rm -f "$session_meta" 2>/dev/null || true
       fi
     fi
-    _cleanup_own_scratch "$uuid"
+    # Reclaim the agent-authored message scratch ($MSG_SCRATCH_DIR/msg-${UUID_A})
+    # too. release's uuid is the GATE session uuid (from acquire), which differs
+    # from the agent's pre-acquire gen-uuid used to NAME the msg scratch file, so
+    # the uuid-derived rm in _cleanup_own_scratch is a no-op for agent files.
+    # Passing the real $message_file reclaims it promptly instead of waiting for
+    # the aged-GC backstop. Invariant preserved: own-UUID/msg reclaim stays
+    # strictly AFTER any state mutation (meta removal above); release has no
+    # update-ref, so ordering is simpler. Best-effort (|| true).
+    _cleanup_own_scratch "$uuid" "$message_file"
     _gate_gc_sweep || true
     json_out "{\"status\":\"released\",\"note\":\"no_lock\"}"
     return 0
@@ -1001,7 +1072,7 @@ cmd_release() {
   # Remove lock
   rm -rf "$LOCK_DIR"
 
-  _cleanup_own_scratch "$lock_uuid_for_meta"
+  _cleanup_own_scratch "$lock_uuid_for_meta" "$message_file"
   _gate_gc_sweep || true
   json_out "{\"status\":\"released\"}"
   return 0
