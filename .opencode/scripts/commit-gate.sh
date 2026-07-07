@@ -195,6 +195,16 @@ _cleanup_own_scratch() {
   # `rm` is not in any agent's bash permission map, so the gate owns this path.
   # Best-effort; the dir may be absent in test/scratch repos.
   rm -f "${MSG_SCRATCH_DIR}/msg-${uuid}" 2>/dev/null || true
+  # Optionally reclaim the ACTUAL --message-file path (caller passes $message_file
+  # from cmd_commit). Needed because acquire generates its OWN gate-session uuid
+  # (stored as the session uuid), which differs from the agent's pre-acquire
+  # gen-uuid used to NAME the msg scratch file — so the uuid-derived rm above is
+  # a no-op for agent-authored files. Passing the real path reclaims it promptly
+  # at commit time instead of waiting for aged GC. The guard makes inline
+  # --message (empty message_file) a safe no-op, and a backward-compat
+  # .git/commit-gate/msg-* path is removed idempotently.
+  local msg_file="${2:-}"
+  [[ -n "$msg_file" ]] && rm -f "$msg_file" 2>/dev/null || true
 }
 
 # Sweep aged orphan scratch files (msg-/paths-/meta-/index-/merge-) from
@@ -705,8 +715,10 @@ print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))
     # Reclaim this session's own scratch (incl. the agent-authored msg file at
     # $MSG_SCRATCH_DIR/msg-${uuid}) immediately — mirrors the success sites.
     # Safe here: no commit/update-ref happened, so the msg file is leftover
-    # scratch with no durability ordering to preserve.
-    _cleanup_own_scratch "$uuid"
+    # scratch with no durability ordering to preserve. Pass the real
+    # $message_file path too (acquire's uuid differs from the agent's filename
+    # uuid, so the uuid-derived rm alone would miss it).
+    _cleanup_own_scratch "$uuid" "$message_file"
     _gate_gc_sweep || true
     json_out "{\"status\":\"no_changes\",\"tree_hash\":\"${tree_hash}\"}"
     return 0
@@ -892,7 +904,7 @@ cmd_commit() {
         # Success — clean up
         rm -f "$private_index_path" 2>/dev/null || true
         rm -f "$(_session_meta_path "$lock_uuid")" 2>/dev/null || true
-        _cleanup_own_scratch "$lock_uuid"
+        _cleanup_own_scratch "$lock_uuid" "$message_file"
         _gate_gc_sweep || true
         # Resync shared index to new HEAD
         git read-tree HEAD 2>/dev/null || true
@@ -917,7 +929,7 @@ cmd_commit() {
       if git update-ref "refs/heads/${branch}" "$commit_hash" "0000000000000000000000000000000000000000" 2>/dev/null; then
         rm -f "$private_index_path" 2>/dev/null || true
         rm -f "$(_session_meta_path "$lock_uuid")" 2>/dev/null || true
-        _cleanup_own_scratch "$lock_uuid"
+        _cleanup_own_scratch "$lock_uuid" "$message_file"
         _gate_gc_sweep || true
         # Resync shared index to new HEAD
         git read-tree HEAD 2>/dev/null || true
