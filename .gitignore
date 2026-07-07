@@ -48,6 +48,9 @@ tmp/
 # disk for local use but never committed / never part of the public module.
 /tmp-*
 
+# External reference repos cloned for local study (never commit)
+refs/
+
 # --- vh-agent-harness (self-hosted): runtime state (never commit) ---
 .opencode/state/
 .opencode/sessions/
