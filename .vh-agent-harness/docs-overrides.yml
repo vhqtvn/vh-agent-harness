@@ -1,0 +1,18 @@
+# vh-agent-harness :: docs-overrides.yml
+#
+# Optional. Maps a `vh-agent-harness docs <key>` key to a repo-relative file
+# whose LIVE content should be served instead of the binary's embedded snapshot.
+# A key with no entry (or an absent file) uses the embedded copy.
+#
+# This repo IS the harness and dogfoods its own doc library: the source lives in
+# templates/docs/ (the embed source) and is edited continuously, so the source
+# runs ahead of the last-installed binary's embedded copy. These overrides make
+# the installed binary read the live source, keeping `docs <key>` fresh without a
+# rebuild+install after every doc edit. An adopting project ships no such file,
+# so it always gets the embedded (version-matched) copy.
+overrides:
+  opencode-memory-model: templates/docs/opencode-memory-model.md
+  opencode-session-workflow: templates/docs/opencode-session-workflow.md
+  opencode-prompt-guide: templates/docs/opencode-prompt-guide.md
+  opencode-skills: templates/docs/opencode-skills.md
+  temporary-files: templates/docs/temporary-files.md

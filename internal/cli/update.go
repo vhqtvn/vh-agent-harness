@@ -169,6 +169,10 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 		return nil
 	}
 
+	if _, err := materializeContextDocs(abs); err != nil {
+		return fmt.Errorf("materialize always-on context docs: %w", err)
+	}
+
 	fmt.Fprintf(out, "update: seam reconciled %d file(s) in %s\n", len(report.Outcomes), abs)
 	fmt.Fprintln(out, summarizeOutcomes(report.Outcomes))
 	if sp := summarizeProposals(report.Proposals); sp != "" {

@@ -10,9 +10,12 @@
     "default_agent": "coordination",
     // MANAGED: instructions[] is config-driven. Harness keeps AGENTS.md + session-workflow
     // as the always-on context; project appends its own architecture/delivery/rule docs.
+    // The session-workflow doc is materialized from the embedded doc library into
+    // .vh-agent-harness/docs/ by install/update (opencode loads files, not the
+    // `vh-agent-harness docs` command), so it needs no file in the project's docs/ tree.
     "instructions": [
         "AGENTS.md",
-        "docs/ai/opencode-session-workflow.md",
+        ".vh-agent-harness/docs/opencode-session-workflow.md",
         // PROJECT: append project-specific docs here, e.g.:
         // "docs/ai/architecture-brief.md",
         // "docs/ai/delivery-rules.md",

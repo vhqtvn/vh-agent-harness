@@ -100,6 +100,28 @@ const OverlaySkeletonDir = "templates/overlay-skeleton"
 //go:embed all:templates/overlay-skeleton
 var OverlaySkeletonFS embed.FS
 
+// DocsDir is the embed.FS sub-directory holding the GENERIC agent-workflow docs
+// surfaced by `vh-agent-harness docs [key]` (memory model, session workflow,
+// prompt guide, skill catalog, tmp-file hygiene). These are BINARY/HELP-SURFACE
+// docs, NOT consumer-corpus files: they live OUTSIDE templates/core, so the
+// substrate seam never renders them into a target repo (they do not clutter an
+// adopter's tree), and they carry NO ownership class in core_manifest.go. They
+// document harness machinery that is byte-identical for every adopter, so they
+// travel with the binary and are read on demand — mirroring the embed-only
+// pattern used by ExamplesFS and MigrationsFS.
+//
+// The `docs` command serves the embedded copy by default. A project may point a
+// key at a live on-disk file via .vh-agent-harness/docs-overrides.yml — this
+// repo dogfoods that path so the installed binary reads the LIVE source under
+// continuous update rather than a stale build-time snapshot.
+const DocsDir = "templates/docs"
+
+// DocsFS is the read-only embedded generic-docs tree. The `docs` command reads
+// from the DocsDir sub-directory (each file's basename without .md is its key).
+//
+//go:embed all:templates/docs
+var DocsFS embed.FS
+
 // MigrationsDir is the embed.FS sub-directory holding the per-release migration
 // notes (one file per release: vX.Y.Z.md). These are BINARY/HELP-SURFACE docs,
 // NOT consumer-corpus files: they live OUTSIDE templates/core, so the substrate

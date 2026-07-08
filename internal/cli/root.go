@@ -43,6 +43,7 @@ Agent orientation
   diff           inspect drift vs. the embedded corpus
   status         show install + runtime info
   example        print a config file's doc/template (no *.example scaffolds shipped)
+  docs           print a generic agent-workflow doc (memory model, session workflow, …)
 
 Upgrade loop (after a new binary or config change):
   vh-agent-harness self-update
@@ -80,6 +81,7 @@ func init() {
 		// orientation (agent-facing entry point)
 		guideCmd,
 		exampleCmd,
+		docsCmd,
 		// overlay pack management (scaffolding)
 		overlayCmd,
 		// binary self-management

@@ -113,6 +113,10 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
+	if _, err := materializeContextDocs(target); err != nil {
+		return fmt.Errorf("materialize always-on context docs: %w", err)
+	}
+
 	fmt.Fprintf(out, "install: seam applied %d file(s) into %s\n", len(report.Outcomes), target)
 	fmt.Fprintln(out, summarizeOutcomes(report.Outcomes))
 	if sp := summarizeProposals(report.Proposals); sp != "" {
