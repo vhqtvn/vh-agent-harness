@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -131,6 +133,67 @@ func TestAppendRejectsOversizedLine(t *testing.T) {
 	}
 	if _, statErr := os.Stat(SessionRecordsPath(root, alias)); !os.IsNotExist(statErr) {
 		t.Fatalf("file should not exist after a rejected append, got err=%v", statErr)
+	}
+}
+
+// TestAppendFsyncsDirOnCreateOnly is the regression test for the create-path
+// parent-directory fsync (D1 item 3: "fsync parent dir on create"). It proves:
+//
+//   - On the FIRST append to a brand-new records.jsonl, fsyncDir fires exactly
+//     once (the create path actually executes — the data file's parent
+//     directory is fsync'd so the directory entry referencing the new file
+//     survives a crash).
+//   - On a SECOND append to the SAME (now-existing) file, fsyncDir does NOT
+//     fire again (the create path is correctly gated on the stat-before-write
+//     create flag, so subsequent appends avoid a redundant dir fsync).
+//
+// Why this is a real regression test (fails on OLD code, passes on NEW):
+// The prior implementation stat'd the file AFTER the write to detect creation.
+// Because write(2) to an O_APPEND regular file advances the inode size
+// synchronously before returning, and marshalLine always emits at least 3
+// bytes (json.Encoder.Encode yields at minimum "{}\n"), that post-write stat
+// always observed size > 0. That made `fi.Size() == 0` permanently false, so
+// the fsyncDir call was unreachable dead code and the parent directory was
+// NEVER fsync'd on create. With that code, dirSyncCount stays 0 on BOTH
+// appends and this test FAILS at the very first assertion. The fix stat's
+// BEFORE the write (under the combined lock), so a zero-size file reliably
+// means "this open created it"; the first append observes size == 0, sets
+// created = true, and the gated fsyncDir fires — count reaches 1, test PASSES.
+//
+// fsyncDir is a package-level var swapped here with an atomic-counting
+// observer that still calls through to the real implementation (so the
+// tempdir's directory entry is genuinely fsync'd — harmless, and keeps the
+// test honest about side effects). The original is restored via defer so no
+// other test is affected. No t.Parallel: package-level var swap is safe only
+// under Go's default sequential test execution.
+func TestAppendFsyncsDirOnCreateOnly(t *testing.T) {
+	origDirSync := fsyncDir
+	defer func() { fsyncDir = origDirSync }()
+
+	var dirSyncCount int32
+	fsyncDir = func(dir string) error {
+		atomic.AddInt32(&dirSyncCount, 1)
+		return origDirSync(dir)
+	}
+
+	root := t.TempDir()
+	const alias = "dirsync"
+	ts := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC)
+
+	// First append: creates records.jsonl → fsyncDir MUST fire exactly once.
+	if err := AppendSession(root, alias, newRec("first", record.TypePersona, record.PriorityNormal, "one", ts)); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	if got := atomic.LoadInt32(&dirSyncCount); got != 1 {
+		t.Fatalf("after first append (create path): expected dirSyncCount=1, got %d — the create-path dir fsync did not fire (dead code)", got)
+	}
+
+	// Second append to the SAME file: file exists → fsyncDir MUST NOT fire.
+	if err := AppendSession(root, alias, newRec("second", record.TypePersona, record.PriorityNormal, "two", ts.Add(time.Second))); err != nil {
+		t.Fatalf("second append: %v", err)
+	}
+	if got := atomic.LoadInt32(&dirSyncCount); got != 1 {
+		t.Fatalf("after second append (no create): expected dirSyncCount=1 (unchanged), got %d — dir fsync fired on a non-create append", got)
 	}
 }
 
@@ -624,6 +687,181 @@ func TestRecordsFilePersistsNoHTMLEscaping(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Body != "use a < b && c > d" {
 		t.Fatalf("round trip lost body: %+v", got)
+	}
+}
+
+// TestConcurrentAppendSafety exercises D1's write-safety guarantee: many
+// goroutines appending distinct records to the SAME session file simultaneously
+// must not lose or corrupt a single line. The per-path in-process mutex
+// serializes these same-process appends (POSIX flock alone would NOT, because
+// each goroutine opens its own fd and gets an independent flock lock).
+//
+// Records are deliberately made LARGE (bodies exceed the POSIX PIPE_BUF of
+// 4096 bytes) so that an O_APPEND write of a full line is NOT guaranteed atomic
+// by the kernel. Without serialization, concurrent >PIPE_BUF O_APPEND writes
+// could interleave at the byte level, producing malformed lines the fault-
+// tolerant reader would skip and count. So this test meaningfully exercises the
+// mutex: if serialization failed, we would observe Malformed > 0 and/or fewer
+// than N*M records recoverable.
+func TestConcurrentAppendSafety(t *testing.T) {
+	root := t.TempDir()
+	const alias = "concurrent"
+
+	const (
+		goroutines = 8
+		perG       = 10
+	)
+	want := goroutines * perG
+
+	// Body of 8 KiB strictly exceeds PIPE_BUF (4096) on Linux, defeating
+	// O_APPEND atomicity and forcing reliance on the in-process mutex.
+	body := strings.Repeat("x", 8192)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines)
+	start := make(chan struct{})
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			<-start // release all goroutines as close to simultaneously as possible
+			for r := 0; r < perG; r++ {
+				// Distinct IDs across goroutines so dedup cannot collapse them;
+				// an UpdatedAt tie would otherwise be fine because IDs differ.
+				ts := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC).Add(time.Duration(g*perG+r) * time.Second)
+				rec := newRec("g"+itoa(g)+"-r"+itoa(r), record.TypeEpisodic, record.PriorityNormal, body, ts)
+				if err := AppendSession(root, alias, rec); err != nil {
+					errs <- err
+					return
+				}
+			}
+			errs <- nil
+		}(g)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent append failed: %v", err)
+		}
+	}
+
+	got, stats, err := ReadSession(root, alias, Query{Limit: MaxRecords + want})
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(got) != want {
+		t.Fatalf("expected all %d records recoverable, got %d (stats=%+v)", want, len(got), stats)
+	}
+	if stats.Malformed != 0 {
+		t.Fatalf("expected zero malformed lines (no interleaving corruption), got %d (stats=%+v)", stats.Malformed, stats)
+	}
+	if stats.LinesScanned != want {
+		t.Fatalf("expected %d lines scanned, got %d", want, stats.LinesScanned)
+	}
+
+	// Verify every distinct ID is present.
+	seen := make(map[string]bool, want)
+	for _, r := range got {
+		seen[r.ID] = true
+	}
+	for g := 0; g < goroutines; g++ {
+		for r := 0; r < perG; r++ {
+			id := "g" + itoa(g) + "-r" + itoa(r)
+			if !seen[id] {
+				t.Fatalf("record %s not recovered after concurrent append", id)
+			}
+		}
+	}
+}
+
+// TestLockReleasedAfterAppendReturns proves the append critical section's locks
+// (in-process mutex + cross-process flock) are released on the success path: a
+// second append to the SAME file returns promptly instead of deadlocking. A
+// failure here surfaces as a test-suite timeout (the goroutine never completes).
+func TestLockReleasedAfterAppendReturns(t *testing.T) {
+	root := t.TempDir()
+	const alias = "release-on-success"
+	ts := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC)
+
+	if err := AppendSession(root, alias, newRec("first", record.TypePersona, record.PriorityNormal, "one", ts)); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- AppendSession(root, alias, newRec("second", record.TypePersona, record.PriorityNormal, "two", ts.Add(time.Second)))
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("second append (release-on-success): %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second append deadlocked: append lock not released on success path")
+	}
+
+	got, _, err := ReadSession(root, alias, Query{})
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 records after two appends, got %d", len(got))
+	}
+}
+
+// TestAppendAfterRejectedAppendSucceeds proves that an append rejected on the
+// pre-lock error path (here, the B1 oversized-line guard, which returns before
+// any lock is acquired) does not leave a lock held: a subsequent valid append
+// to the SAME file returns promptly. This is the D1-suggested release-path
+// check, adjusted for this slice's lock placement (the size guard precedes the
+// lock, so it cannot leak a lock — the test confirms that explicitly).
+//
+// NOTE on the post-lock error path: errors that occur AFTER flockEx succeeds
+// (write / fsync data / fsync dir) are released by the deferred funlock(f) +
+// f.Close() pair, which runs LIFO on every return after the fd is opened.
+// Injecting a genuine post-lock write/fsync failure against a t.TempDir() is
+// not reliably portable (FIFO/pipe fsync semantics vary, disk-full is
+// environmental), so the post-lock release is verified by structural reasoning
+// (the defer chain) rather than a synthetic I/O-failure test. The concurrent
+// test above additionally exercises the lock under heavy contention.
+func TestAppendAfterRejectedAppendSucceeds(t *testing.T) {
+	root := t.TempDir()
+	const alias = "reject-then-ok"
+	ts := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC)
+
+	// Rejected pre-lock: oversized line returns before any lock is acquired
+	// and before the file is created.
+	bad := newRec("too-big", record.TypePersona, record.PriorityNormal, strings.Repeat("x", maxLineBytes), ts)
+	if err := AppendSession(root, alias, bad); err == nil {
+		t.Fatal("expected oversized-line error")
+	}
+	if _, statErr := os.Stat(SessionRecordsPath(root, alias)); !os.IsNotExist(statErr) {
+		t.Fatalf("file should not exist after a rejected append, got err=%v", statErr)
+	}
+
+	// A subsequent valid append to the SAME file must succeed promptly,
+	// proving no lock was left held by the rejected append.
+	done := make(chan error, 1)
+	go func() {
+		done <- AppendSession(root, alias, newRec("ok", record.TypePersona, record.PriorityNormal, "valid", ts))
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("valid append after rejected append: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("valid append after rejected append deadlocked: a pre-lock error leaked a lock")
+	}
+
+	got, _, err := ReadSession(root, alias, Query{})
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "ok" {
+		t.Fatalf("expected only the valid record, got %+v", got)
 	}
 }
 

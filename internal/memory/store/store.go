@@ -12,18 +12,16 @@
 // memory files) remain canonical and are NEVER read, written, migrated, or
 // otherwise touched here.
 //
-// Write model (this slice): append-only. Adding a record appends exactly one
+// Write model: append-only. Adding a record appends exactly one
 // JSON line. Updates are expressed by appending a new line with the same ID
 // and a newer UpdatedAt; readers treat the latest UpdatedAt per ID as current
 // (last-write-wins). The append marshals the whole line into memory and issues
 // a single O_APPEND write so that normal operation never leaves a partial or
 // malformed line in the file.
 //
-// Concurrency: this slice does NOT implement advisory locking, fsync, or the
-// tmp-file-then-rename rewrite discipline. Concurrent writers may interleave
-// whole lines safely on most platforms (O_APPEND writes are atomic up to the
-// pipe buffer size on POSIX) but the layer provides no fsync durability and no
-// cross-process lock. That hardening is deferred to a later slice.
+// Concurrency / durability (D1, closed): the append critical section is guarded by
+// TWO complementary locks. (1) A per-path in-process sync.Mutex serializes
+// appends from goroutines within this process; (2) a POSIX advisory flock (LOCK_EX) on the open data file serializes appends from OTHER processes. Both are needed: POSIX flock associates a lock with an open file description (fd), so two goroutines in the same process that each open the same file with os.OpenFile get independent fds — and therefore independent flock locks — so flock alone cannot serialize same-process concurrent appends. The in-process mutex closes that gap. The lock is held across the create-detecting pre-write stat, the marshaled-line write, the fsync of the data file, and (when that pre-write stat observed a zero-length file, i.e. this open created the data file) the fsync of the parent directory, then released on every path (success + error) via deferred unlock+close. There is intentionally NO tmp-file-then-rename rewrite in this slice (the append path is hardened in place; rewrite/compaction is not added), so the tmp+rename durability discipline does not apply.
 //
 // Read model: bounded linear scan. There is no database, no index, no cache.
 // A reader scans the relevant records.jsonl once, skips malformed lines
@@ -46,9 +44,17 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/memory/record"
+	"golang.org/x/sys/unix"
 )
+
+// fileLocks serializes the append critical section WITHIN a single process, per
+// data-file path. It is the in-process half of the write-safety story; the
+// cross-process half is the POSIX flock taken in appendTo. See the package doc
+// for why both are required.
+var fileLocks sync.Map
 
 // StateDir is the repo-relative root of the harness state tree.
 const StateDir = ".opencode/state"
@@ -175,6 +181,22 @@ func ReadWorkstream(root, slug string, q Query) ([]record.Record, Stats, error) 
 // JSON line (with a trailing newline), creates parent directories if needed,
 // and issues one O_APPEND|O_CREATE|O_WRONLY write of the full line so that
 // normal operation cannot leave a partial line in the file.
+//
+// Write-safety (D1): the entire "open -> flock -> stat (create-detect) ->
+// write -> fsync data -> [if created] fsync dir -> unlock -> close" sequence
+// is serialized by a per-path in-process mutex (cross-goroutine) plus a
+// cross-process advisory flock (LOCK_EX) on the data file. The data file is
+// fsync'd after the write so a crash never loses the just-written line; the
+// parent directory is fsync'd once, on the create path. Creation is detected
+// by stat'ing the file BEFORE the write (under the combined lock) and
+// observing a zero-length inode — a zero-size file under the lock reliably
+// means "this open created it", because exactly one writer is in the critical
+// section. Statting AFTER the write would NOT work: write(2) to an O_APPEND
+// regular file advances the inode size synchronously before returning, and
+// marshalLine always emits >= 3 bytes, so a post-write stat would always see
+// size > 0 and the create branch would be dead code (the bug this fix
+// corrects). The lock is released on every path (success + error) via
+// deferred unlock+close.
 func appendTo(path string, rec record.Record) error {
 	if err := rec.Validate(); err != nil {
 		return fmt.Errorf("memory store: %w", err)
@@ -189,7 +211,8 @@ func appendTo(path string, rec record.Record) error {
 	// line at maxLineBytes and treats a longer line as malformed (skipped and
 	// counted in Stats, never fatal — see readFile). Reject such a record
 	// before any filesystem side effect so this layer never writes a line the
-	// reader would skip, keeping self-authored files fully readable.
+	// reader would skip, keeping self-authored files fully readable. This guard
+	// intentionally precedes the lock so an oversized line acquires no lock.
 	if len(line) > maxLineBytes {
 		return fmt.Errorf("memory store: record %q encoded line (%d bytes) exceeds max %d", rec.ID, len(line), maxLineBytes)
 	}
@@ -198,16 +221,111 @@ func appendTo(path string, rec record.Record) error {
 		return fmt.Errorf("memory store: create dirs for %s: %w", path, err)
 	}
 
+	// In-process serialization (cross-goroutine). Held across open+flock+write+
+	// fsync so the whole critical section is mutually exclusive per path.
+	mu := lockForPath(path)
+	mu.Lock()
+	defer mu.Unlock()
+
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("memory store: open %s: %w", path, err)
 	}
+	// LIFO defer order guarantees: funlock runs BEFORE f.Close, and BOTH run on
+	// every return path (success + any error) after the fd is opened. The lock
+	// is therefore always released, including the write/fsync/fsyncDir error
+	// paths below. (Closing the fd also releases the flock, so even without the
+	// explicit funlock the lock could not outlive this call.)
 	defer f.Close()
+
+	if err := flockEx(f); err != nil {
+		return fmt.Errorf("memory store: lock %s: %w", path, err)
+	}
+	defer funlock(f)
+
+	// POSIX create-durability (D1): stat the file BEFORE writing, under the
+	// combined lock, to detect creation. A zero-length inode at this point
+	// reliably means "this open created it" (exactly one writer is in the
+	// critical section: in-process mutex + cross-process flock). Statting
+	// AFTER the write would always observe size >= len(line) — write(2) to
+	// an O_APPEND regular file advances the inode size synchronously before
+	// returning, and marshalLine emits >= 3 bytes — making `fi.Size() == 0`
+	// permanently false and the dir fsync below unreachable dead code. Capture
+	// the flag now; act on it after the data fsync so the data is durable
+	// before we touch the directory entry referencing it.
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("memory store: stat %s: %w", path, err)
+	}
+	created := fi.Size() == 0
 
 	if _, err := f.Write(line); err != nil {
 		return fmt.Errorf("memory store: write %s: %w", path, err)
 	}
+
+	// fsync the data file for crash durability before releasing the lock.
+	if err := fsyncFd(int(f.Fd())); err != nil {
+		return fmt.Errorf("memory store: fsync %s: %w", path, err)
+	}
+
+	// fsync the parent directory ONCE when the data file was newly created,
+	// so the directory entry referencing it survives a crash. Gated on the
+	// pre-write stat flag captured above; doing it unconditionally per append
+	// would be a redundant dir fsync on every subsequent write, and gating on
+	// a post-write stat would never fire (see the comment above the write).
+	if created {
+		if err := fsyncDir(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("memory store: fsync dir %s: %w", path, err)
+		}
+	}
+
 	return nil
+}
+
+// lockForPath returns the in-process mutex used to serialize appends to a given
+// data-file path. The same *sync.Mutex is returned for the lifetime of the path
+// string across all goroutines; LoadOrStore ensures a winner is chosen when two
+// goroutines race to create it.
+func lockForPath(path string) *sync.Mutex {
+	muAny, _ := fileLocks.LoadOrStore(path, &sync.Mutex{})
+	return muAny.(*sync.Mutex)
+}
+
+// flockEx acquires an exclusive advisory lock (LOCK_EX, blocking) on the open
+// data file. This is the cross-process half of the write-safety story; it does
+// not serialize same-process goroutines (each gets its own fd → independent
+// flock lock), which is why appendTo also holds a per-path in-process mutex.
+func flockEx(f *os.File) error {
+	return unix.Flock(int(f.Fd()), unix.LOCK_EX)
+}
+
+// funlock releases the advisory lock acquired by flockEx. It is a no-op if no
+// lock was held; calling it on a fresh fd returns nil.
+func funlock(f *os.File) error {
+	return unix.Flock(int(f.Fd()), unix.LOCK_UN)
+}
+
+// fsyncFd flushes the file's dirty pages to stable storage (fsync(2)).
+func fsyncFd(fd int) error {
+	return unix.Fsync(fd)
+}
+
+// fsyncDir opens the directory and fsyncs it, satisfying the POSIX
+// create-durability guarantee for a newly created file in that directory.
+//
+// It is a package-level variable rather than a plain func so the regression
+// test for the create-path dir fsync (TestAppendFsyncsDirOnCreateOnly) can
+// swap in an observer and prove the path fires exactly once per create and
+// never on a subsequent append to an existing file. Production code pays only
+// a single indirect call per file creation — negligible next to the fsync
+// itself — and the variable is never reassigned outside of tests.
+var fsyncDir = func(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return unix.Fsync(int(d.Fd()))
 }
 
 // marshalLine encodes rec as compact JSON with HTML escaping disabled (so
