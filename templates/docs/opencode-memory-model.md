@@ -146,3 +146,43 @@ Do not promote a note just because it was useful once.
 A memory file should enter context only if it changes the next action or prevents a repeated mistake.
 
 If it is merely useful background, keep it retrievable instead of auto-loaded.
+
+## Typed records and budgeted injection
+
+Beside the flat files above, the harness keeps an **additive store of typed
+memory records**. The flat files stay canonical; this store never replaces,
+migrates, or shadows them.
+
+- Paths: `.opencode/state/sessions/<alias>/memory/records.jsonl` and
+  `.opencode/state/workstreams/<slug>/records.jsonl`
+- Format: append-only JSON Lines, one record per line; appends are atomic and
+  crash-safe; any index is derived
+- Record fields: `id`, `type` (`persona`|`episodic`|`instruction`), `priority`
+  (`low`|`normal`|`high`|`critical`), `scope` (`session`|`workstream`), optional
+  `source_ref` and scene labels, `created_at`/`updated_at`, `body`
+- Update = append a new line with the same `id` and a newer `updated_at`;
+  readers take the newest per `id` (last-write-wins)
+
+Read contract: a bounded linear scan filtering by scope, session/workstream,
+type, priority, and a case-insensitive keyword over `body`/`source_ref`; dedup
+by `id`; sort priority then recency (descending); cap the result set. Malformed
+lines are skipped, never fatal; a missing file reads as empty.
+
+Use this store for:
+
+- durable agent/operator preferences (`persona`)
+- remembered events, decisions, checkpoints (`episodic`)
+- standing actionable rules worth recalling (`instruction`)
+
+Injection rules — memory is a nicety, not a dependency:
+
+- Split stable from dynamic content. Stable (persona, brief, resolved context)
+  goes in the cacheable region, injected once; dynamic (recalled episodic
+  records) goes per-turn.
+- Hard timeout on retrieval; on timeout, skip injection rather than stall.
+- Total character budget, truncated at a UTF-8 code-point boundary.
+- Never insert between a `tool_use` and its `tool_result`.
+- Carry each record's `source_ref`; provenance must stay traceable.
+- Read misses and store failures are "no memory this turn," never fatal.
+- Inject by explicit invocation at session-start, handoff, or checkpoint — not
+  always-on. This re-affirms the Anti-spam rule above.
