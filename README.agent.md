@@ -354,6 +354,17 @@ that never names it renders nothing of it).
   `vh-agent-harness help migrate vX.Y.Z` (a specific release). With no version
   and no local install, it prints the latest bundled note. It is **documentation
   only** — it never modifies files.
+- **Print a generic agent-workflow doc:** `vh-agent-harness docs [key]`. With no
+  argument, lists every available doc key; with a KEY, prints that doc to stdout.
+  These docs describe harness machinery identical for every adopter (the session,
+  memory, prompt, and skill model) and ship inside the binary rather than into
+  your repo — current keys include `opencode-memory-model`,
+  `opencode-session-workflow`, `opencode-prompt-guide`, `opencode-skills`, and
+  `temporary-files` (run `vh-agent-harness docs` to see the live set). It is
+  **read-only**: it only writes to stdout and never modifies files. This repo
+  dogfoods live source by mapping keys to repo-relative files in
+  `.vh-agent-harness/docs-overrides.yml`; adopters with no overrides file always
+  get the embedded copy.
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   environment). `vh-agent-harness diff` shows drift vs. the corpus.
 - **Package a bug bundle:** `vh-agent-harness diagnostics-export [--dry-run]
