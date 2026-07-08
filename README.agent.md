@@ -356,6 +356,13 @@ that never names it renders nothing of it).
   only** — it never modifies files.
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   environment). `vh-agent-harness diff` shows drift vs. the corpus.
+- **Package a bug bundle:** `vh-agent-harness diagnostics-export [--dry-run]
+  [--output <path>]` bundles selected harness state (`.opencode/state/`,
+  `.local/coordinator/`, `.local/config/`, `docs/checkpoints/`) into a
+  field-aware-redacted `tar.gz` under repo-scoped `tmp/`. It is **never
+  auto-uploaded** — the operator decides if/when to share. Run `--dry-run`
+  first to review the manifest and redaction counts. See the `diagnostics-export`
+  skill for the operator review checklist.
 
 ## Extending the harness (`/harness`)
 

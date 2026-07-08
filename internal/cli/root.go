@@ -36,14 +36,15 @@ executor (driving a runtime backend abstraction). State is lineage-governed
 and repo-relative.
 
 Agent orientation
-  guide          detect harness state + the exact next steps (run this first in any repo)
-  install        install/adopt the harness (preview with --dry-run)
-  update         re-render the corpus after a config or binary change (--dry-run)
-  doctor         verify install health
-  diff           inspect drift vs. the embedded corpus
-  status         show install + runtime info
-  example        print a config file's doc/template (no *.example scaffolds shipped)
-  docs           print a generic agent-workflow doc (memory model, session workflow, …)
+  guide                detect harness state + the exact next steps (run this first in any repo)
+  install              install/adopt the harness (preview with --dry-run)
+  update               re-render the corpus after a config or binary change (--dry-run)
+  doctor               verify install health
+  diff                 inspect drift vs. the embedded corpus
+  status               show install + runtime info
+  diagnostics-export   bundle harness state into a redacted, shareable archive (--dry-run)
+  example              print a config file's doc/template (no *.example scaffolds shipped)
+  docs                 print a generic agent-workflow doc (memory model, session workflow, …)
 
 Upgrade loop (after a new binary or config change):
   vh-agent-harness self-update
@@ -93,6 +94,8 @@ func init() {
 		proposalsCmd,
 		// rendering inspection
 		diffCmd,
+		// diagnostics (operator debug-bundle tooling)
+		diagnosticsExportCmd,
 		// runtime
 		execCmd,
 		execRoCmd,
