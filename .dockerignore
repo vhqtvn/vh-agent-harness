@@ -1,0 +1,63 @@
+# .dockerignore -- repo-root build-context filter for the two Docker-isolated
+# auto-classifier-pilot test images.
+#
+# Both test compose files set `context: ../../..` (the REPO ROOT):
+#   - tests/integration/auto-gate-live-http/docker-compose.yml (tester service)
+#   - tests/e2e/auto-gate-classifier/docker-compose.yml (e2e-runner service)
+#
+# Without this file, the ENTIRE repo tree ships into the build context on every
+# `docker compose ... build`. That is both bloat (.git, tmp, rendered state) and
+# a leak surface. This file keeps the context to exactly what the two
+# Dockerfiles COPY, and EXCLUDES leak-sensitive paths — most importantly refs/,
+# which holds a local reference bundle containing third-party
+# product names that must NEVER enter an image layer.
+#
+# The two Dockerfiles' COPY surface (what this file MUST keep reachable):
+#   Dockerfile.tester (integration):
+#     - .vh-agent-harness/overlays/auto-classifier-pilot/plugins/*.js (3 files)
+#     - templates/sys-prompts/auto-gate-classifier.md
+#     - tests/integration/auto-gate-live-http/auto-gate-live-http.test.mjs
+#   Dockerfile.e2e-runner (e2e):
+#     - Stage 1: `COPY . .` then `go build ./cmd/vh-agent-harness`
+#       (needs cmd/, internal/, corpus.go, core_manifest.go, go.mod, go.sum,
+#        templates/ for go:embed) + render (.vh-agent-harness/ overlay pack +
+#        tests/e2e/auto-gate-classifier/vh-harness-profile.yml)
+#     - Stage 2: tests/e2e/auto-gate-classifier/e2e-driver.mjs
+#
+# NOTE: the mock-llm services build with `context: .` (their own test dir), so
+# this repo-root file does NOT affect them.
+
+# --- VCS + build artifacts (bloat) ---
+.git/
+.gitignore
+tmp/
+
+# --- Rendered state (regenerated inside containers; never needed in context) ---
+.opencode/
+
+# --- Operator-private overlay state ---
+.local/
+
+# --- Node deps (none in this repo, but exclude defensively if ever added) ---
+node_modules/
+
+# --- LEAK-PREVENTION: reference bundle with third-party product names ---
+# refs/ holds a local reference bundle. It must NEVER ship into a
+# Docker image layer. Excluding it here is both bloat reduction and a hard
+# leak-prevention guard at the image-build boundary.
+refs/
+
+# --- Operator-private research docs (gitignored locally; never in images) ---
+*.local.md
+researches/sources/*.local.md
+
+# --- Editor / OS cruft ---
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# --- This file itself is not needed in the image (harmless, but keep it out) ---
+.dockerignore

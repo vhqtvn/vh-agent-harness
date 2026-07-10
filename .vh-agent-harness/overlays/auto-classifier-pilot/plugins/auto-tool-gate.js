@@ -473,12 +473,34 @@ function _readJsonConfig(
     }
 
     let parsed;
+    // `invalidReason` is set when the JSON is structurally unusable as config
+    // (a parse failure OR a successful parse of a non-object — see F3 below).
+    // Both flow through the SAME deduped "invalid" fallback path so the operator
+    // sees one audit line per failure state, never a throw.
+    let invalidReason = null;
     try {
         parsed = JSON.parse(raw);
     } catch (_) {
+        invalidReason = "invalid JSON";
+    }
+    // Fail-safe (F3): a parse that SUCCEEDED but did not yield a plain object
+    // (literal `null`, an array, or a bare primitive/string/number/boolean)
+    // must NEVER reach the normalizer — `normalize(parsed)` would throw on
+    // property access (e.g. `parsed.enabled` on null throws TypeError) instead
+    // of returning fail-safe defaults. Treat it exactly like invalid JSON:
+    // return defaults via the same "invalid" fallbackReason + deduped audit line.
+    if (
+        invalidReason === null &&
+        (parsed === null ||
+            typeof parsed !== "object" ||
+            Array.isArray(parsed))
+    ) {
+        invalidReason = "invalid JSON shape (expected a config object)";
+    }
+    if (invalidReason !== null) {
         if (cache.fallbackReason !== "invalid") {
             console.error(
-                `[auto-gate-audit] ${label} config invalid JSON at ${targetPath}; ` +
+                `[auto-gate-audit] ${label} config ${invalidReason} at ${targetPath}; ` +
                 `using fail-safe defaults ${JSON.stringify(defaults)}.`,
             );
             cache.fallbackReason = "invalid";
@@ -486,8 +508,9 @@ function _readJsonConfig(
         return defaults;
     }
 
-    // Successful parse: normalize + merge over defaults (so partial configs
-    // resolve every field), latch the cache, clear any prior fallback state.
+    // Successful parse of a plain object: normalize + merge over defaults (so
+    // partial configs resolve every field), latch the cache, clear any prior
+    // fallback state.
     const merged = normalize(parsed);
     cache.mtime = mtimeMs;
     cache.parsed = merged;
@@ -1072,6 +1095,50 @@ if (__isMain) {
         });
     });
 
+    // ===== F3 fail-safe: a JSON parse that does NOT yield a plain object =====
+    //
+    // A file containing the literal `null` (or an array, or a bare primitive)
+    // parses successfully but is not a config object — the normalizer would
+    // throw on property access (e.g. `parsed.enabled` on null). The reader must
+    // return fail-safe defaults, never throw, and use the SAME deduped "invalid"
+    // audit path as a syntactically broken file.
+
+    test("readConfig (plugin): literal null -> defaults, no throw + ONE deduped audit line", () => {
+        __resetConfigCaches();
+        writeTestConfig("plugin-null.json", "null");
+        captureErrors((errors) => {
+            const a = readConfig(testConfigPath("plugin-null.json"));
+            const b = readConfig(testConfigPath("plugin-null.json"));
+            assert.deepEqual(a, {
+                enabled: true,
+                mode: "audit",
+                stubVerdict: "block",
+                promptFile: "",
+            });
+            assert.deepEqual(b, a, "second read of same bad file still returns defaults");
+            // Dedup contract (same as invalid JSON): one audit line across both reads.
+            assert.equal(errors.length, 1, "non-object parse must warn once (deduped)");
+            assert.match(errors[0], /invalid JSON/);
+        });
+    });
+
+    test("readConfig (plugin): array / primitive shapes -> defaults, no throw", () => {
+        for (const body of ["[]", "42", "\"oops\"", "true"]) {
+            __resetConfigCaches();
+            writeTestConfig("plugin-shape.json", body);
+            captureErrors((errors) => {
+                const cfg = readConfig(testConfigPath("plugin-shape.json"));
+                assert.deepEqual(cfg, {
+                    enabled: true,
+                    mode: "audit",
+                    stubVerdict: "block",
+                    promptFile: "",
+                });
+                assert.equal(errors.length, 1, `body ${body} must warn once`);
+            });
+        }
+    });
+
     test("readLlmConfig: missing file -> defaults, NO throw, NO audit spam", () => {
         __resetConfigCaches();
         captureErrors((errors) => {
@@ -1147,6 +1214,49 @@ if (__isMain) {
             );
             assert.match(errors[0], /invalid JSON/);
         });
+    });
+
+    // ===== F3 fail-safe (LLM side): non-object parse results =====
+
+    test("readLlmConfig: literal null -> defaults, no throw + ONE deduped audit line", () => {
+        __resetConfigCaches();
+        writeTestConfig("llm-null.json", "null");
+        captureErrors((errors) => {
+            const a = readLlmConfig(testConfigPath("llm-null.json"));
+            const b = readLlmConfig(testConfigPath("llm-null.json"));
+            assert.deepEqual(a, {
+                modelEndpoint: "",
+                model: "",
+                apiKeyEnv: "AUTO_GATE_API_KEY",
+                timeoutMs: 8000,
+                maxRetries: 1,
+                retryDelayMs: 500,
+            });
+            assert.deepEqual(b, a, "second read of same bad file still returns defaults");
+            // A PRESENT-but-non-object file is not the normal "no live setup" case,
+            // so it must emit the audit line once (deduped across both reads).
+            assert.equal(errors.length, 1, "non-object parse must warn once (deduped)");
+            assert.match(errors[0], /invalid JSON/);
+        });
+    });
+
+    test("readLlmConfig: array / primitive shapes -> defaults, no throw", () => {
+        for (const body of ["[]", "42", "\"oops\"", "true"]) {
+            __resetConfigCaches();
+            writeTestConfig("llm-shape.json", body);
+            captureErrors((errors) => {
+                const cfg = readLlmConfig(testConfigPath("llm-shape.json"));
+                assert.deepEqual(cfg, {
+                    modelEndpoint: "",
+                    model: "",
+                    apiKeyEnv: "AUTO_GATE_API_KEY",
+                    timeoutMs: 8000,
+                    maxRetries: 1,
+                    retryDelayMs: 500,
+                });
+                assert.equal(errors.length, 1, `body ${body} must warn once`);
+            });
+        }
     });
 
     test("readLlmConfig: apiKeyEnv default is AUTO_GATE_API_KEY", () => {

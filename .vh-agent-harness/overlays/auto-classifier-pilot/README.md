@@ -227,9 +227,14 @@ defaults.
 > **Token-cost note (retries).** Retries only fire on transient failures; each
 > retry is a fresh API call that **may consume tokens on the provider side even
 > when the prior attempt stalled** (e.g. a request that hangs idle is aborted
-> client-side, but the provider may still have processed it). Defaults are
-> conservative (`maxRetries: 1`) so the common case costs at most one extra call.
-> Operators who want more resilience raise `maxRetries` at their own token cost.
+> client-side, but the provider may still have processed it). `maxRetries` has
+> **no hard upper bound** — it is operator-controlled (the normalizer only floors
+> and rejects negatives; any non-negative integer passes), so the cost ceiling
+> is the operator's responsibility. The default (`maxRetries: 1`) is conservative
+> (the common case costs at most one extra call), but high values multiply token
+> cost on **every retryable failure** (e.g. `maxRetries: 999` can issue up to
+> ~1000 calls per gated request during a transient outage). Pick the lowest
+> value that meets your resilience needs.
 
 Unknown fields are ignored. A field present but of the wrong type or with an
 invalid value falls back to that field's default (partial configs are merged
