@@ -31,6 +31,11 @@ node_modules/
 # Local-only notes (sensitive; never commit)
 *.local.md
 
+# auto-classifier-pilot: LLM config is NEVER committed (secrets-adjacent).
+# The plugin config (auto-gate-config.json) is NOT ignored — it is the
+# optionally-committable one. Only the LLM file is gitignored here.
+.opencode/repo-configs/auto-gate-llm.json
+
 # Editor / OS
 .DS_Store
 Thumbs.db

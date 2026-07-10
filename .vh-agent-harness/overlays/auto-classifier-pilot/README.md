@@ -13,7 +13,7 @@ selected by a live config `mode` field (default `audit`):
   text-mode string, and calls a **provider-agnostic OpenAI-compatible HTTP**
   classifier endpoint. The returned verdict feeds the **same fail-closed
   decision matrix** as `enforce`. The model API key is read from an env var at
-  call time — it never lives in the (commitable) config file.
+  call time — it never lives in either config file.
 
 ## What this is
 
@@ -169,9 +169,9 @@ To disable, remove the pack from the `overlays:` list and re-run
 ## Live configuration (no restart)
 
 Auto-mode behavior is configurable **without restarting OpenCode**. The plugin
-reads a small operator-owned JSON config file from disk on **every hook
-invocation** — editing the file takes effect on the **next tool call**, with no
-server restart and no corpus re-render.
+reads operator-owned JSON config files from disk on **every hook invocation** —
+editing a file takes effect on the **next tool call**, with no server restart
+and no corpus re-render.
 
 This works because the plugin does runtime file I/O inside each hook (mirroring
 how `shell-guard.js` imports `node:fs` + `node:path`). The OpenCode plugin SDK
@@ -181,42 +181,68 @@ so a per-call disk read gated by an **mtime cache** is the reload-free
 mechanism: in steady state an unchanged file costs only a single `statSync` per
 call, and a changed file is re-read + re-parsed only when its mtime changes.
 
-### Config file
+### Two-file model (config split)
 
-- **Path**: `.opencode/repo-configs/auto-gate-config.json` (resolved relative
-  to the repo root, the same way `shell-guard-core.js` derives `repoRoot()` —
-  from the plugin file's location, never a hardcoded absolute path).
-- **Ownership**: operator-owned. The overlay does **not** render or seed this
-  file. Leaving it absent is the documented fail-safe default — the plugin
-  works out of the box with built-in defaults.
+Config is split across **two sibling files** under `.opencode/repo-configs/`
+(resolved relative to the repo root, the same way `shell-guard-core.js` derives
+`repoRoot()` — from the plugin file's location, never a hardcoded absolute
+path). The split exists so that **LLM settings can NEVER be committed** while
+**plugin behavior MAY be committed** (or not) at the adopter's choice:
 
-### Config fields
+| File | Fields | Committability |
+|------|--------|----------------|
+| `auto-gate-config.json` | `enabled`, `mode`, `stubVerdict`, `promptFile` | **Adopter's choice** — a team may commit a shared default (e.g. `{"mode":"enforce"}`). NOT gitignored. |
+| `auto-gate-llm.json` | `modelEndpoint`, `model`, `apiKeyEnv`, `timeoutMs` | **NEVER** — gitignored in this dogfood repo. Adopters using live mode create it locally and add the pattern to their own `.gitignore`. |
+
+Neither file is rendered or seeded by the overlay. Leaving a file absent is the
+documented fail-safe default — the plugin works out of the box with built-in
+defaults.
+
+> **Why the split?** The single-file predecessor mixed LLM endpoint settings
+> with plugin behavior in one committable file. The split guarantees LLM config
+> (which points at an external endpoint) can never leak into a shared repo,
+> while still letting a team share a plugin-behavior default like
+> `{"mode":"enforce"}`.
+
+### Plugin config fields (`auto-gate-config.json`)
 
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
 | `enabled` | boolean | `true` | Master live toggle. `false` live-disables the plugin: both hooks no-op immediately on the next tool call (no audit, no behavior change, no restart). `true` is the normal on state. |
 | `mode` | `"audit"` \| `"enforce"` \| `"live"` | `"audit"` | Behavior selector. `audit` = Phase 1 observability only (default, zero behavior change). `enforce` = Phase 2 decision path on `permission.ask` (verdict parser + STUB evaluator; fail-closed to deny). `live` = Phase 3b decision path using a REAL OpenAI-compatible model call (fail-closed to deny on any error/timeout/misconfiguration). `tool.execute.before` stays an observer in all modes. |
 | `stubVerdict` | `"allow"` \| `"block"` \| `"fail"` | `"block"` | Drives the Phase 2 STUB evaluator in `enforce` mode. `"allow"` → allow verdict; `"block"` → block verdict; `"fail"` → unparseable output (exercises fail-closed). **Test/placeholder only** — not a real classifier; ignored unless `mode: "enforce"`. |
+| `promptFile` | string | `""` | Optional override path for the `live` classifier system prompt. If set and readable, its contents replace the binary-served default prompt. If unset/missing/unreadable, the plugin loads the prompt from `vh-agent-harness sys-prompt auto-gate-classifier`. Lives in the plugin-config file (not the LLM file) so it MAY be committed as a shared default. |
+
+### LLM config fields (`auto-gate-llm.json`)
+
+| Field | Type | Default | Meaning |
+|-------|------|---------|---------|
 | `modelEndpoint` | string | `""` | Required for `live` mode. The FULL OpenAI-compatible chat-completions URL (e.g. `https://api.provider.example/v1/chat/completions`). Empty/missing when `mode: "live"` → fail-closed deny with audit line `live mode misconfigured: no modelEndpoint`. Ignored in other modes. |
 | `model` | string | `""` | Required for `live` mode. The model identifier sent in the request body (e.g. `gpt-4o-mini`, a provider alias, etc.). Empty/missing when `mode: "live"` → fail-closed deny. Ignored in other modes. |
-| `apiKeyEnv` | string | `"AUTO_GATE_API_KEY"` | The **name** of the environment variable holding the API key for `live` mode. The key VALUE is read from `process.env[apiKeyEnv]` at call time — it is **never** stored in this config file (which may be committed). Missing/unset env var at call time → fail-closed deny. Ignored in other modes. |
+| `apiKeyEnv` | string | `"AUTO_GATE_API_KEY"` | The **name** of the environment variable holding the API key for `live` mode. The key VALUE is read from `process.env[apiKeyEnv]` at call time — it is **never** stored in either config file. Missing/unset env var at call time → fail-closed deny. Ignored in other modes. |
 | `timeoutMs` | number | `8000` | Hard timeout for the `live` model HTTP call, via `AbortController`. On timeout the call fails-closed to deny. Ignored in other modes. |
-| `promptFile` | string | `""` | Optional override path for the `live` classifier system prompt. If set and readable, its contents replace the binary-served default prompt. If unset/missing/unreadable, the plugin loads the prompt from `vh-agent-harness sys-prompt auto-gate-classifier` (the embedded binary default, overridable via an overlay rendering `.opencode/sys-prompts/auto-gate-classifier.md`). Ignored in other modes. |
 
 Unknown fields are ignored. A field present but of the wrong type or with an
 invalid value falls back to that field's default (partial configs are merged
 over the defaults field-by-field, so `{"enabled": false}` is valid and leaves
 `mode` at its default).
 
-> **Security note on `apiKeyEnv`:** the config file may be committed to version
-> control, so it carries only the env-var **name** (default
+> **The API key is env-only, never in a file.** Neither config file carries the
+> secret value — both hold at most the env-var **name** (`apiKeyEnv`, default
 > `AUTO_GATE_API_KEY`). The actual secret is supplied at runtime via that env
 > var and is read fresh on every `live` call. Never paste the key value into
-> the config file.
+> either config file.
 
-### Example
+> **Backward-compat note (clean cut):** the single-file predecessor held all
+> eight fields in `auto-gate-config.json`. The split ignores any LLM fields
+> (`modelEndpoint`/`model`/`apiKeyEnv`/`timeoutMs`) left in the plugin-config
+> file — they MUST come from `auto-gate-llm.json`. This is a freshly-shipped
+> pilot with no real install base, so a clean cut (no deprecation fallback)
+> keeps the two files strictly disjoint.
 
-Minimal (audit, the default):
+### Examples
+
+Plugin config — minimal (audit, the default):
 
 ```json
 {
@@ -225,8 +251,7 @@ Minimal (audit, the default):
 }
 ```
 
-To live-disable the plugin (kill switch — takes effect on the next tool call,
-no restart):
+Plugin config — kill switch (takes effect on the next tool call, no restart):
 
 ```json
 {
@@ -234,7 +259,7 @@ no restart):
 }
 ```
 
-`enforce` mode (Phase 2 stub decision path):
+Plugin config — `enforce` mode (Phase 2 stub decision path):
 
 ```json
 {
@@ -244,12 +269,11 @@ no restart):
 }
 ```
 
-`live` mode (Phase 3b real model call):
+LLM config — `live` mode (Phase 3b real model call); create this file locally
+and keep it out of git:
 
 ```json
 {
-  "enabled": true,
-  "mode": "live",
   "modelEndpoint": "https://api.provider.example/v1/chat/completions",
   "model": "your-model-id",
   "apiKeyEnv": "AUTO_GATE_API_KEY",
@@ -261,14 +285,23 @@ no restart):
 
 ### Fail-safe behavior
 
-If the config file is **missing, unreadable, or invalid JSON**, the plugin
-falls back to the hardcoded defaults (`{enabled: true, mode: "audit"}`) and
+**Plugin config** (`auto-gate-config.json`): if the file is **missing,
+unreadable, or invalid JSON**, the plugin falls back to the hardcoded defaults
+(`{enabled: true, mode: "audit", stubVerdict: "block", promptFile: ""}`) and
 emits **one** `console.error` audit line noting the fallback — so the operator
-learns their config isn't loading without the log being spammed every call.
-The plugin **never** throws on a config error; it keeps working with defaults.
-The fallback warning is de-duplicated per failure **state**: a transition
-(missing → present → unreadable → invalid) re-warns once, but a persistent
-failure logs only on the first occurrence.
+learns their config isn't loading without the log being spammed every call. The
+plugin **never** throws on a config error; it keeps working with defaults. The
+fallback warning is de-duplicated per failure **state**: a transition (missing
+→ present → unreadable → invalid) re-warns once, but a persistent failure logs
+only on the first occurrence.
+
+**LLM config** (`auto-gate-llm.json`): a **missing** file is **silent** (no
+audit spam) — it is the normal case when an operator has not set up live mode;
+`audit`/`enforce` modes never fail because the LLM file is absent. Only a
+**present-but-invalid** (unreadable / invalid JSON) file emits one audit line,
+mirroring the plugin-config handling. Defaults: `{modelEndpoint: "", model: "",
+apiKeyEnv: "AUTO_GATE_API_KEY", timeoutMs: 8000}`. In `live` mode, an empty
+`modelEndpoint`/`model` fail-closes to deny via the existing decision path.
 
 ### Reserved for later phases (not yet implemented)
 
@@ -385,12 +418,13 @@ token), missing/unset API key, or a thrown exception in the adapter all yield
 `output.status = "deny"`. Only an explicit `<block>no</block>` (allow) verdict
 yields `allow`.
 
-### The API key comes from the environment, never the config file
+### The API key comes from the environment, never a config file
 
 `live` mode reads the key from `process.env[apiKeyEnv]` (default
-`AUTO_GATE_API_KEY`) **at call time**. The config file carries only the
-env-var **name** — because the config file may be committed, it must never hold
-the secret value. Export the key in the server environment:
+`AUTO_GATE_API_KEY`) **at call time**. Neither config file carries the secret
+value — the LLM config file (`auto-gate-llm.json`) holds only the env-var
+**name** via `apiKeyEnv`, and that file is never committed (gitignored). Export
+the key in the server environment:
 
 ```sh
 export AUTO_GATE_API_KEY=sk-...

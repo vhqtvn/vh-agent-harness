@@ -227,8 +227,50 @@ function repoRoot() {
     return path.resolve(__dirname, "..", "..");
 }
 
-// Operator-owned config path, repo-relative. The `repo-configs/` dir is where
-// the harness already keeps operator-facing config-like data
+// ---------------------------------------------------------------------------
+// Two-file live config model (reload-free).
+//
+// Config is split across TWO sibling files under .opencode/repo-configs/ so
+// that LLM secrets-adjacent settings can NEVER be committed while plugin
+// behavior MAY be committed (or not) at the adopter's choice:
+//
+//   1. Plugin config → auto-gate-config.json (EXISTING path, kept).
+//      Holds the plugin-BEHAVIOR fields: {enabled, mode, stubVerdict, promptFile}.
+//      Committability: ADOPTER'S CHOICE — a team may commit a shared default
+//      (e.g. {"mode":"enforce"}). NOT gitignored. Fail-safe defaults:
+//      missing/invalid → {enabled:true, mode:"audit", stubVerdict:"block",
+//      promptFile:""}.
+//
+//   2. LLM config    → auto-gate-llm.json  (NEW sibling file).
+//      Holds the LLM fields: {modelEndpoint, model, apiKeyEnv, timeoutMs}.
+//      Committability: NEVER — gitignored in the dogfood repo (adopters add
+//      the pattern to their own .gitignore). Fail-safe defaults:
+//      missing/invalid → {modelEndpoint:"", model:"",
+//      apiKeyEnv:"AUTO_GATE_API_KEY", timeoutMs:8000}. A MISSING LLM file is
+//      NORMAL (only needed for live mode) and is SILENT — no audit spam;
+//      audit/enforce modes must NOT fail because the LLM file is absent. In
+//      live mode a missing/empty modelEndpoint/model fail-closes to deny via
+//      the existing decision path.
+//
+// Backward-compat (CLEAN CUT): an operator may still have LLM fields in the
+// OLD auto-gate-config.json. They are IGNORED entirely — readConfig() returns
+// ONLY the four plugin-behavior fields. This is a freshly-shipped pilot with
+// no real install base, so a clean cut (no deprecation fallback) is safe and
+// keeps the two files strictly disjoint. LLM fields MUST come from
+// auto-gate-llm.json.
+//
+// The API key VALUE is NEVER in either file — only the env-var NAME
+// (apiKeyEnv, default AUTO_GATE_API_KEY). The value is read from
+// process.env[apiKeyEnv] at call time inside classifyLive.
+//
+// Merge point: the live branch builds ONE merged object
+// ({...readConfig(), ...readLlmConfig()}) so downstream decideLive /
+// classifyLive / resolveSystemPrompt see a single config as before. The audit
+// and enforce branches only need readConfig() (plugin behavior).
+// ---------------------------------------------------------------------------
+
+// Plugin-config path, repo-relative. The `repo-configs/` dir is where the
+// harness already keeps operator-facing config-like data
 // (allowed-commands.js, forbidden-patterns.js, forbidden-patterns.core.js,
 // repo-recon-data.yml). The overlay does NOT render or seed this file — its
 // absence is the documented fail-safe default.
@@ -239,27 +281,38 @@ const CONFIG_PATH = path.resolve(
     "auto-gate-config.json",
 );
 
-// Fail-safe defaults used when the config file is absent, unreadable, or
-// invalid JSON. `enabled` is the master live kill-switch; `mode` is the
-// behavior selector (`audit` = Phase 1 log-only; `enforce` = Phase 2 stub
-// decision path; `live` = Phase 3b real-model decision path). `stubVerdict`
-// drives the deterministic stub evaluator used in enforce mode.
-//
-// The `live`-mode fields all have FAIL-SAFE defaults: `modelEndpoint` and
-// `model` default to empty (so a live call with no endpoint/model fail-closes
-// to deny instead of hitting a garbage URL); `apiKeyEnv` defaults to the
-// conventional env-var name; `timeoutMs` defaults to a conservative bound;
-// `promptFile` defaults to unset (use the built-in generic classifier prompt).
-const DEFAULT_CONFIG = Object.freeze({
+// LLM-config path — a NEW sibling file. Same repo-configs/ dir. NEVER
+// committed (gitignored); only needed for live mode.
+const LLM_CONFIG_PATH = path.resolve(
+    repoRoot(),
+    ".opencode",
+    "repo-configs",
+    "auto-gate-llm.json",
+);
+
+// Plugin-behavior fail-safe defaults (auto-gate-config.json). `enabled` is the
+// master live kill-switch; `mode` is the behavior selector (`audit` = Phase 1
+// log-only; `enforce` = Phase 2 stub decision path; `live` = Phase 3b real-
+// model decision path). `stubVerdict` drives the deterministic stub evaluator
+// in enforce mode. `promptFile` optionally overrides the classifier system
+// prompt (consulted only in live mode via resolveSystemPrompt, but lives in
+// the plugin-config file so it MAY be committed as a shared default).
+const DEFAULT_PLUGIN_CONFIG = Object.freeze({
     enabled: true,
     mode: "audit",
     stubVerdict: "block",
-    // Phase 3b live-mode fields (only consulted when mode === "live").
+    promptFile: "",
+});
+
+// LLM fail-safe defaults (auto-gate-llm.json). `modelEndpoint` and `model`
+// default to empty (so a live call with no endpoint/model fail-closes to deny
+// instead of hitting a garbage URL). `apiKeyEnv` defaults to the conventional
+// env-var NAME (never the value). `timeoutMs` is a conservative bound.
+const DEFAULT_LLM_CONFIG = Object.freeze({
     modelEndpoint: "", // required for live; empty -> fail-closed deny
     model: "", // required for live; empty -> fail-closed deny
     apiKeyEnv: "AUTO_GATE_API_KEY", // NAME of the env var only (never the value)
     timeoutMs: 8000, // hard timeout for the model HTTP call
-    promptFile: "", // optional override path for the classifier system prompt
 });
 
 // mtime cache: stores the last successful parse plus a fallback-warning latch
@@ -267,125 +320,202 @@ const DEFAULT_CONFIG = Object.freeze({
 // audit line per failure STATE instead of spamming every tool call. A state
 // transition (missing -> present -> invalid) re-warns once. Module-level on
 // purpose — survives across hook invocations within one server process.
-let configCache = {
-    mtime: null, // last mtimeMs we parsed successfully (null until first hit)
+//
+// TWO caches (one per file) are held as MUTABLE const objects (properties
+// reassigned, never the binding) so a shared private reader core can update
+// either without rebinding a module-level `let`.
+const pluginConfigCache = {
+    mtime: null, // last mtimeMs parsed successfully (null until first hit)
     parsed: null, // last parsed + merged config object (null until first hit)
     fallbackReason: null, // null | "missing" | "unreadable" | "invalid"
 };
+const llmConfigCache = {
+    mtime: null,
+    parsed: null,
+    fallbackReason: null,
+};
 
-// Read the live config with an mtime cache. Returns a parsed config object on
-// every call — NEVER throws. Side effect: emits at most one `console.error`
-// audit line per failure-state transition, so the operator learns their config
-// isn't loading without drowning the log. A valid file is merged over the
-// defaults field-by-field, so a partial config like `{"enabled": false}` still
-// resolves every field (mode falls back to its default).
-function readConfig() {
+// Normalize a parsed plugin-config object over defaults (field-by-field so a
+// partial config like {"enabled": false} still resolves every field). LLM
+// fields present in this file are IGNORED (clean cut) — they MUST come from
+// auto-gate-llm.json.
+function normalizePluginConfig(parsed) {
+    return {
+        enabled:
+            typeof parsed.enabled === "boolean"
+                ? parsed.enabled
+                : DEFAULT_PLUGIN_CONFIG.enabled,
+        mode:
+            parsed.mode === "audit" ||
+            parsed.mode === "enforce" ||
+            parsed.mode === "live"
+                ? parsed.mode
+                : DEFAULT_PLUGIN_CONFIG.mode,
+        stubVerdict:
+            parsed.stubVerdict === "allow" ||
+            parsed.stubVerdict === "block" ||
+            parsed.stubVerdict === "fail"
+                ? parsed.stubVerdict
+                : DEFAULT_PLUGIN_CONFIG.stubVerdict,
+        promptFile:
+            typeof parsed.promptFile === "string"
+                ? parsed.promptFile
+                : DEFAULT_PLUGIN_CONFIG.promptFile,
+    };
+}
+
+// Normalize a parsed LLM-config object over defaults. Each field is fail-safe-
+// normalized: an invalid type falls back to the default, which for
+// endpoint/model is empty (so a misconfigured live call fail-closes to deny,
+// not to a garbage request). The API key VALUE is never read here — only the
+// env-var NAME, looked up at call time inside classifyLive.
+function normalizeLlmConfig(parsed) {
+    return {
+        modelEndpoint:
+            typeof parsed.modelEndpoint === "string"
+                ? parsed.modelEndpoint
+                : DEFAULT_LLM_CONFIG.modelEndpoint,
+        model:
+            typeof parsed.model === "string"
+                ? parsed.model
+                : DEFAULT_LLM_CONFIG.model,
+        apiKeyEnv:
+            typeof parsed.apiKeyEnv === "string" && parsed.apiKeyEnv
+                ? parsed.apiKeyEnv
+                : DEFAULT_LLM_CONFIG.apiKeyEnv,
+        timeoutMs:
+            typeof parsed.timeoutMs === "number" && parsed.timeoutMs > 0
+                ? parsed.timeoutMs
+                : DEFAULT_LLM_CONFIG.timeoutMs,
+    };
+}
+
+// Private reader core: stat → (cache fast-path) → read → parse → normalize →
+// cache-latch. NEVER throws. Side effect: emits at most one console.error
+// audit line per failure-state transition (de-duped via cache.fallbackReason),
+// UNLESS silentOnMissing is true (a missing file is then the normal case and
+// emits NOTHING). `label` prefixes the audit line so the operator knows WHICH
+// file failed.
+//
+// `targetPath` is injectable (the public readers default it to the production
+// repo-configs path) so the self-tests can point the readers at temp files
+// under tmp/ without touching the real config location.
+function _readJsonConfig(
+    targetPath,
+    cache,
+    defaults,
+    normalize,
+    silentOnMissing,
+    label,
+) {
     let st;
     try {
-        st = fs.statSync(CONFIG_PATH);
+        st = fs.statSync(targetPath);
     } catch (_) {
-        // Missing / unreadable metadata: ENOENT / EACCES / etc. Fail safe.
-        if (configCache.fallbackReason !== "missing") {
-            console.error(
-                `[auto-gate-audit] config not found at ${CONFIG_PATH}; ` +
-                `using fail-safe defaults ${JSON.stringify(DEFAULT_CONFIG)} ` +
-                `(create the file to override).`,
-            );
-            configCache.fallbackReason = "missing";
+        // Missing / unreadable metadata: ENOENT / EACCES / etc.
+        if (!silentOnMissing) {
+            if (cache.fallbackReason !== "missing") {
+                console.error(
+                    `[auto-gate-audit] ${label} config not found at ${targetPath}; ` +
+                    `using fail-safe defaults ${JSON.stringify(defaults)} ` +
+                    `(create the file to override).`,
+                );
+            }
+            cache.fallbackReason = "missing";
         }
-        return DEFAULT_CONFIG;
+        // silentOnMissing: a missing file is the NORMAL case (e.g. no live
+        // mode set up). Do NOT spam, do NOT latch a fallback state.
+        return defaults;
     }
 
     const mtimeMs = st.mtimeMs;
     // Fast path: unchanged since last successful parse AND not currently in a
     // fallback state — return the cached parsed object (single statSync cost).
-    if (
-        configCache.parsed &&
-        configCache.mtime === mtimeMs &&
-        !configCache.fallbackReason
-    ) {
-        return configCache.parsed;
+    if (cache.parsed && cache.mtime === mtimeMs && !cache.fallbackReason) {
+        return cache.parsed;
     }
 
     let raw;
     try {
-        raw = fs.readFileSync(CONFIG_PATH, "utf8");
+        raw = fs.readFileSync(targetPath, "utf8");
     } catch (_) {
-        if (configCache.fallbackReason !== "unreadable") {
+        if (cache.fallbackReason !== "unreadable") {
             console.error(
-                `[auto-gate-audit] config unreadable at ${CONFIG_PATH}; ` +
-                `using fail-safe defaults ${JSON.stringify(DEFAULT_CONFIG)}.`,
+                `[auto-gate-audit] ${label} config unreadable at ${targetPath}; ` +
+                `using fail-safe defaults ${JSON.stringify(defaults)}.`,
             );
-            configCache.fallbackReason = "unreadable";
+            cache.fallbackReason = "unreadable";
         }
-        return DEFAULT_CONFIG;
+        return defaults;
     }
 
     let parsed;
     try {
         parsed = JSON.parse(raw);
     } catch (_) {
-        if (configCache.fallbackReason !== "invalid") {
+        if (cache.fallbackReason !== "invalid") {
             console.error(
-                `[auto-gate-audit] config invalid JSON at ${CONFIG_PATH}; ` +
-                `using fail-safe defaults ${JSON.stringify(DEFAULT_CONFIG)}.`,
+                `[auto-gate-audit] ${label} config invalid JSON at ${targetPath}; ` +
+                `using fail-safe defaults ${JSON.stringify(defaults)}.`,
             );
-            configCache.fallbackReason = "invalid";
+            cache.fallbackReason = "invalid";
         }
-        return DEFAULT_CONFIG;
+        return defaults;
     }
 
     // Successful parse: normalize + merge over defaults (so partial configs
     // resolve every field), latch the cache, clear any prior fallback state.
-    const merged = {
-        enabled:
-            typeof parsed.enabled === "boolean"
-                ? parsed.enabled
-                : DEFAULT_CONFIG.enabled,
-        mode:
-            parsed.mode === "audit" ||
-            parsed.mode === "enforce" ||
-            parsed.mode === "live"
-                ? parsed.mode
-                : DEFAULT_CONFIG.mode,
-        stubVerdict:
-            parsed.stubVerdict === "allow" ||
-            parsed.stubVerdict === "block" ||
-            parsed.stubVerdict === "fail"
-                ? parsed.stubVerdict
-                : DEFAULT_CONFIG.stubVerdict,
-        // Phase 3b live-mode fields. Each is fail-safe-normalized: an invalid
-        // type falls back to the default, which for endpoint/model is empty
-        // (so a misconfigured live call fail-closes to deny, not to a garbage
-        // request). The API key VALUE is never read here — only the env-var
-        // NAME, looked up at call time inside classifyLive.
-        modelEndpoint:
-            typeof parsed.modelEndpoint === "string"
-                ? parsed.modelEndpoint
-                : DEFAULT_CONFIG.modelEndpoint,
-        model:
-            typeof parsed.model === "string"
-                ? parsed.model
-                : DEFAULT_CONFIG.model,
-        apiKeyEnv:
-            typeof parsed.apiKeyEnv === "string" && parsed.apiKeyEnv
-                ? parsed.apiKeyEnv
-                : DEFAULT_CONFIG.apiKeyEnv,
-        timeoutMs:
-            typeof parsed.timeoutMs === "number" && parsed.timeoutMs > 0
-                ? parsed.timeoutMs
-                : DEFAULT_CONFIG.timeoutMs,
-        promptFile:
-            typeof parsed.promptFile === "string"
-                ? parsed.promptFile
-                : DEFAULT_CONFIG.promptFile,
-    };
-    configCache = {
-        mtime: mtimeMs,
-        parsed: merged,
-        fallbackReason: null,
-    };
+    const merged = normalize(parsed);
+    cache.mtime = mtimeMs;
+    cache.parsed = merged;
+    cache.fallbackReason = null;
     return merged;
+}
+
+// Read the PLUGIN-BEHAVIOR config (auto-gate-config.json) with an mtime cache.
+// Returns {enabled, mode, stubVerdict, promptFile} on every call — never
+// throws. Emits one console.error audit line per failure-state transition
+// (missing / unreadable / invalid). LLM fields in this file are IGNORED.
+// `configPath` is injectable for the self-test; production callers omit it.
+export function readConfig(configPath = CONFIG_PATH) {
+    return _readJsonConfig(
+        configPath,
+        pluginConfigCache,
+        DEFAULT_PLUGIN_CONFIG,
+        normalizePluginConfig,
+        false, // NOT silent: a missing plugin config warns once (existing behavior)
+        "plugin",
+    );
+}
+
+// Read the LLM config (auto-gate-llm.json) with its OWN mtime cache. Returns
+// {modelEndpoint, model, apiKeyEnv, timeoutMs} on every call — never throws.
+// A MISSING file is SILENT (no audit spam) — it is the normal case when live
+// mode is not set up; audit/enforce modes must NOT fail because the LLM file
+// is absent. Only a PRESENT-but-invalid file emits an audit line (mirroring
+// the existing invalid-JSON handling). `llmPath` is injectable for the
+// self-test; production callers omit it.
+export function readLlmConfig(llmPath = LLM_CONFIG_PATH) {
+    return _readJsonConfig(
+        llmPath,
+        llmConfigCache,
+        DEFAULT_LLM_CONFIG,
+        normalizeLlmConfig,
+        true, // SILENT on missing: no live setup = no spam
+        "llm",
+    );
+}
+
+// Test-only: reset BOTH config caches so the self-test's filesystem tests are
+// isolated from each other and from any prior production read. Mirrors the
+// __resetCachedBinaryPrompt helper pattern in auto-gate-live.js.
+export function __resetConfigCaches() {
+    pluginConfigCache.mtime = null;
+    pluginConfigCache.parsed = null;
+    pluginConfigCache.fallbackReason = null;
+    llmConfigCache.mtime = null;
+    llmConfigCache.parsed = null;
+    llmConfigCache.fallbackReason = null;
 }
 
 // The factory receives the full PluginInput ({client, project, directory,
@@ -513,17 +643,28 @@ export const server = async ({ client, directory } = {}) => {
                     `[auto-gate] permission.ask type=${type} pattern=${pattern} mode=live (deciding)`,
                 );
 
+                // MERGE POINT: build ONE config object for the live path by
+                // merging the plugin-behavior config (already read above into
+                // `config` as {enabled, mode, stubVerdict, promptFile}) with the
+                // LLM config (auto-gate-llm.json → {modelEndpoint, model,
+                // apiKeyEnv, timeoutMs}). A missing LLM file is SILENT here:
+                // readLlmConfig() returns empty-string defaults, which flow
+                // straight into the fail-closed validation below. Downstream
+                // decideLive / classifyLive / resolveSystemPrompt see a single
+                // merged object exactly as before the two-file split.
+                const liveConfig = { ...config, ...readLlmConfig() };
+
                 // (1) Validate live config up front so a misconfigured live
                 // mode fail-closes to deny with a CLEAR audit line instead of a
                 // cryptic adapter error.
-                if (!config.modelEndpoint) {
+                if (!liveConfig.modelEndpoint) {
                     console.error(
                         "[auto-gate] live mode misconfigured: no modelEndpoint; fail-closed deny",
                     );
                     output.status = "deny";
                     return;
                 }
-                if (!config.model) {
+                if (!liveConfig.model) {
                     console.error(
                         "[auto-gate] live mode misconfigured: no model; fail-closed deny",
                     );
@@ -576,7 +717,7 @@ export const server = async ({ client, directory } = {}) => {
                 // {status, audit, reason, latencyMs} and never throws.
                 let result;
                 try {
-                    result = await decideLive(config, serialized);
+                    result = await decideLive(liveConfig, serialized);
                 } catch (err) {
                     // Defensive: decideLive itself does not throw, but a future
                     // regression must fail-closed rather than crash the hook.
@@ -794,5 +935,264 @@ if (__isMain) {
     test("permission pattern: missing input -> empty string (no crash)", () => {
         assert.equal(scrubTruncate((null && null.pattern) || "", MAX_ARG_LEN), "");
         assert.equal(scrubTruncate((undefined && undefined.pattern) || "", MAX_ARG_LEN), "");
+    });
+
+    // ===== Config readers: two-file split model =====
+    //
+    // Filesystem tests for readConfig() (plugin-behavior) and readLlmConfig()
+    // (LLM). Each test writes a temp file under tmp/auto-gate-config-test/,
+    // resets BOTH caches via __resetConfigCaches(), and asserts fail-safe
+    // behavior. The readers accept an injectable path (default the production
+    // repo-configs path) so tests never touch the real config location.
+    // Capture console.error to assert audit-spam / audit-line behavior.
+
+    const TEST_CONFIG_DIR = path.resolve(
+        repoRoot(),
+        "tmp",
+        "auto-gate-config-test",
+    );
+
+    function writeTestConfig(name, objOrString) {
+        const body =
+            typeof objOrString === "string"
+                ? objOrString
+                : JSON.stringify(objOrString);
+        fs.writeFileSync(path.join(TEST_CONFIG_DIR, name), body, "utf8");
+    }
+
+    function testConfigPath(name) {
+        return path.join(TEST_CONFIG_DIR, name);
+    }
+
+    // Ensure the test dir exists for the reader tests below (idempotent).
+    fs.mkdirSync(TEST_CONFIG_DIR, { recursive: true });
+
+    // Silence + capture console.error so a missing-file / invalid-JSON audit
+    // line does not pollute test output, and so we can assert it fired (or not).
+    function captureErrors(fn) {
+        const errors = [];
+        const orig = console.error;
+        console.error = (msg) => errors.push(msg);
+        try {
+            fn(errors);
+        } finally {
+            console.error = orig;
+        }
+    }
+
+    test("readConfig (plugin): missing file -> fail-safe defaults {enabled:true, mode:audit}", () => {
+        __resetConfigCaches();
+        const cfg = readConfig(testConfigPath("no-such-plugin.json"));
+        assert.deepEqual(cfg, {
+            enabled: true,
+            mode: "audit",
+            stubVerdict: "block",
+            promptFile: "",
+        });
+    });
+
+    test("readConfig (plugin): valid partial -> merged over defaults", () => {
+        __resetConfigCaches();
+        writeTestConfig("plugin-partial.json", { mode: "enforce" });
+        const cfg = readConfig(testConfigPath("plugin-partial.json"));
+        assert.deepEqual(cfg, {
+            enabled: true,
+            mode: "enforce",
+            stubVerdict: "block",
+            promptFile: "",
+        });
+    });
+
+    test("readConfig (plugin): ignores LLM fields entirely (clean cut)", () => {
+        __resetConfigCaches();
+        writeTestConfig("plugin-with-llm.json", {
+            enabled: true,
+            mode: "live",
+            modelEndpoint: "https://should-be-ignored.example",
+            model: "ignored",
+            apiKeyEnv: "IGNORED_KEY",
+            timeoutMs: 9999,
+        });
+        const cfg = readConfig(testConfigPath("plugin-with-llm.json"));
+        // Returns ONLY the 4 plugin-behavior fields; LLM keys absent.
+        assert.deepEqual(cfg, {
+            enabled: true,
+            mode: "live",
+            stubVerdict: "block",
+            promptFile: "",
+        });
+        assert.equal(
+            "modelEndpoint" in cfg,
+            false,
+            "LLM fields must not appear in plugin config",
+        );
+    });
+
+    test("readConfig (plugin): invalid JSON -> defaults + audit line", () => {
+        __resetConfigCaches();
+        writeTestConfig("plugin-invalid.json", "{ not valid json");
+        captureErrors((errors) => {
+            const cfg = readConfig(testConfigPath("plugin-invalid.json"));
+            assert.deepEqual(cfg, {
+                enabled: true,
+                mode: "audit",
+                stubVerdict: "block",
+                promptFile: "",
+            });
+            assert.equal(errors.length, 1, "present-but-invalid must warn once");
+            assert.match(errors[0], /invalid JSON/);
+        });
+    });
+
+    test("readLlmConfig: missing file -> defaults, NO throw, NO audit spam", () => {
+        __resetConfigCaches();
+        captureErrors((errors) => {
+            const cfg = readLlmConfig(testConfigPath("no-such-llm.json"));
+            assert.deepEqual(cfg, {
+                modelEndpoint: "",
+                model: "",
+                apiKeyEnv: "AUTO_GATE_API_KEY",
+                timeoutMs: 8000,
+            });
+            assert.equal(
+                errors.length,
+                0,
+                "missing LLM file is normal — must NOT emit audit spam",
+            );
+        });
+    });
+
+    test("readLlmConfig: valid file -> merged fields", () => {
+        __resetConfigCaches();
+        writeTestConfig("llm-valid.json", {
+            modelEndpoint: "https://provider.example/v1/chat/completions",
+            model: "test-model",
+            apiKeyEnv: "MY_GATE_KEY",
+            timeoutMs: 4000,
+        });
+        const cfg = readLlmConfig(testConfigPath("llm-valid.json"));
+        assert.deepEqual(cfg, {
+            modelEndpoint: "https://provider.example/v1/chat/completions",
+            model: "test-model",
+            apiKeyEnv: "MY_GATE_KEY",
+            timeoutMs: 4000,
+        });
+    });
+
+    test("readLlmConfig: partial config merges over defaults", () => {
+        __resetConfigCaches();
+        writeTestConfig("llm-partial.json", { modelEndpoint: "https://x" });
+        const cfg = readLlmConfig(testConfigPath("llm-partial.json"));
+        assert.deepEqual(cfg, {
+            modelEndpoint: "https://x",
+            model: "",
+            apiKeyEnv: "AUTO_GATE_API_KEY",
+            timeoutMs: 8000,
+        });
+    });
+
+    test("readLlmConfig: invalid JSON -> defaults + ONE audit line", () => {
+        __resetConfigCaches();
+        writeTestConfig("llm-invalid.json", "{ broken json");
+        captureErrors((errors) => {
+            const cfg = readLlmConfig(testConfigPath("llm-invalid.json"));
+            assert.deepEqual(cfg, {
+                modelEndpoint: "",
+                model: "",
+                apiKeyEnv: "AUTO_GATE_API_KEY",
+                timeoutMs: 8000,
+            });
+            assert.equal(
+                errors.length,
+                1,
+                "present-but-invalid LLM file must emit ONE audit line",
+            );
+            assert.match(errors[0], /invalid JSON/);
+        });
+    });
+
+    test("readLlmConfig: apiKeyEnv default is AUTO_GATE_API_KEY", () => {
+        __resetConfigCaches();
+        writeTestConfig("llm-no-env.json", {
+            modelEndpoint: "https://x",
+            model: "m",
+        });
+        const cfg = readLlmConfig(testConfigPath("llm-no-env.json"));
+        assert.equal(cfg.apiKeyEnv, "AUTO_GATE_API_KEY");
+    });
+
+    test("readLlmConfig: invalid types fall back to defaults", () => {
+        __resetConfigCaches();
+        // Wrong types: modelEndpoint as number, model as null, apiKeyEnv empty,
+        // timeoutMs as negative number. Each must normalize to its default.
+        writeTestConfig("llm-badtypes.json", {
+            modelEndpoint: 123,
+            model: null,
+            apiKeyEnv: "",
+            timeoutMs: -5,
+        });
+        const cfg = readLlmConfig(testConfigPath("llm-badtypes.json"));
+        assert.deepEqual(cfg, {
+            modelEndpoint: "",
+            model: "",
+            apiKeyEnv: "AUTO_GATE_API_KEY",
+            timeoutMs: 8000,
+        });
+    });
+
+    test("readLlmConfig: mtime cache returns SAME object on unchanged file", () => {
+        __resetConfigCaches();
+        writeTestConfig("llm-cache.json", { model: "cached-model" });
+        const a = readLlmConfig(testConfigPath("llm-cache.json"));
+        const b = readLlmConfig(testConfigPath("llm-cache.json"));
+        assert.equal(
+            a,
+            b,
+            "unchanged file (same mtime) must return the SAME cached object",
+        );
+    });
+
+    test("readLlmConfig: re-read after file change sees new content", (t, done) => {
+        __resetConfigCaches();
+        writeTestConfig("llm-mutate.json", { model: "first" });
+        const a = readLlmConfig(testConfigPath("llm-mutate.json"));
+        assert.equal(a.model, "first");
+        // Bump mtime by writing new content, then ensure a fresh mtime
+        // (statSync resolution is ms-level; nudge with a tiny delay).
+        setTimeout(() => {
+            writeTestConfig("llm-mutate.json", { model: "second" });
+            const b = readLlmConfig(testConfigPath("llm-mutate.json"));
+            assert.equal(b.model, "second", "changed file must re-read");
+            done();
+        }, 20);
+    });
+
+    test("merged call-site: {...readConfig(), ...readLlmConfig()} yields all 8 fields", () => {
+        __resetConfigCaches();
+        writeTestConfig("merge-plugin.json", {
+            enabled: true,
+            mode: "live",
+            promptFile: "/x",
+        });
+        writeTestConfig("merge-llm.json", {
+            modelEndpoint: "https://x",
+            model: "m",
+            apiKeyEnv: "K",
+            timeoutMs: 3000,
+        });
+        const merged = {
+            ...readConfig(testConfigPath("merge-plugin.json")),
+            ...readLlmConfig(testConfigPath("merge-llm.json")),
+        };
+        assert.deepEqual(merged, {
+            enabled: true,
+            mode: "live",
+            stubVerdict: "block",
+            promptFile: "/x",
+            modelEndpoint: "https://x",
+            model: "m",
+            apiKeyEnv: "K",
+            timeoutMs: 3000,
+        });
     });
 }
