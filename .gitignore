@@ -28,6 +28,9 @@ node_modules/
 *.tmp
 *.bak
 
+# Local-only notes (sensitive; never commit)
+*.local.md
+
 # Editor / OS
 .DS_Store
 Thumbs.db

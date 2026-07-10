@@ -494,7 +494,7 @@ appear anywhere in this pack.
 
 ## Design source
 
-- `researches/sources/2026-07-10-auto-mode-classifier-source-packet.md` — the
+- `researches/sources/2026-07-10-auto-mode-classifier-source-packet.local.md` — the
   design packet for the reference agent system's
   auto/classifier permission mode (the security-monitor LLM tool-call gate).
   The porting-notes section (§10) frames the later phases.
