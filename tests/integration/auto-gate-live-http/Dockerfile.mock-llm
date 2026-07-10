@@ -1,0 +1,20 @@
+# Dockerfile.mock-llm -- scenario-controllable OpenAI-compatible mock LLM server.
+#
+# Used ONLY by the auto-gate live HTTP integration tests. No real provider
+# names, endpoints, or keys are embedded. The server is a zero-dependency Node
+# http server (only built-in modules), so no npm install step is needed.
+#
+# Build context: tests/integration/auto-gate-live-http/
+#   docker build -t auto-gate-mock-llm:test -f Dockerfile.mock-llm .
+
+FROM node:22-alpine
+
+WORKDIR /app
+
+# Copy the mock server (single file, no node_modules needed).
+COPY mock-llm-server.js .
+
+ENV MOCK_PORT=8080
+EXPOSE 8080
+
+CMD ["node", "mock-llm-server.js"]

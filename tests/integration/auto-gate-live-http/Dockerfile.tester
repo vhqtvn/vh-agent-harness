@@ -1,0 +1,44 @@
+# Dockerfile.tester -- test runner container for the auto-gate live HTTP
+# integration tests.
+#
+# Runs the node:test suite INSIDE an isolated container on the same private
+# Docker network as the mock-llm service. The tester is a PURE CLIENT: it
+# imports the real classifier source, uses the real globalThis.fetch to talk to
+# the mock over the private network, and does NOT manage any containers or
+# ports. The host only runs `docker compose ... run --rm tester`.
+#
+# Build context: REPO ROOT (set in docker-compose.yml via context: ../../..)
+# so the classifier source under .vh-agent-harness/overlays/ and the system
+# prompt under templates/sys-prompts/ are reachable without duplication.
+
+FROM node:22-alpine
+
+WORKDIR /app
+
+# --- Classifier SUT (System Under Test) ---
+# auto-gate-live.js is the module under test. It imports two sibling modules
+# (relative ./ imports), so all three must be co-located in the same directory.
+COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-live.js      ./sut/
+COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-verdict.js   ./sut/
+COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-scrub.js     ./sut/
+
+# --- Classifier system prompt ---
+# classifyLive calls resolveSystemPrompt, which by default shells out to
+# `vh-agent-harness sys-prompt auto-gate-classifier` (the Go binary — NOT present
+# in a node:alpine image). The test avoids this dependency by setting
+# config.promptFile to this COPY'd file, so resolveSystemPrompt reads it
+# directly and never shells out.
+COPY templates/sys-prompts/auto-gate-classifier.md ./prompts/
+
+# --- Test suite ---
+COPY tests/integration/auto-gate-live-http/auto-gate-live-http.test.mjs ./test/
+
+# Environment defaults (compose overrides MOCK_LLM_BASE for network routing).
+ENV MOCK_LLM_BASE=http://mock-llm:8080
+ENV PROMPT_FILE=/app/prompts/auto-gate-classifier.md
+
+WORKDIR /app/test
+
+# node --test discovers and runs the .test.mjs file, then exits with the
+# pass/fail exit code. The host reads this exit code.
+CMD ["node", "--test", "auto-gate-live-http.test.mjs"]

@@ -1,0 +1,52 @@
+# docker-compose.yml -- full Docker isolation for the auto-gate live HTTP
+# integration tests.
+#
+# TWO services on ONE private bridge network. ZERO host port publishing (no
+# `ports:` anywhere). The host only runs:
+#
+#   docker compose -f tests/integration/auto-gate-live-http/docker-compose.yml run --rm tester
+#
+# ...and reads the exit code. The mock's unauthenticated scenario + control
+# endpoints are reachable ONLY from within the private network (never from the
+# host or the default bridge), dissolving the exposure risk of the previous
+# `-p hostPort:containerPort` design at the root.
+#
+# Service DNS: compose registers each service name on the private network, so
+# the tester reaches the mock at http://mock-llm:8080 (set via MOCK_LLM_BASE).
+
+services:
+  mock-llm:
+    # The scenario-controllable OpenAI-compatible mock LLM server.
+    # Build context is THIS directory (the test dir): mock-llm-server.js +
+    # Dockerfile.mock-llm live here.
+    build:
+      context: .
+      dockerfile: Dockerfile.mock-llm
+    networks:
+      - auto-gate-net
+    # NO ports: section -- nothing is published to the host.
+
+  tester:
+    # The test runner: a node:22-alpine container that imports the real
+    # classifier source and exercises the real HTTP fetch path against the
+    # mock over the private network.
+    build:
+      # Build context is the REPO ROOT so the classifier source
+      # (.vh-agent-harness/overlays/...) and system prompt
+      # (templates/sys-prompts/...) are reachable.
+      context: ../../..
+      dockerfile: tests/integration/auto-gate-live-http/Dockerfile.tester
+    depends_on:
+      - mock-llm
+    environment:
+      MOCK_LLM_BASE: http://mock-llm:8080
+    networks:
+      - auto-gate-net
+    # NO ports: section -- nothing is published to the host.
+
+networks:
+  # A dedicated bridge network, isolated from both the host and the Docker
+  # default bridge. The two services can resolve each other by service name
+  # but nothing else can reach them.
+  auto-gate-net:
+    driver: bridge
