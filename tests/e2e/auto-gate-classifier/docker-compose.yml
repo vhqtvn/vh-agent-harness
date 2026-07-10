@@ -1,0 +1,49 @@
+# docker-compose.yml -- full Docker isolation for the auto-gate-classifier
+# plugin e2e test.
+#
+# TWO services on ONE private bridge network. ZERO host port publishing (no
+# `ports:` anywhere). The host only runs:
+#
+#   docker compose -f tests/e2e/auto-gate-classifier/docker-compose.yml run --rm e2e-runner
+#
+# ...and reads the exit code. The mock's unauthenticated scenario + control
+# endpoints are reachable ONLY from within the private network.
+#
+# Service DNS: compose registers each service name on the private network, so
+# the e2e-runner reaches the mock at http://mock-llm:8080.
+
+services:
+  mock-llm:
+    # Reuses the EXISTING zero-dependency mock LLM server from the integration
+    # test suite (no duplication). Build context is the integration test dir so
+    # mock-llm-server.js + Dockerfile.mock-llm are reachable without copying.
+    build:
+      context: ../../integration/auto-gate-live-http
+      dockerfile: Dockerfile.mock-llm
+    networks:
+      - auto-gate-e2e-net
+    # NO ports: section -- nothing is published to the host.
+
+  e2e-runner:
+    # The fully-managed plugin e2e driver. Multi-stage build: stage 1 builds
+    # the Go binary + renders the overlay into /tmpproj; stage 2 runs node:test
+    # with the binary on PATH. See Dockerfile.e2e-runner for details.
+    build:
+      # Build context is the REPO ROOT so the Go source, the overlay pack
+      # source, and the test driver are all reachable.
+      context: ../../..
+      dockerfile: tests/e2e/auto-gate-classifier/Dockerfile.e2e-runner
+    depends_on:
+      - mock-llm
+    environment:
+      MOCK_LLM_BASE: http://mock-llm:8080
+    networks:
+      - auto-gate-e2e-net
+    # NO ports: section -- nothing is published to the host.
+
+networks:
+  # A dedicated bridge network, isolated from both the host and the Docker
+  # default bridge. The two services resolve each other by service name but
+  # nothing else can reach them.
+  auto-gate-e2e-net:
+    driver: bridge

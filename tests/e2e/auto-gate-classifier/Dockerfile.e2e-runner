@@ -1,0 +1,84 @@
+# Dockerfile.e2e-runner -- fully-managed plugin e2e container.
+#
+# Multi-stage build:
+#   Stage 1 (builder): golang:1-alpine builds the vh-agent-harness Go binary
+#     from source, then renders the auto-classifier-pilot overlay into /tmpproj
+#     (a fresh temp project with a minimal profile + the overlay pack source).
+#   Stage 2 (runtime): node:22-alpine COPYs the built binary onto PATH (so the
+#     plugin's spawnSync("vh-agent-harness","sys-prompt",...) works), COPYs the
+#     rendered /tmpproj, and runs the node:test driver that imports the RENDERED
+#     plugin and drives its permission.ask hook.
+#
+# This is a PLUGIN e2e, NOT a full-OpenCode e2e. No OpenCode server runs. The
+# driver builds a faithful fake client/Permission/output stand-in.
+#
+# Build context: REPO ROOT (set in docker-compose.yml via context: ../../..) so
+# the Go source, the overlay pack source, and the test driver are all reachable.
+
+# ===========================================================================
+# Stage 1: build the Go binary + render the overlay into /tmpproj.
+# ===========================================================================
+FROM golang:1-alpine AS builder
+
+WORKDIR /src
+
+# Copy the full repo source so `go build` can compile the binary.
+COPY . .
+
+# Build the binary. CGO is off for a static binary that runs in any base image.
+RUN CGO_ENABLED=0 go build -o /usr/local/bin/vh-agent-harness ./cmd/vh-agent-harness
+
+# Verify the binary runs and the sys-prompt subcommand serves the embedded
+# classifier prompt (gap #4 binary path — must work BEFORE the plugin uses it).
+RUN vh-agent-harness sys-prompt auto-gate-classifier > /tmp/prompt-check.md && \
+    test -s /tmp/prompt-check.md
+
+# --- Render the harness into a fresh temp project with the overlay selected ---
+# This proves gap #2 (overlay render correctness). The mechanism:
+#   1. Create /tmpproj/.vh-agent-harness/overlays/auto-classifier-pilot/ and
+#      copy the overlay pack source there (project-local pack).
+#   2. Write the minimal profile (profile: minimal + overlays:
+#      [auto-classifier-pilot]) to /tmpproj/.vh-agent-harness/vh-harness-profile.yml.
+#   3. Run `vh-agent-harness update --target /tmpproj`. This calls seamApply,
+#      which calls renderSeamStaging, which opens the pack via
+#      OpenPackFor(/tmpproj, "auto-classifier-pilot") (project-local resolution)
+#      and renders the 4 plugin files into /tmpproj/.opencode/plugins/*.js.
+RUN mkdir -p /tmpproj/.vh-agent-harness/overlays/auto-classifier-pilot && \
+    cp -r .vh-agent-harness/overlays/auto-classifier-pilot/. \
+          /tmpproj/.vh-agent-harness/overlays/auto-classifier-pilot/
+COPY tests/e2e/auto-gate-classifier/vh-harness-profile.yml \
+     /tmpproj/.vh-agent-harness/vh-harness-profile.yml
+
+# RUN_FROM_AGENT=1 bypasses the interactive confirmation guard. --force is the
+# belt-and-suspenders. Both stdin-is-not-a-TTY (Docker build) and --force
+# independently bypass; we use both for explicit clarity.
+RUN RUN_FROM_AGENT=1 vh-agent-harness update --target /tmpproj --force
+
+# Assert the render produced the expected plugin files.
+RUN test -f /tmpproj/.opencode/plugins/auto-tool-gate.js && \
+    test -f /tmpproj/.opencode/plugins/auto-gate-live.js && \
+    test -f /tmpproj/.opencode/plugins/auto-gate-verdict.js && \
+    test -f /tmpproj/.opencode/plugins/auto-gate-scrub.js
+
+# ===========================================================================
+# Stage 2: runtime image with the binary on PATH + rendered temp project.
+# ===========================================================================
+FROM node:22-alpine
+
+WORKDIR /app
+
+# Copy the built Go binary onto PATH so the plugin's spawnSync resolves it.
+COPY --from=builder /usr/local/bin/vh-agent-harness /usr/local/bin/vh-agent-harness
+
+# Copy the rendered temp project (proves the render at build time).
+COPY --from=builder /tmpproj /tmpproj
+
+# Copy the test driver.
+COPY tests/e2e/auto-gate-classifier/e2e-driver.mjs /app/
+
+# The mock-llm base URL is set via compose env (service DNS on the private
+# network). The driver also has a fallback default.
+ENV MOCK_LLM_BASE=http://mock-llm:8080
+
+# node --test discovers and runs the driver, then exits with pass/fail.
+CMD ["node", "--test", "/app/e2e-driver.mjs"]

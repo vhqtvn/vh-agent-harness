@@ -1,0 +1,15 @@
+# Minimal harness profile for the auto-gate-classifier e2e test.
+#
+# This file is COPY'd into /tmpproj/.vh-agent-harness/vh-harness-profile.yml
+# inside the e2e-runner container, alongside the auto-classifier-pilot overlay
+# pack source (copied from .vh-agent-harness/overlays/auto-classifier-pilot/).
+# Running `vh-agent-harness update --target /tmpproj` then renders the overlay's
+# plugin files into /tmpproj/.opencode/plugins/*.js — proving gap #2 (overlay
+# render) and gap #1 (the rendered plugin loads as ESM in a real node process).
+#
+# profile: minimal renders the smallest valid core corpus.
+# overlays: [auto-classifier-pilot] selects the project-local overlay pack.
+
+profile: minimal
+overlays:
+  - auto-classifier-pilot
