@@ -890,8 +890,24 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
             // Scrubbed audit summary of the event payload. `patterns` and
             // `metadata` are tool-call-derived and MUST pass through the
             // shared scrubber before landing in the log line.
+            //
+            // PERMISSION-TYPE SHAPE: the SDK wire type for permission.asked
+            // carries `permission` as the permission NAME STRING (e.g.
+            // "bash"), not as an object with a `.type` field. The earlier
+            // `req.permission && req.permission.type` form collapsed to
+            // "unknown" on every real event, losing the tool-type signal
+            // (fail-closed still fired, but the audit/serialized input said
+            // type=unknown). Normalize defensively to accept BOTH the string
+            // shape (today's wire type) and the object shape (a hedge against
+            // an upstream change).
+            const rawPerm = req && req.permission;
             const permType =
-                (req.permission && req.permission.type) || "unknown";
+                typeof rawPerm === "string"
+                    ? rawPerm
+                    : ((rawPerm &&
+                          typeof rawPerm === "object" &&
+                          rawPerm.type) ||
+                          "unknown");
             const patternsSummary = Array.isArray(req.patterns)
                 ? req.patterns
                       .map((p) => scrubTruncate(String(p), MAX_ARG_LEN))
@@ -900,15 +916,45 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
 
             // --- Reply helper (shared by all decision branches) ---
             // Wraps the SDK call so every branch logs r.error uniformly.
+            //
+            // MUST NEVER THROW. The outer catch path routes failures to
+            // handleUncertain -> reply("reject"); if THIS helper could throw
+            // (a thrown transport error, or a missing client), the throw
+            // inside the catch would reject the hook promise, surface an error
+            // to OpenCode, and leave the permission.asked Deferred unresolved
+            // -> HEADLESS HANG. So: guard the client, wrap the call in
+            // try/catch, and log on any failure. The only residual hang case
+            // is a fundamentally-broken transport (then nothing can resolve
+            // the Deferred — inherent, now logged rather than crashing).
             const reply = async (responseMode) => {
-                const r = await client.postSessionIdPermissionsPermissionId({
-                    path: { id: req.sessionID, permissionID: req.id },
-                    body: { response: responseMode },
-                });
-                if (r && r.error) {
+                if (
+                    !client ||
+                    typeof client.postSessionIdPermissionsPermissionId !==
+                        "function"
+                ) {
                     console.error(
-                        `[auto-gate] permission reply failed: ` +
-                        `${(r.error && r.error.message) || "unknown"}`,
+                        `[auto-gate] permission reply unavailable: no client ` +
+                        `(responseMode=${responseMode})`,
+                    );
+                    return;
+                }
+                try {
+                    const r =
+                        await client.postSessionIdPermissionsPermissionId({
+                            path: { id: req.sessionID, permissionID: req.id },
+                            body: { response: responseMode },
+                        });
+                    if (r && r.error) {
+                        console.error(
+                            `[auto-gate] permission reply failed: ` +
+                            `${(r.error && r.error.message) || "unknown"}`,
+                        );
+                    }
+                } catch (e) {
+                    console.error(
+                        `[auto-gate] permission reply threw: ` +
+                        `${(e && e.message) || "unknown"} ` +
+                        `(responseMode=${responseMode})`,
                     );
                 }
             };
@@ -1739,13 +1785,20 @@ if (__isMain) {
     }
 
     // Helper: fake permission.asked bus event.
+    // `rawPermission` (if set) overrides the `permission` field verbatim — used
+    // to exercise the SDK wire shape where `permission` is a STRING name (e.g.
+    // "bash") rather than an object with a `.type`. When unset, the helper
+    // builds the legacy object shape { type: permType }.
     function makeAskedEvent(opts = {}) {
         return {
             type: "permission.asked",
             properties: {
                 id: opts.id || "req-evt-1",
                 sessionID: opts.sessionID || "sess-evt-1",
-                permission: { type: opts.permType || "bash" },
+                permission:
+                    opts.rawPermission !== undefined
+                        ? opts.rawPermission
+                        : { type: opts.permType || "bash" },
                 patterns: opts.patterns || ["ls -la"],
                 metadata: opts.metadata || {},
                 always: false,
@@ -1794,6 +1847,27 @@ if (__isMain) {
         const orig = globalThis.fetch;
         globalThis.fetch = async () => {
             throw new Error(msg);
+        };
+        return () => {
+            globalThis.fetch = orig;
+        };
+    }
+
+    // Mock globalThis.fetch to capture the request body (the JSON-stringified
+    // OpenAI-compatible payload) while returning a fixed verdict. Used to
+    // assert what the live path actually SERIALIZES to the model. Returns a
+    // restore fn. The captured array receives each request's `body` string.
+    function mockFetchCapture(captured, verdictText = "<block>no</block>") {
+        const orig = globalThis.fetch;
+        globalThis.fetch = async (_url, opts) => {
+            if (opts && typeof opts.body === "string") captured.push(opts.body);
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    choices: [{ message: { content: verdictText } }],
+                }),
+            };
         };
         return () => {
             globalThis.fetch = orig;
@@ -2075,6 +2149,186 @@ if (__isMain) {
         const cfg = readConfig(testConfigPath("evt-valid-new.json"));
         assert.equal(cfg.replyMode, "always");
         assert.equal(cfg.onUncertain, "passthrough");
+    });
+
+    // ===================================================================
+    // FOLLOW-UP FIXES (commit 82e37c89 reviewer findings):
+    //   F1 — permission-type shape: the SDK wire type carries `permission` as
+    //        a STRING name, not an object with `.type`. The defensive
+    //        normalizer must yield the real type (not "unknown").
+    //   F2 — reply robustness: a thrown reply (or a missing client) must NOT
+    //        propagate out of the event hook (which would hang headless mode).
+    // ===================================================================
+
+    // F1 — string permission shape (today's real SDK wire type). Asserts BOTH
+    // the audit/log line AND the live-mode serialized egress carry the real
+    // type (not the collapsed "unknown").
+    test("F1: string permission \"bash\" -> audit line + serialized live input carry type=bash", async () => {
+        // (a) audit mode: the audit/log line carries type=bash, not unknown.
+        {
+            const { hooks } = await setupEventTest({ mode: "audit" });
+            const errors = [];
+            const orig = console.error;
+            console.error = (msg) => errors.push(msg);
+            try {
+                await hooks["event"]({
+                    event: makeAskedEvent({ rawPermission: "bash" }),
+                });
+            } finally {
+                console.error = orig;
+            }
+            const line = errors.find((e) => /permission\.asked/.test(e));
+            assert.ok(line, "audit line must be emitted");
+            assert.match(line, /type=bash/);
+            assert.equal(
+                /type=unknown/.test(line),
+                false,
+                "string permission must NOT collapse to unknown",
+            );
+        }
+        // (b) live mode: the serialized input that egresses to the model carries type=bash.
+        {
+            const { hooks } = await setupEventTest(
+                {
+                    mode: "live",
+                    promptFile: testConfigPath("evt-classifier-prompt.txt"),
+                },
+                {
+                    modelEndpoint: "http://mock-llm",
+                    model: "test-model",
+                    maxRetries: 0,
+                },
+            );
+            const captured = [];
+            const restore = mockFetchCapture(captured);
+            try {
+                await hooks["event"]({
+                    event: makeAskedEvent({ rawPermission: "bash" }),
+                });
+            } finally {
+                restore();
+            }
+            assert.ok(captured.length >= 1, "fetch must have been called");
+            const body = JSON.parse(captured[0]);
+            const userMsg = body.messages.find((m) => m.role === "user");
+            assert.ok(userMsg, "user message must be present in the live request");
+            assert.match(
+                userMsg.content,
+                /type=bash/,
+                "serialized live input must carry type=bash",
+            );
+            assert.equal(
+                /type=unknown/.test(userMsg.content),
+                false,
+                "serialized live input must NOT carry type=unknown",
+            );
+        }
+    });
+
+    // F1 — object permission shape (defensive hedge against an upstream change).
+    test("F1: object permission {type:\"edit\"} -> audit line type=edit", async () => {
+        const { hooks } = await setupEventTest({ mode: "audit" });
+        const errors = [];
+        const orig = console.error;
+        console.error = (msg) => errors.push(msg);
+        try {
+            await hooks["event"]({
+                event: makeAskedEvent({ rawPermission: { type: "edit" } }),
+            });
+        } finally {
+            console.error = orig;
+        }
+        const line = errors.find((e) => /permission\.asked/.test(e));
+        assert.ok(line, "audit line must be emitted");
+        assert.match(line, /type=edit/);
+    });
+
+    // F1 — missing permission field -> type=unknown, no crash.
+    test("F1: missing permission field -> audit line type=unknown", async () => {
+        const { hooks } = await setupEventTest({ mode: "audit" });
+        const errors = [];
+        const orig = console.error;
+        console.error = (msg) => errors.push(msg);
+        try {
+            const ev = makeAskedEvent();
+            delete ev.properties.permission;
+            await hooks["event"]({ event: ev });
+        } finally {
+            console.error = orig;
+        }
+        const line = errors.find((e) => /permission\.asked/.test(e));
+        assert.ok(line, "audit line must be emitted");
+        assert.match(line, /type=unknown/);
+    });
+
+    // F2 — a THROWN reply is caught + logged; the hook completes cleanly
+    // (no unhandled rejection, no headless hang).
+    test("F2: throwing reply client -> hook completes, throw logged", async () => {
+        const tag = Math.random().toString(36).slice(2, 8);
+        const pName = `evt-throw-${tag}.json`;
+        writeTestConfig(pName, { mode: "enforce", stubVerdict: "allow" });
+        __resetConfigCaches();
+        const throwingClient = {
+            postSessionIdPermissionsPermissionId: async () => {
+                throw new Error("transport boom");
+            },
+            session: { messages: async () => ({ data: [], error: undefined }) },
+        };
+        const hooks = await server({
+            client: throwingClient,
+            directory: TEST_CONFIG_DIR,
+            configPath: testConfigPath(pName),
+            llmConfigPath: testConfigPath("no-such-llm.json"),
+        });
+        const errors = [];
+        const orig = console.error;
+        console.error = (msg) => errors.push(msg);
+        try {
+            // Must NOT throw — the reply helper catches the transport throw.
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            console.error = orig;
+        }
+        assert.equal(
+            errors.some((e) => /permission reply threw/.test(e)),
+            true,
+            "thrown reply must be logged",
+        );
+        assert.equal(
+            errors.some((e) => /transport boom/.test(e)),
+            true,
+            "the thrown error message must appear in the log",
+        );
+    });
+
+    // F2 — missing client entirely -> hook completes, "reply unavailable" logged.
+    test("F2: no client -> hook completes, reply-unavailable logged", async () => {
+        const tag = Math.random().toString(36).slice(2, 8);
+        const pName = `evt-noclient-${tag}.json`;
+        writeTestConfig(pName, { mode: "enforce", stubVerdict: "allow" });
+        __resetConfigCaches();
+        // No `client` threaded into the server factory.
+        const hooks = await server({
+            directory: TEST_CONFIG_DIR,
+            configPath: testConfigPath(pName),
+            llmConfigPath: testConfigPath("no-such-llm.json"),
+        });
+        const errors = [];
+        const orig = console.error;
+        console.error = (msg) => errors.push(msg);
+        try {
+            // Must NOT throw — the reply helper guards the missing client.
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            console.error = orig;
+        }
+        assert.equal(
+            errors.some((e) =>
+                /permission reply unavailable: no client/.test(e),
+            ),
+            true,
+            "missing client must log reply unavailable",
+        );
     });
 
     // Restore the API key env after the live tests.
