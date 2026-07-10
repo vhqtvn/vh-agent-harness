@@ -365,6 +365,12 @@ that never names it renders nothing of it).
   dogfoods live source by mapping keys to repo-relative files in
   `.vh-agent-harness/docs-overrides.yml`; adopters with no overrides file always
   get the embedded copy.
+- **Print a named system prompt:** `vh-agent-harness sys-prompt [name]`. With no
+  argument, lists every available prompt key; with a NAME, prints that prompt's
+  raw bytes to stdout. Prompts ship inside the binary (embedded defaults); an
+  overlay pack or operator can override one by rendering
+  `.opencode/sys-prompts/<name>.md` (the live tree takes precedence over the
+  embed). It is **read-only**: it only writes to stdout and never modifies files.
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   environment). `vh-agent-harness diff` shows drift vs. the corpus.
 - **Package a bug bundle:** `vh-agent-harness diagnostics-export [--dry-run]

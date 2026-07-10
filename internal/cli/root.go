@@ -45,6 +45,7 @@ Agent orientation
   diagnostics-export   bundle harness state into a redacted, shareable archive (--dry-run)
   example              print a config file's doc/template (no *.example scaffolds shipped)
   docs                 print a generic agent-workflow doc (memory model, session workflow, …)
+  sys-prompt           print a named system prompt (binary default, overridable via overlay)
 
 Upgrade loop (after a new binary or config change):
   vh-agent-harness self-update
@@ -83,6 +84,7 @@ func init() {
 		guideCmd,
 		exampleCmd,
 		docsCmd,
+		sysPromptCmd,
 		// overlay pack management (scaffolding)
 		overlayCmd,
 		// binary self-management

@@ -122,6 +122,24 @@ const DocsDir = "templates/docs"
 //go:embed all:templates/docs
 var DocsFS embed.FS
 
+// SysPromptsDir is the embed.FS sub-directory holding the NAMED SYSTEM PROMPTS
+// surfaced by `vh-agent-harness sys-prompt [name]`. These are BINARY/HELP-SURFACE
+// assets, NOT consumer-corpus files: they live OUTSIDE templates/core, so the
+// substrate seam never renders them into a target repo (they do not clutter an
+// adopter's tree), and they carry NO ownership class in core_manifest.go. The
+// `sys-prompt` command serves the embedded copy by default; an overlay pack or
+// operator may supersede a prompt by rendering a live file to
+// .opencode/sys-prompts/<name>.md, which the live-tree-first resolution serves
+// instead. This mirrors the embed-only pattern used by DocsFS and MigrationsFS.
+const SysPromptsDir = "templates/sys-prompts"
+
+// SysPromptsFS is the read-only embedded named-system-prompts tree. The
+// `sys-prompt` command reads from the SysPromptsDir sub-directory (each file's
+// basename without .md is its key).
+//
+//go:embed all:templates/sys-prompts
+var SysPromptsFS embed.FS
+
 // MigrationsDir is the embed.FS sub-directory holding the per-release migration
 // notes (one file per release: vX.Y.Z.md). These are BINARY/HELP-SURFACE docs,
 // NOT consumer-corpus files: they live OUTSIDE templates/core, so the substrate

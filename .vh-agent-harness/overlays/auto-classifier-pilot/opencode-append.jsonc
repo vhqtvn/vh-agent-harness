@@ -1,0 +1,15 @@
+{
+  // auto-classifier-pilot overlay pack — opencode-append.
+  //
+  // OpenCode auto-discovers plugins from .opencode/plugins/*.js (confirmed:
+  // shell-guard.js, session-state.js, and maxoutputtokens.js all load with NO
+  // "plugins" key anywhere in opencode.jsonc). The audit plugin at
+  // plugins/auto-tool-gate.js therefore renders (via overlay RenderUnits) into
+  // .opencode/plugins/auto-tool-gate.js and is loaded automatically on the
+  // next opencode server start.
+  //
+  // For that reason NO registration is needed here, and this file is
+  // intentionally an empty object: the pack's only deliverable is the plugin
+  // unit file. (Phase 1 also ships no permission grants — the audit plugin
+  // only hooks; it never gates — so there is no permission-pack.jsonc either.)
+}
