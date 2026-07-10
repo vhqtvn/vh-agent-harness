@@ -28,29 +28,46 @@
 //                  OBSERVER. The API key is read from the named env var at call
 //                  time; it NEVER lives in the (commitable) config file.
 //
-// TWO HOOKS, TWO SURFACES (verified against @opencode-ai/plugin + sdk types):
+// THREE HOOKS, ONE ENFORCEMENT SURFACE (verified against @opencode-ai/plugin
+// + sdk types + the upstream's shipped ACP / CLI / TUI reference impls):
 //
 //   1. tool.execute.before  (input:{tool,sessionID,callID}, output:{args})
-//      Sees EVERY tool call — including ones the permission table auto-allows
-//      (those never reach permission.ask). Powers: block (throw) or passthrough
-//      (bare return) ONLY. Cannot force-allow or force-ask. We use it purely to
-//      observe the full tool-call stream and capture the arg summary. It stays
-//      an OBSERVER in both modes.
+//      AUDIT-ONLY observer. Sees EVERY tool call — including ones the
+//      permission table auto-allows (those never reach permission.asked).
+//      Powers: block (throw) or passthrough (bare return) ONLY. Cannot
+//      force-allow or force-ask. We use it purely to observe the full
+//      tool-call stream and capture the arg summary. It stays an OBSERVER
+//      in EVERY mode — it must NOT throw or block in the new model; the
+//      event hook owns enforcement.
 //
-//   2. permission.ask  (input:Permission, output:{status:"ask"|"deny"|"allow"})
-//      The AUTHORITATIVE three-way permission decision. Fires only when the
-//      permission table resolves to `ask` or no-match (table-`allow` =
-//      fast-path that skips this hook; table-`deny`/shell-guard = hard floor
-//      that blocks before this hook). Setting output.status: "allow" grants AND
-//      skips the user prompt; "deny" blocks; "ask" (default) triggers the
-//      interactive prompt. This maps EXACTLY onto the reference classifier's
-//      three dispositions — which is why the enforce branch owns this hook.
+//   2. permission.ask  (input:Permission, output:{status})
+//      DORMANT — OpenCode does not fire `permission.ask` in any stock
+//      release as of the studied version. The hook is RETAINED as a RESERVE
+//      in case upstream wires it (preserves the Phase 2/3b investment).
+//      Do NOT rely on it. No claim of auto-approval rests on this hook.
 //
-// HARD-FLOOR INVARIANT: because permission.ask only fires for ask-routed calls
-// (table-allow fast-paths past it; table-deny / shell-guard blocks before it),
-// the classifier can NEVER override a static deny. It only ever decides the
-// ask-routed subset. The static permission table is the first gate; the
-// classifier runs strictly after it.
+//   3. event  ({ event }) — the PRIMARY ENFORCEMENT SURFACE.
+//      Receives EVERY bus event. Acts only on `permission.asked` — the event
+//      OpenCode publishes when its ruleset routes a tool call to "ask". The
+//      event payload is the Request {id, sessionID, permission, patterns,
+//      metadata, always, tool}. The hook classifies it and REPLIES via the
+//      SDK client: client.postSessionIdPermissionsPermissionId({path:{id,
+//      permissionID}, body:{response}}) → resolves the Deferred Permission.ask
+//      is awaiting → tool proceeds (allow) or is blocked (reject). This is
+//      the SAME mechanism the upstream ships in its ACP agent,
+//      `--dangerously-skip-permissions`, and TUI.
+//
+//      CRITICAL HEADLESS: if NO ONE replies to permission.asked, the Deferred
+//      never resolves and the tool call HANGS. In autonomous modes (enforce/
+//      live) the hook MUST reply. Audit mode (observe-only) and
+//      onUncertain:"passthrough" (interactive only) are the only no-reply
+//      paths.
+//
+// HARD-FLOOR INVARIANT: the event hook fires ONLY for ask-routed calls
+// (table-allow fast-paths past the bus event; table-deny / shell-guard blocks
+// before it). The classifier can NEVER override a static deny. It only ever
+// decides the ask-routed subset. The static permission table is the first
+// gate; the classifier runs strictly after it.
 //
 // Phase status:
 //   Phase 3b (implemented here) — live classifier model wired into
@@ -302,6 +319,8 @@ const DEFAULT_PLUGIN_CONFIG = Object.freeze({
     mode: "audit",
     stubVerdict: "block",
     promptFile: "",
+    replyMode: "once", // event hook: "once" | "always" — the reply disposition on an allow verdict
+    onUncertain: "reject", // event hook: "reject" | "passthrough" — failure/uncertainty disposition
 });
 
 // LLM fail-safe defaults (auto-gate-llm.json). `modelEndpoint` and `model`
@@ -367,6 +386,15 @@ function normalizePluginConfig(parsed) {
             typeof parsed.promptFile === "string"
                 ? parsed.promptFile
                 : DEFAULT_PLUGIN_CONFIG.promptFile,
+        replyMode:
+            parsed.replyMode === "once" || parsed.replyMode === "always"
+                ? parsed.replyMode
+                : DEFAULT_PLUGIN_CONFIG.replyMode,
+        onUncertain:
+            parsed.onUncertain === "reject" ||
+            parsed.onUncertain === "passthrough"
+                ? parsed.onUncertain
+                : DEFAULT_PLUGIN_CONFIG.onUncertain,
     };
 }
 
@@ -567,17 +595,22 @@ export function __resetConfigCaches() {
 // The factory receives the full PluginInput ({client, project, directory,
 // worktree, serverUrl, $}) — same contract session-state.js relies on for
 // client.session.todo(). We close over `client` (the OpenCode SDK client, used
-// ONLY in mode:"live" to fetch the session transcript) and `directory` (the
-// repo dir, passed as the SDK query param for transcript fetch). The audit and
+// in mode:"live" to fetch the session transcript + in mode:"enforce"/"live" of
+// the event hook to reply to permission.asked) and `directory` (the repo dir,
+// passed as the SDK query param for transcript fetch). The audit and
 // enforce branches never touch either.
-export const server = async ({ client, directory } = {}) => {
+//
+// `configPath` / `llmConfigPath` are optional test-injection points: production
+// callers omit them (the hooks default to the production repo-configs paths).
+// The self-tests pass temp-file paths under tmp/ to isolate the filesystem.
+export const server = async ({ client, directory, configPath, llmConfigPath } = {}) => {
     return {
         "tool.execute.before": async (input, output) => {
             // Live config — read on every call (mtime-cached, single statSync
             // in steady state). The operator can live-disable the plugin by
             // setting `enabled: false` in the config file; no OpenCode
             // restart, no re-render required.
-            const config = readConfig();
+            const config = readConfig(configPath);
             if (config.enabled === false) {
                 // Operator kill-switch: the plugin is fully inert (no audit,
                 // no behavior change). This is the only branch that short-
@@ -610,8 +643,15 @@ export const server = async ({ client, directory } = {}) => {
         },
 
         "permission.ask": async (input, output) => {
+            // DORMANT — OpenCode does not fire `permission.ask` in any stock
+            // release as of the studied version. The `event` hook (below) is the
+            // ACTIVE enforcement surface: it receives the `permission.asked`
+            // bus event and replies via the SDK client
+            // (postSessionIdPermissionsPermissionId). This hook is RETAINED as
+            // a RESERVE in case upstream wires permission.ask in a future
+            // release — do NOT rely on it, but keep the investment intact.
             // Live config — read on every call (mtime-cached).
-            const config = readConfig();
+            const config = readConfig(configPath);
             if (config.enabled === false) {
                 // Operator kill-switch: fully inert, no audit, no behavior
                 // change. output.status is left at its default so opencode's
@@ -698,7 +738,7 @@ export const server = async ({ client, directory } = {}) => {
                 // straight into the fail-closed validation below. Downstream
                 // decideLive / classifyLive / resolveSystemPrompt see a single
                 // merged object exactly as before the two-file split.
-                const liveConfig = { ...config, ...readLlmConfig() };
+                const liveConfig = { ...config, ...readLlmConfig(llmConfigPath) };
 
                 // (1) Validate live config up front so a misconfigured live
                 // mode fail-closes to deny with a CLEAR audit line instead of a
@@ -809,6 +849,211 @@ export const server = async ({ client, directory } = {}) => {
                 `[auto-gate-audit] permission.ask type=${type} pattern=${pattern} incoming=${incoming} verdict=AUDIT_ONLY`,
             );
             return; // do NOT set output.status — audit only
+        },
+
+        // ===================================================================
+        // EVENT HOOK — the PRIMARY enforcement surface.
+        //
+        // This hook receives EVERY bus event. The only event type it acts on
+        // is `permission.asked`, which OpenCode publishes when its ruleset
+        // routes a tool call to "ask". The event payload (event.properties)
+        // is the Request: {id, sessionID, permission, patterns, metadata,
+        // always, tool}. The hook classifies it and REPLIES via the SDK
+        // client: client.postSessionIdPermissionsPermissionId({path:{id,
+        // permissionID}, body:{response}}). This resolves the Deferred that
+        // Permission.ask is awaiting, which unblocks the tool call (allow) or
+        // blocks it (reject). This is the SAME mechanism the upstream ships in
+        // its ACP agent, `--dangerously-skip-permissions`, and TUI.
+        //
+        // CRITICAL HEADLESS BEHAVIOR: if NO ONE replies to permission.asked,
+        // the Deferred never resolves and the tool call HANGS. In autonomous
+        // modes (enforce/live) the hook MUST reply. The only mode that does
+        // NOT reply is audit (observe-only, a human is expected to be present
+        // to click the prompt) or onUncertain:"passthrough" (interactive
+        // only — documented hang risk).
+        //
+        // EGRESS: event.properties (patterns, metadata) is tool-call-derived
+        // and MUST be scrubbed before landing in any audit/log line.
+        // ===================================================================
+        "event": async ({ event } = {}) => {
+            // Early-return on non-permission.asked events — the hook receives
+            // EVERY bus event but only acts on this one type.
+            if (!event || event.type !== "permission.asked") return;
+
+            const req = event.properties;
+            if (!req || !req.id || !req.sessionID) return;
+
+            // Kill-switch: same live-disable as the other two hooks.
+            const config = readConfig(configPath);
+            if (config.enabled === false) return;
+
+            // Scrubbed audit summary of the event payload. `patterns` and
+            // `metadata` are tool-call-derived and MUST pass through the
+            // shared scrubber before landing in the log line.
+            const permType =
+                (req.permission && req.permission.type) || "unknown";
+            const patternsSummary = Array.isArray(req.patterns)
+                ? req.patterns
+                      .map((p) => scrubTruncate(String(p), MAX_ARG_LEN))
+                      .join(",")
+                : "";
+
+            // --- Reply helper (shared by all decision branches) ---
+            // Wraps the SDK call so every branch logs r.error uniformly.
+            const reply = async (responseMode) => {
+                const r = await client.postSessionIdPermissionsPermissionId({
+                    path: { id: req.sessionID, permissionID: req.id },
+                    body: { response: responseMode },
+                });
+                if (r && r.error) {
+                    console.error(
+                        `[auto-gate] permission reply failed: ` +
+                        `${(r.error && r.error.message) || "unknown"}`,
+                    );
+                }
+            };
+
+            // --- Uncertainty/failure helper ---
+            // Fail-closed default (reject). `passthrough` = no reply — ONLY
+            // for interactive mode where a human is present to click the
+            // prompt; in headless/autonomous mode passthrough HANGS the tool
+            // call (documented risk).
+            const handleUncertain = async (reason) => {
+                if (config.onUncertain === "passthrough") {
+                    console.error(
+                        `[auto-gate] uncertain: ${reason}; ` +
+                        `onUncertain=passthrough (no reply — interactive only)`,
+                    );
+                    return;
+                }
+                console.error(
+                    `[auto-gate] uncertain: ${reason}; ` +
+                    `onUncertain=reject (fail-closed)`,
+                );
+                await reply("reject");
+            };
+
+            // =============== AUDIT mode (default, observe-only) ===============
+            if (config.mode === "audit") {
+                console.error(
+                    `[auto-gate-audit] permission.asked type=${permType} ` +
+                    `patterns=${patternsSummary} verdict=AUDIT_ONLY (no reply)`,
+                );
+                return; // do NOT reply — the human decides
+            }
+
+            // =============== ENFORCE mode (stub classifier) ===================
+            if (config.mode === "enforce") {
+                console.error(
+                    `[auto-gate] permission.asked type=${permType} ` +
+                    `mode=enforce (deciding)`,
+                );
+                let result;
+                try {
+                    result = decidePermission(config);
+                } catch (err) {
+                    const msg = (err && err.message) || String(err);
+                    await handleUncertain(`decision error: ${msg}`);
+                    return;
+                }
+                if (result.audit) console.error(`[auto-gate] ${result.audit}`);
+                if (result.status === "allow") {
+                    await reply(config.replyMode); // "once" | "always"
+                } else {
+                    await reply("reject");
+                }
+                return;
+            }
+
+            // =============== LIVE mode (real classifier model) ================
+            if (config.mode === "live") {
+                console.error(
+                    `[auto-gate] permission.asked type=${permType} ` +
+                    `mode=live (deciding)`,
+                );
+                const liveConfig = { ...config, ...readLlmConfig(llmConfigPath) };
+
+                // (1) Validate live config — missing endpoint/model fail-closes.
+                if (!liveConfig.modelEndpoint) {
+                    await handleUncertain("no modelEndpoint");
+                    return;
+                }
+                if (!liveConfig.model) {
+                    await handleUncertain("no model");
+                    return;
+                }
+
+                // (2) Fetch the session transcript. Graceful degradation: on
+                // any failure, use the permission payload alone (the model
+                // still gets type+patterns to judge). The model-call / decision
+                // layer owns the fail-closed decision; transcript fetch is soft.
+                let transcript = [];
+                try {
+                    if (
+                        client &&
+                        client.session &&
+                        typeof client.session.messages === "function"
+                    ) {
+                        const r = await client.session.messages({
+                            path: { id: req.sessionID },
+                            query: { directory },
+                        });
+                        if (r && r.error) throw r.error;
+                        if (r && Array.isArray(r.data)) transcript = r.data;
+                    } else {
+                        throw new Error("client/session unavailable");
+                    }
+                } catch (err) {
+                    const msg = (err && err.message) || String(err);
+                    console.error(
+                        `[auto-gate] transcript fetch failed (${msg}); ` +
+                        `using permission payload only`,
+                    );
+                    transcript = [];
+                }
+
+                // (3) Serialize to a redacted text-mode string. Build a
+                // permission-like object from the Request payload for the
+                // serializer (it reads .type and .pattern).
+                const permForSerializer = {
+                    type: permType,
+                    pattern: Array.isArray(req.patterns)
+                        ? req.patterns.join(" ")
+                        : "",
+                };
+                const serialized = serializeTranscript(
+                    transcript,
+                    permForSerializer,
+                );
+
+                // (4) Run the live model decision path. decideLive awaits the
+                // HTTP adapter and feeds the raw verdict through the SAME
+                // fail-closed decision matrix as enforce.
+                let result;
+                try {
+                    result = await decideLive(liveConfig, serialized);
+                } catch (err) {
+                    const msg = (err && err.message) || String(err);
+                    await handleUncertain(`live decision error: ${msg}`);
+                    return;
+                }
+                if (result.audit) console.error(`[auto-gate] ${result.audit}`);
+                const retryTag =
+                    result.retries > 0 ? ` retries=${result.retries}` : "";
+                console.error(
+                    `[auto-gate] live decision status=${result.status} ` +
+                    `latencyMs=${result.latencyMs}${retryTag}`,
+                );
+                if (result.status === "allow") {
+                    await reply(config.replyMode); // "once" | "always"
+                } else {
+                    await reply("reject");
+                }
+                return;
+            }
+
+            // =============== Unknown mode — fail-closed =======================
+            await handleUncertain(`unknown mode: ${config.mode}`);
         },
     };
 };
@@ -1039,6 +1284,8 @@ if (__isMain) {
             mode: "audit",
             stubVerdict: "block",
             promptFile: "",
+            replyMode: "once",
+            onUncertain: "reject",
         });
     });
 
@@ -1051,6 +1298,8 @@ if (__isMain) {
             mode: "enforce",
             stubVerdict: "block",
             promptFile: "",
+            replyMode: "once",
+            onUncertain: "reject",
         });
     });
 
@@ -1071,6 +1320,8 @@ if (__isMain) {
             mode: "live",
             stubVerdict: "block",
             promptFile: "",
+            replyMode: "once",
+            onUncertain: "reject",
         });
         assert.equal(
             "modelEndpoint" in cfg,
@@ -1089,6 +1340,8 @@ if (__isMain) {
                 mode: "audit",
                 stubVerdict: "block",
                 promptFile: "",
+                replyMode: "once",
+                onUncertain: "reject",
             });
             assert.equal(errors.length, 1, "present-but-invalid must warn once");
             assert.match(errors[0], /invalid JSON/);
@@ -1114,6 +1367,8 @@ if (__isMain) {
                 mode: "audit",
                 stubVerdict: "block",
                 promptFile: "",
+                replyMode: "once",
+                onUncertain: "reject",
             });
             assert.deepEqual(b, a, "second read of same bad file still returns defaults");
             // Dedup contract (same as invalid JSON): one audit line across both reads.
@@ -1133,6 +1388,8 @@ if (__isMain) {
                     mode: "audit",
                     stubVerdict: "block",
                     promptFile: "",
+                    replyMode: "once",
+                    onUncertain: "reject",
                 });
                 assert.equal(errors.length, 1, `body ${body} must warn once`);
             });
@@ -1320,7 +1577,7 @@ if (__isMain) {
         }, 20);
     });
 
-    test("merged call-site: {...readConfig(), ...readLlmConfig()} yields all 10 fields", () => {
+    test("merged call-site: {...readConfig(), ...readLlmConfig()} yields all 12 fields", () => {
         __resetConfigCaches();
         writeTestConfig("merge-plugin.json", {
             enabled: true,
@@ -1344,6 +1601,8 @@ if (__isMain) {
             mode: "live",
             stubVerdict: "block",
             promptFile: "/x",
+            replyMode: "once",
+            onUncertain: "reject",
             modelEndpoint: "https://x",
             model: "m",
             apiKeyEnv: "K",
@@ -1430,8 +1689,394 @@ if (__isMain) {
         };
         assert.equal(liveConfig.maxRetries, 4, "maxRetries must reach the live config");
         assert.equal(liveConfig.retryDelayMs, 1000, "retryDelayMs must reach the live config");
-        // The two config sources must not collide: plugin config has 4 fields,
-        // LLM config has 6; the merged object has all 10 (4 plugin + 6 LLM).
-        assert.equal(Object.keys(liveConfig).length, 10);
+        // The two config sources must not collide: plugin config has 6 fields,
+        // LLM config has 6; the merged object has all 12 (6 plugin + 6 LLM).
+        assert.equal(Object.keys(liveConfig).length, 12);
     });
+
+    // ===================================================================
+    // EVENT HOOK TESTS — the PRIMARY enforcement surface.
+    //
+    // Each test builds hooks via server({client, directory, configPath,
+    // llmConfigPath}), invokes hooks["event"]({event}) with a fake
+    // permission.asked event, and asserts the reply call args on the fake
+    // client's postSessionIdPermissionsPermissionId.
+    // ===================================================================
+
+    // Helper: fake SDK client recording permission replies.
+    function makeEventClient(opts = {}) {
+        const replies = [];
+        const transcript =
+            opts.transcript ||
+            [
+                {
+                    info: { role: "user" },
+                    parts: [{ type: "text", text: "hello world" }],
+                },
+                {
+                    info: { role: "assistant" },
+                    parts: [{ type: "text", text: "hi there" }],
+                },
+            ];
+        const client = {
+            postSessionIdPermissionsPermissionId: async (args) => {
+                replies.push(args);
+                return opts.replyError
+                    ? {
+                          data: undefined,
+                          error: { message: "stub reply error" },
+                      }
+                    : { data: {}, error: undefined };
+            },
+            session: {
+                messages: async () => ({
+                    data: transcript,
+                    error: undefined,
+                }),
+            },
+        };
+        return { client, replies };
+    }
+
+    // Helper: fake permission.asked bus event.
+    function makeAskedEvent(opts = {}) {
+        return {
+            type: "permission.asked",
+            properties: {
+                id: opts.id || "req-evt-1",
+                sessionID: opts.sessionID || "sess-evt-1",
+                permission: { type: opts.permType || "bash" },
+                patterns: opts.patterns || ["ls -la"],
+                metadata: opts.metadata || {},
+                always: false,
+                tool: "bash",
+            },
+        };
+    }
+
+    // Helper: write configs, reset caches, build hooks + client holder.
+    async function setupEventTest(pluginCfg, llmCfg, clientOpts) {
+        const tag = Math.random().toString(36).slice(2, 8);
+        const pName = `evt-p-${tag}.json`;
+        const lName = `evt-l-${tag}.json`;
+        writeTestConfig(pName, pluginCfg);
+        if (llmCfg) writeTestConfig(lName, llmCfg);
+        __resetConfigCaches();
+        const holder = makeEventClient(clientOpts || {});
+        const hooks = await server({
+            client: holder.client,
+            directory: TEST_CONFIG_DIR,
+            configPath: testConfigPath(pName),
+            llmConfigPath: testConfigPath(
+                llmCfg ? lName : "no-such-llm.json",
+            ),
+        });
+        return { hooks, replies: holder.replies };
+    }
+
+    // Mock globalThis.fetch to return a fixed verdict. Returns a restore fn.
+    function mockFetchVerdict(verdictText) {
+        const orig = globalThis.fetch;
+        globalThis.fetch = async () => ({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                choices: [{ message: { content: verdictText } }],
+            }),
+        });
+        return () => {
+            globalThis.fetch = orig;
+        };
+    }
+
+    // Mock globalThis.fetch to throw. Returns a restore fn.
+    function mockFetchThrow(msg) {
+        const orig = globalThis.fetch;
+        globalThis.fetch = async () => {
+            throw new Error(msg);
+        };
+        return () => {
+            globalThis.fetch = orig;
+        };
+    }
+
+    // One-time setup for live tests: prompt file + API key env.
+    writeTestConfig("evt-classifier-prompt.txt", "You are a classifier.");
+    const _origApiKey = process.env.AUTO_GATE_API_KEY;
+    process.env.AUTO_GATE_API_KEY = "test-key-for-events";
+
+    // --- audit mode ---
+
+    test("event: audit mode → no reply call", async () => {
+        const { hooks, replies } = await setupEventTest({ mode: "audit" });
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(replies.length, 0, "audit mode must NOT reply");
+    });
+
+    // --- enforce mode ---
+
+    test("event: enforce stubVerdict:allow → reply once (default)", async () => {
+        const { hooks, replies } = await setupEventTest({
+            mode: "enforce",
+            stubVerdict: "allow",
+        });
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(replies.length, 1);
+        assert.equal(replies[0].body.response, "once");
+        // Verify path args are threaded correctly.
+        assert.equal(replies[0].path.id, "sess-evt-1");
+        assert.equal(replies[0].path.permissionID, "req-evt-1");
+    });
+
+    test("event: enforce stubVerdict:allow + replyMode:always → reply always", async () => {
+        const { hooks, replies } = await setupEventTest({
+            mode: "enforce",
+            stubVerdict: "allow",
+            replyMode: "always",
+        });
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(replies.length, 1);
+        assert.equal(replies[0].body.response, "always");
+    });
+
+    test("event: enforce stubVerdict:block → reply reject", async () => {
+        const { hooks, replies } = await setupEventTest({
+            mode: "enforce",
+            stubVerdict: "block",
+        });
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(replies.length, 1);
+        assert.equal(replies[0].body.response, "reject");
+    });
+
+    test("event: enforce stubVerdict:fail → reply reject (fail-closed)", async () => {
+        const { hooks, replies } = await setupEventTest({
+            mode: "enforce",
+            stubVerdict: "fail",
+        });
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(replies.length, 1);
+        assert.equal(replies[0].body.response, "reject");
+    });
+
+    // --- live mode ---
+
+    test("event: live allow → reply once", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            {
+                modelEndpoint: "http://mock-llm",
+                model: "test-model",
+                maxRetries: 0,
+            },
+        );
+        const restore = mockFetchVerdict("<block>no</block>");
+        try {
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            restore();
+        }
+        assert.equal(replies.length, 1);
+        assert.equal(replies[0].body.response, "once");
+    });
+
+    test("event: live deny → reply reject", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            {
+                modelEndpoint: "http://mock-llm",
+                model: "test-model",
+                maxRetries: 0,
+            },
+        );
+        const restore = mockFetchVerdict("<block>yes</block>");
+        try {
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            restore();
+        }
+        assert.equal(replies.length, 1);
+        assert.equal(replies[0].body.response, "reject");
+    });
+
+    test("event: live misconfig (no modelEndpoint) → reply reject", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            { modelEndpoint: "", model: "test-model" },
+        );
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(replies.length, 1);
+        assert.equal(replies[0].body.response, "reject");
+    });
+
+    test("event: live fetch throw → reply reject (fail-closed)", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            {
+                modelEndpoint: "http://mock-llm",
+                model: "test-model",
+                maxRetries: 0,
+            },
+        );
+        const restore = mockFetchThrow("network down");
+        try {
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            restore();
+        }
+        assert.equal(replies.length, 1);
+        assert.equal(replies[0].body.response, "reject");
+    });
+
+    // --- onUncertain behavior ---
+
+    test("event: onUncertain:passthrough + live misconfig → NO reply", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live",
+                onUncertain: "passthrough",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            { modelEndpoint: "", model: "test-model" },
+        );
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(
+            replies.length,
+            0,
+            "passthrough must NOT reply on misconfig failure",
+        );
+    });
+
+    test("event: default onUncertain:reject + live misconfig → reply reject", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live",
+                onUncertain: "reject",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            { modelEndpoint: "", model: "test-model" },
+        );
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(replies.length, 1);
+        assert.equal(replies[0].body.response, "reject");
+    });
+
+    // --- early-return paths ---
+
+    test("event: non-permission.asked event → early return, no reply", async () => {
+        const { hooks, replies } = await setupEventTest({
+            mode: "enforce",
+            stubVerdict: "allow",
+        });
+        await hooks["event"]({
+            event: { type: "session.created", properties: {} },
+        });
+        assert.equal(replies.length, 0, "non-asked events must be ignored");
+    });
+
+    test("event: enabled:false → early return, no reply", async () => {
+        const { hooks, replies } = await setupEventTest({
+            enabled: false,
+            mode: "enforce",
+            stubVerdict: "allow",
+        });
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(replies.length, 0, "disabled plugin must not reply");
+    });
+
+    // --- egress: credential-leak regression ---
+
+    test("event: egress — secret in patterns[0] absent from audit line", async () => {
+        const jwt =
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature";
+        const { hooks } = await setupEventTest({ mode: "audit" });
+        const errors = [];
+        const orig = console.error;
+        console.error = (msg) => errors.push(msg);
+        try {
+            await hooks["event"]({
+                event: makeAskedEvent({
+                    patterns: [
+                        `curl -H "Authorization: Bearer ${jwt}" https://api`,
+                    ],
+                }),
+            });
+        } finally {
+            console.error = orig;
+        }
+        const combined = errors.join("\n");
+        assert.equal(
+            combined.includes(jwt),
+            false,
+            "jwt must NOT survive into the event audit line",
+        );
+        assert.match(combined, /\[redacted\]/);
+    });
+
+    // --- reply error logging ---
+
+    test("event: reply r.error → logged, does not throw", async () => {
+        const { hooks, replies } = await setupEventTest(
+            { mode: "enforce", stubVerdict: "allow" },
+            null,
+            { replyError: true },
+        );
+        const errors = [];
+        const orig = console.error;
+        console.error = (msg) => errors.push(msg);
+        try {
+            // Must NOT throw despite the reply error return.
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            console.error = orig;
+        }
+        assert.equal(replies.length, 1, "reply was still attempted");
+        assert.equal(
+            errors.some((e) => /permission reply failed/.test(e)),
+            true,
+            "r.error must be logged",
+        );
+    });
+
+    // --- new config fields: normalization tests ---
+
+    test("readConfig (plugin): invalid replyMode → default once", () => {
+        __resetConfigCaches();
+        writeTestConfig("evt-bad-reply.json", { replyMode: "forever" });
+        const cfg = readConfig(testConfigPath("evt-bad-reply.json"));
+        assert.equal(cfg.replyMode, "once");
+    });
+
+    test("readConfig (plugin): invalid onUncertain → default reject", () => {
+        __resetConfigCaches();
+        writeTestConfig("evt-bad-uncertain.json", { onUncertain: "maybe" });
+        const cfg = readConfig(testConfigPath("evt-bad-uncertain.json"));
+        assert.equal(cfg.onUncertain, "reject");
+    });
+
+    test("readConfig (plugin): replyMode:always + onUncertain:passthrough preserved", () => {
+        __resetConfigCaches();
+        writeTestConfig("evt-valid-new.json", {
+            replyMode: "always",
+            onUncertain: "passthrough",
+        });
+        const cfg = readConfig(testConfigPath("evt-valid-new.json"));
+        assert.equal(cfg.replyMode, "always");
+        assert.equal(cfg.onUncertain, "passthrough");
+    });
+
+    // Restore the API key env after the live tests.
+    process.env.AUTO_GATE_API_KEY = _origApiKey;
 }

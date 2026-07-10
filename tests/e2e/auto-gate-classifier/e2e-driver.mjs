@@ -11,8 +11,14 @@
 //      /tmpproj/.opencode/repo-configs/*.json paths that the plugin reads.
 //   4. SYS-PROMPT BINARY — no promptFile in config, so the plugin shells out to
 //      `vh-agent-harness sys-prompt auto-gate-classifier` (the real Go binary on PATH).
-//   5. HOOK CONTRACT — drives the permission.ask hook the way OpenCode does and
-//      asserts output.status mutation.
+//   5. HOOK CONTRACT — drives BOTH hook surfaces the way OpenCode does:
+//        a. permission.ask hook (DORMANT regression — upstream does not fire it
+//           in stock releases; retained as a reserve).
+//        b. event hook (PRIMARY enforcement surface) — receives the
+//           permission.asked bus event, classifies, and replies via
+//           client.postSessionIdPermissionsPermissionId. This is the surface
+//           that makes enforce/live actually auto-approve against stock OpenCode
+//           (same pattern the upstream ships in ACP/CLI/TUI).
 //   6. TRANSCRIPT FETCH — fake client.session.messages returns a RequestResult-
 //      shaped {data, error} the plugin reads.
 //
@@ -67,6 +73,7 @@ const CANNED_TRANSCRIPT = [
 // ---------------------------------------------------------------------------
 
 let transcriptCallCount = 0;
+let eventReplies = [];
 
 function makeFakeClient() {
     return {
@@ -78,6 +85,16 @@ function makeFakeClient() {
                     error: undefined,
                 };
             },
+        },
+        // The event hook replies through this SDK method (POST
+        // /session/{id}/permissions/{permissionID}). Record the call args so
+        // the event-hook scenarios can assert the reply disposition.
+        postSessionIdPermissionsPermissionId: async (args = {}) => {
+            eventReplies.push({
+                path: { ...(args.path || {}) },
+                body: { ...(args.body || {}) },
+            });
+            return { data: { id: (args.path || {}).permissionID }, error: undefined };
         },
     };
 }
@@ -158,6 +175,26 @@ function makePermissionOutput() {
     return { status: "ask" };
 }
 
+// ---------------------------------------------------------------------------
+// Event-hook helper — builds a fake permission.asked bus event (the payload
+// the event hook receives for every ask-routed permission request).
+// ---------------------------------------------------------------------------
+
+function makeAskedEvent(opts = {}) {
+    return {
+        type: "permission.asked",
+        properties: {
+            id: opts.id || "req-e2e-1",
+            sessionID: opts.sessionID || "sess-e2e-1",
+            permission: { type: opts.permissionType || "bash" },
+            patterns: opts.patterns || ["ls -la"],
+            metadata: opts.metadata || {},
+            always: opts.always || false,
+            tool: opts.tool || "bash",
+        },
+    };
+}
+
 // ===========================================================================
 // TEST SUITE
 // ===========================================================================
@@ -214,6 +251,10 @@ describe("auto-gate-classifier plugin e2e", () => {
         // Build the plugin instance with the fake client (gap #6 transcript path).
         hooks = await server({ client: makeFakeClient(), directory: TMPROJ });
         assert.ok(hooks && typeof hooks["permission.ask"] === "function");
+        assert.ok(
+            typeof hooks["event"] === "function",
+            "plugin does not expose event hook (PRIMARY enforcement surface)",
+        );
 
         // Set the API key env var the live path reads.
         process.env[API_KEY_ENV] = API_KEY_VALUE;
@@ -364,6 +405,158 @@ describe("auto-gate-classifier plugin e2e", () => {
                 2,
                 `recover-after-stall expected count=2 (stall+retry), got ${count}`,
             );
+        });
+    });
+
+    // -------------------------------------------------------------------------
+    // EVENT hook — the PRIMARY enforcement surface. Drives the event hook the
+    // way OpenCode delivers it: a permission.asked bus event arrives, the hook
+    // classifies, and replies via client.postSessionIdPermissionsPermissionId.
+    // The existing permission.ask scenarios above are dormant-hook regression.
+    // -------------------------------------------------------------------------
+    describe("event hook (enforcement surface)", () => {
+        it("audit mode → no reply (observe-only)", async () => {
+            eventReplies = [];
+            await resetMockCounts(MOCK_LLM_BASE);
+
+            writeGateConfig({ enabled: true, mode: "audit" });
+            __resetConfigCaches();
+
+            await hooks["event"]({ event: makeAskedEvent() });
+
+            // CRITICAL: audit mode MUST NOT reply — the human still decides.
+            assert.equal(
+                eventReplies.length,
+                0,
+                "audit mode replied (should be observe-only)",
+            );
+        });
+
+        it('enforce stubVerdict:allow → reply "once" (default replyMode)', async () => {
+            eventReplies = [];
+            await resetMockCounts(MOCK_LLM_BASE);
+
+            writeGateConfig({ enabled: true, mode: "enforce", stubVerdict: "allow" });
+            __resetConfigCaches();
+
+            const event = makeAskedEvent({ id: "req-enf-allow", sessionID: "sess-enf" });
+            await hooks["event"]({ event });
+
+            assert.equal(eventReplies.length, 1, "enforce+allow did not reply");
+            assert.equal(
+                eventReplies[0].body.response,
+                "once",
+                "default replyMode should be once",
+            );
+            assert.equal(
+                eventReplies[0].path.permissionID,
+                "req-enf-allow",
+                "path.permissionID mismatch",
+            );
+            assert.equal(
+                eventReplies[0].path.id,
+                "sess-enf",
+                "path.id (sessionID) mismatch",
+            );
+
+            // No model HTTP call in enforce mode.
+            const allowCount = await getMockCount(MOCK_LLM_BASE, "allow");
+            assert.equal(allowCount, 0, "enforce mode made a model HTTP call");
+        });
+
+        it('enforce stubVerdict:allow + replyMode:always → reply "always"', async () => {
+            eventReplies = [];
+            await resetMockCounts(MOCK_LLM_BASE);
+
+            writeGateConfig({
+                enabled: true,
+                mode: "enforce",
+                stubVerdict: "allow",
+                replyMode: "always",
+            });
+            __resetConfigCaches();
+
+            await hooks["event"]({ event: makeAskedEvent() });
+
+            assert.equal(eventReplies.length, 1, "enforce+allow+always did not reply");
+            assert.equal(
+                eventReplies[0].body.response,
+                "always",
+                "replyMode:always should reply always",
+            );
+        });
+
+        it('enforce stubVerdict:block → reply "reject"', async () => {
+            eventReplies = [];
+            await resetMockCounts(MOCK_LLM_BASE);
+
+            writeGateConfig({ enabled: true, mode: "enforce", stubVerdict: "block" });
+            __resetConfigCaches();
+
+            await hooks["event"]({ event: makeAskedEvent() });
+
+            assert.equal(eventReplies.length, 1, "enforce+block did not reply");
+            assert.equal(
+                eventReplies[0].body.response,
+                "reject",
+                "block verdict should reply reject",
+            );
+        });
+
+        it('live /allow → reply "once" (real HTTP + transcript fetch)', async () => {
+            eventReplies = [];
+            await resetMockCounts(MOCK_LLM_BASE);
+
+            writeGateConfig({ enabled: true, mode: "live" });
+            writeLlmConfig(makeLlmConfig("allow"));
+            __resetConfigCaches();
+
+            const beforeCount = transcriptCallCount;
+            const event = makeAskedEvent({ id: "req-live-allow" });
+            await hooks["event"]({ event });
+
+            assert.equal(eventReplies.length, 1, "live /allow did not reply");
+            assert.equal(
+                eventReplies[0].body.response,
+                "once",
+                "live allow should reply once",
+            );
+            assert.equal(
+                eventReplies[0].path.permissionID,
+                "req-live-allow",
+                "path.permissionID mismatch",
+            );
+
+            // Transcript fetch fired through the fake client.
+            assert.ok(
+                transcriptCallCount > beforeCount,
+                "live event did not fetch transcript",
+            );
+
+            // Real HTTP path: mock count incremented.
+            const count = await getMockCount(MOCK_LLM_BASE, "allow");
+            assert.ok(count > 0, `live /allow mock count not > 0 (got ${count})`);
+        });
+
+        it('live /block → reply "reject" (real HTTP verdict parse)', async () => {
+            eventReplies = [];
+            await resetMockCounts(MOCK_LLM_BASE);
+
+            writeGateConfig({ enabled: true, mode: "live" });
+            writeLlmConfig(makeLlmConfig("block"));
+            __resetConfigCaches();
+
+            await hooks["event"]({ event: makeAskedEvent() });
+
+            assert.equal(eventReplies.length, 1, "live /block did not reply");
+            assert.equal(
+                eventReplies[0].body.response,
+                "reject",
+                "live block should reply reject",
+            );
+
+            const count = await getMockCount(MOCK_LLM_BASE, "block");
+            assert.ok(count > 0, `live /block mock count not > 0 (got ${count})`);
         });
     });
 
