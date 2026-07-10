@@ -192,7 +192,7 @@ path). The split exists so that **LLM settings can NEVER be committed** while
 | File | Fields | Committability |
 |------|--------|----------------|
 | `auto-gate-config.json` | `enabled`, `mode`, `stubVerdict`, `promptFile` | **Adopter's choice** — a team may commit a shared default (e.g. `{"mode":"enforce"}`). NOT gitignored. |
-| `auto-gate-llm.json` | `modelEndpoint`, `model`, `apiKeyEnv`, `timeoutMs` | **NEVER** — gitignored in this dogfood repo. Adopters using live mode create it locally and add the pattern to their own `.gitignore`. |
+| `auto-gate-llm.json` | `modelEndpoint`, `model`, `apiKeyEnv`, `timeoutMs`, `maxRetries`, `retryDelayMs` | **NEVER** — gitignored in this dogfood repo. Adopters using live mode create it locally and add the pattern to their own `.gitignore`. |
 
 Neither file is rendered or seeded by the overlay. Leaving a file absent is the
 documented fail-safe default — the plugin works out of the box with built-in
@@ -220,7 +220,16 @@ defaults.
 | `modelEndpoint` | string | `""` | Required for `live` mode. The FULL OpenAI-compatible chat-completions URL (e.g. `https://api.provider.example/v1/chat/completions`). Empty/missing when `mode: "live"` → fail-closed deny with audit line `live mode misconfigured: no modelEndpoint`. Ignored in other modes. |
 | `model` | string | `""` | Required for `live` mode. The model identifier sent in the request body (e.g. `gpt-4o-mini`, a provider alias, etc.). Empty/missing when `mode: "live"` → fail-closed deny. Ignored in other modes. |
 | `apiKeyEnv` | string | `"AUTO_GATE_API_KEY"` | The **name** of the environment variable holding the API key for `live` mode. The key VALUE is read from `process.env[apiKeyEnv]` at call time — it is **never** stored in either config file. Missing/unset env var at call time → fail-closed deny. Ignored in other modes. |
-| `timeoutMs` | number | `8000` | Hard timeout for the `live` model HTTP call, via `AbortController`. On timeout the call fails-closed to deny. Ignored in other modes. |
+| `timeoutMs` | number | `8000` | Hard timeout for the `live` model HTTP call, via `AbortController`. On timeout the call fails-closed to deny (after exhausting retries — see `maxRetries`). Ignored in other modes. |
+| `maxRetries` | number | `1` | Number of **additional** attempts the `live` call makes after a **transient** failure (timeout / network error / `5xx` / `2xx`-with-empty-content). `0` = single attempt (the pre-retry behavior); `1` (default) = one retry. A `4xx` or malformed-JSON response is **not** retried (retrying won't help). After the final allowed attempt still fails, the call fail-closes to deny. Coerced to a non-negative integer; invalid/missing → `1`. Ignored in other modes. |
+| `retryDelayMs` | number | `500` | Base delay between retries, with **linear** backoff: the delay before attempt *N* (N ≥ 2) = `retryDelayMs * (N - 1)`, so attempt 2 waits 1×, attempt 3 waits 2×, etc. Coerced to a non-negative integer; invalid/missing → `500`. Ignored in other modes. |
+
+> **Token-cost note (retries).** Retries only fire on transient failures; each
+> retry is a fresh API call that **may consume tokens on the provider side even
+> when the prior attempt stalled** (e.g. a request that hangs idle is aborted
+> client-side, but the provider may still have processed it). Defaults are
+> conservative (`maxRetries: 1`) so the common case costs at most one extra call.
+> Operators who want more resilience raise `maxRetries` at their own token cost.
 
 Unknown fields are ignored. A field present but of the wrong type or with an
 invalid value falls back to that field's default (partial configs are merged
@@ -234,11 +243,11 @@ over the defaults field-by-field, so `{"enabled": false}` is valid and leaves
 > either config file.
 
 > **Backward-compat note (clean cut):** the single-file predecessor held all
-> eight fields in `auto-gate-config.json`. The split ignores any LLM fields
-> (`modelEndpoint`/`model`/`apiKeyEnv`/`timeoutMs`) left in the plugin-config
-> file — they MUST come from `auto-gate-llm.json`. This is a freshly-shipped
-> pilot with no real install base, so a clean cut (no deprecation fallback)
-> keeps the two files strictly disjoint.
+> fields in `auto-gate-config.json`. The split ignores any LLM fields
+> (`modelEndpoint`/`model`/`apiKeyEnv`/`timeoutMs`/`maxRetries`/`retryDelayMs`)
+> left in the plugin-config file — they MUST come from `auto-gate-llm.json`. This
+> is a freshly-shipped pilot with no real install base, so a clean cut (no
+> deprecation fallback) keeps the two files strictly disjoint.
 
 ### Examples
 
@@ -277,7 +286,9 @@ and keep it out of git:
   "modelEndpoint": "https://api.provider.example/v1/chat/completions",
   "model": "your-model-id",
   "apiKeyEnv": "AUTO_GATE_API_KEY",
-  "timeoutMs": 8000
+  "timeoutMs": 8000,
+  "maxRetries": 1,
+  "retryDelayMs": 500
 }
 ```
 
@@ -300,8 +311,9 @@ audit spam) — it is the normal case when an operator has not set up live mode;
 `audit`/`enforce` modes never fail because the LLM file is absent. Only a
 **present-but-invalid** (unreadable / invalid JSON) file emits one audit line,
 mirroring the plugin-config handling. Defaults: `{modelEndpoint: "", model: "",
-apiKeyEnv: "AUTO_GATE_API_KEY", timeoutMs: 8000}`. In `live` mode, an empty
-`modelEndpoint`/`model` fail-closes to deny via the existing decision path.
+apiKeyEnv: "AUTO_GATE_API_KEY", timeoutMs: 8000, maxRetries: 1, retryDelayMs:
+500}`. In `live` mode, an empty `modelEndpoint`/`model` fail-closes to deny via
+the existing decision path.
 
 ### Reserved for later phases (not yet implemented)
 
@@ -403,20 +415,28 @@ When an ask-routed call reaches `permission.ask` and `mode === "live"`:
    a chat-completions request (system prompt = the binary-served default via
    `vh-agent-harness sys-prompt auto-gate-classifier`, or the `promptFile`
    override; user message = the serialized transcript), with `temperature: 1`,
-   `max_tokens: 64`, `stream: false`,
+   `max_tokens: 64`, `stream: false`. A **transient** failure (timeout /
+   network error / `5xx` / `2xx`-with-empty-content) is **retried** up to
+   `maxRetries` additional attempts with linear backoff (`retryDelayMs`); a
+   `4xx` or malformed-JSON response is not retried,
 6. the returned verdict text is parsed by the **same** `parseVerdict` → decision
    matrix as `enforce`,
-7. `output.status` is set from the decision; the decision, reason, and model
-   latency are audit-logged.
+7. `output.status` is set from the decision; the decision, reason, model
+   latency, and retry count (when retries occurred) are audit-logged.
 
 ### Fail-closed to deny on any uncertainty
 
 Every indeterminate path denies — the gate degrades to `deny`, never silently
-allows: transport error, timeout (`timeoutMs`), non-2xx response, malformed
-JSON, missing `choices[0].message.content`, unparseable verdict (no `<block>`
-token), missing/unset API key, or a thrown exception in the adapter all yield
+allows. **Transient** failures (transport error, timeout (`timeoutMs`), `5xx`
+response, `2xx`-with-empty-content) are first **retried** up to `maxRetries`
+additional attempts; only after retries are exhausted (or for a non-retryable
+failure: `4xx`, malformed JSON, missing API key, or a thrown exception in the
+adapter) does the path deny. A missing `modelEndpoint`/`model`,
+unparseable verdict (no `<block>` token), or any final adapter failure all yield
 `output.status = "deny"`. Only an explicit `<block>no</block>` (allow) verdict
-yields `allow`.
+yields `allow`. The retry policy keeps the fail-closed contract intact: a retry
+never turns a deny into an allow on its own — it only gives a stalled request a
+second chance to return a verdict.
 
 ### The API key comes from the environment, never a config file
 

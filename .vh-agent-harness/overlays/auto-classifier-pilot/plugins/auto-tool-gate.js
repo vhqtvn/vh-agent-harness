@@ -242,15 +242,15 @@ function repoRoot() {
 //      promptFile:""}.
 //
 //   2. LLM config    → auto-gate-llm.json  (NEW sibling file).
-//      Holds the LLM fields: {modelEndpoint, model, apiKeyEnv, timeoutMs}.
-//      Committability: NEVER — gitignored in the dogfood repo (adopters add
-//      the pattern to their own .gitignore). Fail-safe defaults:
-//      missing/invalid → {modelEndpoint:"", model:"",
-//      apiKeyEnv:"AUTO_GATE_API_KEY", timeoutMs:8000}. A MISSING LLM file is
-//      NORMAL (only needed for live mode) and is SILENT — no audit spam;
-//      audit/enforce modes must NOT fail because the LLM file is absent. In
-//      live mode a missing/empty modelEndpoint/model fail-closes to deny via
-//      the existing decision path.
+//      Holds the LLM fields: {modelEndpoint, model, apiKeyEnv, timeoutMs,
+//      maxRetries, retryDelayMs}. Committability: NEVER — gitignored in the
+//      dogfood repo (adopters add the pattern to their own .gitignore).
+//      Fail-safe defaults: missing/invalid → {modelEndpoint:"", model:"",
+//      apiKeyEnv:"AUTO_GATE_API_KEY", timeoutMs:8000, maxRetries:1,
+//      retryDelayMs:500}. A MISSING LLM file is NORMAL (only needed for live
+//      mode) and is SILENT — no audit spam; audit/enforce modes must NOT fail
+//      because the LLM file is absent. In live mode a missing/empty
+//      modelEndpoint/model fail-closes to deny via the existing decision path.
 //
 // Backward-compat (CLEAN CUT): an operator may still have LLM fields in the
 // OLD auto-gate-config.json. They are IGNORED entirely — readConfig() returns
@@ -308,11 +308,17 @@ const DEFAULT_PLUGIN_CONFIG = Object.freeze({
 // default to empty (so a live call with no endpoint/model fail-closes to deny
 // instead of hitting a garbage URL). `apiKeyEnv` defaults to the conventional
 // env-var NAME (never the value). `timeoutMs` is a conservative bound.
+// `maxRetries` / `retryDelayMs` configure retry-on-transient-failure INSIDE
+// classifyLive (timeout / network error / 5xx / 2xx-empty). Defaults are
+// conservative: 1 retry, 500ms base — enough to recover from a single stall
+// without unbounded token cost (each retry is a fresh API call).
 const DEFAULT_LLM_CONFIG = Object.freeze({
     modelEndpoint: "", // required for live; empty -> fail-closed deny
     model: "", // required for live; empty -> fail-closed deny
     apiKeyEnv: "AUTO_GATE_API_KEY", // NAME of the env var only (never the value)
     timeoutMs: 8000, // hard timeout for the model HTTP call
+    maxRetries: 1, // ADDITIONAL attempts after the first (0 = single attempt)
+    retryDelayMs: 500, // base delay; LINEAR backoff (see classifyLive)
 });
 
 // mtime cache: stores the last successful parse plus a fallback-warning latch
@@ -369,6 +375,21 @@ function normalizePluginConfig(parsed) {
 // endpoint/model is empty (so a misconfigured live call fail-closes to deny,
 // not to a garbage request). The API key VALUE is never read here — only the
 // env-var NAME, looked up at call time inside classifyLive.
+//
+// _normNonNegInt — coerce a value to a non-negative integer, else return the
+// default. Accepts a finite non-negative number (floored) or a numeric string;
+// anything else (negative, NaN, boolean, object, empty) falls back. Used by
+// maxRetries / retryDelayMs so an operator typo can never break the live path.
+function _normNonNegInt(v, dflt) {
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0) {
+        return Math.floor(v);
+    }
+    if (typeof v === "string" && /^\d+$/.test(v.trim())) {
+        return Math.floor(Number(v));
+    }
+    return dflt;
+}
+
 function normalizeLlmConfig(parsed) {
     return {
         modelEndpoint:
@@ -387,6 +408,8 @@ function normalizeLlmConfig(parsed) {
             typeof parsed.timeoutMs === "number" && parsed.timeoutMs > 0
                 ? parsed.timeoutMs
                 : DEFAULT_LLM_CONFIG.timeoutMs,
+        maxRetries: _normNonNegInt(parsed.maxRetries, DEFAULT_LLM_CONFIG.maxRetries),
+        retryDelayMs: _normNonNegInt(parsed.retryDelayMs, DEFAULT_LLM_CONFIG.retryDelayMs),
     };
 }
 
@@ -489,12 +512,12 @@ export function readConfig(configPath = CONFIG_PATH) {
 }
 
 // Read the LLM config (auto-gate-llm.json) with its OWN mtime cache. Returns
-// {modelEndpoint, model, apiKeyEnv, timeoutMs} on every call — never throws.
-// A MISSING file is SILENT (no audit spam) — it is the normal case when live
-// mode is not set up; audit/enforce modes must NOT fail because the LLM file
-// is absent. Only a PRESENT-but-invalid file emits an audit line (mirroring
-// the existing invalid-JSON handling). `llmPath` is injectable for the
-// self-test; production callers omit it.
+// {modelEndpoint, model, apiKeyEnv, timeoutMs, maxRetries, retryDelayMs} on
+// every call — never throws. A MISSING file is SILENT (no audit spam) — it is
+// the normal case when live mode is not set up; audit/enforce modes must NOT
+// fail because the LLM file is absent. Only a PRESENT-but-invalid file emits an
+// audit line (mirroring the existing invalid-JSON handling). `llmPath` is
+// injectable for the self-test; production callers omit it.
 export function readLlmConfig(llmPath = LLM_CONFIG_PATH) {
     return _readJsonConfig(
         llmPath,
@@ -731,8 +754,13 @@ export const server = async ({ client, directory } = {}) => {
                 if (result.audit) {
                     console.error(`[auto-gate] ${result.audit}`);
                 }
+                // Telemetry: surface the retry count when retries occurred
+                // (result.retries is a safe integer; no tool-call content).
+                // Egress discipline unchanged — this is the existing audit
+                // surface, no new console site.
+                const retryTag = result.retries > 0 ? ` retries=${result.retries}` : "";
                 console.error(
-                    `[auto-gate] live decision status=${result.status} latencyMs=${result.latencyMs}`,
+                    `[auto-gate] live decision status=${result.status} latencyMs=${result.latencyMs}${retryTag}`,
                 );
                 output.status = result.status; // "allow" | "deny"
                 return;
@@ -1053,6 +1081,8 @@ if (__isMain) {
                 model: "",
                 apiKeyEnv: "AUTO_GATE_API_KEY",
                 timeoutMs: 8000,
+                maxRetries: 1,
+                retryDelayMs: 500,
             });
             assert.equal(
                 errors.length,
@@ -1069,6 +1099,8 @@ if (__isMain) {
             model: "test-model",
             apiKeyEnv: "MY_GATE_KEY",
             timeoutMs: 4000,
+            maxRetries: 3,
+            retryDelayMs: 250,
         });
         const cfg = readLlmConfig(testConfigPath("llm-valid.json"));
         assert.deepEqual(cfg, {
@@ -1076,6 +1108,8 @@ if (__isMain) {
             model: "test-model",
             apiKeyEnv: "MY_GATE_KEY",
             timeoutMs: 4000,
+            maxRetries: 3,
+            retryDelayMs: 250,
         });
     });
 
@@ -1088,6 +1122,8 @@ if (__isMain) {
             model: "",
             apiKeyEnv: "AUTO_GATE_API_KEY",
             timeoutMs: 8000,
+            maxRetries: 1,
+            retryDelayMs: 500,
         });
     });
 
@@ -1101,6 +1137,8 @@ if (__isMain) {
                 model: "",
                 apiKeyEnv: "AUTO_GATE_API_KEY",
                 timeoutMs: 8000,
+                maxRetries: 1,
+                retryDelayMs: 500,
             });
             assert.equal(
                 errors.length,
@@ -1124,12 +1162,15 @@ if (__isMain) {
     test("readLlmConfig: invalid types fall back to defaults", () => {
         __resetConfigCaches();
         // Wrong types: modelEndpoint as number, model as null, apiKeyEnv empty,
-        // timeoutMs as negative number. Each must normalize to its default.
+        // timeoutMs as negative number, maxRetries as negative, retryDelayMs as
+        // a non-numeric string. Each must normalize to its default.
         writeTestConfig("llm-badtypes.json", {
             modelEndpoint: 123,
             model: null,
             apiKeyEnv: "",
             timeoutMs: -5,
+            maxRetries: -2,
+            retryDelayMs: "fast",
         });
         const cfg = readLlmConfig(testConfigPath("llm-badtypes.json"));
         assert.deepEqual(cfg, {
@@ -1137,6 +1178,8 @@ if (__isMain) {
             model: "",
             apiKeyEnv: "AUTO_GATE_API_KEY",
             timeoutMs: 8000,
+            maxRetries: 1,
+            retryDelayMs: 500,
         });
     });
 
@@ -1167,7 +1210,7 @@ if (__isMain) {
         }, 20);
     });
 
-    test("merged call-site: {...readConfig(), ...readLlmConfig()} yields all 8 fields", () => {
+    test("merged call-site: {...readConfig(), ...readLlmConfig()} yields all 10 fields", () => {
         __resetConfigCaches();
         writeTestConfig("merge-plugin.json", {
             enabled: true,
@@ -1179,6 +1222,8 @@ if (__isMain) {
             model: "m",
             apiKeyEnv: "K",
             timeoutMs: 3000,
+            maxRetries: 2,
+            retryDelayMs: 750,
         });
         const merged = {
             ...readConfig(testConfigPath("merge-plugin.json")),
@@ -1193,6 +1238,90 @@ if (__isMain) {
             model: "m",
             apiKeyEnv: "K",
             timeoutMs: 3000,
+            maxRetries: 2,
+            retryDelayMs: 750,
         });
+    });
+
+    // ===== maxRetries / retryDelayMs reader tests (new fields) =====
+
+    test("readLlmConfig: missing maxRetries/retryDelayMs default to 1/500", () => {
+        __resetConfigCaches();
+        writeTestConfig("llm-no-retry.json", {
+            modelEndpoint: "https://x",
+            model: "m",
+        });
+        const cfg = readLlmConfig(testConfigPath("llm-no-retry.json"));
+        assert.equal(cfg.maxRetries, 1, "default maxRetries is 1");
+        assert.equal(cfg.retryDelayMs, 500, "default retryDelayMs is 500");
+    });
+
+    test("readLlmConfig: maxRetries:0 is preserved (NOT coerced to default)", () => {
+        // 0 is a valid, meaningful value (single attempt, the pre-retry
+        // behavior). It must NOT be normalized to the default 1.
+        __resetConfigCaches();
+        writeTestConfig("llm-no-retry-zero.json", {
+            modelEndpoint: "https://x",
+            model: "m",
+            maxRetries: 0,
+            retryDelayMs: 0,
+        });
+        const cfg = readLlmConfig(testConfigPath("llm-no-retry-zero.json"));
+        assert.equal(cfg.maxRetries, 0, "maxRetries:0 must be preserved");
+        assert.equal(cfg.retryDelayMs, 0, "retryDelayMs:0 must be preserved");
+    });
+
+    test("readLlmConfig: numeric-string maxRetries/retryDelayMs are coerced to ints", () => {
+        __resetConfigCaches();
+        writeTestConfig("llm-retry-str.json", {
+            modelEndpoint: "https://x",
+            model: "m",
+            maxRetries: "5",
+            retryDelayMs: "1200",
+        });
+        const cfg = readLlmConfig(testConfigPath("llm-retry-str.json"));
+        assert.equal(cfg.maxRetries, 5);
+        assert.equal(cfg.retryDelayMs, 1200);
+    });
+
+    test("readLlmConfig: float maxRetries/retryDelayMs are floored", () => {
+        __resetConfigCaches();
+        writeTestConfig("llm-retry-float.json", {
+            modelEndpoint: "https://x",
+            model: "m",
+            maxRetries: 2.9,
+            retryDelayMs: 500.7,
+        });
+        const cfg = readLlmConfig(testConfigPath("llm-retry-float.json"));
+        assert.equal(cfg.maxRetries, 2);
+        assert.equal(cfg.retryDelayMs, 500);
+    });
+
+    test("readLlmConfig: retry fields merge into the live call-site config", () => {
+        // The production merge is `{...config, ...readLlmConfig()}`. This pins
+        // that maxRetries/retryDelayMs survive the spread (the LLM spread wins
+        // over plugin config, and these fields only exist on the LLM side).
+        __resetConfigCaches();
+        writeTestConfig("merge-plugin2.json", {
+            enabled: true,
+            mode: "live",
+        });
+        writeTestConfig("merge-llm2.json", {
+            modelEndpoint: "https://x",
+            model: "m",
+            apiKeyEnv: "K",
+            timeoutMs: 3000,
+            maxRetries: 4,
+            retryDelayMs: 1000,
+        });
+        const liveConfig = {
+            ...readConfig(testConfigPath("merge-plugin2.json")),
+            ...readLlmConfig(testConfigPath("merge-llm2.json")),
+        };
+        assert.equal(liveConfig.maxRetries, 4, "maxRetries must reach the live config");
+        assert.equal(liveConfig.retryDelayMs, 1000, "retryDelayMs must reach the live config");
+        // The two config sources must not collide: plugin config has 4 fields,
+        // LLM config has 6; the merged object has all 10 (4 plugin + 6 LLM).
+        assert.equal(Object.keys(liveConfig).length, 10);
     });
 }

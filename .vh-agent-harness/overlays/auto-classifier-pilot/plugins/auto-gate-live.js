@@ -362,22 +362,39 @@ export function __setCachedBinaryPrompt(value) {
 }
 
 // ---------------------------------------------------------------------------
-// classifyLive — provider-agnostic OpenAI-compatible chat-completions adapter.
+// classifyLive — provider-agnostic OpenAI-compatible chat-completions adapter,
+// with configurable retry on transient failure.
 //
 // Builds a standard OpenAI-compatible request against config.modelEndpoint (the
-// FULL URL, e.g. https://api.provider.com/v1/chat/completions), with the system
+// FULL URL, e.g. https://api.provider.example/v1/chat/completions), with the system
 // prompt + serialized transcript as the two messages. Returns the raw model text
 // from choices[0].message.content — the SAME contract stubEvaluate satisfies, so
 // it slots into decidePermission()'s evaluator slot.
 //
+// RETRY-ON-TRANSIENT-FAILURE: the fetch+response-parse is wrapped in a retry
+// loop so a single transient hiccup (the symptom this fixes: a request that
+// hangs idle / stalls) does not immediately fail-closed to deny. A request is
+// RETRIED when it fails with:
+//   - timeout       — AbortError / the AbortController fired (idle/stall case)
+//   - network error — fetch threw before a response (ECONNRESET / DNS / dropped)
+//   - 5xx response  — transient server error
+//   - 2xx but empty/missing choices[0].message.content — transient model hiccup
+// A request is NOT retried (fail immediately, do not spend another call) when:
+//   - 4xx response  — bad request / auth / not-found (retrying won't help)
+//   - malformed JSON — a non-retryable parse error
+// After the final allowed attempt still fails, classifyLive THROWS the last
+// error (preserving the fail-closed -> deny path). On success at any attempt it
+// returns the content. Defaults are conservative (1 retry) so the common case
+// costs at most one extra call.
+//
 // FAIL-CLOSED BY THROWING: every indeterminate path THROWS, because the caller
 // (decideLive -> decidePermission) maps a thrown evaluator to deny. Throws on:
-//   - missing modelEndpoint / model          (misconfigured)
-//   - missing API key in the named env var   (no credentials)
-//   - non-2xx HTTP status                     (provider error)
-//   - malformed JSON body                     (provider error)
-//   - missing choices[0].message.content      (provider error)
-//   - fetch rejection / AbortError (timeout)  (transport / timeout)
+//   - missing modelEndpoint / model          (misconfigured; NOT retried)
+//   - missing API key in the named env var   (no credentials; NOT retried)
+//   - non-2xx HTTP status                     (4xx immediate; 5xx retried)
+//   - malformed JSON body                     (NOT retried)
+//   - missing choices[0].message.content      (retried — transient)
+//   - fetch rejection / AbortError (timeout)  (retried — transient)
 //
 // API key: read from process.env[config.apiKeyEnv] (default "AUTO_GATE_API_KEY")
 // AT CALL TIME. The key NEVER goes in the config FILE (which may be committed) —
@@ -387,7 +404,116 @@ export function __setCachedBinaryPrompt(value) {
 // network calls. runnerFn is injectable so tests never spawn a real
 // `vh-agent-harness` process to load the system prompt. The plugin runtime is
 // Bun-based, so global fetch + AbortController are available.
-export async function classifyLive(config, serializedInput, fetchFn, runnerFn) {
+//
+// config.maxRetries (default 1, normalized in auto-tool-gate.js) = number of
+// ADDITIONAL attempts after the first (0 = single attempt, the pre-retry
+// behavior). config.retryDelayMs (default 500) = base delay with LINEAR backoff:
+// delay before attempt N (N>=2) = retryDelayMs * (N-1), so attempt 2 waits 1x,
+// attempt 3 waits 2x, etc. Keeps latency bounded; cheap to reason about.
+// _sleep — promise wrapper around setTimeout, used for linear backoff between
+// retries. Kept as a named helper so the retry loop reads as straight-line code.
+function _sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// _isRetryable — classify a single-attempt error. Errors thrown by
+// _attemptFetchParse carry an explicit `retryable` boolean flag, so this just
+// reads the flag. Errors thrown before the loop (misconfiguration / prompt
+// load) carry no flag and are correctly treated as non-retryable.
+function _isRetryable(err) {
+    if (!err) return false;
+    if (typeof err.retryable === "boolean") return err.retryable;
+    return false;
+}
+
+// _attemptFetchParse — ONE fetch + response-parse attempt. Throws a TAGGED
+// error (carrying a `retryable` boolean + optional `status`) on every failure
+// so the retry loop can classify it without string-matching. The message text
+// matches the pre-retry wording so existing error-message assertions still
+// hold. The AbortError name is preserved when the fetch rejection was an abort
+// (timeout), so upstream handlers that inspect .name still see "AbortError".
+async function _attemptFetchParse(fetchImpl, endpoint, apiKey, body, timeoutMs) {
+    // AbortController + setTimeout gives a hard timeout. On abort the underlying
+    // fetch rejects (AbortError) and this attempt throws — retryable.
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    let res;
+    try {
+        res = await fetchImpl(endpoint, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify(body),
+            signal: ac.signal,
+        });
+    } catch (e) {
+        // Transport error (ECONNRESET / DNS / dropped connection) OR timeout
+        // (the AbortController fired — the idle/stall case this fixes). Both are
+        // transient: retryable.
+        const msg = (e && e.message) || String(e);
+        const tagged = new Error(msg);
+        tagged.name = e && e.name === "AbortError" ? "AbortError" : "TransportError";
+        tagged.retryable = true;
+        throw tagged;
+    } finally {
+        clearTimeout(timer);
+    }
+
+    if (
+        !res ||
+        typeof res.status !== "number" ||
+        res.status < 200 ||
+        res.status >= 300
+    ) {
+        const status =
+            res && typeof res.status === "number" ? res.status : undefined;
+        const tagged = new Error(
+            `non-2xx response: ${status !== undefined ? status : "no-status"}`,
+        );
+        // 5xx (and a missing/untyped status) are transient server errors ->
+        // retryable. 4xx (bad request / auth / not-found) are permanent ->
+        // fail immediately, do not spend another call.
+        tagged.retryable = status === undefined || status >= 500;
+        if (status !== undefined) tagged.status = status;
+        throw tagged;
+    }
+
+    let json;
+    try {
+        json = await res.json();
+    } catch (e) {
+        const tagged = new Error(
+            `malformed JSON response: ${(e && e.message) || String(e)}`,
+        );
+        tagged.retryable = false; // parse error: not retryable
+        throw tagged;
+    }
+
+    const content =
+        json &&
+        json.choices &&
+        json.choices[0] &&
+        json.choices[0].message &&
+        json.choices[0].message.content;
+
+    if (typeof content !== "string" || content.length === 0) {
+        const tagged = new Error("missing choices[0].message.content");
+        // 2xx but empty/missing content — a transient model hiccup: retryable.
+        tagged.retryable = true;
+        throw tagged;
+    }
+    return content;
+}
+
+// _classifyLiveCore — config validation + retry loop. Returns { content,
+// retries } on success (retries = number of ADDITIONAL attempts taken beyond
+// the first, for the audit line). Throws the last error on final failure
+// (fail-closed -> deny). classifyLive() (public) wraps this and returns only
+// .content so its string-return contract is unchanged; decideLive() calls this
+// directly so it can surface the retry count in its result for the audit line.
+async function _classifyLiveCore(config, serializedInput, fetchFn, runnerFn) {
     const fetchImpl = fetchFn || globalThis.fetch;
     if (typeof fetchImpl !== "function") {
         throw new Error("no fetch implementation available");
@@ -412,7 +538,26 @@ export async function classifyLive(config, serializedInput, fetchFn, runnerFn) {
         config && typeof config.timeoutMs === "number" && config.timeoutMs > 0
             ? config.timeoutMs
             : 8000;
+    // Retry policy. Mirrors the timeoutMs defaulting style so a direct call
+    // (e.g. tests) without normalization still resolves the fields. Production
+    // reads these from auto-gate-llm.json via normalizeLlmConfig.
+    const maxRetries =
+        typeof config.maxRetries === "number" &&
+        Number.isInteger(config.maxRetries) &&
+        config.maxRetries >= 0
+            ? config.maxRetries
+            : 1;
+    const retryDelayMs =
+        typeof config.retryDelayMs === "number" &&
+        Number.isInteger(config.retryDelayMs) &&
+        config.retryDelayMs >= 0
+            ? config.retryDelayMs
+            : 500;
 
+    // Prompt + body are built ONCE: they are identical across attempts (a retry
+    // is a fresh POST of the same payload). Building them outside the loop also
+    // keeps a binary prompt-load failure non-retryable (it throws here, before
+    // the loop, so _isRetryable never sees it).
     const prompt = resolveSystemPrompt(config, { runner: runnerFn });
     const body = {
         model,
@@ -425,56 +570,52 @@ export async function classifyLive(config, serializedInput, fetchFn, runnerFn) {
         stream: false,
     };
 
-    // AbortController + setTimeout gives a hard timeout. On abort the underlying
-    // fetch rejects (AbortError) and classifyLive throws — caller fail-closes.
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), timeoutMs);
-    let res;
-    try {
-        res = await fetchImpl(endpoint, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${apiKey}`,
-            },
-            body: JSON.stringify(body),
-            signal: ac.signal,
-        });
-    } finally {
-        clearTimeout(timer);
+    const maxAttempts = maxRetries + 1;
+    let lastErr;
+    let retries = 0;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            const content = await _attemptFetchParse(
+                fetchImpl,
+                endpoint,
+                apiKey,
+                body,
+                timeoutMs,
+            );
+            return { content, retries };
+        } catch (err) {
+            lastErr = err;
+            if (attempt < maxAttempts && _isRetryable(err)) {
+                // LINEAR BACKOFF: delay before attempt N (N>=2) = retryDelayMs *
+                // (N-1). The just-failed attempt is `attempt`, so the NEXT
+                // attempt is `attempt + 1` and (N-1) = attempt. Thus attempt 2
+                // waits 1x, attempt 3 waits 2x, ... keeps latency bounded.
+                const delay = retryDelayMs * attempt;
+                if (delay > 0) await _sleep(delay);
+                retries++;
+                continue;
+            }
+            // Non-retryable error OR no attempts left: throw the original error
+            // (message/name preserved) so the fail-closed -> deny path and all
+            // existing error-message assertions hold unchanged. STAMP the retry
+            // count onto the error (mirroring the .retryable/.status tagging in
+            // _attemptFetchParse) so the fail-closed path (decideLive) can
+            // report accurate `retries=N` telemetry instead of losing it — the
+            // locally-tracked `retries` would otherwise be discarded on throw.
+            err.retries = retries;
+            throw err;
+        }
     }
+    // Unreachable in practice (the loop returns or throws), but kept as a
+    // defensive last-error throw for clarity. Stamp retries here too so the
+    // invariant (every thrown error carries its .retries) holds unconditionally.
+    if (lastErr) lastErr.retries = retries;
+    throw lastErr;
+}
 
-    if (
-        !res ||
-        typeof res.status !== "number" ||
-        res.status < 200 ||
-        res.status >= 300
-    ) {
-        throw new Error(
-            `non-2xx response: ${res && res.status !== undefined ? res.status : "no-status"}`,
-        );
-    }
-
-    let json;
-    try {
-        json = await res.json();
-    } catch (e) {
-        throw new Error(
-            `malformed JSON response: ${(e && e.message) || String(e)}`,
-        );
-    }
-
-    const content =
-        json &&
-        json.choices &&
-        json.choices[0] &&
-        json.choices[0].message &&
-        json.choices[0].message.content;
-
-    if (typeof content !== "string" || content.length === 0) {
-        throw new Error("missing choices[0].message.content");
-    }
-    return content;
+export async function classifyLive(config, serializedInput, fetchFn, runnerFn) {
+    const r = await _classifyLiveCore(config, serializedInput, fetchFn, runnerFn);
+    return r.content;
 }
 
 // ---------------------------------------------------------------------------
@@ -502,18 +643,30 @@ export async function classifyLive(config, serializedInput, fetchFn, runnerFn) {
 export async function decideLive(config, serializedInput, fetchFn, runnerFn) {
     let liveError = null;
     let rawText = null;
+    let retries = 0;
     const t0 = Date.now();
     try {
-        rawText = await classifyLive(config, serializedInput, fetchFn, runnerFn);
+        // Call the core directly (not the public classifyLive wrapper) so the
+        // retry count is available for the audit line below.
+        const r = await _classifyLiveCore(config, serializedInput, fetchFn, runnerFn);
+        rawText = r.content;
+        retries = r.retries;
     } catch (err) {
         liveError = err;
+        // _classifyLiveCore stamps .retries onto thrown errors produced inside
+        // the retry loop (mirroring .retryable/.status). Pre-loop throws
+        // (misconfiguration, prompt-load failure) carry no .retries, so the
+        // fallback is 0 — which is correct: no retries occurred.
+        retries = typeof err.retries === "number" ? err.retries : 0;
     }
     const latencyMs = Date.now() - t0;
     const result = decidePermission(config, () => {
         if (liveError) throw liveError;
         return rawText;
     });
-    return { status: result.status, audit: result.audit, reason: result.reason, latencyMs };
+    // `retries` flows up to the live-decision audit line (appended as
+    // `retries=N` when > 0); it is a safe integer (no tool-call content).
+    return { status: result.status, audit: result.audit, reason: result.reason, latencyMs, retries };
 }
 
 // ===========================================================================
@@ -1048,6 +1201,11 @@ if (__isMain) {
         model: "test-model",
         apiKeyEnv: "TEST_GATE_KEY",
         timeoutMs: 5000,
+        // maxRetries:0 keeps the existing single-attempt failure tests fast and
+        // semantically "one attempt". Retry behavior has its own dedicated tests
+        // below that override these two fields explicitly.
+        maxRetries: 0,
+        retryDelayMs: 0,
     };
 
     function fakeFetchOk(content) {
@@ -1217,6 +1375,164 @@ if (__isMain) {
         }
     });
 
+    // ===== classifyLive retry loop (transient-failure recovery) =====
+    //
+    // These tests pin the retry policy: which failures retry, which fail
+    // immediately, the attempt count, the retry count, and linear backoff.
+    // retryDelayMs:0 keeps them fast (the backoff timing test uses a small
+    // nonzero value with wall-clock slack). Each test uses a call-counting
+    // fake fetch so the attempt count is asserted exactly — NO real network.
+
+    // Helper: a fake fetch whose nth call behavior comes from a list of step
+    // factories. A step is either { throw:"abort" } / { throw:"network", msg }
+    // / { status, content } / { status } / { empty:true }. Calls past the last
+    // step repeat the last step.
+    function stepFetch(steps) {
+        let calls = 0;
+        const fn = async () => {
+            const idx = Math.min(calls, steps.length - 1);
+            const step = steps[idx];
+            calls++;
+            if (step && step.throw) {
+                if (step.throw === "abort") {
+                    const e = new Error(step.msg || "aborted");
+                    e.name = "AbortError";
+                    throw e;
+                }
+                throw new Error(step.msg || "ECONNRESET");
+            }
+            const status = (step && step.status) || 200;
+            const content = step && Object.prototype.hasOwnProperty.call(step, "content")
+                ? step.content
+                : "<block>no</block>";
+            const json = step && step.empty
+                ? {}
+                : { choices: [{ message: { content } }] };
+            return { status, json: async () => json };
+        };
+        fn.callCount = () => calls;
+        return fn;
+    }
+
+    test("retry (a): 1st attempt aborts, 2nd succeeds -> content, retries=1", withKey(async () => {
+        const fake = stepFetch([{ throw: "abort" }, { content: "<block>no</block>" }]);
+        const out = await classifyLive(
+            { ...GOOD_CONFIG, maxRetries: 1, retryDelayMs: 0 },
+            "x", fake, fakeRunnerOk(),
+        );
+        assert.equal(out, "<block>no</block>");
+        assert.equal(fake.callCount(), 2, "must retry exactly once");
+    }));
+
+    test("retry (b): all attempts abort -> throws last error, deny path", withKey(async () => {
+        const fake = stepFetch([{ throw: "abort" }]);
+        await assert.rejects(
+            () => classifyLive({ ...GOOD_CONFIG, maxRetries: 2, retryDelayMs: 0 }, "x", fake, fakeRunnerOk()),
+            /aborted/,
+        );
+        assert.equal(fake.callCount(), 3, "1 initial + 2 retries = 3 attempts");
+    }));
+
+    test("retry (c): 4xx -> NOT retried, immediate throw (deny path)", withKey(async () => {
+        const fake = stepFetch([{ status: 404 }]);
+        await assert.rejects(
+            () => classifyLive({ ...GOOD_CONFIG, maxRetries: 3, retryDelayMs: 0 }, "x", fake, fakeRunnerOk()),
+            /non-2xx response: 404/,
+        );
+        assert.equal(fake.callCount(), 1, "4xx must NOT retry");
+    }));
+
+    test("retry (d): maxRetries:0 -> exactly one attempt even on retryable failure", withKey(async () => {
+        const fake = stepFetch([{ throw: "abort" }]);
+        await assert.rejects(
+            () => classifyLive({ ...GOOD_CONFIG, maxRetries: 0, retryDelayMs: 0 }, "x", fake, fakeRunnerOk()),
+            /aborted/,
+        );
+        assert.equal(fake.callCount(), 1, "maxRetries:0 = single attempt");
+    }));
+
+    test("retry: 5xx is retryable, exhausts attempts then throws", withKey(async () => {
+        const fake = stepFetch([{ status: 503 }]);
+        await assert.rejects(
+            () => classifyLive({ ...GOOD_CONFIG, maxRetries: 1, retryDelayMs: 0 }, "x", fake, fakeRunnerOk()),
+            /non-2xx response: 503/,
+        );
+        assert.equal(fake.callCount(), 2);
+    }));
+
+    test("retry: 2xx empty content is retryable", withKey(async () => {
+        const fake = stepFetch([{ empty: true }]);
+        await assert.rejects(
+            () => classifyLive({ ...GOOD_CONFIG, maxRetries: 1, retryDelayMs: 0 }, "x", fake, fakeRunnerOk()),
+            /missing choices\[0\]\.message\.content/,
+        );
+        assert.equal(fake.callCount(), 2);
+    }));
+
+    test("retry: transport error (ECONNRESET) is retryable, then success", withKey(async () => {
+        const fake = stepFetch([{ throw: "network", msg: "ECONNRESET" }, { content: "<block>no</block>" }]);
+        const out = await classifyLive(
+            { ...GOOD_CONFIG, maxRetries: 1, retryDelayMs: 0 },
+            "x", fake, fakeRunnerOk(),
+        );
+        assert.equal(out, "<block>no</block>");
+        assert.equal(fake.callCount(), 2);
+    }));
+
+    test("retry: malformed JSON is NOT retryable", withKey(async () => {
+        const fake = async () => ({
+            status: 200,
+            json: async () => { throw new Error("bad json"); },
+        });
+        let calls = 0;
+        const counting = async (...a) => { calls++; return fake(...a); };
+        await assert.rejects(
+            () => classifyLive({ ...GOOD_CONFIG, maxRetries: 3, retryDelayMs: 0 }, "x", counting, fakeRunnerOk()),
+            /malformed JSON/,
+        );
+        assert.equal(calls, 1, "malformed JSON must NOT retry");
+    }));
+
+    test("retry: defaults to maxRetries:1 when config omits the fields", withKey(async () => {
+        // A config with NO maxRetries/retryDelayMs (and no GOOD_CONFIG spread)
+        // must pick up the internal defaults: 1 retry. 1st abort -> 1 retry.
+        const fake = stepFetch([{ throw: "abort" }, { content: "<block>no</block>" }]);
+        const out = await classifyLive(
+            { modelEndpoint: "https://x", model: "m", apiKeyEnv: "TEST_GATE_KEY", timeoutMs: 5000 },
+            "x", fake, fakeRunnerOk(),
+        );
+        assert.equal(out, "<block>no</block>");
+        assert.equal(fake.callCount(), 2, "default maxRetries=1 -> one retry");
+    }));
+
+    test("retry: linear backoff sleeps retryDelayMs*(N-1) before each retry", withKey(async () => {
+        // attempt 1 aborts -> sleep retryDelayMs*1 -> attempt 2 succeeds.
+        // Wall-clock assertion with slack (scheduler jitter). retryDelayMs is
+        // small but nonzero so the sleep is observable without slowing the suite.
+        const fake = stepFetch([{ throw: "abort" }, { content: "<block>no</block>" }]);
+        const t0 = Date.now();
+        await classifyLive(
+            { ...GOOD_CONFIG, maxRetries: 1, retryDelayMs: 40 },
+            "x", fake, fakeRunnerOk(),
+        );
+        const elapsed = Date.now() - t0;
+        // delay before attempt 2 = 40*1 = 40ms. Allow a little slack downward.
+        assert.ok(elapsed >= 30, `expected >=30ms backoff (40ms), got ${elapsed}ms`);
+    }));
+
+    test("retry: classifyLive returns content string (unchanged contract)", withKey(async () => {
+        // classifyLive's PUBLIC contract is still the content string (not an
+        // object); only decideLive surfaces the retry count.
+        const fake = stepFetch([{ content: "<block>no</block>" }]);
+        const out = await classifyLive(
+            { ...GOOD_CONFIG, maxRetries: 2, retryDelayMs: 0 },
+            "x", fake, fakeRunnerOk(),
+        );
+        assert.equal(typeof out, "string");
+        assert.equal(out, "<block>no</block>");
+        assert.equal(fake.callCount(), 1);
+    }));
+
     // ===== decideLive — fail-closed wiring (fake transport) =====
 
     test("decideLive: happy <block>no</block> -> allow", withKey(async () => {
@@ -1292,6 +1608,111 @@ if (__isMain) {
             if (prev !== undefined) process.env[name] = prev;
         }
     });
+
+    test("decideLive: retry count surfaces in result.retries (telemetry)", withKey(async () => {
+        // 1st attempt aborts (retryable), 2nd succeeds. decideLive must surface
+        // retries=1 in its result so the live-decision audit line can append
+        // `retries=N`. The audit-line string itself lives in auto-tool-gate.js;
+        // this test pins the value that flows into it.
+        const fake = stepFetch([{ throw: "abort" }, { content: "<block>no</block>" }]);
+        const r = await decideLive(
+            { ...GOOD_CONFIG, maxRetries: 1, retryDelayMs: 0 },
+            "input", fake, fakeRunnerOk(),
+        );
+        assert.equal(r.status, "allow");
+        assert.equal(r.retries, 1, "one retry must surface as retries=1");
+    }));
+
+    test("decideLive: no retries -> retries=0", withKey(async () => {
+        const r = await decideLive(GOOD_CONFIG, "input", fakeFetchOk("<block>no</block>"), fakeRunnerOk());
+        assert.equal(r.status, "allow");
+        assert.equal(r.retries, 0);
+    }));
+
+    // ===== decideLive: retries telemetry on the THROW path (telemetry-fix regression) =====
+    //
+    // The retry count was previously LOST whenever _classifyLiveCore threw (on
+    // a non-retryable error, or after exhausting all retry attempts): the
+    // locally-tracked `retries` was discarded at the throw, so decideLive
+    // reported retries=0 on EVERY fail-closed path. These tests pin the fix:
+    // the surfaced `retries` must equal the number of retries that actually
+    // occurred, across all throw shapes.
+    //
+    // Cross-check against the HTTP-level integration suite
+    // (tests/integration/auto-gate-live-http/): that suite proves retries
+    // HAPPEN via the mock's per-scenario request counter (count = attempts =
+    // retries + 1). The unit-test `retries` value here must match that count
+    // minus one. The integration suite is NOT modified by this fix.
+
+    test("decideLive-telemetry: retries-exhausted -> deny surfaces retries=N (NOT 0)", withKey(async () => {
+        // attempt 1 abort (retryable) -> retry
+        // attempt 2 abort (retryable) -> retry
+        // attempt 3 abort -> exhaust, throw last error -> fail-closed deny.
+        // 2 retries occurred; telemetry must report retries=2.
+        const fake = stepFetch([
+            { throw: "abort" },
+            { throw: "abort" },
+            { throw: "abort" },
+        ]);
+        const r = await decideLive(
+            { ...GOOD_CONFIG, maxRetries: 2, retryDelayMs: 0 },
+            "input", fake, fakeRunnerOk(),
+        );
+        assert.equal(r.status, "deny");
+        assert.match(r.audit, /fail-closed: evaluator error/);
+        assert.equal(
+            r.retries, 2,
+            "2 retries occurred before the throw; telemetry must report retries=2, not 0 (the bug)",
+        );
+        assert.equal(fake.callCount(), 3, "1 initial + 2 retries = 3 attempts");
+    }));
+
+    test("decideLive-telemetry: non-retryable 4xx after a prior retry -> deny surfaces retries=N", withKey(async () => {
+        // attempt 1 abort (retryable) -> retry (1 retry consumed)
+        // attempt 2 4xx (non-retryable) -> immediate throw -> fail-closed deny.
+        // 1 retry occurred before the 4xx; telemetry must report retries=1.
+        const fake = stepFetch([{ throw: "abort" }, { status: 404 }]);
+        const r = await decideLive(
+            { ...GOOD_CONFIG, maxRetries: 3, retryDelayMs: 0 },
+            "input", fake, fakeRunnerOk(),
+        );
+        assert.equal(r.status, "deny");
+        assert.match(r.audit, /non-2xx response: 404/);
+        assert.equal(
+            r.retries, 1,
+            "1 retry occurred before the non-retryable 4xx; telemetry must report retries=1, not 0 (the bug)",
+        );
+        assert.equal(fake.callCount(), 2, "1 initial + 1 retry = 2 attempts");
+    }));
+
+    test("decideLive-telemetry: immediate non-retryable 4xx (no prior retry) -> deny surfaces retries=0", withKey(async () => {
+        // attempt 1 4xx (non-retryable) -> immediate throw, NO retries.
+        // Pins the boundary: the fix must not inflate retries on a path where
+        // zero retries occurred.
+        const fake = stepFetch([{ status: 404 }]);
+        const r = await decideLive(
+            { ...GOOD_CONFIG, maxRetries: 3, retryDelayMs: 0 },
+            "input", fake, fakeRunnerOk(),
+        );
+        assert.equal(r.status, "deny");
+        assert.match(r.audit, /non-2xx response: 404/);
+        assert.equal(r.retries, 0, "no retries occurred; telemetry must report retries=0");
+        assert.equal(fake.callCount(), 1, "4xx must NOT retry");
+    }));
+
+    test("decideLive-telemetry: misconfiguration throw (no retries) -> deny surfaces retries=0", withKey(async () => {
+        // Pre-loop throw (missing modelEndpoint) carries no .retries stamp;
+        // the typeof fallback must yield 0. Pins that the fix correctly
+        // distinguishes in-loop throws (stamped) from pre-loop throws (unstamped).
+        const r = await decideLive(
+            { ...GOOD_CONFIG, modelEndpoint: "" },
+            "input",
+            fakeFetchOk("<block>no</block>"),
+        );
+        assert.equal(r.status, "deny");
+        assert.match(r.audit, /missing modelEndpoint/);
+        assert.equal(r.retries, 0, "misconfiguration (pre-loop throw) must surface retries=0");
+    }));
 
     // ===== Default posture: live path is OPT-IN =====
 
