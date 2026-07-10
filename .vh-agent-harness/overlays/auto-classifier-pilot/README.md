@@ -454,7 +454,7 @@ audit branch.
 
 OpenCode **auto-discovers** plugins from `.opencode/plugins/*.js` — there is no
 `plugins` key in `opencode.jsonc`, yet `shell-guard.js`, `session-state.js`,
-and `maxoutputtokens.js` all load automatically. This pack renders three units
+and `maxoutputtokens.js` all load automatically. This pack renders four units
 (via the overlay `RenderUnits` walk) into `.opencode/plugins/`:
 
 - `plugins/auto-tool-gate.js` → `.opencode/plugins/auto-tool-gate.js` — the
@@ -474,6 +474,13 @@ and `maxoutputtokens.js` all load automatically. This pack renders three units
   `mode === "live"`. Also **self-testing**: run
   `vh-agent-harness exec node --test .opencode/plugins/auto-gate-live.js` to
   execute its regression suite (importing it as a module runs no tests).
+- `plugins/auto-gate-scrub.js` → `.opencode/plugins/auto-gate-scrub.js` — the
+  shared credential scrubber (`truncate`, `scrubCredentials`,
+  `scrubTruncate`); a plugin dependency imported by both `auto-tool-gate.js`
+  (stderr/audit egress) and `auto-gate-live.js` (HTTP-egress transcript). Does
+  NOT export `server`. Also **self-testing**: run `vh-agent-harness exec node
+  --test .opencode/plugins/auto-gate-scrub.js` to execute its regression suite
+  (importing it as a module runs no tests).
 
 No `opencode.jsonc` registration is needed (this pack's
 `opencode-append.jsonc` is intentionally empty for that reason).
