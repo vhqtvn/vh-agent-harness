@@ -1,6 +1,6 @@
 # vh-agent-harness developer tasks. The repo dogfoods its own harness; `update`
 # regenerates this repo's rendered .opencode/ from templates/core after a build.
-.PHONY: build test fmt vet check install update doctor test-auto-gate-live test-e2e-auto-gate
+.PHONY: build test fmt vet check install update doctor test-auto-gate-live test-e2e-auto-gate test-e2e-auto-gate-opencode
 
 build: ## Build the binary into bin/
 	go build -o bin/vh-agent-harness ./cmd/vh-agent-harness
@@ -34,3 +34,9 @@ test-e2e-auto-gate: ## Run auto-gate-classifier plugin e2e (requires Docker Comp
 	@command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || \
 		{ echo "[test-e2e-auto-gate] Docker Compose is not available; install Docker to run this suite."; exit 1; }
 	docker compose -f tests/e2e/auto-gate-classifier/docker-compose.yml run --rm e2e-runner
+
+test-e2e-auto-gate-opencode: ## Run auto-gate real-runtime e2e (requires Docker; single container, fully isolated)
+	@command -v docker >/dev/null 2>&1 || \
+		{ echo "[test-e2e-auto-gate-opencode] Docker is not available; install Docker to run this suite."; exit 1; }
+	docker build -t auto-gate-opencode-e2e -f tests/e2e/auto-gate-opencode/Dockerfile .
+	docker run --rm auto-gate-opencode-e2e

@@ -1,0 +1,1 @@
+readable-target-content for the auto-gate-opencode e2e suite.
