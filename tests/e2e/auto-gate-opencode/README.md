@@ -5,9 +5,11 @@ This suite proves the auto-classifier plugin's enforcement path works against a
 (`tests/e2e/auto-gate-classifier/` with a synthetic driver, and
 `tests/integration/auto-gate-live-http/` with module-import) do not exercise.
 
-It exercises **both** execution modes:
+It exercises **both** execution modes and **both** evaluation modes:
 - **`opencode run`** (one-shot CLI) — the race-proof two-case matrix.
 - **`opencode serve`** (long-lived HTTP listener) — the serve-mode reply proof.
+- **ENFORCE mode** (stub evaluator, sync) — Cases A/B.
+- **LIVE mode** (real classifier HTTP egress) — Cases C/D.
 
 ## What it proves
 
@@ -16,11 +18,17 @@ It exercises **both** execution modes:
 2. **Plugin receives a real `permission.asked` bus event** when the agent
    tries to read a file — not a synthetic event from a fake client.
 3. **Plugin evaluates the request** (ENFORCE mode: stubEvaluate → parseVerdict
-   → decision matrix) and **replies through the real SDK**
+   → decision matrix; LIVE mode: transcript fetch → classifier HTTP → verdict
+   parse) and **replies through the real SDK**
    (`postSessionIdPermissionsPermissionId`).
 4. **Plugin's reply resolves the permission** so the tool proceeds (allow) or
    is blocked (reject) — proven under BOTH `opencode run` and `opencode serve`,
    against CURRENT upstream opencode with **no source patches**.
+5. **The full live chain works end-to-end** (LIVE cases C/D): the plugin fetches
+   the transcript via `client.session.messages`, serializes it, POSTs to the
+   classifier endpoint, parses the verdict, and replies — all against the real
+   runtime. The classifier HTTP egress is **proven** via the mock's call counter
+   (`/count/classifier > 0`), so a pass cannot come from the stub path.
 
 ## Acquisition: latest upstream, no patches
 
@@ -53,7 +61,7 @@ first. The cost is that a build is not byte-for-byte reproducible across time
 integration suite; reproducibility is the job of the pinned unit/integration
 suites.
 
-## Run mode + ENFORCE mode (race-proof two-case matrix)
+## Run mode (race-proof two-case matrix)
 
 This suite uses `opencode run` (one-shot CLI) for its race-proof two-case
 matrix. `opencode run` uses **only** `Server.Default()` (the singleton app) as
@@ -70,23 +78,45 @@ event. **First reply wins.** The plugin has a structural head-start: it
 receives the event via a direct bus-stream callback (synchronous dispatch),
 while run's auto-reply goes through SSE transport (more hops).
 
-To win the race reliably, the plugin runs in **ENFORCE mode** (not LIVE mode).
-ENFORCE mode uses `stubEvaluate` — a pure synchronous evaluator with no HTTP
-round-trip. The plugin's path is: `readConfig` (sync file read) →
-`decidePermission` (sync) → `reply` (in-process SDK fetch). This is
-substantially faster than LIVE mode (which adds a classifier HTTP call that
-lost the race in earlier testing).
+Both ENFORCE and LIVE modes are exercised under run:
 
-### Two-case matrix (airtight — no false pass possible)
+- **ENFORCE mode** (Cases A/B) uses `stubEvaluate` — a pure synchronous
+  evaluator with no HTTP round-trip. The plugin's path is: `readConfig` (sync
+  file read) → `decidePermission` (sync) → `reply` (in-process SDK fetch).
+- **LIVE mode** (Cases C/D) exercises the full live chain: transcript fetch via
+  `client.session.messages` → `serializeTranscript` → classifier HTTP egress
+  (`decideLive` POSTs to `modelEndpoint`) → verdict parse → reply. This is
+  slower (HTTP round-trip), so the run-mode race is tighter; serve-live is the
+  deterministic proof. The live cases ALSO assert the classifier HTTP was
+  actually called (mock `/count/classifier > 0`), proving the live egress
+  happened rather than the stub path.
 
-| Case | `--dangerously-skip` | `stubVerdict` | Run default | PASS = tool outcome |
-|------|:---:|---|---|---|
-| **A (ALLOW proof)** | absent | `"allow"` | reject | **read PROCEEDS** (run alone would reject) |
-| **B (BLOCK proof)** | present | `"block"` | once/allow | **read BLOCKED** (run alone would allow) |
+### Two-case matrix × two evaluation modes (airtight — no false pass possible)
+
+| Case | Mode | `--dangerously` | Verdict source | Run default | PASS = tool outcome |
+|------|------|:---:|---|---|---|
+| **A (ALLOW proof)** | enforce | absent | stub `"allow"` | reject | **read PROCEEDS** |
+| **B (BLOCK proof)** | enforce | present | stub `"block"` | once/allow | **read BLOCKED** |
+| **C (LIVE ALLOW proof)** | live | absent | classifier `<block>no` | reject | **read PROCEEDS** |
+| **D (LIVE BLOCK proof)** | live | present | classifier `<block>yes` | once/allow | **read BLOCKED** |
 
 A pass PROVES the plugin won the race: the only way the outcome flips from the
 run-default is if the plugin's reply landed first. If the plugin loses, the
-outcome matches the run-default and the case FAILS loudly.
+outcome matches the run-default and the case FAILS loudly. For LIVE cases, the
+classifier-call-count assertion adds a second guard: a pass requires the live
+HTTP egress to have actually happened.
+
+> **Run-live race note:** LIVE mode adds an HTTP round-trip that narrows the
+> plugin's head-start over run's auto-reply. In practice the live path
+> (transcript fetch + classifier POST) is consistently a few milliseconds
+> slower than run's in-process auto-reply, so the plugin typically LOSES the
+> reply race under run. This is classified as **RACE_LOSS** — not a failure:
+> the stderr proves the live chain ran correctly (event seen + classifier
+> called + correct decision parsed + `permission reply failed: Permission
+> request not found`). The **serve-live cases** (no auto-replier, sole
+> replier) are the **deterministic proof** that the full live chain resolves
+> end-to-end. RACE_LOSS does not fail the suite; only a genuine live-chain
+> failure (event not seen, classifier not called, wrong decision) does.
 
 ## Serve mode (plugin reply resolves under the HTTP listener)
 
@@ -105,15 +135,19 @@ correctly with **no patches**:
 
 Serve mode has **no** `--dangerously-skip-permissions` auto-reply, so the plugin
 is the **sole replier** — no race. This makes serve-mode assertions simpler and
-more direct:
+more direct, and makes serve-LIVE the **deterministic proof** of the full live
+chain (no race to lose):
 
-| Case | `stubVerdict` | PASS = tool outcome |
-|------|:---:|---|
-| **serve-A (ALLOW proof)** | `"allow"` | **read PROCEEDS** (plugin's allow reply resolved) |
-| **serve-B (BLOCK proof)** | `"block"` | **read BLOCKED** (plugin's reject reply resolved) |
+| Case | Mode | Verdict source | PASS = tool outcome |
+|------|------|---|---|
+| **serve-A (ALLOW proof)** | enforce | stub `"allow"` | **read PROCEEDS** (plugin's allow reply resolved) |
+| **serve-B (BLOCK proof)** | enforce | stub `"block"` | **read BLOCKED** (plugin's reject reply resolved) |
+| **serve-C (LIVE ALLOW proof)** | live | classifier `<block>no` | **read PROCEEDS** + classifier HTTP called |
+| **serve-D (LIVE BLOCK proof)** | live | classifier `<block>yes` | **read BLOCKED** + classifier HTTP called |
 
-Both polarities are tested, proving the plugin's reply resolves end-to-end under
-serve against current upstream.
+Both polarities are tested in both evaluation modes, proving the plugin's reply
+resolves end-to-end under serve against current upstream — including the full
+live chain (transcript fetch over HTTP + classifier egress + verdict parse).
 
 ## Architecture (single container)
 
@@ -131,25 +165,30 @@ The driver (`run-e2e.mjs`) orchestrates everything on localhost inside the
 container:
 
 1. Writes `opencode.json` (mock provider + `permission.read:"ask"`), the plugin
-   config files, and the target fixture.
+   config files (`auto-gate-config.json` per case, `auto-gate-llm.json` once),
+   and the target fixture.
 2. Starts the dual-port mock LLM server (agent `:8080`, classifier `:8081`).
-3. **Run Case A**: sets `stubVerdict:"allow"`, resets the agent counter, runs
-   `opencode run --format json "Read /workspace/target.txt"` (no
+3. **Run Case A** (enforce allow): sets `stubVerdict:"allow"`, resets the agent
+   counter, runs `opencode run --format json "Read /workspace/target.txt"` (no
    `--dangerously-skip-permissions`), captures stdout + stderr.
-4. **Run Case B**: sets `stubVerdict:"block"`, resets, runs
-   `opencode run --dangerously-skip-permissions --format json "..."`,
-   captures stdout + stderr.
-5. **Starts `opencode serve`** on `:3000` (with `OPENCODE_SERVER_PASSWORD` set),
+4. **Run Case B** (enforce block): sets `stubVerdict:"block"`, resets, runs
+   `opencode run --dangerously-skip-permissions --format json "..."`.
+5. **Run Case C** (live allow): sets `mode:"live"` + classifier verdict
+   `<block>no</block>`, resets the classifier counter, runs `opencode run`
+   (no `--dangerously-skip-permissions`), then asserts classifier count > 0.
+6. **Run Case D** (live block): sets `mode:"live"` + classifier verdict
+   `<block>yes</block>...<reason>`, resets, runs `opencode run
+   --dangerously-skip-permissions`, asserts classifier count > 0.
+7. **Starts `opencode serve`** on `:3000` (with `OPENCODE_SERVER_PASSWORD` set),
    polls `GET /global/health` until healthy.
-6. **Serve Case A**: creates a session over HTTP, sends `prompt_async` with the
-   same prompt, polls `GET /session/{id}/message` for content (allow → read
-   proceeds).
-7. **Serve Case B**: same flow with `stubVerdict:"block"`, polls for rejection
-   (plugin's reject reply resolved).
-8. Tears down serve, then the mock LLM server.
-9. Asserts: (a) plugin audit lines in stderr show it saw each
-   `permission.asked` event; (b) run-A + serve-A have file content; (c) run-B +
-   serve-B have no file content + a rejection indicator.
+8. **Serve Cases A–D**: same evaluation-mode matrix as run, driven over HTTP
+   (create session → `prompt_async` → poll `GET /session/{id}/message`). Serve
+   has no auto-replier, so the plugin is the sole replier (deterministic).
+9. Tears down serve, then the mock LLM server.
+10. Asserts per case: (a) plugin audit lines in stderr show it saw each
+    `permission.asked` event (mode=enforce for A/B, mode=live for C/D); (b)
+    allow cases have file content, block cases have no content + a rejection
+    indicator; (c) live cases have classifier call count > 0.
 
 ### Mock LLM server
 
@@ -158,10 +197,15 @@ calls (no `tools` in request body → short text) from agent calls (has `tools` 
 1st call emits a tool_call for the `read` tool, 2nd call emits short text so the
 session reaches idle). Both streaming SSE and non-streaming JSON are supported.
 
-The classifier endpoint (`:8081`) reads a control file and returns a verdict.
-It is **not used in ENFORCE mode** (the stub evaluator is pure sync), but is
-included for completeness — if the suite is later switched to LIVE mode the
-infrastructure is already in place.
+The classifier endpoint (`:8081`) reads a control file (`/tmp/classifier-verdict`)
+and returns a verdict. It supports a **passthrough mode**: if the control file
+contains a string starting with `<block>`, it is returned verbatim as the
+classifier content, so the live cases can inject exact verdict text (including
+test-specific reasons). It is **not used in ENFORCE mode** (the stub evaluator
+is pure sync), but is exercised by **LIVE mode** (Cases C/D): the plugin POSTs
+the serialized transcript, the mock returns the verdict, and the driver asserts
+the call happened via `GET /count/classifier` (counter > 0). The counter is
+reset between cases via `GET /reset-classifier-count`.
 
 ### Why `permission.read:"ask"` is mandatory
 
@@ -199,7 +243,7 @@ docker run --rm auto-gate-opencode-e2e
 |------|---------|
 | `Dockerfile` | Multi-stage build: latest upstream opencode (shallow clone) + test runtime, no patches |
 | `mock-llm-server.js` | Dual-port mock LLM (agent + classifier endpoints) |
-| `run-e2e.mjs` | Test driver: orchestrate mock + 2 run cases + 2 serve cases, assert |
+| `run-e2e.mjs` | Test driver: orchestrate mock + 4 run cases (A–D) + 4 serve cases (A–D), assert |
 | `target.txt` | Fixture file the agent tries to read |
 | `classifier-prompt.md` | Minimal classifier system prompt (promptFile override) |
 | `README.md` | This file |

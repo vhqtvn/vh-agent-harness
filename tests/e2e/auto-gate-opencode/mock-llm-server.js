@@ -14,10 +14,17 @@
 //   GET /healthz → readiness probe.
 //
 // CLASSIFIER (:8081, POST /v1/chat/completions) — reads a control file:
-//   /tmp/classifier-verdict  →  "allow"  → returns <block>no</block>
-//                           →  "block"  → returns <block>yes</block><reason>scope creep</reason>
+//   /tmp/classifier-verdict  →  supports TWO shapes:
+//     KEYWORD   : "allow"  → returns <block>no</block>
+//                 "block"  → returns <block>yes</block><reason>scope creep</reason>
+//     PASSTHROUGH: any string starting with "<block>" is returned VERBATIM as the
+//                 verdict content. This lets the live-mode cases inject an exact
+//                 verdict (e.g. "<block>yes</block><reason>[test-block] ...</reason>")
+//                 without changing the keyword fallback.
 //   The test driver writes the control file BEFORE each case.
-//   GET /healthz → readiness probe.
+//   GET /healthz                → readiness probe.
+//   GET /count/classifier       → { count } of POSTs received (proves live egress).
+//   GET /reset-classifier-count → resets the counter (called between cases).
 //
 // Both endpoints respect the request body's `stream` field: if true, respond
 // with SSE chunks (data: {...}\n\n + data: [DONE]\n\n); if false, respond with
@@ -256,11 +263,23 @@ function readVerdict() {
 }
 
 function verdictContent(verdict) {
+    // PASSTHROUGH: if the control file already carries a <block> tag, return it
+    // verbatim. This lets the live-mode cases inject an EXACT verdict text
+    // (including a test-specific reason) without changing the keyword fallback.
+    if (typeof verdict === "string" && verdict.startsWith("<block>")) {
+        return verdict;
+    }
     if (verdict === "block") {
         return "<block>yes</block><reason>scope creep</reason>";
     }
     return "<block>no</block>";
 }
+
+// Per-process counter of classifier POSTs. The live-mode cases query
+// GET /count/classifier to PROVE the live classifier HTTP egress actually
+// happened (not just the stub evaluator). Reset between cases via
+// GET /reset-classifier-count.
+let classifierCallCount = 0;
 
 const classifierServer = http.createServer(async (req, res) => {
     req.on("error", () => {});
@@ -274,13 +293,28 @@ const classifierServer = http.createServer(async (req, res) => {
         return;
     }
 
+    if (req.method === "GET" && url === "/count/classifier") {
+        sendJson(res, 200, { ok: true, count: classifierCallCount });
+        return;
+    }
+
+    if (req.method === "GET" && url === "/reset-classifier-count") {
+        classifierCallCount = 0;
+        sendJson(res, 200, { ok: true, count: classifierCallCount });
+        return;
+    }
+
     if (req.method === "POST" && url === "/v1/chat/completions") {
+        // Count EVERY classifier POST so the live-mode driver can prove the
+        // live classifier HTTP egress happened (count > 0 = the plugin really
+        // called the endpoint, not just the stub path).
+        classifierCallCount += 1;
         const verdict = readVerdict();
         const content = verdictContent(verdict);
         // The plugin always sends stream:false, so non-streaming JSON is the
         // primary path. Streaming support is included for robustness.
         const body = await readJsonBody(req);
-        console.error(`[mock-classifier] POST /v1/chat/completions verdict=${verdict} stream=${body.stream === true}`);
+        console.error(`[mock-classifier] POST call=${classifierCallCount} /v1/chat/completions verdict=${verdict} stream=${body.stream === true}`);
         if (body.stream === true) {
             res.writeHead(200, {
                 "Content-Type": "text/event-stream",
