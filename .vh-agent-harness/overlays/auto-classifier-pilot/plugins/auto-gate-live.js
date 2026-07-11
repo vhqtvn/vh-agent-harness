@@ -1831,11 +1831,15 @@ if (__isMain) {
     // DEFAULT_LLM_CONFIG default) falls through to the env form. If neither
     // yields a value, classifyLive throws (fail-closed).
 
-    // Helper: a fake fetch that captures the URL it was called with.
+    // Helper: a fake fetch that captures the URL (and the headers) it was
+    // called with, so tests can assert both the routed endpoint AND the
+    // outbound Authorization header.
     function urlCapturingFetch(responseContent) {
         let calledUrl = null;
-        const fn = async (url) => {
+        let calledHeaders = null;
+        const fn = async (url, init) => {
             calledUrl = url;
+            calledHeaders = (init && init.headers) || null;
             return {
                 ok: true,
                 status: 200,
@@ -1845,6 +1849,7 @@ if (__isMain) {
             };
         };
         fn.getUrl = () => calledUrl;
+        fn.getHeaders = () => calledHeaders;
         return fn;
     }
 
@@ -1942,21 +1947,25 @@ if (__isMain) {
 
     test("classifyLive: key BOTH literal apiKey + apiKeyEnv -> literal wins", async () => {
         const envName = "TEST_KEY_BOTH_ENV";
+        // Distinct, obviously-different values so the header assertion is
+        // unambiguous: the literal key is the only one that may appear in the
+        // outbound Authorization header.
+        const literalValue = "lit-key-value-123";
+        const envValue = "env-key-value-456";
         const prev = process.env[envName];
-        process.env[envName] = "env-key-value";
+        process.env[envName] = envValue;
         try {
-            // The literal key is used; the env key is NOT consulted. We verify
-            // by NOT setting the env var's value in the config's apiKeyEnv and
-            // using a literal apiKey that differs — the call succeeds, proving
-            // the literal was used (if env had been used, it would still work,
-            // but the point is the literal is sufficient even when env is also
-            // set). The URL capture proves the request went through.
+            // The literal key is used; the env key is NOT consulted. We prove
+            // this by capturing the outbound Authorization header and asserting
+            // it carries ONLY the LITERAL key value — if the env-var form had
+            // won, the header would carry envValue instead. The success
+            // assertion is retained; the header assertions are added on top.
             const fetchFn = urlCapturingFetch("<block>no</block>");
             const out = await classifyLive(
                 {
                     modelEndpoint: "https://x",
                     model: "m",
-                    apiKey: "literal-key-value",
+                    apiKey: literalValue,
                     apiKeyEnv: envName,
                 },
                 "x",
@@ -1964,6 +1973,17 @@ if (__isMain) {
                 fakeRunnerOk(),
             );
             assert.equal(out, "<block>no</block>", "call must succeed with literal key");
+            const headers = fetchFn.getHeaders();
+            const auth = headers && headers.Authorization;
+            assert.equal(
+                auth,
+                `Bearer ${literalValue}`,
+                "outbound Authorization must carry the LITERAL apiKey",
+            );
+            assert.ok(
+                typeof auth === "string" && !auth.includes(envValue),
+                "outbound Authorization must NOT contain the env-var key value",
+            );
         } finally {
             if (prev === undefined) delete process.env[envName];
             else process.env[envName] = prev;

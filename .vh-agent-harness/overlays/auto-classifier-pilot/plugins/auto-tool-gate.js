@@ -1506,10 +1506,11 @@ export const server = async ({
                 );
                 const llmConfig = readLlmConfig(llmConfigPath, userLlmConfigPath);
 
-                // (1) Validate the leaves array. A well-formed leaf needs a
-                // non-empty modelEndpoint AND model (mirrors single-leaf live
-                // validation). Malformed -> fail-closed via onUncertain.
-                // NEVER fall back to permissive.
+                // (1) Validate the leaves array. A well-formed leaf provides a
+                // model AND at least one endpoint form — a literal modelEndpoint
+                // (URL) OR a modelEndpointEnv env-var name (mirrors single-leaf
+                // live validation after the dual-form endpoint change). Malformed
+                // -> fail-closed via onUncertain. NEVER fall back to permissive.
                 const leaves = Array.isArray(llmConfig.leaves)
                     ? llmConfig.leaves
                     : [];
