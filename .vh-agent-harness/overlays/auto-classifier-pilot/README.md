@@ -312,7 +312,7 @@ path). The split exists so that **LLM settings can NEVER be committed** while
 | File | Fields | Committability |
 |------|--------|----------------|
 | `auto-gate-config.json` | `enabled`, `mode`, `stubVerdict`, `promptFile` | **Adopter's choice** — a team may commit a shared default (e.g. `{"mode":"enforce"}`). NOT gitignored. |
-| `auto-gate-llm.json` | `modelEndpoint`, `model`, `apiKeyEnv`, `timeoutMs`, `maxRetries`, `retryDelayMs` | **NEVER** — gitignored in this dogfood repo. Adopters using live mode create it locally and add the pattern to their own `.gitignore`. |
+| `auto-gate-llm.json` | `modelEndpoint`, `modelEndpointEnv`, `model`, `apiKey`, `apiKeyEnv`, `timeoutMs`, `maxRetries`, `retryDelayMs` | **NEVER** — gitignored in this dogfood repo. Adopters using live mode create it locally and add the pattern to their own `.gitignore`. |
 
 Neither file is rendered or seeded by the overlay. Leaving a file absent is the
 documented fail-safe default — the plugin works out of the box with built-in
@@ -363,13 +363,26 @@ obvious: "same file, user-level base, project-level override."
 `auto-gate-llm.json` once, and it applies to every project. A project that needs
 its own override drops a project-level file — that file is then authoritative.
 
-Example — user-level LLM config (applies to all projects without one):
+Example — user-level LLM config (applies to all projects without one).
+Both the literal and env-var forms are shown; in practice you pick ONE per
+field (literal wins if both are non-empty):
 
 ```json
 {
   "modelEndpoint": "https://api.provider.example/v1/chat/completions",
   "model": "gpt-4o-mini",
   "apiKeyEnv": "MY_GATE_KEY"
+}
+```
+
+Or using the env-var-name form for the endpoint (operator sets the URL via the
+`AUTO_GATE_MODEL_ENDPOINT` environment variable instead of hardcoding it):
+
+```json
+{
+  "modelEndpointEnv": "AUTO_GATE_MODEL_ENDPOINT",
+  "model": "gpt-4o-mini",
+  "apiKey": "sk-literal-key-here"
 }
 ```
 
@@ -388,15 +401,35 @@ Example — user-level LLM config (applies to all projects without one):
 
 ### LLM config fields (`auto-gate-llm.json`)
 
+> **Dual-form resolution (literal-preferred).** The endpoint URL and API key
+> each support **two forms** — a literal value and an env-var **name**. When
+> both forms are specified and non-empty, the **literal wins** and the env var
+> is NOT consulted. An empty literal (the default) is treated as "unspecified"
+> and falls through to the env form. If neither yields a value at call time,
+> the call fail-closes to deny.
+>
+> | Field | Literal form (wins) | Env-var-name form (fallback) |
+> |-------|---------------------|------------------------------|
+> | Endpoint | `modelEndpoint` (URL) | `modelEndpointEnv` (env-var name; default `AUTO_GATE_MODEL_ENDPOINT`) |
+> | API key | `apiKey` (key value) | `apiKeyEnv` (env-var name; default `AUTO_GATE_API_KEY`) |
+>
+> **Security note:** a literal `apiKey` puts the key VALUE in the LLM config
+> file. At the **project** level the file is gitignored (never committed); at
+> the **user** level it lives under `~/.config` (also outside the repo). For
+> CI/containers, `apiKeyEnv` remains recommended — the key stays in the
+> environment only and never touches disk config.
+
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
-| `modelEndpoint` | string | `""` | Required for `live` mode. The FULL OpenAI-compatible chat-completions URL (e.g. `https://api.provider.example/v1/chat/completions`). Empty/missing when `mode: "live"` → fail-closed deny with audit line `live mode misconfigured: no modelEndpoint`. Ignored in other modes. |
+| `modelEndpoint` | string | `""` | **Literal endpoint URL** for `live` mode (literal-preferred form). The FULL OpenAI-compatible chat-completions URL (e.g. `https://api.provider.example/v1/chat/completions`). Empty (the default) → falls through to `modelEndpointEnv`. If neither yields a value when `mode: "live"` → fail-closed deny. Ignored in other modes. |
+| `modelEndpointEnv` | string | `"AUTO_GATE_MODEL_ENDPOINT"` | The **name** of the environment variable holding the endpoint URL (env-var-name fallback form). The URL VALUE is read from `process.env[modelEndpointEnv]` at call time — it is **never** stored in the config file itself. Only consulted when `modelEndpoint` is empty/unspecified. Ignored in other modes. |
 | `model` | string | `""` | Required for `live` mode. The model identifier sent in the request body (e.g. `gpt-4o-mini`, a provider alias, etc.). Empty/missing when `mode: "live"` → fail-closed deny. Ignored in other modes. |
-| `apiKeyEnv` | string | `"AUTO_GATE_API_KEY"` | The **name** of the environment variable holding the API key for `live` mode. The key VALUE is read from `process.env[apiKeyEnv]` at call time — it is **never** stored in either config file. Missing/unset env var at call time → fail-closed deny. Ignored in other modes. |
+| `apiKey` | string | `""` | **Literal API key value** for `live` mode (literal-preferred form). When non-empty, used directly and `apiKeyEnv` is NOT consulted. Empty (the default) → falls through to `apiKeyEnv`. If neither yields a value at call time → fail-closed deny. Ignored in other modes. |
+| `apiKeyEnv` | string | `"AUTO_GATE_API_KEY"` | The **name** of the environment variable holding the API key (env-var-name fallback form). The key VALUE is read from `process.env[apiKeyEnv]` at call time. Only consulted when `apiKey` is empty/unspecified. Missing/unset env var at call time → fail-closed deny. Ignored in other modes. |
 | `timeoutMs` | number | `8000` | Hard timeout for the `live` model HTTP call, via `AbortController`. On timeout the call fails-closed to deny (after exhausting retries — see `maxRetries`). Ignored in other modes. |
 | `maxRetries` | number | `1` | Number of **additional** attempts the `live` call makes after a **transient** failure (timeout / network error / `5xx` / `2xx`-with-empty-content). `0` = single attempt (the pre-retry behavior); `1` (default) = one retry. A `4xx` or malformed-JSON response is **not** retried (retrying won't help). After the final allowed attempt still fails, the call fail-closes to deny. Coerced to a non-negative integer; invalid/missing → `1`. Ignored in other modes. |
 | `retryDelayMs` | number | `500` | Base delay between retries, with **linear** backoff: the delay before attempt *N* (N ≥ 2) = `retryDelayMs * (N - 1)`, so attempt 2 waits 1×, attempt 3 waits 2×, etc. Coerced to a non-negative integer; invalid/missing → `500`. Ignored in other modes. |
-| `leaves` | array of leaf-config objects | `[]` | **Phase 2 (`live-tiered` only).** An array of per-leaf configs, each a full leaf object `{modelEndpoint, model, apiKeyEnv, timeoutMs, maxRetries, retryDelayMs}`. Each leaf may point at a DIFFERENT endpoint/model — that is the whole point (independent classifiers for consensus). A leaf missing `modelEndpoint` or `model` is dropped; if ALL leaves are malformed or the array is empty/missing → fail-closed deny with audit line `live-tiered misconfigured: no leaves`. Ignored in `audit`/`enforce`/`live` modes. |
+| `leaves` | array of leaf-config objects | `[]` | **Phase 2 (`live-tiered` only).** An array of per-leaf configs, each a full leaf object `{modelEndpoint, modelEndpointEnv, model, apiKey, apiKeyEnv, timeoutMs, maxRetries, retryDelayMs}`. Each leaf may point at a DIFFERENT endpoint/model — that is the whole point (independent classifiers for consensus). A leaf missing both `modelEndpoint` and `modelEndpointEnv`, or missing `model`, is dropped; if ALL leaves are malformed or the array is empty/missing → fail-closed deny with audit line `live-tiered misconfigured: no leaves`. Ignored in `audit`/`enforce`/`live` modes. |
 
 > **Token-cost note (retries).** Retries only fire on transient failures; each
 > retry is a fresh API call that **may consume tokens on the provider side even
@@ -478,15 +511,18 @@ harness-context fragment nor adopter guides are appended. This is the escape
 hatch for adopters who want full control over the prompt (the e2e suite relies
 on this path).
 
-> **The API key is env-only, never in a file.** Neither config file carries the
-> secret value — both hold at most the env-var **name** (`apiKeyEnv`, default
-> `AUTO_GATE_API_KEY`). The actual secret is supplied at runtime via that env
-> var and is read fresh on every `live` call. Never paste the key value into
-> either config file.
+> **The API key is env-only by default, never in a file.** The RECOMMENDED
+> form is the env-var **name** (`apiKeyEnv`, default `AUTO_GATE_API_KEY`) — the
+> actual secret is supplied at runtime via that env var and is read fresh on
+> every `live` call. A literal `apiKey` form IS supported (literal-preferred
+> dual-form), but it places the key VALUE in the LLM config file. That file is
+> gitignored at the project level and lives under `~/.config` at the user
+> level (so it won't be committed), but `apiKeyEnv` remains recommended for
+> CI/containers where the key should stay in the environment only.
 
 > **Backward-compat note (clean cut):** the single-file predecessor held all
 > fields in `auto-gate-config.json`. The split ignores any LLM fields
-> (`modelEndpoint`/`model`/`apiKeyEnv`/`timeoutMs`/`maxRetries`/`retryDelayMs`)
+> (`modelEndpoint`/`modelEndpointEnv`/`model`/`apiKey`/`apiKeyEnv`/`timeoutMs`/`maxRetries`/`retryDelayMs`)
 > left in the plugin-config file — they MUST come from `auto-gate-llm.json`. This
 > is a freshly-shipped pilot with no real install base, so a clean cut (no
 > deprecation fallback) keeps the two files strictly disjoint.
@@ -521,7 +557,8 @@ Plugin config — `enforce` mode (Phase 2 stub decision path):
 ```
 
 LLM config — `live` mode (Phase 3b real model call); create this file locally
-and keep it out of git:
+and keep it out of git. Either form works for endpoint and key — literal is
+preferred when both are present:
 
 ```json
 {
@@ -535,6 +572,18 @@ and keep it out of git:
 ```
 
 (with the key exported in the environment: `export AUTO_GATE_API_KEY=sk-...`)
+
+Or the env-var-name form for the endpoint (URL via env var) and a literal key:
+
+```json
+{
+  "modelEndpointEnv": "AUTO_GATE_MODEL_ENDPOINT",
+  "model": "your-model-id",
+  "apiKey": "sk-literal-key-here"
+}
+```
+
+(with `export AUTO_GATE_MODEL_ENDPOINT=https://...`)
 
 ### Fail-safe behavior
 
@@ -557,9 +606,11 @@ only on the first occurrence.
 audit spam) — it is the normal case when an operator has not set up live mode;
 `audit`/`enforce` modes never fail because the LLM file is absent. Only a
 **present-but-invalid** (unreadable / invalid JSON) file emits one audit line,
-mirroring the plugin-config handling. Defaults: `{modelEndpoint: "", model: "",
+mirroring the plugin-config handling. Defaults: `{modelEndpoint: "",
+modelEndpointEnv: "AUTO_GATE_MODEL_ENDPOINT", model: "", apiKey: "",
 apiKeyEnv: "AUTO_GATE_API_KEY", timeoutMs: 8000, maxRetries: 1, retryDelayMs:
-500}`. In `live` mode, an empty `modelEndpoint`/`model` fail-closes to deny via
+500}`. In `live` mode, an endpoint that cannot be resolved from either form
+(empty literal + unset env var) or an empty `model` fail-closes to deny via
 the existing decision path.
 
 ### Reserved for later phases (not yet implemented)
@@ -787,7 +838,8 @@ When a `permission.asked` event reaches the `event` hook and `mode === "live"`:
 
 1. the event is audit-logged (permission type + patterns summary +
    `mode=live`, all scrubbed),
-2. live config is validated — a missing `modelEndpoint` or `model` fails-closed
+2. live config is validated — an endpoint that cannot be resolved from either
+   form (empty literal + unset env var) or a missing `model` fails-closed
    to `"reject"` with a clear audit line (`live mode misconfigured:
    no modelEndpoint` / `no model`),
 3. the session transcript is fetched via the SDK client
@@ -827,20 +879,24 @@ allows. **Transient** failures (transport error, timeout (`timeoutMs`), `5xx`
 response, `2xx`-with-empty-content) are first **retried** up to `maxRetries`
 additional attempts; only after retries are exhausted (or for a non-retryable
 failure: `4xx`, malformed JSON, missing API key, or a thrown exception in the
-adapter) does the path reply `"reject"`. A missing `modelEndpoint`/`model`,
-unparseable verdict (no `<block>` token), or any final adapter failure all yield
-a `"reject"` reply. Only an explicit `<block>no</block>` (allow) verdict yields
-an allow reply. The retry policy keeps the fail-closed contract intact: a retry
-never turns a reject into an allow on its own — it only gives a stalled request
-a second chance to return a verdict.
+adapter) does the path reply `"reject"`. An unresolvable endpoint (neither
+literal nor env form yields a value), missing `model`, unparseable verdict
+(no `<block>` token), or any final adapter failure all yield a `"reject"`
+reply. Only an explicit `<block>no</block>` (allow) verdict yields an allow
+reply. The retry policy keeps the fail-closed contract intact: a retry never
+turns a reject into an allow on its own — it only gives a stalled request a
+second chance to return a verdict.
 
-### The API key comes from the environment, never a config file
+### The API key — dual-form, env-var recommended
 
-`live` mode reads the key from `process.env[apiKeyEnv]` (default
-`AUTO_GATE_API_KEY`) **at call time**. Neither config file carries the secret
-value — the LLM config file (`auto-gate-llm.json`) holds only the env-var
-**name** via `apiKeyEnv`, and that file is never committed (gitignored). Export
-the key in the server environment:
+`live` mode resolves the key at **call time** using dual-form literal-preferred
+resolution: a non-empty literal `apiKey` (in the LLM config) wins; otherwise the
+env var named by `apiKeyEnv` (default `AUTO_GATE_API_KEY`) is read from
+`process.env`. The RECOMMENDED form is `apiKeyEnv` — the secret stays in the
+environment only and never touches disk config. The literal `apiKey` form IS
+supported but places the value in `auto-gate-llm.json` (gitignored at project
+level, under `~/.config` at user level). Export the key in the server
+environment:
 
 ```sh
 export AUTO_GATE_API_KEY=sk-...
@@ -934,8 +990,9 @@ The transcript is fetched **once** and shared across all leaves (the leaves
 differ in LLM endpoint/model, not in what they see). The shared fields
 (`promptFile`, `replyMode`, `onUncertain`, the transcript) come from the plugin
 config + a single `client.session.messages` fetch. Each leaf gets its OWN
-`modelEndpoint` / `model` / `apiKeyEnv` / `timeoutMs` / `maxRetries` /
-`retryDelayMs` from its entry in the `leaves` array.
+`modelEndpoint` / `modelEndpointEnv` / `model` / `apiKey` / `apiKeyEnv` /
+`timeoutMs` / `maxRetries` / `retryDelayMs` from its entry in the `leaves`
+array (dual-form literal-preferred resolution applies per leaf).
 
 ### Config shape
 
@@ -965,10 +1022,10 @@ The plugin config sets `mode: "live-tiered"`. The LLM config carries the
 }
 ```
 
-Each leaf is a FULL leaf-config object (all six LLM fields). The top-level
+Each leaf is a FULL leaf-config object (all eight LLM fields). The top-level
 `modelEndpoint`/`model`/etc. are ignored when `leaves` is present. A leaf
-missing `modelEndpoint` or `model` is dropped; if that leaves zero valid leaves,
-the dispatch fail-closes.
+missing both `modelEndpoint` and `modelEndpointEnv`, or missing `model`, is
+dropped; if that leaves zero valid leaves, the dispatch fail-closes.
 
 ### SERVE-ONLY enforcement (run-mode race)
 

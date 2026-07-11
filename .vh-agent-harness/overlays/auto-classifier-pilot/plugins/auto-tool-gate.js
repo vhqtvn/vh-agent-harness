@@ -272,15 +272,18 @@ function repoRoot() {
 //      stubVerdict:"block", promptFile:"", replyMode:"once", onUncertain:"reject"}.
 //
 //   2. LLM config    → auto-gate-llm.json  (sibling file).
-//      Holds the LLM fields: {modelEndpoint, model, apiKeyEnv, timeoutMs,
-//      maxRetries, retryDelayMs, leaves}. Committability: NEVER — gitignored in
-//      the dogfood repo (adopters add the pattern to their own .gitignore).
-//      Fail-safe defaults: missing/invalid → {modelEndpoint:"", model:"",
+//      Holds the LLM fields: {modelEndpoint, modelEndpointEnv, model, apiKey,
+//      apiKeyEnv, timeoutMs, maxRetries, retryDelayMs, leaves}. Committability:
+//      NEVER — gitignored in the dogfood repo (adopters add the pattern to their
+//      own .gitignore). Fail-safe defaults: missing/invalid → {modelEndpoint:"",
+//      modelEndpointEnv:"AUTO_GATE_MODEL_ENDPOINT", model:"", apiKey:"",
 //      apiKeyEnv:"AUTO_GATE_API_KEY", timeoutMs:8000, maxRetries:1,
 //      retryDelayMs:500, leaves:[]}. A MISSING LLM file is NORMAL (only needed
 //      for live mode) and is SILENT — no audit spam; audit/enforce modes must
 //      NOT fail because the LLM file is absent. In live mode a missing/empty
 //      modelEndpoint/model fail-closes to deny via the existing decision path.
+//      Endpoint + key each support a DUAL form, literal-preferred (see
+//      DEFAULT_LLM_CONFIG below for the resolution rule).
 //
 // THREE-LEVEL LAYERED LOADING (defaults ← user ← project):
 //
@@ -312,9 +315,12 @@ function repoRoot() {
 // keeps the two files strictly disjoint. LLM fields MUST come from
 // auto-gate-llm.json.
 //
-// The API key VALUE is NEVER in either file — only the env-var NAME
-// (apiKeyEnv, default AUTO_GATE_API_KEY). The value is read from
-// process.env[apiKeyEnv] at call time inside classifyLive.
+// The API key supports a DUAL form, literal-preferred: a literal `apiKey`
+// value OR an `apiKeyEnv` env-var NAME (default AUTO_GATE_API_KEY). The literal
+// wins when both are non-empty; otherwise the value is read from
+// process.env[apiKeyEnv] at call time inside classifyLive. The endpoint mirrors
+// this: a literal `modelEndpoint` URL OR a `modelEndpointEnv` env-var NAME
+// (default AUTO_GATE_MODEL_ENDPOINT), literal-preferred.
 //
 // Merge point: the live branch builds ONE merged object
 // ({...readConfig(), ...readLlmConfig()}) so downstream decideLive /
@@ -380,15 +386,25 @@ const DEFAULT_PLUGIN_CONFIG = Object.freeze({
 
 // LLM fail-safe defaults (auto-gate-llm.json). `modelEndpoint` and `model`
 // default to empty (so a live call with no endpoint/model fail-closes to deny
-// instead of hitting a garbage URL). `apiKeyEnv` defaults to the conventional
-// env-var NAME (never the value). `timeoutMs` is a conservative bound.
-// `maxRetries` / `retryDelayMs` configure retry-on-transient-failure INSIDE
-// classifyLive (timeout / network error / 5xx / 2xx-empty). Defaults are
-// conservative: 1 retry, 500ms base — enough to recover from a single stall
-// without unbounded token cost (each retry is a fresh API call).
+// instead of hitting a garbage URL). The endpoint + API key each support a
+// DUAL form, literal-preferred:
+//   - `modelEndpoint` (literal URL) OR `modelEndpointEnv` (NAME of an env var
+//     holding the URL) — literal wins when both are non-empty;
+//   - `apiKey` (literal key value) OR `apiKeyEnv` (NAME of an env var holding
+//     the key) — literal wins when both are non-empty.
+// A non-empty literal suppresses the env fallback; an empty literal (the
+// default) is treated as "unspecified" and falls through to env. The env-var
+// NAME fields (`modelEndpointEnv`, `apiKeyEnv`) never carry the value.
+// `timeoutMs` is a conservative bound. `maxRetries` / `retryDelayMs` configure
+// retry-on-transient-failure INSIDE classifyLive (timeout / network error /
+// 5xx / 2xx-empty). Defaults are conservative: 1 retry, 500ms base — enough to
+// recover from a single stall without unbounded token cost (each retry is a
+// fresh API call).
 const DEFAULT_LLM_CONFIG = Object.freeze({
-    modelEndpoint: "", // required for live; empty -> fail-closed deny
+    modelEndpoint: "", // literal URL for live; empty -> fall back to modelEndpointEnv
+    modelEndpointEnv: "AUTO_GATE_MODEL_ENDPOINT", // NAME of env var holding the URL (never the value)
     model: "", // required for live; empty -> fail-closed deny
+    apiKey: "", // literal key value for live; empty -> fall back to apiKeyEnv
     apiKeyEnv: "AUTO_GATE_API_KEY", // NAME of the env var only (never the value)
     timeoutMs: 8000, // hard timeout for the model HTTP call
     maxRetries: 1, // ADDITIONAL attempts after the first (0 = single attempt)
@@ -530,10 +546,18 @@ function normalizeLlmConfig(parsed) {
             typeof parsed.modelEndpoint === "string"
                 ? parsed.modelEndpoint
                 : DEFAULT_LLM_CONFIG.modelEndpoint,
+        modelEndpointEnv:
+            typeof parsed.modelEndpointEnv === "string" && parsed.modelEndpointEnv
+                ? parsed.modelEndpointEnv
+                : DEFAULT_LLM_CONFIG.modelEndpointEnv,
         model:
             typeof parsed.model === "string"
                 ? parsed.model
                 : DEFAULT_LLM_CONFIG.model,
+        apiKey:
+            typeof parsed.apiKey === "string"
+                ? parsed.apiKey
+                : DEFAULT_LLM_CONFIG.apiKey,
         apiKeyEnv:
             typeof parsed.apiKeyEnv === "string" && parsed.apiKeyEnv
                 ? parsed.apiKeyEnv
@@ -807,12 +831,12 @@ export function readConfig(projectPath = CONFIG_PATH, userPath = USER_CONFIG_PAT
 }
 
 // Read the LLM config with three-level merge (project > user > default).
-// Returns {modelEndpoint, model, apiKeyEnv, timeoutMs, maxRetries,
-// retryDelayMs, leaves} on every call — never throws. A MISSING file at EITHER
-// level is SILENT (no audit spam) — it is the normal case when live mode is
-// not set up; audit/enforce modes must NOT fail because the LLM file is
-// absent. Only a PRESENT-but-invalid file emits an audit line, labeled with
-// the level ("llm/project", "llm/user").
+// Returns {modelEndpoint, modelEndpointEnv, model, apiKey, apiKeyEnv, timeoutMs,
+// maxRetries, retryDelayMs, leaves} on every call — never throws. A MISSING
+// file at EITHER level is SILENT (no audit spam) — it is the normal case when
+// live mode is not set up; audit/enforce modes must NOT fail because the LLM
+// file is absent. Only a PRESENT-but-invalid file emits an audit line, labeled
+// with the level ("llm/project", "llm/user").
 //
 // `projectPath` / `userPath` are injectable for the self-test; production
 // callers omit them.
@@ -1009,8 +1033,8 @@ export const server = async ({
                 // MERGE POINT: build ONE config object for the live path by
                 // merging the plugin-behavior config (already read above into
                 // `config` as {enabled, mode, stubVerdict, promptFile}) with the
-                // LLM config (auto-gate-llm.json → {modelEndpoint, model,
-                // apiKeyEnv, timeoutMs}). A missing LLM file is SILENT here:
+                // LLM config (auto-gate-llm.json → {modelEndpoint,
+                // modelEndpointEnv, model, apiKey, apiKeyEnv, timeoutMs}). A missing LLM file is SILENT here:
                 // readLlmConfig() returns empty-string defaults, which flow
                 // straight into the fail-closed validation below. Downstream
                 // decideLive / classifyLive / resolveSystemPrompt see a single
@@ -1019,8 +1043,11 @@ export const server = async ({
 
                 // (1) Validate live config up front so a misconfigured live
                 // mode fail-closes to deny with a CLEAR audit line instead of a
-                // cryptic adapter error.
-                if (!liveConfig.modelEndpoint) {
+                // cryptic adapter error. Dual-form endpoint: either a literal
+                // modelEndpoint OR a modelEndpointEnv name must be present (the
+                // resolved env VALUE is checked by classifyLive at call time;
+                // here we only confirm the config specifies at least one form).
+                if (!liveConfig.modelEndpoint && !liveConfig.modelEndpointEnv) {
                     console.error(
                         "[auto-gate] live mode misconfigured: no modelEndpoint; fail-closed deny",
                     );
@@ -1368,7 +1395,11 @@ export const server = async ({
                 const liveConfig = { ...config, ...readLlmConfig(llmConfigPath, userLlmConfigPath) };
 
                 // (1) Validate live config — missing endpoint/model fail-closes.
-                if (!liveConfig.modelEndpoint) {
+                // Dual-form endpoint: either a literal modelEndpoint OR a
+                // modelEndpointEnv name must be present (the resolved env VALUE
+                // is checked by classifyLive at call time; here we only confirm
+                // the config specifies at least one form).
+                if (!liveConfig.modelEndpoint && !liveConfig.modelEndpointEnv) {
                     await handleUncertain("no modelEndpoint");
                     return;
                 }
@@ -1486,8 +1517,13 @@ export const server = async ({
                     (leaf) =>
                         leaf &&
                         typeof leaf === "object" &&
+                        // Dual-form endpoint: the leaf must specify at least one
+                        // form (literal URL OR env-var name). We do NOT resolve
+                        // the env value here — classifyLive does that at call
+                        // time; validation only checks the config is well-formed.
                         typeof leaf.modelEndpoint === "string" &&
-                        leaf.modelEndpoint &&
+                        (leaf.modelEndpoint ||
+                            (typeof leaf.modelEndpointEnv === "string" && leaf.modelEndpointEnv)) &&
                         typeof leaf.model === "string" &&
                         leaf.model,
                 );
@@ -1982,7 +2018,9 @@ if (__isMain) {
             const cfg = readLlmConfig(testConfigPath("no-such-llm.json"), NO_USER_LLM);
             assert.deepEqual(cfg, {
                 modelEndpoint: "",
+                modelEndpointEnv: "AUTO_GATE_MODEL_ENDPOINT",
                 model: "",
+                apiKey: "",
                 apiKeyEnv: "AUTO_GATE_API_KEY",
                 timeoutMs: 8000,
                 maxRetries: 1,
@@ -2010,7 +2048,9 @@ if (__isMain) {
         const cfg = readLlmConfig(testConfigPath("llm-valid.json"), NO_USER_LLM);
         assert.deepEqual(cfg, {
             modelEndpoint: "https://provider.example/v1/chat/completions",
+            modelEndpointEnv: "AUTO_GATE_MODEL_ENDPOINT",
             model: "test-model",
+            apiKey: "",
             apiKeyEnv: "MY_GATE_KEY",
             timeoutMs: 4000,
             maxRetries: 3,
@@ -2025,7 +2065,9 @@ if (__isMain) {
         const cfg = readLlmConfig(testConfigPath("llm-partial.json"), NO_USER_LLM);
         assert.deepEqual(cfg, {
             modelEndpoint: "https://x",
+            modelEndpointEnv: "AUTO_GATE_MODEL_ENDPOINT",
             model: "",
+            apiKey: "",
             apiKeyEnv: "AUTO_GATE_API_KEY",
             timeoutMs: 8000,
             maxRetries: 1,
@@ -2041,7 +2083,9 @@ if (__isMain) {
             const cfg = readLlmConfig(testConfigPath("llm-invalid.json"), NO_USER_LLM);
             assert.deepEqual(cfg, {
                 modelEndpoint: "",
+                modelEndpointEnv: "AUTO_GATE_MODEL_ENDPOINT",
                 model: "",
+                apiKey: "",
                 apiKeyEnv: "AUTO_GATE_API_KEY",
                 timeoutMs: 8000,
                 maxRetries: 1,
@@ -2067,7 +2111,9 @@ if (__isMain) {
             const b = readLlmConfig(testConfigPath("llm-null.json"), NO_USER_LLM);
             assert.deepEqual(a, {
                 modelEndpoint: "",
+                modelEndpointEnv: "AUTO_GATE_MODEL_ENDPOINT",
                 model: "",
+                apiKey: "",
                 apiKeyEnv: "AUTO_GATE_API_KEY",
                 timeoutMs: 8000,
                 maxRetries: 1,
@@ -2090,7 +2136,9 @@ if (__isMain) {
                 const cfg = readLlmConfig(testConfigPath("llm-shape.json"), NO_USER_LLM);
                 assert.deepEqual(cfg, {
                     modelEndpoint: "",
+                    modelEndpointEnv: "AUTO_GATE_MODEL_ENDPOINT",
                     model: "",
+                    apiKey: "",
                     apiKeyEnv: "AUTO_GATE_API_KEY",
                     timeoutMs: 8000,
                     maxRetries: 1,
@@ -2112,6 +2160,74 @@ if (__isMain) {
         assert.equal(cfg.apiKeyEnv, "AUTO_GATE_API_KEY");
     });
 
+    // ===== Dual-form normalize tests (modelEndpointEnv, apiKey) =====
+
+    test("readLlmConfig: modelEndpointEnv defaults to AUTO_GATE_MODEL_ENDPOINT when absent", () => {
+        __resetConfigCaches();
+        writeTestConfig("llm-no-endpoint-env.json", {
+            modelEndpoint: "https://x",
+            model: "m",
+        });
+        const cfg = readLlmConfig(testConfigPath("llm-no-endpoint-env.json"), NO_USER_LLM);
+        assert.equal(cfg.modelEndpointEnv, "AUTO_GATE_MODEL_ENDPOINT");
+    });
+
+    test("readLlmConfig: modelEndpointEnv preserved when specified", () => {
+        __resetConfigCaches();
+        writeTestConfig("llm-custom-endpoint-env.json", {
+            modelEndpoint: "https://x",
+            modelEndpointEnv: "MY_CUSTOM_ENDPOINT_VAR",
+            model: "m",
+        });
+        const cfg = readLlmConfig(testConfigPath("llm-custom-endpoint-env.json"), NO_USER_LLM);
+        assert.equal(cfg.modelEndpointEnv, "MY_CUSTOM_ENDPOINT_VAR");
+    });
+
+    test("readLlmConfig: apiKey defaults to empty string when absent", () => {
+        __resetConfigCaches();
+        writeTestConfig("llm-no-apikey.json", {
+            modelEndpoint: "https://x",
+            model: "m",
+        });
+        const cfg = readLlmConfig(testConfigPath("llm-no-apikey.json"), NO_USER_LLM);
+        assert.equal(cfg.apiKey, "");
+    });
+
+    test("readLlmConfig: apiKey preserved when specified (literal key value)", () => {
+        __resetConfigCaches();
+        writeTestConfig("llm-literal-apikey.json", {
+            modelEndpoint: "https://x",
+            model: "m",
+            apiKey: "sk-literal-key-12345",
+        });
+        const cfg = readLlmConfig(testConfigPath("llm-literal-apikey.json"), NO_USER_LLM);
+        assert.equal(cfg.apiKey, "sk-literal-key-12345");
+    });
+
+    test("readLlmConfig: PARTIAL override — project sets only modelEndpointEnv, user fills the rest", () => {
+        __resetConfigCaches();
+        writeTestConfig("layered-llm-user-endpoint-env.json", {
+            modelEndpoint: "http://u",
+            model: "user-model",
+            apiKeyEnv: "USER_KEY",
+            timeoutMs: 9000,
+        });
+        writeTestConfig("layered-llm-proj-endpoint-env.json", {
+            modelEndpointEnv: "PROJ_ENDPOINT_VAR",
+        });
+        const merged = readLlmConfig(
+            testConfigPath("layered-llm-proj-endpoint-env.json"),
+            testConfigPath("layered-llm-user-endpoint-env.json"),
+        );
+        // Project overrides ONLY modelEndpointEnv; user fills every other field.
+        assert.equal(merged.modelEndpointEnv, "PROJ_ENDPOINT_VAR", "project modelEndpointEnv must apply");
+        assert.equal(merged.modelEndpoint, "http://u", "user modelEndpoint must survive");
+        assert.equal(merged.model, "user-model", "user model must survive");
+        assert.equal(merged.apiKeyEnv, "USER_KEY", "user apiKeyEnv must survive");
+        assert.equal(merged.apiKey, "", "absent apiKey must default to empty");
+        assert.equal(merged.timeoutMs, 9000, "user timeoutMs must survive");
+    });
+
     test("readLlmConfig: invalid types fall back to defaults", () => {
         __resetConfigCaches();
         // Wrong types: modelEndpoint as number, model as null, apiKeyEnv empty,
@@ -2128,7 +2244,9 @@ if (__isMain) {
         const cfg = readLlmConfig(testConfigPath("llm-badtypes.json"), NO_USER_LLM);
         assert.deepEqual(cfg, {
             modelEndpoint: "",
+            modelEndpointEnv: "AUTO_GATE_MODEL_ENDPOINT",
             model: "",
+            apiKey: "",
             apiKeyEnv: "AUTO_GATE_API_KEY",
             timeoutMs: 8000,
             maxRetries: 1,
@@ -2193,7 +2311,9 @@ if (__isMain) {
             harnessContext: true,
             guides: true,
             modelEndpoint: "https://x",
+            modelEndpointEnv: "AUTO_GATE_MODEL_ENDPOINT",
             model: "m",
+            apiKey: "",
             apiKeyEnv: "K",
             timeoutMs: 3000,
             maxRetries: 2,
@@ -2280,9 +2400,9 @@ if (__isMain) {
         assert.equal(liveConfig.maxRetries, 4, "maxRetries must reach the live config");
         assert.equal(liveConfig.retryDelayMs, 1000, "retryDelayMs must reach the live config");
         // The two config sources must not collide: plugin config has 8 fields,
-        // LLM config has 7 (6 scalar + the leaves array); the merged object has
-        // all 15 (8 plugin + 7 LLM).
-        assert.equal(Object.keys(liveConfig).length, 15);
+        // LLM config has 9 (8 scalar + the leaves array); the merged object has
+        // all 17 (8 plugin + 9 LLM).
+        assert.equal(Object.keys(liveConfig).length, 17);
     });
 
     // ===================================================================
@@ -2886,13 +3006,19 @@ if (__isMain) {
     // --- onUncertain behavior ---
 
     test("event: onUncertain:passthrough + live misconfig → NO reply", async () => {
+        // Uses a MODEL misconfig (not endpoint) so it triggers the pre-check
+        // → handleUncertain → passthrough (no reply). An endpoint misconfig
+        // (empty modelEndpoint + unset modelEndpointEnv) now goes through the
+        // runtime deny→reject chain (classifyLive throws → decideLive deny →
+        // reply reject), which does NOT route through handleUncertain and so
+        // does NOT respect onUncertain. That asymmetry is pre-existing.
         const { hooks, replies } = await setupEventTest(
             {
                 mode: "live",
                 onUncertain: "passthrough",
                 promptFile: testConfigPath("evt-classifier-prompt.txt"),
             },
-            { modelEndpoint: "", model: "test-model" },
+            { modelEndpoint: "https://x", model: "" },
         );
         await hooks["event"]({ event: makeAskedEvent() });
         assert.equal(

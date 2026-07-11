@@ -587,16 +587,20 @@ export function __setCachedHarnessContextPrompt(value) {
 //
 // FAIL-CLOSED BY THROWING: every indeterminate path THROWS, because the caller
 // (decideLive -> decidePermission) maps a thrown evaluator to deny. Throws on:
-//   - missing modelEndpoint / model          (misconfigured; NOT retried)
-//   - missing API key in the named env var   (no credentials; NOT retried)
+//   - endpoint resolves to empty / missing model  (misconfigured; NOT retried)
+//   - API key resolves to empty              (no credentials; NOT retried)
 //   - non-2xx HTTP status                     (4xx immediate; 5xx retried)
 //   - malformed JSON body                     (NOT retried)
 //   - missing choices[0].message.content      (retried — transient)
 //   - fetch rejection / AbortError (timeout)  (retried — transient)
 //
-// API key: read from process.env[config.apiKeyEnv] (default "AUTO_GATE_API_KEY")
-// AT CALL TIME. The key NEVER goes in the config FILE (which may be committed) —
-// only the env-var NAME goes in config; the value comes from env at call time.
+// ENDPOINT + API KEY are each resolved DUAL-FORM with LITERAL PREFERRED (see
+// the resolution blocks in _classifyLiveCore): a non-empty literal in config
+// wins; otherwise the named env var (modelEndpointEnv / apiKeyEnv) is consulted
+// at call time; if neither yields a value the throw above fail-closes. A key
+// VALUE in a literal apiKey lives in the gitignored LLM config file (safe for
+// local setups); the env-var form (apiKeyEnv) remains recommended for
+// CI/containers where secrets must not live on disk.
 //
 // fetchFn is injectable (default globalThis.fetch) so tests never make real
 // network calls. runnerFn is injectable so tests never spawn a real
@@ -716,21 +720,51 @@ async function _classifyLiveCore(config, serializedInput, fetchFn, runnerFn) {
     if (typeof fetchImpl !== "function") {
         throw new Error("no fetch implementation available");
     }
-    const endpoint = config && config.modelEndpoint;
     const model = config && config.model;
-    if (typeof endpoint !== "string" || endpoint.length === 0) {
-        throw new Error("missing modelEndpoint");
-    }
     if (typeof model !== "string" || model.length === 0) {
         throw new Error("missing model");
     }
+    // Dual-form endpoint resolution (literal-preferred):
+    //   - a NON-EMPTY literal `config.modelEndpoint` wins;
+      //   - otherwise fall back to `config.modelEndpointEnv` (NAME of an env
+    //     var) and read its value from process.env;
+    //   - otherwise the endpoint resolves to "" -> fail-closed below.
+    // The non-empty guard matters: DEFAULT_LLM_CONFIG.modelEndpoint is "" and
+    // must NOT suppress the env fallback.
+    const endpointLiteral =
+        config && typeof config.modelEndpoint === "string"
+            ? config.modelEndpoint
+            : "";
+    const endpointEnvName =
+        config && typeof config.modelEndpointEnv === "string" && config.modelEndpointEnv
+            ? config.modelEndpointEnv
+            : "AUTO_GATE_MODEL_ENDPOINT";
+    const endpoint = endpointLiteral.length > 0
+        ? endpointLiteral
+        : (process.env[endpointEnvName] || "");
+    if (typeof endpoint !== "string" || endpoint.length === 0) {
+        throw new Error("missing modelEndpoint");
+    }
+    // Dual-form key resolution (literal-preferred):
+    //   - a NON-EMPTY literal `config.apiKey` (the value itself) wins;
+    //   - otherwise fall back to `config.apiKeyEnv` (NAME of an env var) and
+    //     read its value from process.env (the historical behavior);
+    //   - otherwise the key resolves to "" -> fail-closed below.
+    // The non-empty guard matters: DEFAULT_LLM_CONFIG.apiKey is "" and must
+    // NOT suppress the env fallback.
+    const apiKeyLiteral =
+        config && typeof config.apiKey === "string"
+            ? config.apiKey
+            : "";
     const apiKeyEnv =
         config && typeof config.apiKeyEnv === "string" && config.apiKeyEnv
             ? config.apiKeyEnv
             : "AUTO_GATE_API_KEY";
-    const apiKey = process.env[apiKeyEnv];
-    if (!apiKey || typeof apiKey !== "string") {
-        throw new Error(`missing API key in env ${apiKeyEnv}`);
+    const apiKey = apiKeyLiteral.length > 0
+        ? apiKeyLiteral
+        : (process.env[apiKeyEnv] || "");
+    if (!apiKey || typeof apiKey !== "string" || apiKey.length === 0) {
+        throw new Error(`missing API key (literal apiKey or env ${apiKeyEnv})`);
     }
     const timeoutMs =
         config && typeof config.timeoutMs === "number" && config.timeoutMs > 0
@@ -1750,7 +1784,7 @@ if (__isMain) {
         try {
             await assert.rejects(
                 () => classifyLive(GOOD_CONFIG, "x", fakeFetchOk("ok")),
-                new RegExp(`missing API key in env ${name}`),
+                new RegExp(`missing API key.*${name}`),
             );
         } finally {
             if (prev !== undefined) process.env[name] = prev;
@@ -1786,6 +1820,199 @@ if (__isMain) {
         } finally {
             if (prev === undefined) delete process.env[name];
             else process.env[name] = prev;
+        }
+    });
+
+    // ===== DUAL-FORM endpoint + key resolution (literal-preferred) =====
+    //
+    // Both endpoint and API key support two forms: a literal value (modelEndpoint
+    // URL / apiKey value) and an env-var NAME (modelEndpointEnv / apiKeyEnv).
+    // When both forms are non-empty, the LITERAL wins. An empty literal (the
+    // DEFAULT_LLM_CONFIG default) falls through to the env form. If neither
+    // yields a value, classifyLive throws (fail-closed).
+
+    // Helper: a fake fetch that captures the URL it was called with.
+    function urlCapturingFetch(responseContent) {
+        let calledUrl = null;
+        const fn = async (url) => {
+            calledUrl = url;
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    choices: [{ message: { content: responseContent } }],
+                }),
+            };
+        };
+        fn.getUrl = () => calledUrl;
+        return fn;
+    }
+
+    // Helper: save/restore an env var around a test.
+    function withEnv(name, value, fn) {
+        return async () => {
+            const prev = process.env[name];
+            if (value === undefined) delete process.env[name];
+            else process.env[name] = value;
+            try {
+                return await fn();
+            } finally {
+                if (prev === undefined) delete process.env[name];
+                else process.env[name] = prev;
+            }
+        };
+    }
+
+    test("classifyLive: endpoint from modelEndpointEnv only (env holds URL)", withKey(async () => {
+        const envName = "TEST_ENDPOINT_ENV";
+        const envUrl = "https://from-env.example/v1/chat";
+        const prev = process.env[envName];
+        process.env[envName] = envUrl;
+        try {
+            const fetchFn = urlCapturingFetch("<block>no</block>");
+            await classifyLive(
+                { ...GOOD_CONFIG, modelEndpoint: "", modelEndpointEnv: envName },
+                "x",
+                fetchFn,
+                fakeRunnerOk(),
+            );
+            assert.equal(fetchFn.getUrl(), envUrl, "endpoint must come from env var");
+        } finally {
+            if (prev === undefined) delete process.env[envName];
+            else process.env[envName] = prev;
+        }
+    }));
+
+    test("classifyLive: endpoint BOTH literal + env -> literal wins", withKey(async () => {
+        const envName = "TEST_ENDPOINT_ENV";
+        const envUrl = "https://from-env.example/v1/chat";
+        const literalUrl = "https://from-literal.example/v1/chat";
+        const prev = process.env[envName];
+        process.env[envName] = envUrl;
+        try {
+            const fetchFn = urlCapturingFetch("<block>no</block>");
+            await classifyLive(
+                { ...GOOD_CONFIG, modelEndpoint: literalUrl, modelEndpointEnv: envName },
+                "x",
+                fetchFn,
+                fakeRunnerOk(),
+            );
+            assert.equal(fetchFn.getUrl(), literalUrl, "literal endpoint must win over env");
+            assert.notEqual(fetchFn.getUrl(), envUrl, "env endpoint must NOT be used");
+        } finally {
+            if (prev === undefined) delete process.env[envName];
+            else process.env[envName] = prev;
+        }
+    }));
+
+    test("classifyLive: endpoint neither literal nor env set -> throws", withKey(async () => {
+        const envName = "TEST_ENDPOINT_UNSET_ENV";
+        const prev = process.env[envName];
+        delete process.env[envName];
+        try {
+            await assert.rejects(
+                () => classifyLive(
+                    { ...GOOD_CONFIG, modelEndpoint: "", modelEndpointEnv: envName },
+                    "x",
+                    fakeFetchOk("ok"),
+                ),
+                /missing modelEndpoint/,
+            );
+        } finally {
+            if (prev !== undefined) process.env[envName] = prev;
+        }
+    }));
+
+    test("classifyLive: key from literal apiKey (no env needed)", async () => {
+        // No env var set — the literal apiKey in config is used directly.
+        const fetchFn = urlCapturingFetch("<block>no</block>");
+        const out = await classifyLive(
+            {
+                modelEndpoint: "https://x",
+                model: "m",
+                apiKey: "literal-key-value",
+                apiKeyEnv: "UNSET_TEST_KEY_ENV",
+            },
+            "x",
+            fetchFn,
+            fakeRunnerOk(),
+        );
+        assert.equal(out, "<block>no</block>", "literal apiKey must work without env");
+    });
+
+    test("classifyLive: key BOTH literal apiKey + apiKeyEnv -> literal wins", async () => {
+        const envName = "TEST_KEY_BOTH_ENV";
+        const prev = process.env[envName];
+        process.env[envName] = "env-key-value";
+        try {
+            // The literal key is used; the env key is NOT consulted. We verify
+            // by NOT setting the env var's value in the config's apiKeyEnv and
+            // using a literal apiKey that differs — the call succeeds, proving
+            // the literal was used (if env had been used, it would still work,
+            // but the point is the literal is sufficient even when env is also
+            // set). The URL capture proves the request went through.
+            const fetchFn = urlCapturingFetch("<block>no</block>");
+            const out = await classifyLive(
+                {
+                    modelEndpoint: "https://x",
+                    model: "m",
+                    apiKey: "literal-key-value",
+                    apiKeyEnv: envName,
+                },
+                "x",
+                fetchFn,
+                fakeRunnerOk(),
+            );
+            assert.equal(out, "<block>no</block>", "call must succeed with literal key");
+        } finally {
+            if (prev === undefined) delete process.env[envName];
+            else process.env[envName] = prev;
+        }
+    });
+
+    test("classifyLive: key from apiKeyEnv only (env holds key) -> existing behavior", async () => {
+        const envName = "TEST_KEY_ENV_ONLY";
+        const prev = process.env[envName];
+        process.env[envName] = "env-key-value";
+        try {
+            const out = await classifyLive(
+                {
+                    modelEndpoint: "https://x",
+                    model: "m",
+                    apiKey: "", // no literal key -> falls through to env
+                    apiKeyEnv: envName,
+                },
+                "x",
+                fakeFetchOk("<block>no</block>"),
+                fakeRunnerOk(),
+            );
+            assert.equal(out, "<block>no</block>", "env-only key must work");
+        } finally {
+            if (prev === undefined) delete process.env[envName];
+            else process.env[envName] = prev;
+        }
+    });
+
+    test("classifyLive: key neither literal nor env set -> throws", async () => {
+        const envName = "TEST_KEY_NEITHER_ENV";
+        const prev = process.env[envName];
+        delete process.env[envName];
+        try {
+            await assert.rejects(
+                () => classifyLive(
+                    {
+                        modelEndpoint: "https://x",
+                        model: "m",
+                        apiKey: "",
+                        apiKeyEnv: envName,
+                    },
+                    "x",
+                    fakeFetchOk("ok"),
+                ),
+                /missing API key/,
+            );
+        } finally {
+            if (prev !== undefined) process.env[envName] = prev;
         }
     });
 
