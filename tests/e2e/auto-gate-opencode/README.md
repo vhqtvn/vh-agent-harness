@@ -7,7 +7,7 @@ This suite proves the auto-classifier plugin's enforcement path works against a
 
 It exercises **both** execution modes:
 - **`opencode run`** (one-shot CLI) — the race-proof two-case matrix.
-- **`opencode serve`** (long-lived HTTP listener) — the serve-mode fix proof.
+- **`opencode serve`** (long-lived HTTP listener) — the serve-mode reply proof.
 
 ## What it proves
 
@@ -19,13 +19,45 @@ It exercises **both** execution modes:
    → decision matrix) and **replies through the real SDK**
    (`postSessionIdPermissionsPermissionId`).
 4. **Plugin's reply resolves the permission** so the tool proceeds (allow) or
-   is blocked (reject) — proven under BOTH `opencode run` and `opencode serve`.
+   is blocked (reject) — proven under BOTH `opencode run` and `opencode serve`,
+   against CURRENT upstream opencode with **no source patches**.
+
+## Acquisition: latest upstream, no patches
+
+The Docker image acquires the **LATEST HEAD** of the canonical upstream
+(`https://github.com/sst/opencode.git`) as a shallow clone at build time — no
+fork, no pinned commit, no host clone dependency. The image self-installs
+opencode; the build context never references an out-of-tree checkout.
+
+**No source patches are applied.** An earlier version of this suite patched two
+bugs in a stale fork of opencode (an `InstanceMiddleware` outlier mount and an
+in-process plugin fetch that broke serve-mode permission replies). Both bugs
+were **resolved upstream**: the routing layer was rewritten from hand-rolled
+Hono mounts to Effect HttpApi (eliminating the outlier mount), and the plugin
+SDK client now threads `directory` via the `x-opencode-directory` header and
+routes replies over HTTP when a serve listener is active
+(`plugin/index.ts`: `serverUrl?.toString()` baseUrl + conditional in-process
+fetch override). The plugin's permission reply now resolves correctly under both
+`run` and `serve` out of the box.
+
+This suite therefore proves the plugin works against **what operators actually
+run** — current upstream, unmodified.
+
+### Intentional non-reproducibility (the tradeoff)
+
+Building against latest HEAD is a deliberate choice: it means this suite
+**catches upstream drift**. A change to the event payload, the reply route, the
+provider config shape, or the plugin auto-discovery contract surfaces here
+first. The cost is that a build is not byte-for-byte reproducible across time
+(today's HEAD differs from next week's). That is acceptable for a drift-detecting
+integration suite; reproducibility is the job of the pinned unit/integration
+suites.
 
 ## Run mode + ENFORCE mode (race-proof two-case matrix)
 
 This suite uses `opencode run` (one-shot CLI) for its race-proof two-case
-matrix. `opencode run` uses **only** `Server.Default()` (the singleton Hono app)
-as its SDK fetch function — every code path (session, prompt, permission ask,
+matrix. `opencode run` uses **only** `Server.Default()` (the singleton app) as
+its SDK fetch function — every code path (session, prompt, permission ask,
 reply) goes through the same app with the same middleware chain and the same
 ScopedCache.
 
@@ -56,124 +88,44 @@ A pass PROVES the plugin won the race: the only way the outcome flips from the
 run-default is if the plugin's reply landed first. If the plugin loses, the
 outcome matches the run-default and the case FAILS loudly.
 
-## Serve mode (two fixes for plugin reply resolution)
+## Serve mode (plugin reply resolves under the HTTP listener)
 
-`opencode serve` runs without ambient instance context (`effectCmd` uses
-`instance: false`), so the plugin's permission reply needs explicit instance
-context to find the right pending-map entry. Two issues must be fixed:
+`opencode serve` runs the headless HTTP listener with no ambient instance
+context (`effectCmd` uses `instance: false`), so the plugin's permission reply
+must resolve through the serve routing path. Current upstream handles this
+correctly with **no patches**:
 
-### Fix 1: InstanceMiddleware on line-139 InstanceRoutes mount
+- The Effect HttpApi routing rewrite eliminated the inconsistent
+  `InstanceMiddleware` outlier mount that previously left the reply handler
+  without instance context.
+- The plugin SDK client threads `directory` via `x-opencode-directory` and, when
+  a serve listener is active (`Server.url` set), routes replies over HTTP to the
+  live listener instead of an in-process fetch — so the reply resolves in the
+  same request context as the ask.
 
-In `createHono()` Branch 2 (no `OPENCODE_WORKSPACE_ID` — the default
-multi-workspace path), `InstanceRoutes` is mounted at **line 139** of
-`packages/opencode/src/server/server.ts` **WITHOUT** `InstanceMiddleware`:
-
-```typescript
-// line 139 (BROKEN — no InstanceMiddleware):
-.route("/", InstanceRoutes(runtime.upgradeWebSocket, opts))
-```
-
-This is the inconsistent outlier — Branch 1 (line 123, `OPENCODE_WORKSPACE_ID`
-set) and `workspaceLegacyApp` (line 130) BOTH wrap their `InstanceRoutes`
-mounts with `InstanceMiddleware`.
-
-Without `InstanceMiddleware`, the permission reply route handler
-(`POST /session/{id}/permissions/{permissionID}`) has no instance context:
-`InstanceMiddleware` reads the `x-opencode-directory` header and provides
-`WithInstance` (the AsyncLocalStorage the permission pending `ScopedCache` is
-keyed by). Without it, the handler resolves the wrong directory → empty pending
-map → `if (!existing) return` → **silent no-op**.
-
-```diff
--      .route("/", InstanceRoutes(runtime.upgradeWebSocket, opts))
-+      .route("/", new Hono().use(InstanceMiddleware()).route("/", InstanceRoutes(runtime.upgradeWebSocket, opts)))
-```
-
-This mirrors the pattern already used at line 123 (Branch 1). `Hono` and
-`InstanceMiddleware` are already imported in `server.ts`.
-
-Under `opencode run`, `effectCmd` (`instance: true`) establishes ambient ALS
-instance context for the whole handler, so the reply resolves via ambient
-context even without the middleware. Under `opencode serve`, `effectCmd` uses
-`instance: false` (no ambient ALS) → the middleware is **required**.
-
-### Fix 2: Route plugin reply through HTTP when serve listener is active
-
-Fix 1 is **necessary but not sufficient**. The plugin creates its SDK client
-with an **in-process** fetch override:
-
-```typescript
-// plugin/index.ts — original (BROKEN for serve):
-fetch: async (...args) => Server.Default().app.fetch(...args)
-```
-
-This processes the permission reply via `Server.Default().app.fetch()` — a
-direct in-process Hono call that runs in the **caller's** async context (the
-bus stream-consumer fiber that dispatched the `permission.asked` event to the
-plugin). Despite InstanceMiddleware correctly setting `x-opencode-directory`
-ALS and `attach()` correctly providing `InstanceRef`, the `ScopedCache` that
-backs the permission pending map resolves to a **different `State` object** for
-the reply vs the ask (the ask ran through the serve listener's HTTP path → a
-fresh fiber; the reply ran through the in-process path → the bus consumer's
-fiber lineage). Result: `pending.get(requestID)` returns `undefined` →
-`if (!existing) return` → **silent no-op**.
-
-The Dockerfile patches `plugin/index.ts` to use `globalThis.fetch` (HTTP) when
-`Server.url` is set (serve mode), routing the reply through Bun's HTTP server
-→ a fresh async context → the same fiber/scope lineage as the ask. In run mode
-(`Server.url` unset), it falls back to the original in-process fetch (which
-works via ambient ALS from `effectCmd` `instance: true`).
-
-```diff
--        baseUrl: "http://localhost:4096",
-+        baseUrl: Server.url ? Server.url.origin : "http://localhost:4096",
-         ...
--        fetch: async (...args) => Server.Default().app.fetch(...args),
-+        fetch: Server.url ? globalThis.fetch : (async (...args) => Server.Default().app.fetch(...args)),
-```
-
-### Reconciliation with the prior run-mode patch
-
-The previous Dockerfile applied a **global** `InstanceMiddleware` patch
-(appending `.use(InstanceMiddleware())` after `CorsMiddleware` on the main app
-chain). Investigation found that Hono v4 `.use()` on a parent app does NOT
-propagate to `.route("/", subApp)` sub-apps (sub-apps are isolated routers), so
-the global patch was a **no-op** for the InstanceRoutes mount. The surgical
-line-139 wrap is what actually puts `InstanceMiddleware` inside the sub-app's
-chain.
-
-Under `opencode run`, the reply resolves via ambient ALS (`effectCmd`
-`instance: true`) regardless of any middleware patch — the run-mode cases pass
-with or without the global patch. The line-139 fix is necessary for serve but
-not sufficient; the HTTP-fetch fix (Fix 2) is what ultimately makes serve pass.
-The old global patch was redundant and has been removed.
-
-### Serve-mode cases
-
-Serve mode has **no** `--dangerously-skip-permissions` auto-reply, so the
-plugin is the **sole replier** — no race. This makes serve-mode assertions
-simpler and more direct:
+Serve mode has **no** `--dangerously-skip-permissions` auto-reply, so the plugin
+is the **sole replier** — no race. This makes serve-mode assertions simpler and
+more direct:
 
 | Case | `stubVerdict` | PASS = tool outcome |
 |------|:---:|---|
 | **serve-A (ALLOW proof)** | `"allow"` | **read PROCEEDS** (plugin's allow reply resolved) |
 | **serve-B (BLOCK proof)** | `"block"` | **read BLOCKED** (plugin's reject reply resolved) |
 
-If either fix were absent, the permission `Deferred` would never resolve and
-both cases would time out (90 s) with neither content nor rejection in the
-messages — a loud FAIL.
+Both polarities are tested, proving the plugin's reply resolves end-to-end under
+serve against current upstream.
 
 ## Architecture (single container)
 
 One Dockerfile, one container:
 
-1. **Stage 1** (`oven/bun:1-debian`): clones the OpenCode repo at a pinned
-   commit, runs `bun install` (including native modules).
-2. **Stage 2** (`oven/bun:1-debian`): copies the OpenCode tree, applies two
-   serve fixes (InstanceMiddleware line-139 wrap + plugin HTTP-fetch patch —
-   see below), installs ripgrep + ca-certificates, bundles the 4 plugin
-   modules into a single file via `bun build`, copies test files, and sets
-   the entrypoint.
+1. **Stage 1** (`oven/bun:1-debian`): shallow-clones the LATEST upstream
+   opencode (`sst/opencode`, HEAD only), runs `bun install` (including native
+   modules). No fork, no pinned commit.
+2. **Stage 2** (`oven/bun:1-debian`): copies the opencode tree, installs
+   ripgrep + ca-certificates, bundles the 4 plugin modules into a single file
+   via `bun build`, copies test files, and sets the entrypoint. **No source
+   patches are applied.**
 
 The driver (`run-e2e.mjs`) orchestrates everything on localhost inside the
 container:
@@ -211,26 +163,6 @@ It is **not used in ENFORCE mode** (the stub evaluator is pure sync), but is
 included for completeness — if the suite is later switched to LIVE mode the
 infrastructure is already in place.
 
-### Dockerfile patches (two serve fixes)
-
-The Dockerfile applies two `sed` patches to the cloned OpenCode source:
-
-1. **InstanceMiddleware line-139 wrap** (`server/server.ts`): wraps the
-   multi-workspace `InstanceRoutes` mount with `InstanceMiddleware`, mirroring
-   the pattern already used at line 123 and line 130. See [Fix 1](#fix-1-instancemiddleware-on-line-139-instanceroutes-mount)
-   above for the full root-cause analysis.
-
-2. **Plugin HTTP-fetch** (`plugin/index.ts`): when `Server.url` is set (serve
-   mode), routes the plugin's SDK client through `globalThis.fetch` to the live
-   serve listener instead of the in-process `Server.Default().app.fetch()`.
-   This avoids a `ScopedCache` context-isolation issue where the in-process
-   fetch resolves the reply in a different fiber lineage than the ask. See
-   [Fix 2](#fix-2-route-plugin-reply-through-http-when-serve-listener-is-active)
-   above for details.
-
-Neither patch modifies the committed plugin source — both are build-time
-patches to the cloned OpenCode source tree.
-
 ### Why `permission.read:"ask"` is mandatory
 
 The default `build` agent pre-allows `read: {"*":"allow"}`. The permission
@@ -265,7 +197,7 @@ docker run --rm auto-gate-opencode-e2e
 
 | File | Purpose |
 |------|---------|
-| `Dockerfile` | Multi-stage build: OpenCode from source + test runtime |
+| `Dockerfile` | Multi-stage build: latest upstream opencode (shallow clone) + test runtime, no patches |
 | `mock-llm-server.js` | Dual-port mock LLM (agent + classifier endpoints) |
 | `run-e2e.mjs` | Test driver: orchestrate mock + 2 run cases + 2 serve cases, assert |
 | `target.txt` | Fixture file the agent tries to read |

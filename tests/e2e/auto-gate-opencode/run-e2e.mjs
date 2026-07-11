@@ -33,24 +33,27 @@
 // case FAILS loudly — no false pass is possible.
 //
 // ── WHY BOTH run AND serve ────────────────────────────────────────────────
-// `opencode run` uses ONLY Server.Default() (the singleton Hono app) as its
+// `opencode run` uses ONLY Server.Default() (the singleton app) as its
 // SDK fetch fn — one app, one middleware chain, one ScopedCache. It also
 // auto-replies to permission.asked, creating a race with our plugin that we
 // exploit as an airtight two-case proof (see matrix above).
 //
-// `opencode serve` creates a SEPARATE Hono listener (createHono) distinct
-// from Server.Default(). The test driver's HTTP requests hit the listener
-// while the plugin's in-process SDK replies hit Server.Default(). Both apps
-// share the same InstanceState (and thus the same permission pending
-// ScopedCache) — but ONLY if the line-139 InstanceRoutes mount applies
-// InstanceMiddleware so the reply handler resolves the correct directory.
-// Without that fix (see Dockerfile patch), the reply is a silent no-op and
-// the permission Deferred hangs forever.
+// `opencode serve` runs the headless HTTP listener. Current upstream resolves
+// the plugin's permission reply correctly OUT OF THE BOX — no source patches
+// needed. Two upstream changes retired the bug the e2e USED to patch:
+//   (a) the routing layer was rewritten from hand-rolled Hono mounts to Effect
+//       HttpApi, eliminating the InstanceMiddleware outlier mount; and
+//   (b) the plugin SDK client now threads `directory` via the
+//       `x-opencode-directory` header and routes replies over HTTP when a serve
+//       listener is active, so the reply resolves the correct pending map
+//       regardless of fiber lineage. (plugin/index.ts: `serverUrl?.toString()`
+//       baseUrl + conditional in-process fetch override.)
 //
 // Serve mode has NO auto-reply race (there is no --dangerously-skip-permissions
 // equivalent), so the plugin is the SOLE replier. This makes serve-mode
 // assertions simpler: allow → read proceeds, block → read rejected. Both
-// polarities are tested, proving the fix resolves plugin replies under serve.
+// polarities are tested, proving the plugin's reply resolves under serve
+// against current upstream with no patches.
 
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -522,9 +525,10 @@ async function main() {
         // block → read rejected).
         //
         // Serve has NO --dangerously-skip-permissions auto-reply, so the plugin
-        // is the SOLE replier — no race. This is the direct proof that the
-        // line-139 InstanceMiddleware fix makes plugin replies resolve under
-        // serve (previously a silent no-op → Deferred hang → timeout).
+        // is the SOLE replier — no race. Current upstream resolves the plugin's
+        // permission reply under serve out of the box (no patches): the Effect
+        // HttpApi routing rewrite + per-request `x-opencode-directory` threading
+        // retired the InstanceMiddleware/fiber-lineage bug this suite used to patch.
         log("========== STARTING SERVE MODE ==========");
         serveProc = spawn(
             "bun",
