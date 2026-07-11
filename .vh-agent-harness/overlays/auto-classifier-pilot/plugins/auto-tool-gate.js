@@ -956,19 +956,75 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
             // try/catch, and log on any failure. The only residual hang case
             // is a fundamentally-broken transport (then nothing can resolve
             // the Deferred — inherent, now logged rather than crashing).
-            const reply = async (responseMode) => {
-                if (
-                    !client ||
-                    typeof client.postSessionIdPermissionsPermissionId !==
-                        "function"
-                ) {
-                    console.error(
-                        `[auto-gate] permission reply unavailable: no client ` +
-                        `(responseMode=${responseMode})`,
-                    );
-                    return;
-                }
+            // `reason` is OPTIONAL and only meaningful for `responseMode ===
+            // "reject"`. When a non-empty reason string is supplied on a reject,
+            // the reply routes through the v2 permission-reply endpoint
+            // (POST /permission/:requestID/reply) which forwards `message` to
+            // the permission service. Upstream that switches the Deferred
+            // failure from RejectedError (which kills the WHOLE agent turn
+            // under default config — one block ends the session) to
+            // CorrectedError (which fails only THIS tool call and surfaces the
+            // reason to the model as errorText next step, so it can adapt and
+            // retry). That makes the gate a TRUE per-call gate instead of a
+            // binary let-it-run / kill-session switch.
+            //
+            // The v2 endpoint is reached via the SAME in-process transport the
+            // v1 SDK methods use (the underlying openapi-fetch client on
+            // `client._client`), so it works in BOTH run mode (in-process fetch,
+            // no HTTP listener — nothing listens on the loopback port) and serve
+            // mode (real HTTP listener). Raw globalThis.fetch to /permission/...
+            // would fail in run mode; this does not. Allow (once/always) and
+            // reject-without-message keep the v1 endpoint, which carries only
+            // the reply literal and never a message.
+            //
+            // MUST NEVER THROW (see F2 hardening note above). Guard the client,
+            // guard the transport, wrap every call in try/catch, and log on any
+            // failure. A reject-with-reason whose v2 transport is unavailable
+            // degrades to a v1 reject (kills the turn under default config) —
+            // fail-closed, not silent.
+            const reply = async (responseMode, reason) => {
+                const rejectWithReason =
+                    responseMode === "reject" &&
+                    typeof reason === "string" &&
+                    reason.length > 0;
                 try {
+                    if (rejectWithReason) {
+                        const transport = client && client._client;
+                        if (transport && typeof transport.post === "function") {
+                            const r2 = await transport.post({
+                                url:
+                                    "/permission/" +
+                                    encodeURIComponent(req.id) +
+                                    "/reply",
+                                body: { reply: "reject", message: reason },
+                                headers: {
+                                    "Content-Type": "application/json",
+                                },
+                            });
+                            if (r2 && r2.error) {
+                                console.error(
+                                    `[auto-gate] permission reply (v2) ` +
+                                    `failed: ` +
+                                    `${(r2.error && r2.error.message) || "unknown"}`,
+                                );
+                            }
+                            return;
+                        }
+                        // No v2 transport available — fall through to the v1
+                        // reject below (turn-killing under default config; logged
+                        // rather than silent). Degrades fail-closed.
+                    }
+                    if (
+                        !client ||
+                        typeof client.postSessionIdPermissionsPermissionId !==
+                            "function"
+                    ) {
+                        console.error(
+                            `[auto-gate] permission reply unavailable: ` +
+                            `no client (responseMode=${responseMode})`,
+                        );
+                        return;
+                    }
                     const r =
                         await client.postSessionIdPermissionsPermissionId({
                             path: { id: req.sessionID, permissionID: req.id },
@@ -1006,7 +1062,7 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
                     `[auto-gate] uncertain: ${reason}; ` +
                     `onUncertain=reject (fail-closed)`,
                 );
-                await reply("reject");
+                await reply("reject", `[auto-gate] fail-closed: ${reason}`);
             };
 
             // =============== AUDIT mode (default, observe-only) ===============
@@ -1036,7 +1092,12 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
                 if (result.status === "allow") {
                     await reply(config.replyMode); // "once" | "always"
                 } else {
-                    await reply("reject");
+                    await reply(
+                        "reject",
+                        result.reason ||
+                            result.audit ||
+                            "[auto-gate] blocked by stub verdict",
+                    );
                 }
                 return;
             }
@@ -1123,7 +1184,12 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
                 if (result.status === "allow") {
                     await reply(config.replyMode); // "once" | "always"
                 } else {
-                    await reply("reject");
+                    await reply(
+                        "reject",
+                        result.reason ||
+                            result.audit ||
+                            "[auto-gate] blocked by live classifier",
+                    );
                 }
                 return;
             }
@@ -1278,7 +1344,10 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
                 if (agg.decision === "allow") {
                     await reply(config.replyMode); // "once" | "always"
                 } else {
-                    await reply("reject");
+                    await reply(
+                        "reject",
+                        `[auto-gate] blocked by consensus: ${agg.audit}`,
+                    );
                 }
                 return;
             }
@@ -1960,13 +2029,40 @@ if (__isMain) {
             ];
         const client = {
             postSessionIdPermissionsPermissionId: async (args) => {
-                replies.push(args);
+                replies.push({ ...args, _route: "v1" });
                 return opts.replyError
                     ? {
                           data: undefined,
                           error: { message: "stub reply error" },
                       }
                     : { data: {}, error: undefined };
+            },
+            // Underlying openapi-fetch transport used by the v2 permission-reply
+            // route (POST /permission/:requestID/reply). Records a v1-compatible
+            // normalized entry so existing `replies[i].body.response` assertions
+            // still pass, while new tests can assert `replies[i].body.message`
+            // and `replies[i]._route`.
+            _client: {
+                post: async (args) => {
+                    const m = String((args && args.url) || "").match(
+                        /\/permission\/([^/]+)\/reply/,
+                    );
+                    const body = (args && args.body) || {};
+                    replies.push({
+                        path: { permissionID: m ? m[1] : undefined },
+                        body: {
+                            response: body.reply,
+                            message: body.message,
+                        },
+                        _route: "v2",
+                    });
+                    return opts.replyError
+                        ? {
+                              data: undefined,
+                              error: { message: "stub reply error" },
+                          }
+                        : { data: {}, error: undefined };
+                },
             },
             session: {
                 messages: async () => ({
@@ -2094,6 +2190,9 @@ if (__isMain) {
         // Verify path args are threaded correctly.
         assert.equal(replies[0].path.id, "sess-evt-1");
         assert.equal(replies[0].path.permissionID, "req-evt-1");
+        // Allow routes through the v1 endpoint and carries NO message.
+        assert.equal(replies[0]._route, "v1");
+        assert.equal(replies[0].body.message, undefined);
     });
 
     test("event: enforce stubVerdict:allow + replyMode:always → reply always", async () => {
@@ -2105,6 +2204,8 @@ if (__isMain) {
         await hooks["event"]({ event: makeAskedEvent() });
         assert.equal(replies.length, 1);
         assert.equal(replies[0].body.response, "always");
+        assert.equal(replies[0]._route, "v1");
+        assert.equal(replies[0].body.message, undefined);
     });
 
     test("event: enforce stubVerdict:block → reply reject", async () => {
@@ -2115,6 +2216,14 @@ if (__isMain) {
         await hooks["event"]({ event: makeAskedEvent() });
         assert.equal(replies.length, 1);
         assert.equal(replies[0].body.response, "reject");
+        // Reject now routes through the v2 endpoint with a reason message so
+        // the model sees why (per-call gate via CorrectedError).
+        assert.equal(replies[0]._route, "v2");
+        assert.ok(
+            typeof replies[0].body.message === "string" &&
+                replies[0].body.message.length > 0,
+            "reject must carry a non-empty reason message",
+        );
     });
 
     test("event: enforce stubVerdict:fail → reply reject (fail-closed)", async () => {
@@ -2125,6 +2234,12 @@ if (__isMain) {
         await hooks["event"]({ event: makeAskedEvent() });
         assert.equal(replies.length, 1);
         assert.equal(replies[0].body.response, "reject");
+        assert.equal(replies[0]._route, "v2");
+        assert.ok(
+            typeof replies[0].body.message === "string" &&
+                replies[0].body.message.length > 0,
+            "fail-closed reject must carry a reason message",
+        );
     });
 
     // --- live mode ---
@@ -2171,6 +2286,12 @@ if (__isMain) {
         }
         assert.equal(replies.length, 1);
         assert.equal(replies[0].body.response, "reject");
+        assert.equal(replies[0]._route, "v2");
+        assert.ok(
+            typeof replies[0].body.message === "string" &&
+                replies[0].body.message.length > 0,
+            "live reject must carry a reason message",
+        );
     });
 
     test("event: live misconfig (no modelEndpoint) → reply reject", async () => {
@@ -2184,6 +2305,12 @@ if (__isMain) {
         await hooks["event"]({ event: makeAskedEvent() });
         assert.equal(replies.length, 1);
         assert.equal(replies[0].body.response, "reject");
+        assert.equal(replies[0]._route, "v2");
+        assert.ok(
+            typeof replies[0].body.message === "string" &&
+                replies[0].body.message.length > 0,
+            "live misconfig reject must carry a reason message",
+        );
     });
 
     test("event: live fetch throw → reply reject (fail-closed)", async () => {
@@ -2206,6 +2333,12 @@ if (__isMain) {
         }
         assert.equal(replies.length, 1);
         assert.equal(replies[0].body.response, "reject");
+        assert.equal(replies[0]._route, "v2");
+        assert.ok(
+            typeof replies[0].body.message === "string" &&
+                replies[0].body.message.length > 0,
+            "live fetch-throw reject must carry a reason message",
+        );
     });
 
     // --- onUncertain behavior ---
@@ -2239,6 +2372,144 @@ if (__isMain) {
         await hooks["event"]({ event: makeAskedEvent() });
         assert.equal(replies.length, 1);
         assert.equal(replies[0].body.response, "reject");
+        assert.equal(replies[0]._route, "v2");
+        assert.ok(
+            typeof replies[0].body.message === "string" &&
+                replies[0].body.message.length > 0,
+            "onUncertain reject must carry a reason message",
+        );
+    });
+
+    // --- per-call gate: v2 route URL form + transport-missing degradation ---
+
+    test("event: reject routes through v2 endpoint at /permission/:id/reply with reason", async () => {
+        // Use a custom client that captures the RAW _client.post args so we can
+        // assert the exact v2 URL form + body shape (independent of the
+        // normalized recording in makeEventClient).
+        const tag = Math.random().toString(36).slice(2, 8);
+        const pName = `evt-v2url-p-${tag}.json`;
+        writeTestConfig(pName, { mode: "enforce", stubVerdict: "block" });
+        __resetConfigCaches();
+        const v2Calls = [];
+        const client = {
+            postSessionIdPermissionsPermissionId: async () => ({
+                data: {},
+                error: undefined,
+            }),
+            _client: {
+                post: async (args) => {
+                    v2Calls.push(args);
+                    return { data: {}, error: undefined };
+                },
+            },
+            session: {
+                messages: async () => ({ data: [], error: undefined }),
+            },
+        };
+        const hooks = await server({
+            client,
+            directory: TEST_CONFIG_DIR,
+            configPath: testConfigPath(pName),
+            llmConfigPath: testConfigPath("no-such-llm.json"),
+        });
+        await hooks["event"]({
+            event: makeAskedEvent({ id: "req-v2-1" }),
+        });
+        assert.equal(v2Calls.length, 1, "reject must hit the v2 transport once");
+        assert.match(
+            v2Calls[0].url,
+            /^\/permission\/req-v2-1\/reply$/,
+            "v2 URL must be /permission/<encoded-id>/reply",
+        );
+        assert.equal(v2Calls[0].body.reply, "reject");
+        assert.ok(
+            typeof v2Calls[0].body.message === "string" &&
+                v2Calls[0].body.message.length > 0,
+            "v2 reject body must carry a non-empty message",
+        );
+        assert.equal(
+            (v2Calls[0].headers || {})["Content-Type"],
+            "application/json",
+        );
+    });
+
+    test("event: reject with no v2 transport → degrades to v1 reject (fail-closed, no throw)", async () => {
+        // Client has v1 but NO _client.post. A reject-with-reason must fall
+        // through to the v1 reject path (which kills the turn under default
+        // config, but never throws — F2 hardening preserved).
+        const tag = Math.random().toString(36).slice(2, 8);
+        const pName = `evt-nov2-p-${tag}.json`;
+        writeTestConfig(pName, { mode: "enforce", stubVerdict: "block" });
+        __resetConfigCaches();
+        const v1Calls = [];
+        const client = {
+            postSessionIdPermissionsPermissionId: async (args) => {
+                v1Calls.push(args);
+                return { data: {}, error: undefined };
+            },
+            session: {
+                messages: async () => ({ data: [], error: undefined }),
+            },
+        };
+        const hooks = await server({
+            client,
+            directory: TEST_CONFIG_DIR,
+            configPath: testConfigPath(pName),
+            llmConfigPath: testConfigPath("no-such-llm.json"),
+        });
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(
+            v1Calls.length,
+            1,
+            "reject must fall back to v1 when no v2 transport",
+        );
+        assert.equal(v1Calls[0].body.response, "reject");
+        assert.equal(
+            v1Calls[0].body.message,
+            undefined,
+            "v1 reject carries no message (kills the turn — documented)",
+        );
+    });
+
+    test("event: allow does NOT touch the v2 transport", async () => {
+        // Allow (once/always) must route exclusively through v1 — never the v2
+        // endpoint (which would carry a message needlessly and, semantically,
+        // only makes sense for reject-with-reason).
+        const tag = Math.random().toString(36).slice(2, 8);
+        const pName = `evt-allownov2-p-${tag}.json`;
+        writeTestConfig(pName, { mode: "enforce", stubVerdict: "allow" });
+        __resetConfigCaches();
+        const v2Calls = [];
+        const v1Calls = [];
+        const client = {
+            postSessionIdPermissionsPermissionId: async (args) => {
+                v1Calls.push(args);
+                return { data: {}, error: undefined };
+            },
+            _client: {
+                post: async (args) => {
+                    v2Calls.push(args);
+                    return { data: {}, error: undefined };
+                },
+            },
+            session: {
+                messages: async () => ({ data: [], error: undefined }),
+            },
+        };
+        const hooks = await server({
+            client,
+            directory: TEST_CONFIG_DIR,
+            configPath: testConfigPath(pName),
+            llmConfigPath: testConfigPath("no-such-llm.json"),
+        });
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(v1Calls.length, 1, "allow must hit v1 once");
+        assert.equal(v1Calls[0].body.response, "once");
+        assert.equal(
+            v2Calls.length,
+            0,
+            "allow must NOT touch the v2 transport",
+        );
     });
 
     // --- early-return paths ---
@@ -2639,6 +2910,12 @@ if (__isMain) {
         }
         assert.equal(replies.length, 1, "disagreement must reply (reject)");
         assert.equal(replies[0].body.response, "reject");
+        assert.equal(replies[0]._route, "v2");
+        assert.ok(
+            typeof replies[0].body.message === "string" &&
+                replies[0].body.message.length > 0,
+            "tiered disagreement reject must carry a reason message",
+        );
     });
 
     // --- live-tiered: one fail -> reply reject (incomplete) ---
@@ -2662,6 +2939,12 @@ if (__isMain) {
         }
         assert.equal(replies.length, 1, "incomplete must reply (reject)");
         assert.equal(replies[0].body.response, "reject");
+        assert.equal(replies[0]._route, "v2");
+        assert.ok(
+            typeof replies[0].body.message === "string" &&
+                replies[0].body.message.length > 0,
+            "tiered incomplete reject must carry a reason message",
+        );
     });
 
     // --- live-tiered: empty/malformed leaves -> fail-closed reject ---
@@ -2677,6 +2960,12 @@ if (__isMain) {
         await hooks["event"]({ event: makeAskedEvent() });
         assert.equal(replies.length, 1, "empty leaves must fail-closed");
         assert.equal(replies[0].body.response, "reject");
+        assert.equal(replies[0]._route, "v2");
+        assert.ok(
+            typeof replies[0].body.message === "string" &&
+                replies[0].body.message.length > 0,
+            "tiered empty-leaves reject must carry a reason message",
+        );
     });
 
     test("live-tiered: missing leaves key -> fail-closed reject", async () => {
@@ -2690,6 +2979,12 @@ if (__isMain) {
         await hooks["event"]({ event: makeAskedEvent() });
         assert.equal(replies.length, 1);
         assert.equal(replies[0].body.response, "reject");
+        assert.equal(replies[0]._route, "v2");
+        assert.ok(
+            typeof replies[0].body.message === "string" &&
+                replies[0].body.message.length > 0,
+            "tiered missing-leaves reject must carry a reason message",
+        );
     });
 
     // --- live-tiered: onUncertain:passthrough + misconfig -> NO reply ---
@@ -2868,6 +3163,12 @@ if (__isMain) {
         }
         assert.equal(replies.length, 1, "mix must reply (reject)");
         assert.equal(replies[0].body.response, "reject");
+        assert.equal(replies[0]._route, "v2");
+        assert.ok(
+            typeof replies[0].body.message === "string" &&
+                replies[0].body.message.length > 0,
+            "tiered 3-mix reject must carry a reason message",
+        );
     });
 
     // --- live-tiered: consensus deny (2 leaves both deny) -> reply reject ---
@@ -2891,6 +3192,12 @@ if (__isMain) {
         }
         assert.equal(replies.length, 1);
         assert.equal(replies[0].body.response, "reject");
+        assert.equal(replies[0]._route, "v2");
+        assert.ok(
+            typeof replies[0].body.message === "string" &&
+                replies[0].body.message.length > 0,
+            "tiered unanimous-deny reject must carry a reason message",
+        );
     });
 
     // --- config normalization: mode live-tiered accepted ---

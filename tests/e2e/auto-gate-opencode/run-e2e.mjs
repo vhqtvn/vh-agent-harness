@@ -76,6 +76,19 @@
 // assertions simpler: allow → read proceeds, block → read rejected. Both
 // polarities are tested, proving the plugin's reply resolves under serve
 // against current upstream with no patches.
+//
+// ── PER-CALL GATE (reject carries a reason) ───────────────────────────────
+// A reject routes through the v2 permission-reply endpoint
+// (POST /permission/:requestID/reply) with a `message` (the denial reason).
+// That fails the tool call with a CorrectedError (NOT a RejectedError), so the
+// turn CONTINUES — the model is called again and sees the reason as errorText,
+// letting it adapt. The agent mock's stateful 2nd call returns a short
+// text/stop response so the turn ends cleanly (no loop). Block cases still
+// PASS: the read is blocked (no file content), but the turn now completes
+// gracefully instead of being killed mid-stride. Serve-mode detection via
+// /reject/i still works because CorrectedError's message prefix is
+// "The user rejected permission...". Run-mode detection also matches
+// CorrectedError explicitly + the plugin's own [auto-gate] blocked: audit line.
 
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -540,9 +553,14 @@ function runCase(opts) {
 // fail the suite, because it proves the live chain RAN, just not that it won
 // the timing race against run's built-in auto-reply.
 function detectRaceLoss(stderr, expectedDecision) {
-    const replyLost = /permission reply failed: Permission request not found/.test(
-        stderr,
-    );
+    // Match BOTH the v1 reply-failed log ("permission reply failed: ...") and
+    // the v2 reply-failed log ("permission reply (v2) failed: ..."). The v2
+    // path is used when a reject carries a reason (per-call gate fix); in
+    // run-live mode the built-in auto-replier can resolve the permission first,
+    // so the plugin's v2 reply also hits "Permission request not found".
+    const replyLost =
+        /permission reply failed: Permission request not found/.test(stderr) ||
+        /permission reply \(v2\) failed:/.test(stderr);
     const correctDecision = new RegExp(
         `live decision status=${expectedDecision}`,
     ).test(stderr);
@@ -564,9 +582,19 @@ function analyzeCase(label, stdout, stderr, mode = "enforce") {
     const hasContent = stdout.includes(TARGET_CONTENT);
 
     // Permission rejection indicators in stdout/stderr.
+    //
+    // Since the per-call-gate fix, a reject carries a reason and routes through
+    // the v2 permission-reply endpoint, which fails the tool call with a
+    // CorrectedError (NOT a RejectedError). The turn CONTINUES — the model is
+    // called again and sees the reason as errorText (the agent mock returns a
+    // short text/stop response on the 2nd call so the turn ends cleanly). Both
+    // error classes share the message prefix "The user rejected permission...",
+    // so the serve-mode /reject/i check still fires. Here in run mode we match
+    // BOTH class names AND the plugin's own [auto-gate] blocked: audit line.
     const hasRejection =
         /permission.*reject/i.test(stdout) ||
         /RejectedError/i.test(stdout) ||
+        /CorrectedError/i.test(stdout) ||
         /\[auto-gate\] blocked:/.test(stderr);
 
     return { eventSeen, hasContent, hasRejection };

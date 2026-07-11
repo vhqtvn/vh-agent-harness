@@ -37,7 +37,10 @@ The three hooks:
    event, runs the classifier (stub in `enforce`, real HTTP model in `live`),
    and **replies** via the SDK client method
    `client.postSessionIdPermissionsPermissionId({path:{id:sessionID,
-   permissionID:req.id}, body:{response:"once"|"always"|"reject"}})`. The reply
+   permissionID:req.id}, body:{response:"once"|"always"|"reject"}})` for
+   **allow** replies, or the v2 route (`POST /permission/:id/reply`) for
+   **reject** replies that carry a reason (per-call gate — see "Per-call gate"
+   below). The reply
    resolves the Deferred → OpenCode's `Permission.ask` unblocks → the tool call
    proceeds (allow) or is blocked (reject). This is the same pattern OpenCode
    ships in its ACP agent, `opencode run --dangerously-skip-permissions`, and
@@ -69,7 +72,7 @@ reference implementations):
 
 | Hook | Input | Powers | Role in this plugin |
 |------|-------|--------|---------------------|
-| `event` | `{ event }` where `event.type` is the event name and `event.properties` is the payload | Receives **every bus event**, including `permission.asked`. For `permission.asked`, `properties` is the `Request` `{id, sessionID, permission, patterns, metadata, always, tool}`. The hook replies via `client.postSessionIdPermissionsPermissionId(...)` to resolve the Deferred → auto-approve or auto-reject. | **PRIMARY ENFORCEMENT SURFACE.** This is the hook that makes `enforce`/`live` auto-approve against stock OpenCode. |
+| `event` | `{ event }` where `event.type` is the event name and `event.properties` is the payload | Receives **every bus event**, including `permission.asked`. For `permission.asked`, `properties` is the `Request` `{id, sessionID, permission, patterns, metadata, always, tool}`. The hook replies via the SDK client to resolve the Deferred → auto-approve or auto-reject. **Allow** replies use the v1 route (`postSessionIdPermissionsPermissionId`); **reject** replies use the v2 route (`POST /permission/:id/reply`) to attach a reason (per-call gate — see "Per-call gate" below). | **PRIMARY ENFORCEMENT SURFACE.** This is the hook that makes `enforce`/`live` auto-approve against stock OpenCode. |
 | `tool.execute.before` | `{tool, sessionID, callID}` | **block (throw)** or **passthrough (bare return)** only. Cannot force-allow. Sees EVERY tool call. | **AUDIT-ONLY OBSERVER.** Must NOT throw/block. Kept because it sees calls the event hook does not (table-allowed fast-path). |
 | `permission.ask` | `Permission {id, type, pattern, sessionID, messageID, callID?, title, metadata, time}` + `{status}` output | Three-way `status` mutation (`allow` / `deny` / `ask`). | **DORMANT RESERVE.** Not fired by stock OpenCode. Retained as hedge. No enforcement claim rests on it. |
 
@@ -383,31 +386,102 @@ The flow (proven by three shipped OpenCode reference implementations: ACP agent,
      `client.session.messages(...)`, serializes it, runs `decideLive(...)` (the
      real HTTP classifier). If `result.status === "allow"` → replies
      `config.replyMode`; otherwise → replies `"reject"`.
-4. The reply is sent via the SDK client the plugin already receives in
-   `PluginInput.client`:
-   ```js
-   client.postSessionIdPermissionsPermissionId({
-       path: { id: req.sessionID, permissionID: req.id },
-       body: { response: "once" | "always" | "reject" },
-   });
-   ```
-   This hits `POST /session/{id}/permissions/{permissionID}` →
-   `Permission.reply` → resolves the Deferred → `Permission.ask` unblocks → the
-   tool call proceeds (allow) or is blocked (reject).
+4. The reply is sent via two routes depending on disposition:
+   - **Allow** (`"once"` / `"always"`) — via the v1 SDK method:
+     ```js
+     client.postSessionIdPermissionsPermissionId({
+         path: { id: req.sessionID, permissionID: req.id },
+         body: { response: "once" | "always" },
+     });
+     ```
+     This hits `POST /session/{id}/permissions/{permissionID}` →
+     `Permission.reply` → resolves the Deferred → `Permission.ask` unblocks →
+     the tool call proceeds.
+   - **Reject with reason** — via the v2 route, reusing the same in-process
+     transport as the v1 client (`client._client.post`):
+     ```js
+     client._client.post({
+         url: "/permission/" + encodeURIComponent(req.id) + "/reply",
+         body: { reply: "reject", message: reason },
+         headers: { "Content-Type": "application/json" },
+     });
+     ```
+     This hits `POST /permission/{requestID}/reply` (the same route the TUI's
+     RejectPrompt uses with feedback) → `Permission.reply({message})` → resolves
+     the Deferred with a `CorrectedError` carrying the feedback. The **reason
+     is threaded from every deny path**: the stub verdict reason (`enforce`),
+     the parsed `<reason>` (`live`), the aggregate audit (`live-tiered`), or a
+     fail-closed message (`onUncertain`). See "Per-call gate" below for why
+     this matters.
 5. `"once"` approves this call only; `"always"` persists the pattern into
    OpenCode's in-memory allowlist (future matching calls never prompt —
    self-tightening); `"reject"` denies.
 
 **Uncertainty / failure policy:** on classifier failure, misconfiguration, or
 any unrecognized state, the hook consults `config.onUncertain`. The default
-`"reject"` fail-closes (replies `"reject"`). The `"passthrough"` alternative
-does NOT reply (intended for interactive mode where a human is present — **it
-hangs in headless mode**).
+`"reject"` fail-closes (replies `"reject"` with a fail-closed reason). The
+`"passthrough"` alternative does NOT reply (intended for interactive mode where
+a human is present — **it hangs in headless mode**).
 
 **Headless hang warning (repeated for emphasis):** if NO ONE replies to a
 `permission.asked` event, the Deferred never resolves and the tool call hangs.
 In autonomous mode the plugin MUST reply. `"no reply"` is only safe in
 interactive mode.
+
+## Per-call gate: reject carries a reason
+
+A reject is a **per-call gate**, not a session-kill switch. When the classifier
+denies a tool call, the plugin sends the reject **with a reason** through the
+v2 route (`POST /permission/:requestID/reply` with `{reply:"reject",
+message:<reason>}`). Upstream, this produces a `CorrectedError` (not a
+`RejectedError`):
+
+- **`CorrectedError`** (reject WITH message) — the tool call is blocked, but the
+  agent turn **continues**. The model sees the reason as tool-error feedback on
+  the next step and can adapt (retry differently, explain, or stop).
+- **`RejectedError`** (reject WITHOUT message) — the tool call is blocked AND,
+  under default config, the agent turn **ends** (`ctx.blocked = true` →
+  `process` returns `"stop"` → the outer loop breaks). The model never gets to
+  react to the denial.
+
+The v1 route (`POST /session/:id/permissions/:permissionID`) only forwards
+`response`, never `message` — so any reject through it is a bare
+`RejectedError`. The plugin uses the v2 route specifically to attach a reason,
+switching the error class to `CorrectedError` and keeping the turn alive. This
+is what makes the gate **per-call**: block the one call, tell the model why, let
+it retry differently.
+
+### Cascade caveat (parallel tool calls)
+
+On a reject, upstream also fails **other pending permission requests in the same
+session** with `RejectedError` (not `CorrectedError`). If the model made
+**parallel tool calls** whose permission requests are concurrently pending, a
+reject on one can cascade-fail the others with `RejectedError` — which under
+default config CAN still trip the session-kill path for those other calls.
+
+This is an upstream design constraint, not a plugin bug. Mitigations:
+
+- **Prefer sequential tool calls** over parallel ones when the gate is active
+  (avoids concurrent permission requests).
+- **Set `experimental.continue_loop_on_deny: true`** in session config as
+  defense-in-depth (see below).
+
+### Recommended: `experimental.continue_loop_on_deny: true`
+
+As operator-side defense-in-depth, set this in the OpenCode session config:
+
+```json
+{
+  "experimental": {
+    "continue_loop_on_deny": true
+  }
+}
+```
+
+This makes `ctx.shouldBreak = false` even for `RejectedError`, so a deny never
+kills the turn regardless of error class. The plugin does NOT set this itself
+(it is session config, operator-side) — it is recommended alongside the
+per-call-gate fix so that even the cascade edge case cannot end the turn.
 
 ## Enforce mode (Phase 2)
 
