@@ -483,6 +483,22 @@ kills the turn regardless of error class. The plugin does NOT set this itself
 (it is session config, operator-side) — it is recommended alongside the
 per-call-gate fix so that even the cascade edge case cannot end the turn.
 
+### v2-route server-error → fail-safe kill-switch (no hang)
+
+The reject-with-reason path goes through the v2 route to attach a message
+(`CorrectedError`, per-call gate). If the v2 route itself returns a
+**server-error response** (the pending entry is not found, or the route handler
+throws), the helper does **not** leave the permission Deferred unresolved — a
+hanging tool call (`ctx.ask` awaits forever) is strictly worse than a
+kill-switch. Instead the helper **falls back to the v1 bare reject**, which
+resolves the Deferred with a `RejectedError` (turn ends under default config).
+
+This is an intentional **fail-safe degradation**: the per-call-gate property
+holds on the v2 success path (turn continues, model sees the reason); the rare
+v2-error path degrades to kill-switch (turn ends). It remains **fail-closed**
+either way — the tool call is blocked, never silently allowed. The same
+fallback already applies when no v2 transport is available at all.
+
 ## Enforce mode (Phase 2)
 
 `mode: "enforce"` switches the `event` hook from observability into a

@@ -1002,13 +1002,23 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
                                 },
                             });
                             if (r2 && r2.error) {
+                                // F1 hardening: a v2 server-error must NOT leave
+                                // the permission Deferred unresolved (the tool's
+                                // ctx.ask would hang indefinitely). Fall through
+                                // to the v1 bare reject below (kill-switch — turn
+                                // ends — but no hang). A hang is strictly worse
+                                // than a kill-switch.
                                 console.error(
                                     `[auto-gate] permission reply (v2) ` +
                                     `failed: ` +
-                                    `${(r2.error && r2.error.message) || "unknown"}`,
+                                    `${(r2.error && r2.error.message) || "unknown"}; ` +
+                                    `falling back to v1 reject (kill-switch)`,
                                 );
+                            } else {
+                                // v2 succeeded — do NOT also call v1 (would
+                                // double-reply). Done.
+                                return;
                             }
-                            return;
                         }
                         // No v2 transport available — fall through to the v1
                         // reject below (turn-killing under default config; logged
@@ -2509,6 +2519,139 @@ if (__isMain) {
             v2Calls.length,
             0,
             "allow must NOT touch the v2 transport",
+        );
+    });
+
+    // --- F1 hardening: v2 server-error must fall back to v1 (no hang) ---
+
+    test("reply F1: v2 transport returns error -> falls back to v1 reject (v1 method called)", async () => {
+        // The v2 transport resolves with an error object (server-error
+        // response). The helper MUST fall through to the v1 bare reject so the
+        // permission Deferred resolves (kill-switch, not a hang).
+        const tag = Math.random().toString(36).slice(2, 8);
+        const pName = `evt-f1v2err-p-${tag}.json`;
+        writeTestConfig(pName, { mode: "enforce", stubVerdict: "block" });
+        __resetConfigCaches();
+        const v1Calls = [];
+        const v2Calls = [];
+        const client = {
+            postSessionIdPermissionsPermissionId: async (args) => {
+                v1Calls.push(args);
+                return { data: {}, error: undefined };
+            },
+            _client: {
+                post: async (args) => {
+                    v2Calls.push(args);
+                    return { data: undefined, error: { message: "server error" } };
+                },
+            },
+            session: {
+                messages: async () => ({ data: [], error: undefined }),
+            },
+        };
+        const hooks = await server({
+            client,
+            directory: TEST_CONFIG_DIR,
+            configPath: testConfigPath(pName),
+            llmConfigPath: testConfigPath("no-such-llm.json"),
+        });
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(
+            v2Calls.length,
+            1,
+            "reject-with-reason must attempt the v2 transport once",
+        );
+        assert.equal(
+            v1Calls.length,
+            1,
+            "F1: v2 server-error MUST fall back to v1 reject (Deferred must resolve)",
+        );
+        assert.equal(
+            v1Calls[0].body.response,
+            "reject",
+            "fallback must be a bare reject (kill-switch)",
+        );
+        assert.equal(
+            v1Calls[0].body.message,
+            undefined,
+            "v1 fallback carries no message (per-call-gate degrades to kill-switch)",
+        );
+    });
+
+    test("reply F1: v2 transport returns error -> helper completes (no throw)", async () => {
+        // Same v2-error setup; assert the event hook resolves cleanly rather
+        // than propagating a rejection (F2 hardening preserved on the F1 path).
+        const tag = Math.random().toString(36).slice(2, 8);
+        const pName = `evt-f1nothow-p-${tag}.json`;
+        writeTestConfig(pName, { mode: "enforce", stubVerdict: "block" });
+        __resetConfigCaches();
+        const client = {
+            postSessionIdPermissionsPermissionId: async () => ({
+                data: {},
+                error: undefined,
+            }),
+            _client: {
+                post: async () => ({
+                    data: undefined,
+                    error: { message: "server error" },
+                }),
+            },
+            session: {
+                messages: async () => ({ data: [], error: undefined }),
+            },
+        };
+        const hooks = await server({
+            client,
+            directory: TEST_CONFIG_DIR,
+            configPath: testConfigPath(pName),
+            llmConfigPath: testConfigPath("no-such-llm.json"),
+        });
+        // The hook MUST resolve normally (no rejection thrown to the caller).
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.ok(true, "event hook completed without throwing on v2 server-error");
+    });
+
+    test("reply: v2 transport succeeds -> v1 NOT called (no double reply)", async () => {
+        // REGRESSION for the F1 fix: on the v2 success path the helper MUST
+        // still return without calling v1 (do not break the happy path /
+        // per-call-gate).
+        const tag = Math.random().toString(36).slice(2, 8);
+        const pName = `evt-v2ok-p-${tag}.json`;
+        writeTestConfig(pName, { mode: "enforce", stubVerdict: "block" });
+        __resetConfigCaches();
+        const v1Calls = [];
+        const v2Calls = [];
+        const client = {
+            postSessionIdPermissionsPermissionId: async (args) => {
+                v1Calls.push(args);
+                return { data: {}, error: undefined };
+            },
+            _client: {
+                post: async (args) => {
+                    v2Calls.push(args);
+                    return { data: {}, error: undefined };
+                },
+            },
+            session: {
+                messages: async () => ({ data: [], error: undefined }),
+            },
+        };
+        const hooks = await server({
+            client,
+            directory: TEST_CONFIG_DIR,
+            configPath: testConfigPath(pName),
+            llmConfigPath: testConfigPath("no-such-llm.json"),
+        });
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(
+            v2Calls.length,
+            1,
+            "reject-with-reason must hit the v2 transport once",
+        );
+        assert.equal(
+            v1Calls.length,
+            0,
+            "v2 success MUST NOT also call v1 (no double reply)",
         );
     });
 
