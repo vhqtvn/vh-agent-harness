@@ -89,22 +89,116 @@ reply (the human still decides in interactive mode).
 > This is why `audit` mode is explicitly documented as **not for autonomous
 > operation** — it is observe-only.
 
-### Composition model (when each layer fires)
+### Composition model (the three-stage permission flow)
 
-Per tool call, OpenCode resolves permission in this order:
+Three layers compose into a strict **pipeline**, not a vote: an earlier stage
+can short-circuit every later stage. The classifier is the **last, slowest**
+stage and only ever runs on the **residue** that survives the two faster static
+stages. This is what makes the layering economical — the fast static layers
+absorb the volume, and the slow LLM spends only on the genuinely-ambiguous
+middle.
+
+#### The three-stage flow
+
+Per tool call, OpenCode resolves permission through this exact ordering
+(verified against `refs/opencode` at the current upstream):
 
 ```
-permission config table
-├─ table "allow"    → tool runs; no permission.asked event fires (fast-path)
-├─ table "deny"     → blocked; no event fires (shell-guard / hard floor)
-└─ table "ask" / no-match
-   └─ permission.asked event published → event hook classifies → replies
-      via SDK client → Deferred resolves → tool proceeds or is blocked
+tool.execute.before  ──►  shell-guard throws?  ──YES──►  BLOCKED (LLM never runs)
+                         │
+                         NO (passes)
+                         ▼
+                    item.execute → ctx.ask → permission table
+                         │
+                         ├── allow   ─────────────────► fast-path (LLM never runs)
+                         ├── deny    ─────────────────► BLOCKED (LLM never runs)
+                         └── ask / no-match ──────────► permission.asked → classifier decides
+                                                                   (allow / reject-with-reason)
 ```
 
-So the `permission.asked` event fires **only** for the ask-routed subset; the
-static table is the first gate. `tool.execute.before` is orthogonal — it
-observes the full tool-call stream regardless of how the table resolved it.
+The two short-circuit points — the **shell-guard throw** at Stage 1 and the
+**table routing** at Stage 2 — are what gate the classifier. The
+`permission.asked` event (Stage 2's `ask` branch) fires **only** for the
+ask-routed subset; everything else is resolved statically before the LLM is
+ever consulted.
+
+#### Circuit-breaker: how Stage 1 short-circuits Stage 2
+
+The pipeline ordering is not a convention — it is enforced by OpenCode's plugin
+trigger machinery:
+
+- **`Plugin.trigger` is a sequential `for`-loop** over registered hooks
+  (`refs/opencode/packages/opencode/src/plugin/index.ts`, the `trigger`
+  `Effect.fn`): each hook runs via
+  `yield* Effect.promise(async () => fn(input, output))`. **If any hook throws,
+  the loop short-circuits** (later hooks do not run) and the whole trigger
+  Effect fails.
+- **`tool.execute.before` fires BEFORE `item.execute`.** In
+  `refs/opencode/packages/opencode/src/session/prompt.ts`, the tool-execution
+  path yields `plugin.trigger("tool.execute.before", ...)` first, and only then
+  runs `item.execute`, whose `ask` callback calls `permission.ask` (i.e.
+  `ctx.ask`) — the entry point that consults the permission table and, on an
+  `ask` routing, publishes the `permission.asked` event.
+
+Concretely:
+
+- **Stage 1 — `tool.execute.before`:** shell-guard lives here. If shell-guard
+  throws on a forbidden pattern → the trigger Effect fails → `item.execute`
+  never runs → `ctx.ask` is never called → **no `permission.asked` event** →
+  the classifier's enforcement (Stage 2) never fires. Circuit broken.
+- **Stage 2 — `permission.asked`:** the classifier's `event` hook replies here.
+  It is reached only if Stage 1 passed **and** the permission table routed to
+  `ask` (not the `allow` fast-path, not `deny`).
+
+#### The three layers
+
+| Layer | Where | Toggleable? | Speed | Role |
+|---|---|---|---|---|
+| **shell-guard** (blocklist) | `tool.execute.before` hook | **No — always on, hard floor** for every adopter | instant (static pattern match) | absorbs the obvious-bad volume; circuit-breaks before any LLM cost |
+| **permission-pack** (table: readonly / git_read_only / gate / devSh) | OpenCode permission config | yes — per-overlay | instant (table lookup) | routes calls to allow (fast-path) / deny / ask |
+| **auto-classifier** (LLM) | `permission.asked` event hook | **opt-in** (overlay selected + `enabled` / `mode` set) | slow (HTTP to the classifier model) | residual judge for the grey middle that survives Stage 1 + the table's `ask` |
+
+#### Key invariants
+
+1. **The classifier NEVER overrides a static allow.** Table-`allow` calls
+   fast-path past Stage 2 entirely — no `permission.asked` event is published,
+   so the classifier's enforcement hook never sees the call.
+2. **The classifier NEVER overrides a static deny.** A shell-guard throw at
+   Stage 1 circuit-breaks before Stage 2; a table-`deny` routes away from the
+   `ask` branch. In both cases the classifier's enforcement hook is never
+   reached — a statically-denied call cannot become an allow.
+3. **LLM cost is incurred ONLY on the ask-residue** — never on shell-guard-denied
+   calls, never on statically-allowed fast-paths, never on static denies. This
+   is the speed advantage of the layering: the fast static layer absorbs the
+   volume; the slow LLM spends only on the genuinely-ambiguous middle.
+4. **Under a readonly / read-only-execution posture, the classifier is
+   effectively inert for the readonly tools** — the table pre-allows them
+   (fast-path), so they never reach `ask`. For the rest, only the shell-guard
+   floor plus the classifier's observe-only audit hook (the
+   `tool.execute.before` observer) run. The framing: *LLM evaluation optional,
+   readonly guard always.*
+5. **shell-guard is unreachable-by-design for the classifier.** The classifier
+   cannot see, override, or appeal a shell-guard deny; it is a true hard floor
+   upstream of Stage 2.
+
+#### Ordering nuance — audit hook vs shell-guard at Stage 1 (not a correctness issue)
+
+The classifier's *audit* hook also lives at `tool.execute.before`. Whether it
+logs before shell-guard throws depends on plugin-discovery (glob) order. If
+shell-guard is discovered first, it throws and the audit hook is skipped — but
+shell-guard logs its own deny, so there is **no audit-coverage gap**. The
+*enforcement* (Stage 2) is what matters for correctness, and it is firmly gated
+by Stage 1 regardless of audit-hook order.
+
+#### Tight vs relaxed allowlist posture
+
+An adopter running a **tight** posture (e.g. a `git_read_only` permission-pack
+that denies most mutating shell) will see the classifier consulted **rarely** —
+little traffic reaches `ask`. A **relaxed** posture (a permissive allow table)
+will see the classifier consulted **more often** — more calls reach `ask`. The
+classifier's value scales with the size of the ask-residue; a strict static
+layer is **complementary**, not redundant. Layering a slow LLM judge on top of a
+fast, strict static layer is what keeps both cost and coverage sane.
 
 ### Reconciliation rule (Phase 2/3 must preserve)
 
