@@ -374,6 +374,8 @@ const DEFAULT_PLUGIN_CONFIG = Object.freeze({
     promptFile: "",
     replyMode: "once", // event hook: "once" | "always" — the reply disposition on an allow verdict
     onUncertain: "reject", // event hook: "reject" | "passthrough" — failure/uncertainty disposition
+    harnessContext: true, // compose the harness-context sys-prompt fragment into the live classifier prompt
+    guides: true, // compose adopter-supplied guide files into the live classifier prompt
 });
 
 // LLM fail-safe defaults (auto-gate-llm.json). `modelEndpoint` and `model`
@@ -491,6 +493,14 @@ function normalizePluginConfig(parsed) {
             parsed.onUncertain === "passthrough"
                 ? parsed.onUncertain
                 : DEFAULT_PLUGIN_CONFIG.onUncertain,
+        harnessContext:
+            typeof parsed.harnessContext === "boolean"
+                ? parsed.harnessContext
+                : DEFAULT_PLUGIN_CONFIG.harnessContext,
+        guides:
+            typeof parsed.guides === "boolean"
+                ? parsed.guides
+                : DEFAULT_PLUGIN_CONFIG.guides,
     };
 }
 
@@ -1844,6 +1854,8 @@ if (__isMain) {
             promptFile: "",
             replyMode: "once",
             onUncertain: "reject",
+            harnessContext: true,
+            guides: true,
         });
     });
 
@@ -1858,6 +1870,8 @@ if (__isMain) {
             promptFile: "",
             replyMode: "once",
             onUncertain: "reject",
+            harnessContext: true,
+            guides: true,
         });
     });
 
@@ -1880,6 +1894,8 @@ if (__isMain) {
             promptFile: "",
             replyMode: "once",
             onUncertain: "reject",
+            harnessContext: true,
+            guides: true,
         });
         assert.equal(
             "modelEndpoint" in cfg,
@@ -1900,6 +1916,8 @@ if (__isMain) {
                 promptFile: "",
                 replyMode: "once",
                 onUncertain: "reject",
+                harnessContext: true,
+                guides: true,
             });
             assert.equal(errors.length, 1, "present-but-invalid must warn once");
             assert.match(errors[0], /invalid JSON/);
@@ -1927,6 +1945,8 @@ if (__isMain) {
                 promptFile: "",
                 replyMode: "once",
                 onUncertain: "reject",
+                harnessContext: true,
+                guides: true,
             });
             assert.deepEqual(b, a, "second read of same bad file still returns defaults");
             // Dedup contract (same as invalid JSON): one audit line across both reads.
@@ -1948,6 +1968,8 @@ if (__isMain) {
                     promptFile: "",
                     replyMode: "once",
                     onUncertain: "reject",
+                    harnessContext: true,
+                    guides: true,
                 });
                 assert.equal(errors.length, 1, `body ${body} must warn once`);
             });
@@ -2142,7 +2164,7 @@ if (__isMain) {
         }, 20);
     });
 
-    test("merged call-site: {...readConfig(), ...readLlmConfig()} yields all 13 fields", () => {
+    test("merged call-site: {...readConfig(), ...readLlmConfig()} yields all 15 fields", () => {
         __resetConfigCaches();
         writeTestConfig("merge-plugin.json", {
             enabled: true,
@@ -2168,6 +2190,8 @@ if (__isMain) {
             promptFile: "/x",
             replyMode: "once",
             onUncertain: "reject",
+            harnessContext: true,
+            guides: true,
             modelEndpoint: "https://x",
             model: "m",
             apiKeyEnv: "K",
@@ -2255,10 +2279,10 @@ if (__isMain) {
         };
         assert.equal(liveConfig.maxRetries, 4, "maxRetries must reach the live config");
         assert.equal(liveConfig.retryDelayMs, 1000, "retryDelayMs must reach the live config");
-        // The two config sources must not collide: plugin config has 6 fields,
+        // The two config sources must not collide: plugin config has 8 fields,
         // LLM config has 7 (6 scalar + the leaves array); the merged object has
-        // all 13 (6 plugin + 7 LLM).
-        assert.equal(Object.keys(liveConfig).length, 13);
+        // all 15 (8 plugin + 7 LLM).
+        assert.equal(Object.keys(liveConfig).length, 15);
     });
 
     // ===================================================================
@@ -2283,6 +2307,8 @@ if (__isMain) {
             promptFile: "",
             replyMode: "once",
             onUncertain: "reject",
+            harnessContext: true,
+            guides: true,
         });
     });
 
@@ -2300,6 +2326,8 @@ if (__isMain) {
             promptFile: "",
             replyMode: "once",
             onUncertain: "reject",
+            harnessContext: true,
+            guides: true,
         });
     });
 
@@ -2331,6 +2359,8 @@ if (__isMain) {
             promptFile: "",
             replyMode: "once",
             onUncertain: "reject",
+            harnessContext: true,
+            guides: true,
         });
     });
 
@@ -2476,6 +2506,8 @@ if (__isMain) {
             promptFile: "/x",
             replyMode: "once",
             onUncertain: "reject",
+            harnessContext: true,
+            guides: true,
         });
         writeTestConfig("layered-proj-partial.json", { mode: "enforce" }); // ONLY mode
         const merged = readConfig(
@@ -2491,6 +2523,8 @@ if (__isMain) {
         assert.equal(merged.promptFile, "/x", "user promptFile must survive (NOT default '')");
         assert.equal(merged.replyMode, "once", "user replyMode must survive");
         assert.equal(merged.onUncertain, "reject", "user onUncertain must survive");
+        assert.equal(merged.harnessContext, true, "default harnessContext must survive (NOT set by either level)");
+        assert.equal(merged.guides, true, "default guides must survive (NOT set by either level)");
     });
 
     test("readLlmConfig: PARTIAL user + missing project -> user fields apply, absent fields default", () => {

@@ -38,6 +38,7 @@
 //     the LAST tool call is the action being judged)
 
 import fs from "node:fs";
+import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -67,11 +68,22 @@ export { scrubCredentials };
 // CLASSIFIER_PROMPT_KEY is the named sys-prompt key this plugin consumes.
 export const CLASSIFIER_PROMPT_KEY = "auto-gate-classifier";
 
+// HARNESS_CONTEXT_PROMPT_KEY is the named sys-prompt key for the harness-
+// execution-context fragment (vh-agent-harness exec wrapper contract, the
+// wrapper-is-context-not-bypass rule, the deny-list floor, git routing). It is
+// COMPOSED after the base prompt at load time (see resolveSystemPrompt), unless
+// config.harnessContext === false or config.promptFile is set (full override).
+export const HARNESS_CONTEXT_PROMPT_KEY = "auto-gate-harness-context";
+
 // Memoized cache of the binary-served prompt. Read-once per process — a prompt
 // changes only on a binary or overlay update, never mid-session. Tests reset this
 // via __resetCachedBinaryPrompt; a custom opts.runner bypasses the cache entirely
 // (so tests stay isolated).
 let _cachedBinaryPrompt = null;
+
+// Separate memo for the harness-context fragment (same read-once-per-process
+// contract as the base prompt). Tests reset via __resetCachedHarnessContextPrompt.
+let _cachedHarnessContextPrompt = null;
 
 // defaultSpawnPromptRunner shells out SYNCHRONOUSLY to
 // `vh-agent-harness sys-prompt <name>` and returns {ok, stdout, reason}.
@@ -293,43 +305,92 @@ export function serializeTranscript(messages, permission) {
 }
 
 // ---------------------------------------------------------------------------
-// resolveSystemPrompt — choose the system prompt for the live call.
+// resolveSystemPrompt — choose AND COMPOSE the system prompt for the live call.
 //
 // Resolution order:
-//   1. If config.promptFile is set and readable -> its contents (operator
-//      escape-hatch; kept from Phase 3b).
-//   2. Else -> shell out synchronously to `vh-agent-harness sys-prompt
-//      auto-gate-classifier` and return its stdout, memoized read-once per
-//      process (a prompt changes only on a binary/overlay update, never
-//      mid-session).
+//   1. If config.promptFile is set and readable -> its contents VERBATIM
+//      (operator full-override escape-hatch; COMPOSITION IS SKIPPED). This
+//      preserves the Phase 3b behavior the e2e depends on.
+//   2. Else -> COMPOSE at load time from fragments:
+//        final = base_prompt                          # auto-gate-classifier
+//              + harness_context_fragment             # auto-gate-harness-context
+//              + adopter_guides                       # *.md from per-level dirs
 //
-// On a binary failure (spawn error, non-zero exit, empty stdout) this THROWS:
-// the caller (classifyLive -> decideLive -> decidePermission) maps a thrown
-// evaluator to DENY (fail-closed). A clear audit line is emitted to stderr
-// first.
+// The base prompt is shell-out `vh-agent-harness sys-prompt auto-gate-classifier`
+// (memoized read-once per process). The harness-context fragment is a SEPARATE
+// shell-out `vh-agent-harness sys-prompt auto-gate-harness-context` (also
+// memoized). Both are stable per-process (they change only on a binary/overlay
+// update, never mid-session).
+//
+// The harness-context fragment is OMITTED when config.harnessContext === false.
+// The adopter guides are OMITTED when config.guides === false OR no guide files
+// exist. This makes the composition OPT-IN-extensible without breaking the
+// default minimal prompt.
+//
+// FAILURE SEMANTICS:
+//   - base prompt failure (spawn error, non-zero exit, empty stdout) -> THROW.
+//     The base is REQUIRED; the caller (classifyLive -> decideLive ->
+//     decidePermission) maps a thrown evaluator to DENY (fail-closed).
+//   - harness-context fragment failure -> NON-FATAL (omit + warn). The fragment
+//     is additive; the classifier functions without it. Throwing would fail-
+//     close every live call on a missing optional fragment.
+//   - guide read failure -> NON-FATAL (skip the unreadable file / empty dir).
 //
 // opts.runner is injectable so tests exercise the shell-out path without a real
 // `vh-agent-harness` invocation. When a custom runner is passed the memoization
 // cache is bypassed (so each test is fully isolated). opts.readFileFn is
 // injectable so tests exercise the promptFile override without touching the
-// filesystem.
+// filesystem. opts.projectGuideDir / opts.userGuideDir / opts.readDirFn /
+// opts.guideReadFileFn are injectable so tests exercise guide composition
+// without touching the real guide directories.
 export function resolveSystemPrompt(config, opts = {}) {
     const readFileFn = opts.readFileFn || fs.readFileSync;
     const isTestRunner = !!opts.runner;
     const runner = opts.runner || defaultSpawnPromptRunner;
 
-    // 1. Operator escape-hatch: explicit promptFile overrides everything.
+    // 1. Operator escape-hatch: explicit promptFile overrides everything
+    //    VERBATIM. Composition is SKIPPED (full override).
     const pf = config && config.promptFile;
     if (typeof pf === "string" && pf.length > 0) {
         try {
             return readFileFn(pf, "utf8");
         } catch (_) {
-            // Unreadable override file: fall through to the binary-served prompt.
+            // Unreadable override file: fall through to the composition path.
             // A bad promptFile must NOT take down the permission hot path.
         }
     }
 
-    // 2. Binary-served prompt (memoized on the production default path only).
+    // 2. Base prompt (REQUIRED — memoized on the production default path only).
+    const basePrompt = _loadBasePrompt(runner, isTestRunner);
+
+    // 3. Compose: base + harness-context (optional) + adopter guides (optional).
+    const wantHarnessContext = !(config && config.harnessContext === false);
+    const wantGuides = !(config && config.guides === false);
+
+    let composed = basePrompt;
+
+    if (wantHarnessContext) {
+        const ctx = _loadHarnessContextPrompt(runner, isTestRunner);
+        if (ctx) {
+            composed +=
+                "\n\n<!-- harness-context -->\n## Harness context\n\n" + ctx;
+        }
+    }
+
+    if (wantGuides) {
+        const guideText = _loadAdopterGuides(opts);
+        if (guideText) {
+            composed += guideText;
+        }
+    }
+
+    return composed;
+}
+
+// _loadBasePrompt shells out for the base classifier prompt (REQUIRED).
+// Memoized read-once per process on the production path. Throws on failure
+// (fail-closed — the base prompt is mandatory for the classifier to function).
+function _loadBasePrompt(runner, isTestRunner) {
     if (!isTestRunner && _cachedBinaryPrompt !== null) {
         return _cachedBinaryPrompt;
     }
@@ -349,6 +410,128 @@ export function resolveSystemPrompt(config, opts = {}) {
     return result.stdout;
 }
 
+// _loadHarnessContextPrompt shells out for the harness-execution-context
+// fragment (OPTIONAL additive). Memoized read-once per process. NON-FATAL on
+// failure: returns "" (the fragment is omitted, the classifier still has the
+// base prompt). A warning is logged so an operator notices a misconfigured
+// fragment without every live call fail-closing.
+function _loadHarnessContextPrompt(runner, isTestRunner) {
+    if (!isTestRunner && _cachedHarnessContextPrompt !== null) {
+        return _cachedHarnessContextPrompt;
+    }
+    const result = runner(HARNESS_CONTEXT_PROMPT_KEY);
+    if (!result.ok) {
+        console.error(
+            `[auto-gate] failed to load harness-context prompt via sys-prompt: ${result.reason || "unknown"}; omitting fragment`,
+        );
+        return "";
+    }
+    const out = result.stdout || "";
+    if (!isTestRunner) {
+        _cachedHarnessContextPrompt = out;
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Adopter guide directories + guide loader.
+//
+// Adopter guides are *.md files an operator drops into a per-level directory to
+// extend the classifier system prompt with project-/user-specific guidance. The
+// two directories mirror the three-level config layering:
+//
+//   PROJECT: <repoRoot>/.opencode/sys-prompts/auto-gate-classifier-guides/*.md
+//   USER:    <userConfigDir>/vh-agent-harness/auto-gate-classifier-guides/*.md
+//     where <userConfigDir> = <XDG_CONFIG_HOME>/.config (XDG spec) — same base
+//     the plugin-config layering uses.
+//
+// ORDERING: user-level guides are concatenated FIRST, then project-level, each
+// level sorted alphabetically by filename. This puts project guides LAST (closer
+// to the user message in the final prompt) so they carry more contextual weight
+// — mirroring the config precedence (project > user > default). The order is
+// DETERMINISTIC: the same set of files always composes the same prompt.
+//
+// DELIMITERS: each guide is preceded by
+//   <!-- adopter-guide: <level>/<filename> -->
+// so the LLM sees distinct sections and an operator can grep for provenance.
+//
+// Non-fatal: a missing directory or an unreadable file is skipped silently
+// (guides are optional). An empty result returns "" so the caller omits the
+// section entirely.
+
+const GUIDE_DIR_NAME = "auto-gate-classifier-guides";
+
+function _userConfigBase() {
+    return path.join(
+        process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"),
+        "vh-agent-harness",
+    );
+}
+
+function _defaultProjectGuideDir() {
+    // In production the plugin lives at <repoRoot>/.opencode/plugins/ so
+    // resolving two levels up gives <repoRoot>, then into the guide dir.
+    return path.resolve(
+        __dirname,
+        "..",
+        "..",
+        ".opencode",
+        "sys-prompts",
+        GUIDE_DIR_NAME,
+    );
+}
+
+function _defaultUserGuideDir() {
+    return path.join(_userConfigBase(), GUIDE_DIR_NAME);
+}
+
+// _readGuideLevel lists+reads the *.md files in one guide dir. Returns an array
+// of {name, body} sorted alphabetically by filename. A missing/unreadable dir
+// returns []. Uses injectable readDir/readFile for test isolation.
+function _readGuideLevel(label, dir, readDirFn, readFileFn) {
+    let names;
+    try {
+        names = readDirFn(dir);
+    } catch (_) {
+        return [];
+    }
+    const mdNames = names
+        .filter((n) => n.endsWith(".md"))
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const out = [];
+    for (const n of mdNames) {
+        try {
+            const body = readFileFn(path.join(dir, n), "utf8");
+            out.push({ name: n, body });
+        } catch (_) {
+            // Skip unreadable guide; guides are optional.
+        }
+    }
+    return out;
+}
+
+// _loadAdopterGuides reads both guide levels and returns the concatenated
+// delimited text, or "" if no guides were found.
+function _loadAdopterGuides(opts) {
+    const readDirFn = opts.readDirFn || fs.readdirSync;
+    const guideReadFileFn = opts.guideReadFileFn || fs.readFileSync;
+    const projectDir = opts.projectGuideDir || _defaultProjectGuideDir();
+    const userDir = opts.userGuideDir || _defaultUserGuideDir();
+
+    // User-level FIRST, then project-level (project-last = closer to user msg).
+    const userGuides = _readGuideLevel("user", userDir, readDirFn, guideReadFileFn);
+    const projectGuides = _readGuideLevel("project", projectDir, readDirFn, guideReadFileFn);
+
+    const parts = [];
+    for (const g of userGuides) {
+        parts.push(`\n\n<!-- adopter-guide: user/${g.name} -->\n\n${g.body}`);
+    }
+    for (const g of projectGuides) {
+        parts.push(`\n\n<!-- adopter-guide: project/${g.name} -->\n\n${g.body}`);
+    }
+    return parts.length > 0 ? parts.join("") : "";
+}
+
 // __resetCachedBinaryPrompt clears the memoized binary prompt. Test-only; used
 // to keep resolveSystemPrompt tests isolated from each other.
 export function __resetCachedBinaryPrompt() {
@@ -359,6 +542,18 @@ export function __resetCachedBinaryPrompt() {
 // lets a memoization test prime the cache without spawning the real binary.
 export function __setCachedBinaryPrompt(value) {
     _cachedBinaryPrompt = value;
+}
+
+// __resetCachedHarnessContextPrompt clears the memoized harness-context prompt.
+// Test-only; keeps composition tests isolated from each other.
+export function __resetCachedHarnessContextPrompt() {
+    _cachedHarnessContextPrompt = null;
+}
+
+// __setCachedHarnessContextPrompt sets the memoized harness-context prompt
+// directly. Test-only.
+export function __setCachedHarnessContextPrompt(value) {
+    _cachedHarnessContextPrompt = value;
 }
 
 // ---------------------------------------------------------------------------
@@ -676,6 +871,7 @@ export async function decideLive(config, serializedInput, fetchFn, runnerFn) {
 // __filename comparison so an accidental import cannot fire the suite.
 // ===========================================================================
 const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const __isMain = path.resolve(process.argv[1] ?? "") === __filename;
 
 if (__isMain) {
@@ -1123,32 +1319,55 @@ if (__isMain) {
     // custom runner bypasses the memoization cache so tests stay isolated.
 
     const FAKE_PROMPT = "FAKE PROMPT FROM BINARY";
+    const FAKE_CONTEXT = "FAKE HARNESS CONTEXT";
 
     function fakeRunnerOk(stdout = FAKE_PROMPT) {
         return () => ({ ok: true, stdout, reason: "" });
+    }
+
+    // fakeRunnerMap returns a name-dispatching runner so composition tests can
+    // fake DIFFERENT content for the base vs harness-context fragments.
+    function fakeRunnerMap(map) {
+        return (name) => {
+            const stdout = map[name];
+            if (stdout === undefined) {
+                return { ok: false, stdout: "", reason: `no fake for ${name}` };
+            }
+            return { ok: true, stdout, reason: "" };
+        };
     }
 
     function fakeRunnerFail(reason = "non-zero exit 1") {
         return () => ({ ok: false, stdout: "", reason });
     }
 
-    test("resolveSystemPrompt: unset promptFile -> shells out + returns stdout", () => {
+    test("resolveSystemPrompt: unset promptFile -> shells out for base + context, composes", () => {
         __resetCachedBinaryPrompt();
-        let calls = 0;
-        let gotName = "";
+        __resetCachedHarnessContextPrompt();
+        const called = [];
         const runner = (name) => {
-            calls++;
-            gotName = name;
-            return { ok: true, stdout: FAKE_PROMPT, reason: "" };
+            called.push(name);
+            if (name === CLASSIFIER_PROMPT_KEY) {
+                return { ok: true, stdout: FAKE_PROMPT, reason: "" };
+            }
+            if (name === HARNESS_CONTEXT_PROMPT_KEY) {
+                return { ok: true, stdout: FAKE_CONTEXT, reason: "" };
+            }
+            return { ok: false, stdout: "", reason: "unknown" };
         };
         const out = resolveSystemPrompt({}, { runner });
-        assert.equal(out, FAKE_PROMPT);
-        assert.equal(calls, 1, "must shell out once when promptFile unset");
-        assert.equal(gotName, CLASSIFIER_PROMPT_KEY);
+        // Composition: base + harness-context delimiter + context body.
+        assert.ok(out.startsWith(FAKE_PROMPT), "composed prompt starts with base");
+        assert.ok(out.includes("<!-- harness-context -->"), "harness-context delimiter present");
+        assert.ok(out.includes("## Harness context"), "harness-context heading present");
+        assert.ok(out.endsWith(FAKE_CONTEXT), "composed prompt ends with context body");
+        // Both keys must be requested (base first, then context).
+        assert.deepEqual(called, [CLASSIFIER_PROMPT_KEY, HARNESS_CONTEXT_PROMPT_KEY]);
     });
 
     test("resolveSystemPrompt: memoized on default path (no second shell-out)", () => {
         __resetCachedBinaryPrompt();
+        __resetCachedHarnessContextPrompt();
         // Prime the cache directly (simulates a prior production call). This is
         // the only way to test memoization without spawning the real binary,
         // since a custom opts.runner bypasses the cache by design.
@@ -1156,9 +1375,12 @@ if (__isMain) {
         // Call with the DEFAULT runner (no opts.runner). The cache MUST
         // short-circuit so the real binary is never spawned. If it were, the
         // real prompt (not "CACHED-SENTINEL-777") would be returned.
-        const out = resolveSystemPrompt({});
+        // harnessContext:false isolates the BASE cache — without it the
+        // harness-context fragment would shell out to the real binary.
+        const out = resolveSystemPrompt({ harnessContext: false });
         assert.equal(out, "CACHED-SENTINEL-777");
         __resetCachedBinaryPrompt();
+        __resetCachedHarnessContextPrompt();
     });
 
     test("resolveSystemPrompt: set+readable promptFile -> override (no shell-out)", () => {
@@ -1175,11 +1397,12 @@ if (__isMain) {
 
     test("resolveSystemPrompt: unreadable promptFile -> falls through to binary", () => {
         __resetCachedBinaryPrompt();
+        __resetCachedHarnessContextPrompt();
         const fakeRead = () => {
             throw new Error("ENOENT");
         };
         const out = resolveSystemPrompt(
-            { promptFile: "/missing.txt" },
+            { promptFile: "/missing.txt", harnessContext: false },
             { readFileFn: fakeRead, runner: fakeRunnerOk() },
         );
         assert.equal(out, FAKE_PROMPT);
@@ -1187,11 +1410,151 @@ if (__isMain) {
 
     test("resolveSystemPrompt: binary failure -> throws", () => {
         __resetCachedBinaryPrompt();
+        __resetCachedHarnessContextPrompt();
         assert.throws(
             () => resolveSystemPrompt({}, { runner: fakeRunnerFail("spawn failed: ENOENT") }),
             /failed to load classifier prompt via sys-prompt: spawn failed: ENOENT/,
         );
         __resetCachedBinaryPrompt();
+        __resetCachedHarnessContextPrompt();
+    });
+
+    // ===== resolveSystemPrompt: TIER-1 COMPOSITION TESTS =====
+    //
+    // The final classifier prompt COMPOSES at load time:
+    //   final = base + harness-context (optional) + adopter guides (optional)
+    // The tests below use a guideOpts() helper that injects FAKE guide dirs +
+    // readDir/readFile stubs so no real filesystem access is needed. The runner
+    // is name-dispatching (fakeRunnerMap) so base and context fragments are
+    // distinguishable.
+
+    function guideOpts(userFiles, projectFiles) {
+        const userDir = "/fake/user-guides";
+        const projectDir = "/fake/project-guides";
+        return {
+            runner: fakeRunnerMap({
+                [CLASSIFIER_PROMPT_KEY]: FAKE_PROMPT,
+                [HARNESS_CONTEXT_PROMPT_KEY]: FAKE_CONTEXT,
+            }),
+            projectGuideDir: projectDir,
+            userGuideDir: userDir,
+            readDirFn: (dir) => {
+                if (dir === projectDir) return Object.keys(projectFiles);
+                if (dir === userDir) return Object.keys(userFiles);
+                return [];
+            },
+            guideReadFileFn: (p) => {
+                const base = path.basename(p);
+                if (base in projectFiles) return projectFiles[base];
+                if (base in userFiles) return userFiles[base];
+                throw new Error(`ENOENT: ${p}`);
+            },
+        };
+    }
+
+    test("composition: base + harness-context + guides when all present", () => {
+        __resetCachedBinaryPrompt();
+        __resetCachedHarnessContextPrompt();
+        const opts = guideOpts(
+            { "a-user.md": "USER-A", "b-user.md": "USER-B" },
+            { "z-proj.md": "PROJ-Z" },
+        );
+        const out = resolveSystemPrompt({}, opts);
+        // Base prompt at the start.
+        assert.ok(out.startsWith(FAKE_PROMPT), "starts with base prompt");
+        // Harness-context delimiter + body.
+        assert.ok(out.includes("<!-- harness-context -->"), "harness-context delimiter present");
+        assert.ok(out.includes("## Harness context"), "harness-context heading present");
+        assert.ok(out.includes(FAKE_CONTEXT), "harness-context body present");
+        // Guide delimiters + bodies.
+        assert.ok(out.includes("<!-- adopter-guide: user/a-user.md -->"), "user guide a delimiter");
+        assert.ok(out.includes("USER-A"), "user guide a body");
+        assert.ok(out.includes("<!-- adopter-guide: user/b-user.md -->"), "user guide b delimiter");
+        assert.ok(out.includes("<!-- adopter-guide: project/z-proj.md -->"), "project guide delimiter");
+        assert.ok(out.includes("PROJ-Z"), "project guide body");
+    });
+
+    test("composition: harnessContext:false -> harness-context fragment absent", () => {
+        __resetCachedBinaryPrompt();
+        __resetCachedHarnessContextPrompt();
+        const opts = guideOpts({}, {});
+        const out = resolveSystemPrompt({ harnessContext: false }, opts);
+        assert.equal(out, FAKE_PROMPT, "only base, no context, no guides (empty dirs)");
+        assert.ok(!out.includes("<!-- harness-context -->"), "no context delimiter");
+    });
+
+    test("composition: guides:false -> adopter guides absent", () => {
+        __resetCachedBinaryPrompt();
+        __resetCachedHarnessContextPrompt();
+        const opts = guideOpts(
+            { "a-user.md": "USER-A" },
+            { "z-proj.md": "PROJ-Z" },
+        );
+        const out = resolveSystemPrompt({ guides: false }, opts);
+        assert.ok(out.startsWith(FAKE_PROMPT), "starts with base");
+        assert.ok(out.includes("<!-- harness-context -->"), "context still present");
+        assert.ok(out.includes(FAKE_CONTEXT), "context body still present");
+        assert.ok(!out.includes("<!-- adopter-guide:"), "no guide delimiters");
+        assert.ok(!out.includes("USER-A"), "no user guide body");
+        assert.ok(!out.includes("PROJ-Z"), "no project guide body");
+    });
+
+    test("composition: no guide files -> base + context only, no error", () => {
+        __resetCachedBinaryPrompt();
+        __resetCachedHarnessContextPrompt();
+        const opts = guideOpts({}, {});
+        const out = resolveSystemPrompt({}, opts);
+        assert.ok(out.startsWith(FAKE_PROMPT), "starts with base");
+        assert.ok(out.includes("<!-- harness-context -->"), "context present");
+        assert.ok(out.includes(FAKE_CONTEXT), "context body present");
+        assert.ok(!out.includes("<!-- adopter-guide:"), "no guide delimiters");
+    });
+
+    test("composition: promptFile set -> composition SKIPPED, file verbatim (regression guard)", () => {
+        __resetCachedBinaryPrompt();
+        __resetCachedHarnessContextPrompt();
+        let runnerCalls = 0;
+        const opts = {
+            readFileFn: (p) => `CUSTOM from ${p}`,
+            runner: () => {
+                runnerCalls++;
+                return { ok: true, stdout: "SHOULD-NOT-APPEAR", reason: "" };
+            },
+            // Guide dirs with files — must NOT be read when promptFile is set.
+            projectGuideDir: "/fake/proj",
+            userGuideDir: "/fake/user",
+            readDirFn: () => {
+                throw new Error("readDir must not be called when promptFile is set");
+            },
+            guideReadFileFn: () => {
+                throw new Error("guideReadFile must not be called when promptFile is set");
+            },
+        };
+        const out = resolveSystemPrompt({ promptFile: "/override.txt" }, opts);
+        assert.equal(out, "CUSTOM from /override.txt");
+        assert.equal(runnerCalls, 0, "runner must not be called when promptFile is readable");
+    });
+
+    test("composition: deterministic ordering (user-first, project-last, alphabetical)", () => {
+        __resetCachedBinaryPrompt();
+        __resetCachedHarnessContextPrompt();
+        const opts = guideOpts(
+            { "b-user.md": "B-USER", "a-user.md": "A-USER" },
+            { "z-proj.md": "Z-PROJ", "a-proj.md": "A-PROJ" },
+        );
+        const out = resolveSystemPrompt({}, opts);
+        const posAUser = out.indexOf("<!-- adopter-guide: user/a-user.md -->");
+        const posBUser = out.indexOf("<!-- adopter-guide: user/b-user.md -->");
+        const posAProj = out.indexOf("<!-- adopter-guide: project/a-proj.md -->");
+        const posZProj = out.indexOf("<!-- adopter-guide: project/z-proj.md -->");
+        // All four guides present.
+        assert.ok(posAUser > -1 && posBUser > -1, "both user guides present");
+        assert.ok(posAProj > -1 && posZProj > -1, "both project guides present");
+        // User-level first, alphabetical within (a-user before b-user).
+        assert.ok(posAUser < posBUser, "user a-user before b-user (alphabetical)");
+        // Project-level after user-level, alphabetical within.
+        assert.ok(posBUser < posAProj, "user level before project level");
+        assert.ok(posAProj < posZProj, "project a-proj before z-proj (alphabetical)");
     });
 
     // ===== classifyLive (fake fetch; NO real network) =====
@@ -1270,7 +1633,10 @@ if (__isMain) {
         assert.equal(body.stream, false);
         assert.equal(body.messages.length, 2);
         assert.equal(body.messages[0].role, "system");
-        assert.equal(body.messages[0].content, FAKE_PROMPT);
+        assert.ok(
+            body.messages[0].content.startsWith(FAKE_PROMPT),
+            "system message begins with the base prompt (composition may append more)",
+        );
         assert.equal(body.messages[1].role, "user");
         assert.equal(body.messages[1].content, "the input");
     }));

@@ -12,6 +12,7 @@ import (
 // from any CWD. Adding or renaming a prompt file changes this set intentionally.
 var wantSysPromptKeys = []string{
 	"auto-gate-classifier",
+	"auto-gate-harness-context",
 }
 
 // TestSysPromptIndex_EmbeddedKeys pins the embedded key set (basename minus .md)

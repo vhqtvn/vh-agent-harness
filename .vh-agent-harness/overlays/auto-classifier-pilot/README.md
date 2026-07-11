@@ -380,9 +380,11 @@ Example — user-level LLM config (applies to all projects without one):
 | `enabled` | boolean | `true` | Master live toggle. `false` live-disables the plugin: both hooks no-op immediately on the next tool call (no audit, no behavior change, no restart). `true` is the normal on state. |
 | `mode` | `"audit"` \| `"enforce"` \| `"live"` \| `"live-tiered"` | `"audit"` | Behavior selector. `audit` = Phase 1 observability only (default, zero behavior change). `enforce` = Phase 2 decision path on `permission.ask` (verdict parser + STUB evaluator; fail-closed to deny). `live` = Phase 3b decision path using a REAL OpenAI-compatible model call (fail-closed to deny on any error/timeout/misconfiguration). `live-tiered` = Phase 2 multi-leaf consensus: dispatches the `live` classifier for EACH configured leaf IN PARALLEL and grants only on **unanimous-allow** (see "Phase 2 — `live-tiered` consensus mode"). `tool.execute.before` stays an observer in all modes. |
 | `stubVerdict` | `"allow"` \| `"block"` \| `"fail"` | `"block"` | Drives the Phase 2 STUB evaluator in `enforce` mode. `"allow"` → allow verdict; `"block"` → block verdict; `"fail"` → unparseable output (exercises fail-closed). **Test/placeholder only** — not a real classifier; ignored unless `mode: "enforce"`. |
-| `promptFile` | string | `""` | Optional override path for the `live` classifier system prompt. If set and readable, its contents replace the binary-served default prompt. If unset/missing/unreadable, the plugin loads the prompt from `vh-agent-harness sys-prompt auto-gate-classifier`. Lives in the plugin-config file (not the LLM file) so it MAY be committed as a shared default. |
+| `promptFile` | string | `""` | **Full-override escape hatch** for the `live` classifier system prompt. If set and readable, its contents are used VERBATIM and **composition is skipped entirely** (no harness-context fragment, no adopter guides are appended). If unset/missing/unreadable, the plugin COMPOSES the prompt from fragments at load time (see "Classifier system-prompt composition" below). Lives in the plugin-config file (not the LLM file) so it MAY be committed as a shared default. |
 | `replyMode` | `"once"` \| `"always"` | `"once"` | Controls the reply disposition when the classifier verdict is **allow**. `"once"` = approve this call only (the tool call proceeds; future matching calls still prompt). `"always"` = approve AND **persist the pattern into OpenCode's in-memory allowlist** — future matching calls never prompt again (self-tightening). **`"always"` is powerful**: it auto-allowlists patterns, so a wrong allow verdict permanently silences that pattern for the session. Use `"once"` (the default) unless you are confident in the classifier's precision. Ignored in `audit` mode (no reply is sent). Invalid values → default `"once"`. |
 | `onUncertain` | `"reject"` \| `"passthrough"` | `"reject"` | Controls the reply disposition when the classifier **fails or is uncertain** (exception thrown, misconfiguration, undegradable transcript-fetch error, or unrecognized mode). `"reject"` (default, fail-closed) = reply `"reject"`, blocking the call. `"passthrough"` = **no reply** — the Deferred is left unresolved. **⚠ HANG RISK:** `"passthrough"` causes the tool call to HANG in headless/autonomous mode (no human to click). Only use `"passthrough"` in interactive mode where a human is present. Invalid values → default `"reject"`. |
+| `harnessContext` | boolean | `true` | When `true` (default), the `auto-gate-harness-context` fragment is COMPOSED after the base classifier prompt — it tells the live model how the `vh-agent-harness exec` wrapper works (see "Classifier system-prompt composition" below). When `false`, the fragment is omitted, yielding the base prompt alone (unless `promptFile` overrides). Invalid/non-boolean → default `true`. |
+| `guides` | boolean | `true` | When `true` (default), adopter-supplied guide `*.md` files (see "Classifier system-prompt composition" below) are COMPOSED after the harness-context fragment. When `false`, guides are omitted entirely. Invalid/non-boolean → default `true`. |
 
 ### LLM config fields (`auto-gate-llm.json`)
 
@@ -412,6 +414,65 @@ Unknown fields are ignored. A field present but of the wrong type or with an
 invalid value falls back to that field's default (partial configs are merged
 over the defaults field-by-field, so `{"enabled": false}` is valid and leaves
 `mode` at its default).
+
+## Classifier system-prompt composition
+
+When `mode` is `live` or `live-tiered`, the classifier reads its system prompt
+at load time and **composes it from fragments** rather than reading a single
+baked prompt. The composed prompt is:
+
+```
+final_prompt = base_prompt                    # auto-gate-classifier (embedded)
+             + harness_context_fragment       # auto-gate-harness-context (embedded), unless disabled
+             + adopter_guides                 # concatenated *.md from per-level dirs, unless disabled
+```
+
+- **base** — the embedded `auto-gate-classifier` fragment served by
+  `vh-agent-harness sys-prompt auto-gate-classifier`. Always present (unless
+  `promptFile` overrides the whole prompt — see below).
+- **harness context** — the embedded `auto-gate-harness-context` fragment served
+  by `vh-agent-harness sys-prompt auto-gate-harness-context`. Describes the
+  `vh-agent-harness exec` wrapper contract, the shell-guard deny-list floor, and
+  git→committer routing so the classifier understands the environment. Omitted
+  when `harnessContext: false`.
+- **adopter guides** — every `*.md` file found in (a) the user-level guide dir
+  and (b) the project-level guide dir (see locations below), concatenated.
+  Omitted when `guides: false` or no guide files exist.
+
+Guide directory locations (mirroring the config layering):
+
+- **user-level:** `<userConfigDir>/vh-agent-harness/auto-gate-classifier-guides/*.md`
+  where `<userConfigDir>` is `XDG_CONFIG_HOME` if set, else `~/.config`.
+- **project-level:** `<repoRoot>/.opencode/sys-prompts/auto-gate-classifier-guides/*.md`
+
+Ordering is **deterministic**: user-level guides first, then project-level
+guides, alphabetical by filename within each level. (Project content sits closer
+to the user's message, mirroring the config precedence project > user > default.)
+
+Each fragment is introduced by a delimiter so the LLM sees distinct sections:
+
+- `<!-- harness-context -->` / `## Harness context` before the harness-context block.
+- `<!-- adopter-guide: <level>/<filename> -->` before each adopter guide.
+
+### The wrapper is context, not a bypass
+
+The harness-context fragment exists to teach the classifier a critical rule:
+**`vh-agent-harness exec` is context, not a bypass.** A destructive payload
+(`vh-agent-harness exec bash -c 'rm -rf …'`) is still destructive — the wrapper
+roots the working directory and applies the shell-guard deny-list floor, but it
+does **not** sanitize intent. The classifier must judge the **payload**, not the
+wrapper. Conversely, an unwrapped mutating command (raw `bash -c '…'` with no
+`vh-agent-harness exec`) bypasses the harness's hygiene and warrants **more**
+scrutiny, not less. Adopter guides written against this model should treat the
+wrapper as environmental context, never as an allow signal.
+
+### `promptFile` — full-override escape hatch
+
+Setting `promptFile` (in either config file) to a readable file path uses that
+file's contents verbatim and **skips composition entirely** — neither the
+harness-context fragment nor adopter guides are appended. This is the escape
+hatch for adopters who want full control over the prompt (the e2e suite relies
+on this path).
 
 > **The API key is env-only, never in a file.** Neither config file carries the
 > secret value — both hold at most the env-var **name** (`apiKeyEnv`, default
