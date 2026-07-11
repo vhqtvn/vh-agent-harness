@@ -372,7 +372,11 @@ that never names it renders nothing of it).
   `.opencode/sys-prompts/<name>.md` (the live tree takes precedence over the
   embed). It is **read-only**: it only writes to stdout and never modifies files.
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
-  environment). `vh-agent-harness diff` shows drift vs. the corpus.
+  overlay-perm, environment, config-refs, gitignore, auto-classifier). The
+  `auto-classifier` check lints the shape (field set + types + enums) of the
+  auto-classifier-pilot overlay's config files when present — a present-but-invalid
+  `auto-gate-config.json` / `auto-gate-llm.json` FAILs; absent configs are never
+  failures (defaults apply). `vh-agent-harness diff` shows drift vs. the corpus.
 - **Package a bug bundle:** `vh-agent-harness diagnostics-export [--dry-run]
   [--output <path>]` bundles selected harness state (`.opencode/state/`,
   `.local/coordinator/`, `.local/config/`, `docs/checkpoints/`) into a

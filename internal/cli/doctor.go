@@ -3,10 +3,13 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -46,12 +49,14 @@ var doctorCmd = &cobra.Command{
 	SilenceErrors: true,
 	Long: `Detailed seam health diagnosis (read-only). Reports:
 
-  lineage       .vh-agent-harness/lineage.yml present + parseable    FAIL if leaked/unparseable
-  armed-schema  every platform_armed file schema-conformant          FAIL if schema-invalid
-  managed-drift every platform_managed file matches re-rendered bytes FAIL if drifted/missing
-  overlay-perm  active overlay permission-packs resolved in opencode.jsonc FAIL if resolver not run
-  environment   node on PATH + shell-guard eval.js present            FAIL if missing
-  gitignore     harness-written dirs (.opencode/state…, __pycache__) ignored WARN if not ignored
+  lineage         .vh-agent-harness/lineage.yml present + parseable     FAIL if leaked/unparseable
+  armed-schema    every platform_armed file schema-conformant           FAIL if schema-invalid
+  managed-drift   every platform_managed file matches re-rendered bytes  FAIL if drifted/missing
+  overlay-perm    active overlay permission-packs resolved in opencode.jsonc FAIL if resolver not run
+  environment     node on PATH + shell-guard eval.js present             FAIL if missing
+  config-refs     {file:...} refs resolve; empty agent-model files       FAIL if missing ref / WARN if empty
+  gitignore       harness-written dirs (.opencode/state…, __pycache__) ignored WARN if not ignored
+  auto-classifier auto-classifier-pilot overlay config shapes valid      FAIL if present-but-invalid
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -150,6 +155,16 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	gr := checkRuntimeStateGitignored(abs)
 	fmt.Fprintln(out, "    "+gr.String())
 	applyTier(gr.tier, &problems, &warns)
+
+	// 8. Auto-classifier-pilot overlay config shapes (present-but-invalid = FAIL).
+	//    Validates the JSON envelope of the overlay's 4 config files (project +
+	//    user, plugin + LLM) when present. Absent files are not failures (LLM
+	//    config is normally absent; plugin defaults apply). Clean no-op (SKIP)
+	//    when the overlay is unselected AND no config files exist.
+	fmt.Fprintln(out, "  auto-classifier:")
+	ar2 := checkAutoGateConfig(abs)
+	fmt.Fprintln(out, "    "+ar2.String())
+	applyTier(ar2.tier, &problems, &warns)
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)
@@ -720,4 +735,302 @@ func checkConfigRefs(target string) checkResult {
 			len(emptyModels), emptyModels[0])}
 	}
 	return checkResult{name: name, tier: tierPass, detail: fmt.Sprintf("%d {file:} ref(s) resolve", len(seen))}
+}
+
+// autoGateOverlayName is the overlay-pack name the auto-classifier config check
+// keys on. It matches the overlays: list entry the operator adds in
+// vh-harness-profile.yml to opt into the pilot.
+const autoGateOverlayName = "auto-classifier-pilot"
+
+// autoGateFile names one of the up-to-4 config files the auto-classifier check
+// inspects. level is "project" or "user"; kind is "plugin" (auto-gate-config.json)
+// or "llm" (auto-gate-llm.json).
+type autoGateFile struct {
+	level string // "project" | "user"
+	kind  string // "plugin" | "llm"
+	path  string // absolute path to the file
+}
+
+// label renders a stable, human-readable identifier for a finding: it names the
+// level + kind + basename so an operator knows exactly which of the 4 files to
+// fix. Project and user files share basenames, so the level prefix is what
+// disambiguates them.
+func (f autoGateFile) label() string {
+	return fmt.Sprintf("%s %s (%s)", f.level, f.kind, filepath.Base(f.path))
+}
+
+// checkAutoGateConfig validates the SHAPE (field set + types + enums) of the
+// auto-classifier-pilot overlay's config files. Modeled on
+// checkOverlayPermissionState: it is a no-op (SKIP) when the overlay is
+// unselected AND no config files are present, and validates each present file
+// standalone (it does NOT merge layers or reimplement the JS coerce/normalize
+// logic). Missing optional files are never failures — LLM config is normally
+// absent (live mode only) and plugin config defaults apply on absence — but a
+// PRESENT-but-invalid file (corrupt JSON, wrong type, bad enum) FAILs.
+//
+// Dual trigger: overlay-unselected + no-files → SKIP (clean no-op);
+// overlay-unselected + corrupt-file-present → FAIL (safety net so a stale file
+// does not silently break a selected-in-another-worktree config);
+// overlay-selected → validate every present file.
+//
+// It does NOT shell out to the JS plugin (no precedent; doctor's only shell-outs
+// are git + a node version probe) and does NOT resolve env vars
+// (modelEndpointEnv/apiKeyEnv) — it is a SHAPE lint, not a semantic resolver.
+//
+// DRIFT CONTRACT — SCHEMA SOURCE OF TRUTH is the JS plugin:
+//
+//	.vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-tool-gate.js
+//	  - DEFAULT_PLUGIN_CONFIG  (~L376-385): the plugin-config field set + defaults
+//	  - DEFAULT_LLM_CONFIG     (~L403-413): the LLM-config field set + defaults
+//	  - normalizePluginConfig  (~L480-521): plugin field type/enum rules
+//	  - normalizeLlmConfig     (~L543-588): LLM field type/range rules
+//
+// This Go check reimplements only the SCHEMA ENVELOPE (field set + types +
+// enums), NOT the coerce/normalize logic (e.g. _normNonNegInt accepting a
+// numeric string is a JS normalize concern; doctor treats a non-number as a
+// wrong-type FAIL). A future JS schema change (field added/removed/retyped or an
+// enum widened) MUST be mirrored in the known sets / validators below and in the
+// pinning tests (TestAutoGateConfig_PluginKnownFieldsPinned /
+// TestAutoGateConfig_LlmKnownFieldsPinned); the header comment + those tests are
+// the cross-reference so a JS schema change visibly breaks the Go test.
+//
+// XDG parity: Go's os.UserConfigDir() returns $XDG_CONFIG_HOME (if non-empty)
+// else $HOME/.config on Unix — matching the JS userConfigDir()
+// (process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config")) then joined
+// with "vh-agent-harness". The two diverge only on Windows (Go returns
+// %AppData%; JS stays on the XDG/HOME rule), which is outside the Linux/macOS dev
+// container this check runs in.
+func checkAutoGateConfig(target string) checkResult {
+	const name = "auto-classifier"
+
+	// 1. Resolve candidate files (up to 4: project plugin/llm + user plugin/llm).
+	//    User-level resolution via os.UserConfigDir(); on error, skip user-level
+	//    rather than failing the whole check on an XDG resolution problem.
+	var candidates []autoGateFile
+	candidates = append(candidates,
+		autoGateFile{level: "project", kind: "plugin", path: filepath.Join(target, ".opencode", "repo-configs", "auto-gate-config.json")},
+		autoGateFile{level: "project", kind: "llm", path: filepath.Join(target, ".opencode", "repo-configs", "auto-gate-llm.json")},
+	)
+	if userDir, err := os.UserConfigDir(); err == nil {
+		candidates = append(candidates,
+			autoGateFile{level: "user", kind: "plugin", path: filepath.Join(userDir, "vh-agent-harness", "auto-gate-config.json")},
+			autoGateFile{level: "user", kind: "llm", path: filepath.Join(userDir, "vh-agent-harness", "auto-gate-llm.json")},
+		)
+	}
+
+	// 2. Determine trigger: overlay selection + any-present on disk.
+	selected := slices.Contains(activeOverlays(target), autoGateOverlayName)
+	anyPresent := false
+	for _, c := range candidates {
+		if isRegularFile(c.path) {
+			anyPresent = true
+			break
+		}
+	}
+
+	// 3. Short-circuit: unselected + no files → clean no-op.
+	if !selected && !anyPresent {
+		return checkResult{name: name, tier: tierSkip,
+			detail: "overlay not selected; no config files present"}
+	}
+
+	// 4. Validate each present file standalone (NO layered merge — each file must
+	//    be independently well-formed). Accumulate FAIL-level and WARN-level
+	//    findings across all present files.
+	var fails, warns []string
+	validated := 0
+	for _, c := range candidates {
+		if !isRegularFile(c.path) {
+			continue // absent optional file — not a failure
+		}
+		validated++
+		raw, rerr := os.ReadFile(c.path)
+		if rerr != nil {
+			fails = append(fails, fmt.Sprintf("%s: unreadable: %v", c.label(), rerr))
+			continue
+		}
+		var doc map[string]any
+		if jerr := json.Unmarshal(raw, &doc); jerr != nil {
+			fails = append(fails, fmt.Sprintf("%s: invalid JSON: %v", c.label(), jerr))
+			continue
+		}
+		if doc == nil {
+			// JSON `null` decodes to a nil map: treat as not-a-JSON-object.
+			fails = append(fails, fmt.Sprintf("%s: top-level value is not a JSON object", c.label()))
+			continue
+		}
+		ff, fw := validateAutoGateFile(c.kind, doc)
+		for _, m := range ff {
+			fails = append(fails, fmt.Sprintf("%s: %s", c.label(), m))
+		}
+		for _, m := range fw {
+			warns = append(warns, fmt.Sprintf("%s: %s", c.label(), m))
+		}
+	}
+
+	// 5. Aggregate: any FAIL → tierFail; else any WARN → tierWarn; else PASS.
+	sort.Strings(fails)
+	sort.Strings(warns)
+	switch {
+	case len(fails) > 0:
+		return checkResult{name: name, tier: tierFail, detail: strings.Join(fails, "; ")}
+	case len(warns) > 0:
+		return checkResult{name: name, tier: tierWarn, detail: strings.Join(warns, "; ")}
+	default:
+		return checkResult{name: name, tier: tierPass,
+			detail: fmt.Sprintf("%d config file(s) shape-valid", validated)}
+	}
+}
+
+// validateAutoGateFile dispatches to the per-kind validator. kind is "plugin"
+// (auto-gate-config.json) or "llm" (auto-gate-llm.json). Returns fail-level then
+// warn-level findings for the single file (without the file label, which the
+// caller prepends).
+func validateAutoGateFile(kind string, doc map[string]any) (fails, warns []string) {
+	if kind == "llm" {
+		return validateAutoGateLlmConfig(doc)
+	}
+	return validateAutoGatePluginConfig(doc)
+}
+
+// validateAutoGatePluginConfig lints the field set + types + enums of a parsed
+// auto-gate-config.json object (the SCHEMA ENVELOPE only). See the DRIFT
+// CONTRACT on checkAutoGateConfig.
+func validateAutoGatePluginConfig(doc map[string]any) (fails, warns []string) {
+	for k, v := range doc {
+		switch k {
+		case "enabled", "harnessContext", "guides":
+			if _, ok := v.(bool); !ok {
+				fails = append(fails, fmt.Sprintf("%s: wrong type %s (want bool)", k, jsonTypeName(v)))
+			}
+		case "promptFile":
+			if _, ok := v.(string); !ok {
+				fails = append(fails, fmt.Sprintf("%s: wrong type %s (want string)", k, jsonTypeName(v)))
+			}
+		case "mode":
+			if s, ok := v.(string); ok {
+				if !slices.Contains([]string{"audit", "enforce", "live", "live-tiered"}, s) {
+					fails = append(fails, fmt.Sprintf("%s: bad enum %q (want one of audit|enforce|live|live-tiered)", k, s))
+				}
+			} else {
+				fails = append(fails, fmt.Sprintf("%s: wrong type %s (want string)", k, jsonTypeName(v)))
+			}
+		case "stubVerdict":
+			if s, ok := v.(string); ok {
+				if !slices.Contains([]string{"block", "allow", "fail"}, s) {
+					fails = append(fails, fmt.Sprintf("%s: bad enum %q (want one of block|allow|fail)", k, s))
+				}
+			} else {
+				fails = append(fails, fmt.Sprintf("%s: wrong type %s (want string)", k, jsonTypeName(v)))
+			}
+		case "replyMode":
+			if s, ok := v.(string); ok {
+				if !slices.Contains([]string{"once", "always"}, s) {
+					fails = append(fails, fmt.Sprintf("%s: bad enum %q (want one of once|always)", k, s))
+				}
+			} else {
+				fails = append(fails, fmt.Sprintf("%s: wrong type %s (want string)", k, jsonTypeName(v)))
+			}
+		case "onUncertain":
+			if s, ok := v.(string); ok {
+				if !slices.Contains([]string{"reject", "passthrough"}, s) {
+					fails = append(fails, fmt.Sprintf("%s: bad enum %q (want one of reject|passthrough)", k, s))
+				}
+			} else {
+				fails = append(fails, fmt.Sprintf("%s: wrong type %s (want string)", k, jsonTypeName(v)))
+			}
+		default:
+			warns = append(warns, fmt.Sprintf("unknown field %q", k))
+		}
+	}
+	return fails, warns
+}
+
+// validateAutoGateLlmConfig lints the field set + types + ranges of a parsed
+// auto-gate-llm.json object (the SCHEMA ENVELOPE only). See the DRIFT CONTRACT on
+// checkAutoGateConfig. The `leaves` array is checked SHALLOWLY: each element must
+// be a JSON object (non-object → WARN); leaf field types are NOT deep-recurse'd.
+func validateAutoGateLlmConfig(doc map[string]any) (fails, warns []string) {
+	for k, v := range doc {
+		switch k {
+		case "modelEndpoint", "modelEndpointEnv", "model", "apiKey", "apiKeyEnv":
+			if _, ok := v.(string); !ok {
+				fails = append(fails, fmt.Sprintf("%s: wrong type %s (want string)", k, jsonTypeName(v)))
+			}
+		case "timeoutMs":
+			n, ok := asJSONNumber(v)
+			if !ok {
+				fails = append(fails, fmt.Sprintf("%s: wrong type %s (want number)", k, jsonTypeName(v)))
+			} else if !(n > 0) {
+				fails = append(fails, fmt.Sprintf("%s: must be > 0 (got %v)", k, numberDisplay(v)))
+			}
+		case "maxRetries", "retryDelayMs":
+			n, ok := asJSONNumber(v)
+			if !ok {
+				fails = append(fails, fmt.Sprintf("%s: wrong type %s (want number)", k, jsonTypeName(v)))
+			} else if n < 0 || n != math.Trunc(n) {
+				fails = append(fails, fmt.Sprintf("%s: must be a non-negative integer (got %v)", k, numberDisplay(v)))
+			}
+		case "leaves":
+			arr, ok := v.([]any)
+			if !ok {
+				fails = append(fails, fmt.Sprintf("%s: wrong type %s (want array)", k, jsonTypeName(v)))
+				continue
+			}
+			for i, el := range arr {
+				if _, ok := el.(map[string]any); !ok {
+					warns = append(warns, fmt.Sprintf("%s[%d]: not a JSON object (want object)", k, i))
+				}
+			}
+		default:
+			warns = append(warns, fmt.Sprintf("unknown field %q", k))
+		}
+	}
+	return fails, warns
+}
+
+// asJSONNumber reports whether v is a JSON number. encoding/json unmarshals every
+// JSON number into a float64 when decoding into map[string]any, so float64 is the
+// only number carrier here. bool / string / nil / object / array all return
+// (0,false). An integer-constrained field accepts a float64 with a zero fraction
+// part (e.g. 2.0); the fraction check is the caller's responsibility.
+func asJSONNumber(v any) (float64, bool) {
+	n, ok := v.(float64)
+	return n, ok
+}
+
+// jsonTypeName renders the JSON-level type name for a decoded value, used in
+// fail messages so the operator sees the JSON type (not the Go type). A Go bool
+// is JSON "boolean"; a float64 is JSON "number"; nil is JSON "null"; []any /
+// map[string]any are "array"/"object"; everything else falls back to its Go type.
+func jsonTypeName(v any) string {
+	switch v.(type) {
+	case bool:
+		return "boolean"
+	case float64:
+		return "number"
+	case string:
+		return "string"
+	case nil:
+		return "null"
+	case []any:
+		return "array"
+	case map[string]any:
+		return "object"
+	default:
+		return fmt.Sprintf("%T", v)
+	}
+}
+
+// numberDisplay renders a numeric value for a fail message. It mirrors the
+// original JSON spelling where possible: a float64 with a zero fraction shows as
+// an integer (so "2.0" reads "2", not "2.000000"), otherwise the raw value.
+func numberDisplay(v any) any {
+	if n, ok := v.(float64); ok {
+		if n == math.Trunc(n) {
+			return int64(n)
+		}
+		return n
+	}
+	return v
 }

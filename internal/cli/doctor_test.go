@@ -1,11 +1,31 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestMain isolates the whole cli-package test binary from the operator's real
+// user-level config. Several checks resolve user-level files via
+// os.UserConfigDir() (which follows $XDG_CONFIG_HOME on Unix); a test must
+// never depend on the operator's real home config, so point XDG at a throwaway
+// temp dir for every test in the package. Individual tests that need their own
+// user-level fixtures still override this via isolateXDG (t.Setenv restores
+// afterward). This keeps the TestSeam* doctor-asserts-HEALTHY tests stable
+// even when the operator has a (possibly corrupt) user-level config on disk.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "vh-cli-test-xdg-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain: mkdir temp:", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(dir)
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	os.Exit(m.Run())
+}
 
 // writeProfileOverlays seeds a target dir with a schema-valid
 // .vh-agent-harness/vh-harness-profile.yml whose overlays list is names. This
@@ -189,5 +209,340 @@ func TestOverlayPermissionState_SkipWhenNoOpencodeJSONC(t *testing.T) {
 	r := checkOverlayPermissionState(dir)
 	if r.tier != tierSkip {
 		t.Fatalf("want SKIP when opencode.jsonc absent (managed-drift owns that), got %s: %s", r.tier, r.detail)
+	}
+}
+
+// --- auto-classifier config shape check (checkAutoGateConfig) ---
+//
+// These cases pin the SCHEMA ENVELOPE of the auto-classifier-pilot overlay's
+// config files. The SCHEMA SOURCE OF TRUTH is the JS plugin
+// .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-tool-gate.js
+// (DEFAULT_PLUGIN_CONFIG ~L376-385, DEFAULT_LLM_CONFIG ~L403-413,
+// normalizePluginConfig ~L480-521, normalizeLlmConfig ~L543-588). If the JS
+// schema gains/drops/retypes a field or widens an enum, update Go's validators
+// (validateAutoGatePluginConfig / validateAutoGateLlmConfig) AND these pinning
+// tests together — the drift contract on checkAutoGateConfig cross-references the
+// JS line ranges.
+
+// isolateXDG points os.UserConfigDir() at an isolated temp dir for the test so
+// user-level auto-gate config resolution does not leak real-environment files
+// into the check. User-level files live under <root>/vh-agent-harness/. Returns
+// the XDG root so a test that wants a user-level file can write under it.
+func isolateXDG(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	return root
+}
+
+// writeAutoGateConfig writes an auto-gate config file under the project-level
+// repo-configs/ dir (the rendered location). kind selects plugin
+// (auto-gate-config.json) or llm (auto-gate-llm.json). body is written verbatim so
+// tests can exercise corrupt JSON shapes.
+func writeAutoGateConfig(t *testing.T, target, kind, body string) {
+	t.Helper()
+	dir := filepath.Join(target, ".opencode", "repo-configs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	name := "auto-gate-config.json"
+	if kind == "llm" {
+		name = "auto-gate-llm.json"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+// writeUserAutoGateConfig writes an auto-gate config file under a user-level XDG
+// root (isolateXDG's return value). kind selects plugin/llm.
+func writeUserAutoGateConfig(t *testing.T, xdgRoot, kind, body string) {
+	t.Helper()
+	dir := filepath.Join(xdgRoot, "vh-agent-harness")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	name := "auto-gate-config.json"
+	if kind == "llm" {
+		name = "auto-gate-llm.json"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+// TestAutoGateConfig_SkipWhenUnselectedAndNoFiles: overlay unselected + no config
+// files present → clean no-op (tierSkip). This is the common core-only case.
+func TestAutoGateConfig_SkipWhenUnselectedAndNoFiles(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t) // no user-level files leak in
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierSkip {
+		t.Fatalf("want SKIP when unselected + no files, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_PassWhenSelectedAndValid: overlay selected + a valid plugin
+// config + a valid LLM config → PASS (all present files shape-valid).
+func TestAutoGateConfig_PassWhenSelectedAndValid(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{
+	  "enabled": true, "mode": "enforce", "stubVerdict": "allow",
+	  "promptFile": "", "replyMode": "once", "onUncertain": "reject",
+	  "harnessContext": true, "guides": true
+	}`)
+	writeAutoGateConfig(t, dir, "llm", `{
+	  "modelEndpoint": "https://x", "modelEndpointEnv": "EP", "model": "m",
+	  "apiKey": "", "apiKeyEnv": "KEY", "timeoutMs": 5000,
+	  "maxRetries": 2, "retryDelayMs": 100, "leaves": []
+	}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS when selected + valid configs, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_FailCorruptJson: a present plugin config with corrupt JSON
+// (trailing comma) → FAIL (present-but-invalid breaks doctor).
+func TestAutoGateConfig_FailCorruptJson(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode": "enforce",}`) // trailing comma
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for corrupt JSON, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "invalid JSON") {
+		t.Errorf("FAIL detail should mention invalid JSON; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_FailBadEnum: a plugin config with a bad enum value
+// (mode: "audited") → FAIL naming the field.
+func TestAutoGateConfig_FailBadEnum(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"audited"}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for bad enum, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "mode") {
+		t.Errorf("FAIL detail should name the bad field; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_FailWrongType: a plugin config with a wrong type
+// (enabled: "yes" — string instead of bool) → FAIL.
+func TestAutoGateConfig_FailWrongType(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"enabled":"yes"}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for wrong type, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "enabled") {
+		t.Errorf("FAIL detail should name the mistyped field; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_WarnUnknownField: an unknown top-level field → WARN (not
+// FAIL). Known fields with valid values stay clean; only the stray key warns.
+func TestAutoGateConfig_WarnUnknownField(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"audit","bogusField":1}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierWarn {
+		t.Fatalf("want WARN for unknown field, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "bogusField") {
+		t.Errorf("WARN detail should name the unknown field; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_FailLeavesNotArray: an LLM config where `leaves` is not an
+// array → FAIL (wrong type).
+func TestAutoGateConfig_FailLeavesNotArray(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "llm", `{"leaves":"notarray"}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for leaves not array, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_WarnLeavesNonObjectElement: an LLM config where `leaves` is
+// an array but contains a non-object element → WARN (shallow check, no FAIL).
+func TestAutoGateConfig_WarnLeavesNonObjectElement(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "llm", `{"leaves":["ok", 42, {"model":"x"}]}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierWarn {
+		t.Fatalf("want WARN for non-object leaf element, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "leaves") {
+		t.Errorf("WARN detail should name the leaves field; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_FailWhenUnselectedButCorruptFilePresent: the safety net —
+// overlay NOT selected but a corrupt config file exists on disk → FAIL (a stale
+// file does not silently break the config that a selected worktree depends on).
+func TestAutoGateConfig_FailWhenUnselectedButCorruptFilePresent(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	// No profile written -> overlay unselected. But a corrupt plugin config exists.
+	writeAutoGateConfig(t, dir, "plugin", `{"mode": oops}`) // unquoted value
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL (safety net) when corrupt file present even if overlay unselected, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_FailNegativeMaxRetries: an LLM config with a negative
+// maxRetries → FAIL (must be a non-negative integer). Also covers retryDelayMs.
+func TestAutoGateConfig_FailNegativeMaxRetries(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "llm", `{"maxRetries":-1}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for negative maxRetries, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "maxRetries") {
+		t.Errorf("FAIL detail should name maxRetries; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_FailFractionalMaxRetries: a fractional value for an
+// integer-constrained field (maxRetries: 2.5) → FAIL; 2.0 is accepted.
+func TestAutoGateConfig_FailFractionalMaxRetries(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "llm", `{"maxRetries":2.5}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for fractional maxRetries, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_AcceptsZeroFractionFloat: a float64 with a zero fraction
+// part (maxRetries: 2.0) is accepted as an integer-constrained value. This pins
+// the "2.0 ok" rule from the validation spec.
+func TestAutoGateConfig_AcceptsZeroFractionFloat(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "llm", `{"maxRetries":2.0,"retryDelayMs":0}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for zero-fraction floats, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_PluginKnownFieldsPinned pins the plugin-config known field
+// set against the SCHEMA SOURCE OF TRUTH (DEFAULT_PLUGIN_CONFIG ~L376-385,
+// normalizePluginConfig ~L480-521 in auto-tool-gate.js). Every known field with a
+// valid value — including the enum edges (live-tiered, fail, always, passthrough)
+// — must yield PASS. If the JS schema gains/drops a field, update Go's known set
+// AND this test together.
+func TestAutoGateConfig_PluginKnownFieldsPinned(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{
+	  "enabled": true, "mode": "live-tiered", "stubVerdict": "fail",
+	  "promptFile": "/x/p.md", "replyMode": "always", "onUncertain": "passthrough",
+	  "harnessContext": false, "guides": false
+	}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("all known plugin fields valid (incl enum edges) should PASS; got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_LlmKnownFieldsPinned pins the LLM-config known field set
+// against the SCHEMA SOURCE OF TRUTH (DEFAULT_LLM_CONFIG ~L403-413,
+// normalizeLlmConfig ~L543-588 in auto-tool-gate.js). Every known field with a
+// valid value (incl leaves with object elements and 0-valued integers) must PASS.
+func TestAutoGateConfig_LlmKnownFieldsPinned(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "llm", `{
+	  "modelEndpoint": "https://x", "modelEndpointEnv": "EP", "model": "m",
+	  "apiKey": "k", "apiKeyEnv": "KEY", "timeoutMs": 1,
+	  "maxRetries": 0, "retryDelayMs": 0, "leaves": [{"model":"a"}, {"model":"b"}]
+	}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("all known llm fields valid should PASS; got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_UserLevelViaXDG: a user-level (XDG) config is resolved via
+// os.UserConfigDir() and validated standalone. A bad user-level LLM config FAILs
+// and the detail labels the file as user-level. This is the cross-platform XDG
+// parity case (Linux dev container).
+func TestAutoGateConfig_UserLevelViaXDG(t *testing.T) {
+	dir := t.TempDir()
+	xdg := isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	// user-level plugin valid; user-level LLM has a negative retryDelayMs → FAIL.
+	writeUserAutoGateConfig(t, xdg, "plugin", `{"mode":"live"}`)
+	writeUserAutoGateConfig(t, xdg, "llm", `{"retryDelayMs":-5}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for bad user-level config, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "user") {
+		t.Errorf("FAIL detail should label the user-level file; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "retryDelayMs") {
+		t.Errorf("FAIL detail should name the bad field; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_MissingOptionalIsNotFailure: overlay selected but NO config
+// files present at all → PASS (not SKIP, because selected; and not FAIL, because
+// absence is the documented fail-safe default for both plugin and LLM configs).
+func TestAutoGateConfig_MissingOptionalIsNotFailure(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	// No plugin or LLM config files written.
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS when selected but all configs absent (defaults apply), got %s: %s", r.tier, r.detail)
 	}
 }
