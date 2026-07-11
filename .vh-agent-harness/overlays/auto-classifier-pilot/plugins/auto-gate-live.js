@@ -372,8 +372,11 @@ export function resolveSystemPrompt(config, opts = {}) {
     if (wantHarnessContext) {
         const ctx = _loadHarnessContextPrompt(runner, isTestRunner);
         if (ctx) {
-            composed +=
-                "\n\n<!-- harness-context -->\n## Harness context\n\n" + ctx;
+            // Delimiter-ONLY injection (matching how adopter guides are
+            // injected). The harness-context fragment OWNS its heading
+            // (`## Harness execution context`); prepending one here would
+            // produce a double-H2 in the composed output.
+            composed += "\n\n<!-- harness-context -->\n\n" + ctx;
         }
     }
 
@@ -1319,7 +1322,12 @@ if (__isMain) {
     // custom runner bypasses the memoization cache so tests stay isolated.
 
     const FAKE_PROMPT = "FAKE PROMPT FROM BINARY";
-    const FAKE_CONTEXT = "FAKE HARNESS CONTEXT";
+    // FAKE_CONTEXT mirrors the real fragment's shape: it opens with the H2
+    // `## Harness execution context` (the heading the fragment OWNS). The
+    // composer injects only the delimiter comment, so a realistic fake lets
+    // the composition assertions check for the real heading rather than a
+    // composer-injected one.
+    const FAKE_CONTEXT = "## Harness execution context\n\nFAKE HARNESS CONTEXT";
 
     function fakeRunnerOk(stdout = FAKE_PROMPT) {
         return () => ({ ok: true, stdout, reason: "" });
@@ -1359,7 +1367,7 @@ if (__isMain) {
         // Composition: base + harness-context delimiter + context body.
         assert.ok(out.startsWith(FAKE_PROMPT), "composed prompt starts with base");
         assert.ok(out.includes("<!-- harness-context -->"), "harness-context delimiter present");
-        assert.ok(out.includes("## Harness context"), "harness-context heading present");
+        assert.ok(out.includes("## Harness execution context"), "harness-context heading present (fragment-owned, not composer-injected)");
         assert.ok(out.endsWith(FAKE_CONTEXT), "composed prompt ends with context body");
         // Both keys must be requested (base first, then context).
         assert.deepEqual(called, [CLASSIFIER_PROMPT_KEY, HARNESS_CONTEXT_PROMPT_KEY]);
@@ -1464,7 +1472,7 @@ if (__isMain) {
         assert.ok(out.startsWith(FAKE_PROMPT), "starts with base prompt");
         // Harness-context delimiter + body.
         assert.ok(out.includes("<!-- harness-context -->"), "harness-context delimiter present");
-        assert.ok(out.includes("## Harness context"), "harness-context heading present");
+        assert.ok(out.includes("## Harness execution context"), "harness-context heading present (fragment-owned, not composer-injected)");
         assert.ok(out.includes(FAKE_CONTEXT), "harness-context body present");
         // Guide delimiters + bodies.
         assert.ok(out.includes("<!-- adopter-guide: user/a-user.md -->"), "user guide a delimiter");
@@ -1481,6 +1489,46 @@ if (__isMain) {
         const out = resolveSystemPrompt({ harnessContext: false }, opts);
         assert.equal(out, FAKE_PROMPT, "only base, no context, no guides (empty dirs)");
         assert.ok(!out.includes("<!-- harness-context -->"), "no context delimiter");
+    });
+
+    test("composition: harness-context load FAILS (base ok) -> non-fatal, base only, no context heading", () => {
+        // F3: the path where the base prompt loads OK but the harness-context
+        // load FAILS (runner returns !ok for HARNESS_CONTEXT_PROMPT_KEY). This
+        // is the NON-FATAL branch: _loadHarnessContextPrompt returns "" and the
+        // classifier keeps just the base prompt (guides are empty here too, so
+        // the composed output is base-only). Other composition branches are
+        // covered; this pins the base-ok/context-fail failure semantics.
+        __resetCachedBinaryPrompt();
+        __resetCachedHarnessContextPrompt();
+        const runner = (name) => {
+            if (name === CLASSIFIER_PROMPT_KEY) {
+                return { ok: true, stdout: FAKE_PROMPT, reason: "" };
+            }
+            if (name === HARNESS_CONTEXT_PROMPT_KEY) {
+                return { ok: false, stdout: "", reason: "simulated fragment load failure" };
+            }
+            return { ok: false, stdout: "", reason: "unknown key" };
+        };
+        const opts = {
+            runner,
+            projectGuideDir: "/fake/empty-proj",
+            userGuideDir: "/fake/empty-user",
+            readDirFn: () => [],
+            guideReadFileFn: () => { throw new Error("no guides"); },
+        };
+        let out;
+        // Non-fatal: the harness-context fragment is additive, so a load
+        // failure must NOT take down the permission hot path.
+        assert.doesNotThrow(() => {
+            out = resolveSystemPrompt({}, opts);
+        }, "harness-context load failure must be non-fatal (must not throw)");
+        // Base prompt is still present.
+        assert.ok(out.startsWith(FAKE_PROMPT), "base prompt must survive a harness-context load failure");
+        // Harness-context contributed nothing: no fragment-owned heading, no
+        // delimiter, no body. (The composer appends NOTHING when ctx is "".)
+        assert.ok(!out.includes("## Harness execution context"), "no harness-context heading (load failed -> fragment omitted)");
+        assert.ok(!out.includes("<!-- harness-context -->"), "no harness-context delimiter (load failed -> nothing appended)");
+        assert.ok(!out.includes(FAKE_CONTEXT), "no harness-context body (load failed -> fragment omitted)");
     });
 
     test("composition: guides:false -> adopter guides absent", () => {

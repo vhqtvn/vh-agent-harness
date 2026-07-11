@@ -449,9 +449,13 @@ Ordering is **deterministic**: user-level guides first, then project-level
 guides, alphabetical by filename within each level. (Project content sits closer
 to the user's message, mirroring the config precedence project > user > default.)
 
-Each fragment is introduced by a delimiter so the LLM sees distinct sections:
+Each fragment is introduced by a delimiter so the LLM sees distinct sections.
+The delimiter is the ONLY thing the composer injects — each fragment owns its
+own heading (delimiter-only injection, mirroring how adopter guides work):
 
-- `<!-- harness-context -->` / `## Harness context` before the harness-context block.
+- `<!-- harness-context -->` before the harness-context block. The
+  `## Harness execution context` heading comes from the fragment itself, not
+  the composer (no injected heading, so no double-H2).
 - `<!-- adopter-guide: <level>/<filename> -->` before each adopter guide.
 
 ### The wrapper is context, not a bypass
