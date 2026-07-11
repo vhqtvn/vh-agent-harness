@@ -166,6 +166,18 @@ import { decideLive, serializeTranscript } from "./auto-gate-live.js";
 // (auto-gate-live.js) via this module — no drift.
 import { scrubTruncate } from "./auto-gate-scrub.js";
 
+// Tiered-consensus aggregation core (Phase 2): normalizes each leaf outcome
+// (the SAME {status, audit, reason, latencyMs, retries} shape decideLive
+// returns — no adapter needed) and applies the unanimous-allow policy. Only
+// reachable when config.mode === "live-tiered". The audit/enforce/live branches
+// below do NOT touch this module, so they are unchanged by Phase 2. The core
+// is pure and behavior-frozen (its own 47-test suite covers the policy); here
+// we only IMPORT and USE it.
+import {
+    normalizeLeafOutcome,
+    aggregateLeafOutcomes,
+} from "./auto-gate-tiered.js";
+
 export const id = "auto-tool-gate";
 
 // ESM does not provide __dirname (the OpenCode plugin runtime loads these as
@@ -338,6 +350,7 @@ const DEFAULT_LLM_CONFIG = Object.freeze({
     timeoutMs: 8000, // hard timeout for the model HTTP call
     maxRetries: 1, // ADDITIONAL attempts after the first (0 = single attempt)
     retryDelayMs: 500, // base delay; LINEAR backoff (see classifyLive)
+    leaves: [], // Phase 2: per-leaf configs for live-tiered consensus (empty = no tier)
 });
 
 // mtime cache: stores the last successful parse plus a fallback-warning latch
@@ -373,7 +386,8 @@ function normalizePluginConfig(parsed) {
         mode:
             parsed.mode === "audit" ||
             parsed.mode === "enforce" ||
-            parsed.mode === "live"
+            parsed.mode === "live" ||
+            parsed.mode === "live-tiered"
                 ? parsed.mode
                 : DEFAULT_PLUGIN_CONFIG.mode,
         stubVerdict:
@@ -419,7 +433,7 @@ function _normNonNegInt(v, dflt) {
 }
 
 function normalizeLlmConfig(parsed) {
-    return {
+    const base = {
         modelEndpoint:
             typeof parsed.modelEndpoint === "string"
                 ? parsed.modelEndpoint
@@ -439,6 +453,22 @@ function normalizeLlmConfig(parsed) {
         maxRetries: _normNonNegInt(parsed.maxRetries, DEFAULT_LLM_CONFIG.maxRetries),
         retryDelayMs: _normNonNegInt(parsed.retryDelayMs, DEFAULT_LLM_CONFIG.retryDelayMs),
     };
+    // Phase 2: optional `leaves` array for live-tiered consensus mode. Each
+    // leaf is normalized through the SAME field rules as the top-level config
+    // (a leaf IS a full leaf-config object). A non-array or empty array is
+    // preserved as-is ([]) so the dispatch-time validator can fail-closed on
+    // it — we do NOT silently fabricate a leaf here (that would mask a
+    // misconfiguration). Only live-tiered reads this field; single-leaf live
+    // ignores it entirely.
+    let leaves = [];
+    if (Array.isArray(parsed.leaves)) {
+        leaves = parsed.leaves.map((leaf) =>
+            normalizeLlmConfig(
+                leaf && typeof leaf === "object" ? leaf : {},
+            ),
+        );
+    }
+    return { ...base, leaves };
 }
 
 // Private reader core: stat → (cache fast-path) → read → parse → normalize →
@@ -1098,6 +1128,161 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
                 return;
             }
 
+            // =========== LIVE-TIERED mode (Phase 2 multi-leaf consensus) =====
+            //
+            // Opt-in consensus mode. Dispatches decideLive for EACH configured
+            // leaf IN PARALLEL (each leaf may point at a DIFFERENT endpoint/
+            // model — independent classifiers), normalizes each outcome via
+            // normalizeLeafOutcome (the SAME {status} shape decideLive returns
+            // — no adapter), and aggregates via aggregateLeafOutcomes with the
+            // unanimous-allow policy: ALLOW+ALLOW (>=1) is the ONLY grant;
+            // any DENY/FAIL/empty/misconfig -> deny. The transcript is fetched
+            // ONCE and shared (leaves differ in LLM endpoint/model, not in
+            // what they see). Misconfig -> fail-closed via onUncertain.
+            //
+            // RUN-MODE RACE: multi-leaf (parallel classifyLive) loses the reply
+            // race under `opencode run` WORSE than single-leaf live (more
+            // latency). Phase 2 consensus enforcement is effectively SERVE-ONLY
+            // — document, do not attempt to fix. Enforce/stub still wins
+            // run-mode (synchronous).
+            if (config.mode === "live-tiered") {
+                console.error(
+                    `[auto-gate] permission.asked type=${permType} ` +
+                    `mode=live-tiered (deciding consensus)`,
+                );
+                const llmConfig = readLlmConfig(llmConfigPath);
+
+                // (1) Validate the leaves array. A well-formed leaf needs a
+                // non-empty modelEndpoint AND model (mirrors single-leaf live
+                // validation). Malformed -> fail-closed via onUncertain.
+                // NEVER fall back to permissive.
+                const leaves = Array.isArray(llmConfig.leaves)
+                    ? llmConfig.leaves
+                    : [];
+                const wellFormedLeaves = leaves.filter(
+                    (leaf) =>
+                        leaf &&
+                        typeof leaf === "object" &&
+                        typeof leaf.modelEndpoint === "string" &&
+                        leaf.modelEndpoint &&
+                        typeof leaf.model === "string" &&
+                        leaf.model,
+                );
+                if (wellFormedLeaves.length === 0) {
+                    console.error(
+                        "[auto-gate] live-tiered misconfigured: no leaves",
+                    );
+                    await handleUncertain("live-tiered misconfigured: no leaves");
+                    return;
+                }
+
+                // (2) Fetch the session transcript ONCE (shared across all
+                // leaves). Graceful degradation: on any failure, use the
+                // permission payload alone. The per-leaf model call / decision
+                // layer owns the fail-closed decision; transcript fetch is soft.
+                let transcript = [];
+                try {
+                    if (
+                        client &&
+                        client.session &&
+                        typeof client.session.messages === "function"
+                    ) {
+                        const r = await client.session.messages({
+                            path: { id: req.sessionID },
+                            query: { directory },
+                        });
+                        if (r && r.error) throw r.error;
+                        if (r && Array.isArray(r.data)) transcript = r.data;
+                    } else {
+                        throw new Error("client/session unavailable");
+                    }
+                } catch (err) {
+                    const msg = (err && err.message) || String(err);
+                    console.error(
+                        `[auto-gate] transcript fetch failed (${msg}); ` +
+                        `using permission payload only`,
+                    );
+                    transcript = [];
+                }
+
+                // (3) Serialize ONCE. Each leaf sees the SAME redacted text.
+                const permForSerializer = {
+                    type: permType,
+                    pattern: Array.isArray(req.patterns)
+                        ? req.patterns.join(" ")
+                        : "",
+                };
+                const serialized = serializeTranscript(
+                    transcript,
+                    permForSerializer,
+                );
+
+                // (4) Parallel per-leaf dispatch. Each leaf gets its OWN
+                // endpoint/model/apiKeyEnv/timeoutMs/retries; the shared
+                // promptFile + transcript apply to all. decideLive already
+                // catches internally and returns {status:"deny"} on error, but
+                // we wrap defensively so a throwing leaf becomes a FAIL
+                // outcome rather than aborting the whole tier.
+                const leafPromises = wellFormedLeaves.map((leaf) =>
+                    (async () => {
+                        try {
+                            const leafConfig = { ...config, ...leaf };
+                            return await decideLive(leafConfig, serialized);
+                        } catch (err) {
+                            // Defensive: decideLive should not throw, but if it
+                            // does, surface a deny-on-error so normalize maps
+                            // it to DENY (not FAIL), keeping the tier honest.
+                            return {
+                                status: "deny",
+                                audit: null,
+                                reason: `leaf threw: ${(err && err.message) || String(err)}`,
+                                latencyMs: 0,
+                                retries: 0,
+                            };
+                        }
+                    })(),
+                );
+                const results = await Promise.all(leafPromises);
+
+                // (5) Normalize each leaf outcome via the tiered core (maps
+                // {status:"allow"}->ALLOW, {status:"deny"}->DENY, else FAIL).
+                const normalized = results.map((r) => normalizeLeafOutcome(r));
+
+                // (6) Aggregate via the unanimous-allow policy.
+                const agg = aggregateLeafOutcomes(normalized, {
+                    tierId: "consensus",
+                });
+
+                // (7) EGRESS-DISCIPLINED audit line. agg.audit is already
+                // constant-shaped (tierId + integer counts + normalized-outcome
+                // enums ONLY — NEVER leaf endpoint/model/apiKeyEnv values). We
+                // log agg.audit directly plus the aggregate decision flags,
+                // and a per-leaf scrubbed outcome summary (integer retries/
+                // latency + enum outcomes — NO endpoint/model interpolation).
+                console.error(`[auto-gate] ${agg.audit}`);
+                const perLeafSummary = results
+                    .map(
+                        (r, i) =>
+                            `leaf#${i}=${normalized[i]}` +
+                            ` retries=${(r && r.retries) || 0}` +
+                            ` latencyMs=${(r && r.latencyMs) || 0}`,
+                    )
+                    .join(" ");
+                console.error(
+                    `[auto-gate] live-tiered decision=${agg.decision} ` +
+                    `disagreement=${agg.disagreement} ` +
+                    `incomplete=${agg.incomplete} ${perLeafSummary}`,
+                );
+
+                // (8) Reply based on the aggregate decision.
+                if (agg.decision === "allow") {
+                    await reply(config.replyMode); // "once" | "always"
+                } else {
+                    await reply("reject");
+                }
+                return;
+            }
+
             // =============== Unknown mode — fail-closed =======================
             await handleUncertain(`unknown mode: ${config.mode}`);
         },
@@ -1453,6 +1638,7 @@ if (__isMain) {
                 timeoutMs: 8000,
                 maxRetries: 1,
                 retryDelayMs: 500,
+                leaves: [],
             });
             assert.equal(
                 errors.length,
@@ -1480,6 +1666,7 @@ if (__isMain) {
             timeoutMs: 4000,
             maxRetries: 3,
             retryDelayMs: 250,
+            leaves: [],
         });
     });
 
@@ -1494,6 +1681,7 @@ if (__isMain) {
             timeoutMs: 8000,
             maxRetries: 1,
             retryDelayMs: 500,
+            leaves: [],
         });
     });
 
@@ -1509,6 +1697,7 @@ if (__isMain) {
                 timeoutMs: 8000,
                 maxRetries: 1,
                 retryDelayMs: 500,
+                leaves: [],
             });
             assert.equal(
                 errors.length,
@@ -1534,6 +1723,7 @@ if (__isMain) {
                 timeoutMs: 8000,
                 maxRetries: 1,
                 retryDelayMs: 500,
+                leaves: [],
             });
             assert.deepEqual(b, a, "second read of same bad file still returns defaults");
             // A PRESENT-but-non-object file is not the normal "no live setup" case,
@@ -1556,6 +1746,7 @@ if (__isMain) {
                     timeoutMs: 8000,
                     maxRetries: 1,
                     retryDelayMs: 500,
+                    leaves: [],
                 });
                 assert.equal(errors.length, 1, `body ${body} must warn once`);
             });
@@ -1593,6 +1784,7 @@ if (__isMain) {
             timeoutMs: 8000,
             maxRetries: 1,
             retryDelayMs: 500,
+            leaves: [],
         });
     });
 
@@ -1623,7 +1815,7 @@ if (__isMain) {
         }, 20);
     });
 
-    test("merged call-site: {...readConfig(), ...readLlmConfig()} yields all 12 fields", () => {
+    test("merged call-site: {...readConfig(), ...readLlmConfig()} yields all 13 fields", () => {
         __resetConfigCaches();
         writeTestConfig("merge-plugin.json", {
             enabled: true,
@@ -1655,6 +1847,7 @@ if (__isMain) {
             timeoutMs: 3000,
             maxRetries: 2,
             retryDelayMs: 750,
+            leaves: [],
         });
     });
 
@@ -1736,8 +1929,9 @@ if (__isMain) {
         assert.equal(liveConfig.maxRetries, 4, "maxRetries must reach the live config");
         assert.equal(liveConfig.retryDelayMs, 1000, "retryDelayMs must reach the live config");
         // The two config sources must not collide: plugin config has 6 fields,
-        // LLM config has 6; the merged object has all 12 (6 plugin + 6 LLM).
-        assert.equal(Object.keys(liveConfig).length, 12);
+        // LLM config has 7 (6 scalar + the leaves array); the merged object has
+        // all 13 (6 plugin + 7 LLM).
+        assert.equal(Object.keys(liveConfig).length, 13);
     });
 
     // ===================================================================
@@ -2329,6 +2523,424 @@ if (__isMain) {
             true,
             "missing client must log reply unavailable",
         );
+    });
+
+    // ===================================================================
+    // PHASE 2 — live-tiered consensus mode self-tests.
+    //
+    // These exercise the event hook's live-tiered branch: parallel per-leaf
+    // decideLive dispatch -> normalizeLeafOutcome -> aggregateLeafOutcomes ->
+    // reply. They use injected fake clients + mock globalThis.fetch. No real
+    // network. Leaves point at DIFFERENT endpoints so the mock can dispatch by
+    // URL (deterministic regardless of parallel call order).
+    // ===================================================================
+
+    // Mock globalThis.fetch dispatching by the request URL endpoint. Each key
+    // is matched as a substring of the URL; the matching verdict is returned.
+    // A key mapping to null THROWS (simulates a leaf network failure). Used to
+    // give leaf-A and leaf-B DIFFERENT verdicts deterministically even though
+    // Promise.all runs them in parallel. Returns a restore fn.
+    function mockFetchByEndpoint(map) {
+        const orig = globalThis.fetch;
+        globalThis.fetch = async (url, _opts) => {
+            const u = typeof url === "string" ? url : String(url);
+            for (const [key, verdict] of Object.entries(map)) {
+                if (u.includes(key)) {
+                    if (verdict === null) {
+                        throw new Error(`mock leaf failure for ${key}`);
+                    }
+                    return {
+                        ok: true,
+                        status: 200,
+                        json: async () => ({
+                            choices: [{ message: { content: verdict } }],
+                        }),
+                    };
+                }
+            }
+            // Fallback: return a generic allow so an unmatched leaf does not
+            // silently hang the test.
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    choices: [{ message: { content: "<block>no</block>" } }],
+                }),
+            };
+        };
+        return () => {
+            globalThis.fetch = orig;
+        };
+    }
+
+    // Helper: build a 2-leaf LLM config pointing at two distinct endpoints.
+    function twoLeafLlmConfig(verdictA, verdictB, extra = {}) {
+        return {
+            leaves: [
+                {
+                    modelEndpoint: "http://leaf-a-endpoint",
+                    model: "leaf-a-model",
+                    apiKeyEnv: "AUTO_GATE_API_KEY",
+                    maxRetries: 0,
+                    ...extra,
+                },
+                {
+                    modelEndpoint: "http://leaf-b-endpoint",
+                    model: "leaf-b-model",
+                    apiKeyEnv: "AUTO_GATE_API_KEY",
+                    maxRetries: 0,
+                    ...extra,
+                },
+            ],
+        };
+    }
+
+    // --- live-tiered: consensus allow (2 leaves both allow) -> reply once ---
+
+    test("live-tiered: unanimous allow (2 leaves both allow) -> reply once", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live-tiered",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            twoLeafLlmConfig(),
+        );
+        const restore = mockFetchByEndpoint({
+            "leaf-a-endpoint": "<block>no</block>", // allow
+            "leaf-b-endpoint": "<block>no</block>", // allow
+        });
+        try {
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            restore();
+        }
+        assert.equal(replies.length, 1, "consensus allow must reply once");
+        assert.equal(replies[0].body.response, "once");
+    });
+
+    // --- live-tiered: one deny -> reply reject (disagreement) ---
+
+    test("live-tiered: one deny -> reply reject (disagreement)", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live-tiered",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            twoLeafLlmConfig(),
+        );
+        const restore = mockFetchByEndpoint({
+            "leaf-a-endpoint": "<block>no</block>", // allow
+            "leaf-b-endpoint": "<block>yes</block>", // deny
+        });
+        try {
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            restore();
+        }
+        assert.equal(replies.length, 1, "disagreement must reply (reject)");
+        assert.equal(replies[0].body.response, "reject");
+    });
+
+    // --- live-tiered: one fail -> reply reject (incomplete) ---
+
+    test("live-tiered: one fail (leaf throws) -> reply reject (incomplete)", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live-tiered",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            twoLeafLlmConfig(),
+        );
+        const restore = mockFetchByEndpoint({
+            "leaf-a-endpoint": "<block>no</block>", // allow
+            "leaf-b-endpoint": null, // throws -> decideLive returns deny-on-error
+        });
+        try {
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            restore();
+        }
+        assert.equal(replies.length, 1, "incomplete must reply (reject)");
+        assert.equal(replies[0].body.response, "reject");
+    });
+
+    // --- live-tiered: empty/malformed leaves -> fail-closed reject ---
+
+    test("live-tiered: empty leaves config -> fail-closed reject (onUncertain:reject)", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live-tiered",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            { leaves: [] },
+        );
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(replies.length, 1, "empty leaves must fail-closed");
+        assert.equal(replies[0].body.response, "reject");
+    });
+
+    test("live-tiered: missing leaves key -> fail-closed reject", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live-tiered",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            { modelEndpoint: "http://x", model: "m" }, // no leaves key
+        );
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(replies.length, 1);
+        assert.equal(replies[0].body.response, "reject");
+    });
+
+    // --- live-tiered: onUncertain:passthrough + misconfig -> NO reply ---
+
+    test("live-tiered: onUncertain:passthrough + misconfig -> NO reply", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live-tiered",
+                onUncertain: "passthrough",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            { leaves: [] },
+        );
+        await hooks["event"]({ event: makeAskedEvent() });
+        assert.equal(
+            replies.length,
+            0,
+            "passthrough must NOT reply on misconfig",
+        );
+    });
+
+    // --- live-tiered: transcript fetch shared (called once, not N times) ---
+
+    test("live-tiered: transcript fetch shared (session.messages called once, not N times)", async () => {
+        const tag = Math.random().toString(36).slice(2, 8);
+        const pName = `evt-tiered-tx-${tag}.json`;
+        const lName = `evt-tiered-tx-l-${tag}.json`;
+        writeTestConfig(pName, {
+            mode: "live-tiered",
+            promptFile: testConfigPath("evt-classifier-prompt.txt"),
+        });
+        writeTestConfig(lName, twoLeafLlmConfig());
+        __resetConfigCaches();
+        let messagesCallCount = 0;
+        const client = {
+            postSessionIdPermissionsPermissionId: async (args) => {
+                return { data: {}, error: undefined };
+            },
+            session: {
+                messages: async () => {
+                    messagesCallCount++;
+                    return {
+                        data: [
+                            {
+                                info: { role: "user" },
+                                parts: [{ type: "text", text: "hello" }],
+                            },
+                        ],
+                        error: undefined,
+                    };
+                },
+            },
+        };
+        const hooks = await server({
+            client,
+            directory: TEST_CONFIG_DIR,
+            configPath: testConfigPath(pName),
+            llmConfigPath: testConfigPath(lName),
+        });
+        const restore = mockFetchByEndpoint({
+            "leaf-a-endpoint": "<block>no</block>",
+            "leaf-b-endpoint": "<block>no</block>",
+        });
+        try {
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            restore();
+        }
+        assert.equal(
+            messagesCallCount,
+            1,
+            "transcript must be fetched ONCE regardless of leaf count",
+        );
+    });
+
+    // --- live-tiered: egress — no leaf endpoint/model/value in audit line ---
+
+    test("live-tiered: egress — no leaf endpoint/model/secret in audit line", async () => {
+        // Inject a leaf config with a secret-shaped model name and a Bearer-
+        // bearing endpoint. Neither must survive into the stderr audit line.
+        const secretModel = "sk-secretleakmodel1234567890abcdefghijklmnop";
+        const secretEndpoint = "Bearer eyJleGFtcGxl.qm9o.signature";
+        const { hooks } = await setupEventTest(
+            {
+                mode: "live-tiered",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            {
+                leaves: [
+                    {
+                        modelEndpoint: `http://leaf-a-${secretEndpoint}`,
+                        model: secretModel,
+                        apiKeyEnv: "AUTO_GATE_API_KEY",
+                        maxRetries: 0,
+                    },
+                    {
+                        modelEndpoint: "http://leaf-b-endpoint",
+                        model: "leaf-b-model",
+                        apiKeyEnv: "AUTO_GATE_API_KEY",
+                        maxRetries: 0,
+                    },
+                ],
+            },
+        );
+        const errors = [];
+        const orig = console.error;
+        console.error = (msg) => errors.push(msg);
+        const restore = mockFetchByEndpoint({
+            "leaf-a": "<block>no</block>",
+            "leaf-b": "<block>no</block>",
+        });
+        try {
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            restore();
+            console.error = orig;
+        }
+        const combined = errors.join("\n");
+        assert.equal(
+            combined.includes(secretModel),
+            false,
+            "leaf model value must NOT survive into the audit line",
+        );
+        assert.equal(
+            combined.includes(secretEndpoint),
+            false,
+            "leaf endpoint secret must NOT survive into the audit line",
+        );
+        // The aggregate audit line must be present (proves the tiered path ran).
+        assert.ok(
+            errors.some((e) => /tier-aggregate/.test(e)),
+            "aggregate audit line must be emitted",
+        );
+    });
+
+    // --- live-tiered: 3-leaf mix (allow+deny+fail) -> deny incomplete ---
+
+    test("live-tiered: 3-leaf mix (allow+deny+fail) -> deny incomplete", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live-tiered",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            {
+                leaves: [
+                    {
+                        modelEndpoint: "http://leaf-a-endpoint",
+                        model: "m",
+                        apiKeyEnv: "AUTO_GATE_API_KEY",
+                        maxRetries: 0,
+                    },
+                    {
+                        modelEndpoint: "http://leaf-b-endpoint",
+                        model: "m",
+                        apiKeyEnv: "AUTO_GATE_API_KEY",
+                        maxRetries: 0,
+                    },
+                    {
+                        modelEndpoint: "http://leaf-c-endpoint",
+                        model: "m",
+                        apiKeyEnv: "AUTO_GATE_API_KEY",
+                        maxRetries: 0,
+                    },
+                ],
+            },
+        );
+        const restore = mockFetchByEndpoint({
+            "leaf-a": "<block>no</block>", // allow
+            "leaf-b": "<block>yes</block>", // deny
+            "leaf-c": null, // fail
+        });
+        try {
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            restore();
+        }
+        assert.equal(replies.length, 1, "mix must reply (reject)");
+        assert.equal(replies[0].body.response, "reject");
+    });
+
+    // --- live-tiered: consensus deny (2 leaves both deny) -> reply reject ---
+
+    test("live-tiered: unanimous deny (2 leaves both deny) -> reply reject", async () => {
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live-tiered",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            twoLeafLlmConfig(),
+        );
+        const restore = mockFetchByEndpoint({
+            "leaf-a-endpoint": "<block>yes</block>", // deny
+            "leaf-b-endpoint": "<block>yes</block>", // deny
+        });
+        try {
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            restore();
+        }
+        assert.equal(replies.length, 1);
+        assert.equal(replies[0].body.response, "reject");
+    });
+
+    // --- config normalization: mode live-tiered accepted ---
+
+    test("readConfig (plugin): mode live-tiered accepted", () => {
+        __resetConfigCaches();
+        writeTestConfig("evt-tiered-mode.json", { mode: "live-tiered" });
+        const cfg = readConfig(testConfigPath("evt-tiered-mode.json"));
+        assert.equal(cfg.mode, "live-tiered");
+    });
+
+    // --- config normalization: leaves array validated in LLM config ---
+
+    test("readLlmConfig: leaves array normalized (each leaf field-safe)", () => {
+        __resetConfigCaches();
+        writeTestConfig("evt-tiered-leaves.json", {
+            leaves: [
+                {
+                    modelEndpoint: "http://a",
+                    model: "ma",
+                    apiKeyEnv: "KEY_A",
+                    timeoutMs: 5000,
+                    maxRetries: 2,
+                    retryDelayMs: 300,
+                },
+                {
+                    modelEndpoint: "http://b",
+                    model: "mb",
+                    // missing fields -> defaults per leaf
+                },
+            ],
+        });
+        const cfg = readLlmConfig(testConfigPath("evt-tiered-leaves.json"));
+        assert.ok(Array.isArray(cfg.leaves), "leaves must be an array");
+        assert.equal(cfg.leaves.length, 2);
+        assert.equal(cfg.leaves[0].modelEndpoint, "http://a");
+        assert.equal(cfg.leaves[0].maxRetries, 2);
+        assert.equal(cfg.leaves[1].modelEndpoint, "http://b");
+        assert.equal(cfg.leaves[1].apiKeyEnv, "AUTO_GATE_API_KEY", "default");
+        assert.equal(cfg.leaves[1].timeoutMs, 8000, "default");
+    });
+
+    test("readLlmConfig: non-array leaves -> empty array (no throw)", () => {
+        __resetConfigCaches();
+        writeTestConfig("evt-tiered-badleaves.json", {
+            leaves: "not-an-array",
+        });
+        const cfg = readLlmConfig(testConfigPath("evt-tiered-badleaves.json"));
+        assert.ok(Array.isArray(cfg.leaves));
+        assert.equal(cfg.leaves.length, 0);
     });
 
     // Restore the API key env after the live tests.

@@ -88,6 +88,7 @@ const OPENCODE_SRC = "/opt/opencode/packages/opencode";
 const TEST_DIR = "/opt/test";
 const AGENT_PORT = 8080;
 const CLASSIFIER_PORT = 8081;
+const CLASSIFIER2_PORT = 8082;
 const PROMPT_TEXT = "Read /workspace/target.txt";
 const TARGET_CONTENT = "readable-target-content";
 
@@ -232,6 +233,43 @@ function writeLlmConfig() {
     );
 }
 
+function writeLlmConfigTiered() {
+    // auto-gate-llm.json — TWO-LEAF tiered classifier config (live-tiered mode).
+    //
+    // Each leaf points at an INDEPENDENT classifier mock instance so the
+    // consensus path dispatches 2 parallel decideLive calls. Leaf A uses the
+    // primary classifier mock (:CLASSIFIER_PORT), leaf B uses the secondary
+    // classifier mock (:CLASSIFIER2_PORT). Each mock reads its own verdict
+    // control file, so the per-leaf verdict is independently controllable.
+    // The mock approach: 2 classifier instances on 2 ports, each with its own
+    // verdict control file (/tmp/classifier-verdict + /tmp/classifier-verdict-2).
+    // This gives clean per-leaf verdict differentiation for Cases E/F/G.
+    const llmConfig = {
+        leaves: [
+            {
+                modelEndpoint: `http://127.0.0.1:${CLASSIFIER_PORT}/v1/chat/completions`,
+                model: "mock-classifier-a",
+                apiKeyEnv: "AUTO_GATE_API_KEY",
+                timeoutMs: 5000,
+                maxRetries: 1,
+                retryDelayMs: 200,
+            },
+            {
+                modelEndpoint: `http://127.0.0.1:${CLASSIFIER2_PORT}/v1/chat/completions`,
+                model: "mock-classifier-b",
+                apiKeyEnv: "AUTO_GATE_API_KEY",
+                timeoutMs: 5000,
+                maxRetries: 1,
+                retryDelayMs: 200,
+            },
+        ],
+    };
+    fs.writeFileSync(
+        path.join(WORKSPACE, ".opencode", "repo-configs", "auto-gate-llm.json"),
+        JSON.stringify(llmConfig, null, 2),
+    );
+}
+
 // ── mock helpers ─────────────────────────────────────────────────────────
 
 function resetAgentCounter() {
@@ -272,6 +310,39 @@ async function getClassifierCount() {
     try {
         const r = await fetch(
             `http://127.0.0.1:${CLASSIFIER_PORT}/count/classifier`,
+        );
+        if (!r.ok) return 0;
+        const data = await r.json();
+        return data.count || 0;
+    } catch {
+        return 0;
+    }
+}
+
+// ── classifier2-mock helpers (live-tiered leaf B) ────────────────────────
+//
+// The second classifier mock (:CLASSIFIER2_PORT) mirrors the first but reads
+// /tmp/classifier-verdict-2 on each POST. Used for consensus leaf B so the
+// two leaves can return DIFFERENT verdicts independently (Cases E/F/G).
+
+function setClassifierVerdict2(text) {
+    fs.writeFileSync("/tmp/classifier-verdict-2", text);
+}
+
+async function resetClassifier2Count() {
+    try {
+        await fetch(
+            `http://127.0.0.1:${CLASSIFIER2_PORT}/reset-classifier-count`,
+        );
+    } catch {
+        // best effort
+    }
+}
+
+async function getClassifier2Count() {
+    try {
+        const r = await fetch(
+            `http://127.0.0.1:${CLASSIFIER2_PORT}/count/classifier`,
         );
         if (!r.ok) return 0;
         const data = await r.json();
@@ -333,13 +404,21 @@ async function waitForServe(maxAttempts = 90) {
 // Run one serve-mode case: create session, prompt_async, poll messages.
 // Returns { messagesJson, sessionID }.
 async function runServeCase(opts) {
-    const { stubVerdict, label, mode = "enforce", classifierVerdict } = opts;
+    const { stubVerdict, label, mode = "enforce", classifierVerdict, classifierVerdict2 } = opts;
 
     writeGateConfig(stubVerdict, mode);
     resetAgentCounter();
     if (mode === "live") {
+        writeLlmConfig();
         setClassifierVerdict(classifierVerdict);
         await resetClassifierCount();
+    }
+    if (mode === "live-tiered") {
+        writeLlmConfigTiered();
+        setClassifierVerdict(classifierVerdict || "<block>no</block>");
+        setClassifierVerdict2(classifierVerdict2 || "<block>no</block>");
+        await resetClassifierCount();
+        await resetClassifier2Count();
     }
 
     // Create a fresh session for this case.
@@ -548,7 +627,9 @@ async function main() {
                 ...process.env,
                 AGENT_PORT: String(AGENT_PORT),
                 CLASSIFIER_PORT: String(CLASSIFIER_PORT),
+                CLASSIFIER2_PORT: String(CLASSIFIER2_PORT),
                 VERDICT_FILE: "/tmp/classifier-verdict",
+                VERDICT_FILE_2: "/tmp/classifier-verdict-2",
                 READ_PATH: path.join(WORKSPACE, "target.txt"),
             },
             stdio: ["ignore", "pipe", "pipe"],
@@ -562,6 +643,7 @@ async function main() {
 
         await waitForHealth(AGENT_PORT, "agent mock");
         await waitForHealth(CLASSIFIER_PORT, "classifier mock");
+        await waitForHealth(CLASSIFIER2_PORT, "classifier2 mock");
 
         // ── CASE A: ALLOW proof ────────────────────────────────────────
         // stubVerdict="allow", NO --dangerously-skip-permissions.
@@ -896,6 +978,166 @@ async function main() {
                 .forEach((l) => log(`  err> ${l}`));
         }
 
+        // ── PHASE 2: live-tiered CONSENSUS serve cases ───────────────────
+        //
+        // mode=live-tiered dispatches 2 parallel decideLive calls (one per
+        // leaf) and aggregates via the unanimous-allow policy. Serve-only:
+        // under `opencode run` the multi-leaf HTTP latency loses the race
+        // WORSE than single-leaf live. Serve has no auto-replier, so the
+        // consensus path is deterministic here.
+        //
+        // Mock approach: 2 classifier instances on 2 ports (:CLASSIFIER_PORT
+        // + :CLASSIFIER2_PORT), each with its own verdict control file. Each
+        // leaf config in writeLlmConfigTiered() points at its own endpoint.
+        //
+        //   Case | Leaf A verdict      | Leaf B verdict      | Aggregate       | PASS = tool outcome
+        //   -----|---------------------|---------------------|-----------------|---------------------
+        //   E    | <block>no (allow)   | <block>no (allow)   | allow           | read PROCEEDS
+        //   F    | <block>no (allow)   | <block>yes (block)  | deny disagree   | read BLOCKED
+        //   G    | <block>no (allow)   | error (HTTP 500)    | deny incomplete | read BLOCKED
+
+        // ── CASE serve-E: CONSENSUS ALLOW proof ──────────────────────────
+        // Both leaves return <block>no</block>. Unanimous-allow → aggregate
+        // allow → reply once → read PROCEEDS. Both classifier mocks called.
+        log("========== CASE serve-E (CONSENSUS ALLOW proof) ==========");
+        const stderrMarkerE = serveStderrBuf.length;
+        const serveE = await runServeCase({
+            label: "serve-E",
+            stubVerdict: "allow", // ignored in live-tiered mode
+            mode: "live-tiered",
+            classifierVerdict: "<block>no</block>",
+            classifierVerdict2: "<block>no</block>",
+        });
+        const serveAnalysisE = analyzeServeCase(
+            "serve-E",
+            serveE.messagesJson,
+        );
+        const serveStderrE = serveStderrBuf.slice(stderrMarkerE);
+        const serveE_eventSeen =
+            /\[auto-gate\] permission\.asked type=read mode=live-tiered/.test(
+                serveStderrE,
+            );
+        const serveE_classifierCount = await getClassifierCount();
+        const serveE_classifier2Count = await getClassifier2Count();
+        const serveE_pass =
+            serveE_eventSeen &&
+            serveAnalysisE.hasContent &&
+            serveE_classifierCount > 0 &&
+            serveE_classifier2Count > 0;
+        log(
+            `Case serve-E: eventSeen=${serveE_eventSeen} content=${serveAnalysisE.hasContent} rejection=${serveAnalysisE.hasRejection} classifierCalls=${serveE_classifierCount} classifier2Calls=${serveE_classifier2Count} → ${serveE_pass ? "PASS" : "FAIL"}`,
+        );
+        if (!serveE_pass) {
+            log(`--- [serve-E] messages JSON (first 3000 chars) ---`);
+            log(serveE.messagesJson.slice(0, 3000));
+            log(`--- [serve-E] serve stderr excerpt ---`);
+            serveStderrE
+                .split("\n")
+                .filter((l) =>
+                    /auto-gate|permission|reject|error|warn|live|tier|classifier/i.test(
+                        l,
+                    ),
+                )
+                .slice(0, 40)
+                .forEach((l) => log(`  err> ${l}`));
+        }
+
+        // ── CASE serve-F: CONSENSUS BLOCK proof (disagreement) ──────────
+        // Leaf A allows, leaf B blocks. Disagreement → aggregate deny →
+        // reply reject → read BLOCKED. Both classifier mocks called.
+        log("========== CASE serve-F (CONSENSUS BLOCK proof) ==========");
+        const stderrMarkerF = serveStderrBuf.length;
+        const serveF = await runServeCase({
+            label: "serve-F",
+            stubVerdict: "block", // ignored in live-tiered mode
+            mode: "live-tiered",
+            classifierVerdict: "<block>no</block>",
+            classifierVerdict2:
+                "<block>yes</block><reason>[test-block] classifier-B blocked</reason>",
+        });
+        const serveAnalysisF = analyzeServeCase(
+            "serve-F",
+            serveF.messagesJson,
+        );
+        const serveStderrF = serveStderrBuf.slice(stderrMarkerF);
+        const serveF_eventSeen =
+            /\[auto-gate\] permission\.asked type=read mode=live-tiered/.test(
+                serveStderrF,
+            );
+        const serveF_classifierCount = await getClassifierCount();
+        const serveF_classifier2Count = await getClassifier2Count();
+        const serveF_pass =
+            serveF_eventSeen &&
+            !serveAnalysisF.hasContent &&
+            serveAnalysisF.hasRejection &&
+            serveF_classifierCount > 0 &&
+            serveF_classifier2Count > 0;
+        log(
+            `Case serve-F: eventSeen=${serveF_eventSeen} content=${serveAnalysisF.hasContent} rejection=${serveAnalysisF.hasRejection} classifierCalls=${serveF_classifierCount} classifier2Calls=${serveF_classifier2Count} → ${serveF_pass ? "PASS" : "FAIL"}`,
+        );
+        if (!serveF_pass) {
+            log(`--- [serve-F] messages JSON (first 3000 chars) ---`);
+            log(serveF.messagesJson.slice(0, 3000));
+            log(`--- [serve-F] serve stderr excerpt ---`);
+            serveStderrF
+                .split("\n")
+                .filter((l) =>
+                    /auto-gate|permission|reject|error|warn|live|tier|classifier/i.test(
+                        l,
+                    ),
+                )
+                .slice(0, 40)
+                .forEach((l) => log(`  err> ${l}`));
+        }
+
+        // ── CASE serve-G: CONSENSUS INCOMPLETE proof (one leaf errors) ───
+        // Leaf A allows, leaf B errors (mock returns HTTP 500). decideLive
+        // catches the error and returns {status:"deny"} → normalized to FAIL.
+        // Aggregate: deny + incomplete → reply reject → read BLOCKED.
+        log("========== CASE serve-G (CONSENSUS INCOMPLETE proof) ==========");
+        const stderrMarkerG = serveStderrBuf.length;
+        const serveG = await runServeCase({
+            label: "serve-G",
+            stubVerdict: "block", // ignored in live-tiered mode
+            mode: "live-tiered",
+            classifierVerdict: "<block>no</block>",
+            classifierVerdict2: "error", // mock returns HTTP 500
+        });
+        const serveAnalysisG = analyzeServeCase(
+            "serve-G",
+            serveG.messagesJson,
+        );
+        const serveStderrG = serveStderrBuf.slice(stderrMarkerG);
+        const serveG_eventSeen =
+            /\[auto-gate\] permission\.asked type=read mode=live-tiered/.test(
+                serveStderrG,
+            );
+        const serveG_classifierCount = await getClassifierCount();
+        const serveG_classifier2Count = await getClassifier2Count();
+        const serveG_pass =
+            serveG_eventSeen &&
+            !serveAnalysisG.hasContent &&
+            serveAnalysisG.hasRejection &&
+            serveG_classifierCount > 0 &&
+            serveG_classifier2Count > 0;
+        log(
+            `Case serve-G: eventSeen=${serveG_eventSeen} content=${serveAnalysisG.hasContent} rejection=${serveAnalysisG.hasRejection} classifierCalls=${serveG_classifierCount} classifier2Calls=${serveG_classifier2Count} → ${serveG_pass ? "PASS" : "FAIL"}`,
+        );
+        if (!serveG_pass) {
+            log(`--- [serve-G] messages JSON (first 3000 chars) ---`);
+            log(serveG.messagesJson.slice(0, 3000));
+            log(`--- [serve-G] serve stderr excerpt ---`);
+            serveStderrG
+                .split("\n")
+                .filter((l) =>
+                    /auto-gate|permission|reject|error|warn|live|tier|classifier/i.test(
+                        l,
+                    ),
+                )
+                .slice(0, 40)
+                .forEach((l) => log(`  err> ${l}`));
+        }
+
         // ── FULL SUMMARY ───────────────────────────────────────────────
         log("========== FULL SUMMARY ==========");
         log(`Run   Case A (ALLOW proof):       ${caseA_pass ? "PASS" : "FAIL"}`);
@@ -906,17 +1148,24 @@ async function main() {
         log(`Serve Case B (BLOCK proof):       ${serveB_pass ? "PASS" : "FAIL"}`);
         log(`Serve Case C (LIVE ALLOW proof):  ${serveC_pass ? "PASS" : "FAIL"}`);
         log(`Serve Case D (LIVE BLOCK proof):  ${serveD_pass ? "PASS" : "FAIL"}`);
+        log(`Serve Case E (CONSENSUS ALLOW):   ${serveE_pass ? "PASS" : "FAIL"}`);
+        log(`Serve Case F (CONSENSUS BLOCK):   ${serveF_pass ? "PASS" : "FAIL"}`);
+        log(`Serve Case G (CONSENSUS INCMPLT): ${serveG_pass ? "PASS" : "FAIL"}`);
         // The suite PASSES if: enforce A/B pass (run + serve) + serve-live C/D
-        // pass (deterministic proof of the full live chain) + run-live C/D are
-        // not FAIL (PASS or RACE_LOSS both acceptable). A run-live RACE_LOSS
-        // proves the live chain ran (event + classifier + correct decision);
-        // the serve-live cases prove it resolves deterministically.
+        // pass (deterministic proof of the full live chain) + serve-consensus
+        // E/F/G pass (deterministic proof of the tiered consensus chain) +
+        // run-live C/D are not FAIL (PASS or RACE_LOSS both acceptable). A
+        // run-live RACE_LOSS proves the live chain ran (event + classifier +
+        // correct decision); the serve-live cases prove it resolves
+        // deterministically. There are NO run-consensus cases because the
+        // multi-leaf HTTP path loses the run-mode race WORSE than single-leaf.
         const liveRunOk =
             caseC_status !== "FAIL" && caseD_status !== "FAIL";
         const allPass =
             caseA_pass && caseB_pass &&
             serveA_pass && serveB_pass &&
             serveC_pass && serveD_pass &&
+            serveE_pass && serveF_pass && serveG_pass &&
             liveRunOk;
         log(`Overall: ${allPass ? "PASS" : "FAIL"}`);
 

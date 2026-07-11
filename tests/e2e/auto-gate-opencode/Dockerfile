@@ -64,17 +64,21 @@ COPY tests/e2e/auto-gate-opencode/run-e2e.mjs /opt/test/
 COPY tests/e2e/auto-gate-opencode/target.txt /opt/test/
 COPY tests/e2e/auto-gate-opencode/classifier-prompt.md /opt/test/
 
-# Copy plugin sources (4 modules: main + live + verdict + scrub).
-# Do NOT copy auto-gate-tiered.js — it may export `server` and conflict.
+# Copy plugin sources (5 modules: main + live + verdict + scrub + tiered).
+# auto-gate-tiered.js is required at build time — auto-tool-gate.js imports
+# normalizeLeafOutcome + aggregateLeafOutcomes from it. The bun build step
+# inlines all imports into a single bundled file, so only auto-tool-gate.js
+# is discovered as a plugin (the sibling modules do not export `server`).
 COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-tool-gate.js /tmp/plugins-src/
 COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-live.js /tmp/plugins-src/
 COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-verdict.js /tmp/plugins-src/
 COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-scrub.js /tmp/plugins-src/
+COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-tiered.js /tmp/plugins-src/
 
-# Bundle the 4 plugin modules into a SINGLE self-contained file.
+# Bundle the 5 plugin modules into a SINGLE self-contained file.
 # REASON: OpenCode's plugin auto-discovery scans plugins/*.{ts,js} and loads
-# EACH file as a separate plugin. The sibling modules (live/verdict/scrub) do
-# not export `server` and crash the loader. Bundling inlines all imports into
+# EACH file as a separate plugin. The sibling modules (live/verdict/scrub/tiered)
+# do not export `server` and crash the loader. Bundling inlines all imports into
 # one file so only one plugin is discovered. This does NOT modify the
 # committed plugin source — it is a build-time transform.
 RUN bun build /tmp/plugins-src/auto-tool-gate.js \

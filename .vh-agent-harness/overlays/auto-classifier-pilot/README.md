@@ -231,7 +231,7 @@ defaults.
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
 | `enabled` | boolean | `true` | Master live toggle. `false` live-disables the plugin: both hooks no-op immediately on the next tool call (no audit, no behavior change, no restart). `true` is the normal on state. |
-| `mode` | `"audit"` \| `"enforce"` \| `"live"` | `"audit"` | Behavior selector. `audit` = Phase 1 observability only (default, zero behavior change). `enforce` = Phase 2 decision path on `permission.ask` (verdict parser + STUB evaluator; fail-closed to deny). `live` = Phase 3b decision path using a REAL OpenAI-compatible model call (fail-closed to deny on any error/timeout/misconfiguration). `tool.execute.before` stays an observer in all modes. |
+| `mode` | `"audit"` \| `"enforce"` \| `"live"` \| `"live-tiered"` | `"audit"` | Behavior selector. `audit` = Phase 1 observability only (default, zero behavior change). `enforce` = Phase 2 decision path on `permission.ask` (verdict parser + STUB evaluator; fail-closed to deny). `live` = Phase 3b decision path using a REAL OpenAI-compatible model call (fail-closed to deny on any error/timeout/misconfiguration). `live-tiered` = Phase 2 multi-leaf consensus: dispatches the `live` classifier for EACH configured leaf IN PARALLEL and grants only on **unanimous-allow** (see "Phase 2 — `live-tiered` consensus mode"). `tool.execute.before` stays an observer in all modes. |
 | `stubVerdict` | `"allow"` \| `"block"` \| `"fail"` | `"block"` | Drives the Phase 2 STUB evaluator in `enforce` mode. `"allow"` → allow verdict; `"block"` → block verdict; `"fail"` → unparseable output (exercises fail-closed). **Test/placeholder only** — not a real classifier; ignored unless `mode: "enforce"`. |
 | `promptFile` | string | `""` | Optional override path for the `live` classifier system prompt. If set and readable, its contents replace the binary-served default prompt. If unset/missing/unreadable, the plugin loads the prompt from `vh-agent-harness sys-prompt auto-gate-classifier`. Lives in the plugin-config file (not the LLM file) so it MAY be committed as a shared default. |
 | `replyMode` | `"once"` \| `"always"` | `"once"` | Controls the reply disposition when the classifier verdict is **allow**. `"once"` = approve this call only (the tool call proceeds; future matching calls still prompt). `"always"` = approve AND **persist the pattern into OpenCode's in-memory allowlist** — future matching calls never prompt again (self-tightening). **`"always"` is powerful**: it auto-allowlists patterns, so a wrong allow verdict permanently silences that pattern for the session. Use `"once"` (the default) unless you are confident in the classifier's precision. Ignored in `audit` mode (no reply is sent). Invalid values → default `"once"`. |
@@ -247,6 +247,7 @@ defaults.
 | `timeoutMs` | number | `8000` | Hard timeout for the `live` model HTTP call, via `AbortController`. On timeout the call fails-closed to deny (after exhausting retries — see `maxRetries`). Ignored in other modes. |
 | `maxRetries` | number | `1` | Number of **additional** attempts the `live` call makes after a **transient** failure (timeout / network error / `5xx` / `2xx`-with-empty-content). `0` = single attempt (the pre-retry behavior); `1` (default) = one retry. A `4xx` or malformed-JSON response is **not** retried (retrying won't help). After the final allowed attempt still fails, the call fail-closes to deny. Coerced to a non-negative integer; invalid/missing → `1`. Ignored in other modes. |
 | `retryDelayMs` | number | `500` | Base delay between retries, with **linear** backoff: the delay before attempt *N* (N ≥ 2) = `retryDelayMs * (N - 1)`, so attempt 2 waits 1×, attempt 3 waits 2×, etc. Coerced to a non-negative integer; invalid/missing → `500`. Ignored in other modes. |
+| `leaves` | array of leaf-config objects | `[]` | **Phase 2 (`live-tiered` only).** An array of per-leaf configs, each a full leaf object `{modelEndpoint, model, apiKeyEnv, timeoutMs, maxRetries, retryDelayMs}`. Each leaf may point at a DIFFERENT endpoint/model — that is the whole point (independent classifiers for consensus). A leaf missing `modelEndpoint` or `model` is dropped; if ALL leaves are malformed or the array is empty/missing → fail-closed deny with audit line `live-tiered misconfigured: no leaves`. Ignored in `audit`/`enforce`/`live` modes. |
 
 > **Token-cost note (retries).** Retries only fire on transient failures; each
 > retry is a fresh API call that **may consume tokens on the provider side even
@@ -596,6 +597,98 @@ Switching back to `mode: "audit"` (the default) restores the exact Phase 1
 behavior. The event hook logs only and does NOT reply. The `live` branch is a
 separate code path that does not touch the audit branch.
 
+## Phase 2 — `live-tiered` consensus mode
+
+`mode: "live-tiered"` is an **opt-in** consensus mode that dispatches the same
+`live` classifier (Phase 3b substrate) for EACH configured leaf IN PARALLEL and
+grants only on **unanimous allow**. It is the multi-leaf generalization of
+single-leaf `live`: each leaf may point at a different endpoint/model (independent
+classifiers), so a single misbehaving or compromised classifier cannot silently
+allow a call that another classifier would block.
+
+### Unanimous-allow policy
+
+The aggregate is computed by the behavior-frozen aggregation core
+(`auto-gate-tiered.js`, 47 passing unit tests of its own). The policy is:
+
+- **ALLOW × N (≥1 leaf, all allow)** → **allow** (the ONLY grant path).
+- **Any DENY** → **deny**. If at least one leaf also ALLOWed → `disagreement: true`.
+- **Any FAIL** (a leaf threw, timed out, returned an unparseable verdict, or hit
+  a non-2xx) → **deny** with `incomplete: true`. The dominant reason is
+  incompleteness, so `disagreement` is `false` even if both ALLOW and DENY are
+  also present.
+- **Empty / malformed / missing leaves** → **deny** (fail-closed via `onUncertain`).
+- **Unknown leaf outcome** → treated as **FAIL** → deny.
+
+Each leaf's `decideLive` outcome (shape `{status, audit, reason, latencyMs,
+retries}`) is normalized by `normalizeLeafOutcome` — `{status:"allow"}` → ALLOW,
+`{status:"deny"}` → DENY, anything else → FAIL. No adapter is needed because the
+live path already returns exactly this shape.
+
+### Shared transcript, per-leaf endpoints
+
+The transcript is fetched **once** and shared across all leaves (the leaves
+differ in LLM endpoint/model, not in what they see). The shared fields
+(`promptFile`, `replyMode`, `onUncertain`, the transcript) come from the plugin
+config + a single `client.session.messages` fetch. Each leaf gets its OWN
+`modelEndpoint` / `model` / `apiKeyEnv` / `timeoutMs` / `maxRetries` /
+`retryDelayMs` from its entry in the `leaves` array.
+
+### Config shape
+
+The plugin config sets `mode: "live-tiered"`. The LLM config carries the
+`leaves` array. Example `auto-gate-llm.json`:
+
+```json
+{
+  "leaves": [
+    {
+      "modelEndpoint": "https://classifier-a.example/v1/chat/completions",
+      "model": "gate-model-a",
+      "apiKeyEnv": "CLASSIFIER_A_KEY",
+      "timeoutMs": 8000,
+      "maxRetries": 1,
+      "retryDelayMs": 500
+    },
+    {
+      "modelEndpoint": "https://classifier-b.example/v1/chat/completions",
+      "model": "gate-model-b",
+      "apiKeyEnv": "CLASSIFIER_B_KEY",
+      "timeoutMs": 8000,
+      "maxRetries": 1,
+      "retryDelayMs": 500
+    }
+  ]
+}
+```
+
+Each leaf is a FULL leaf-config object (all six LLM fields). The top-level
+`modelEndpoint`/`model`/etc. are ignored when `leaves` is present. A leaf
+missing `modelEndpoint` or `model` is dropped; if that leaves zero valid leaves,
+the dispatch fail-closes.
+
+### SERVE-ONLY enforcement (run-mode race)
+
+> **Single-leaf `live` already loses the reply race under `opencode run`** (the
+> async classifier HTTP path, ~4–14 ms, is slower than `run`'s near-instant
+> in-process auto-reply). Multi-leaf consensus (parallel `decideLive` = even
+> more latency) loses the run race **worse**. **Therefore `live-tiered`
+> consensus enforcement is effectively SERVE-ONLY**, just like single-leaf
+> `live`. Under `opencode run`, the consensus reply arrives after `run`'s own
+> auto-reply has already resolved the Deferred, so the tool call is NOT gated by
+> the consensus verdict. Enforce/stub mode still wins run-mode (it is
+> synchronous). Do NOT attempt to fix the run race — it is inherent to
+> `opencode run`'s auto-reply design.
+
+### Egress discipline (per-leaf audit)
+
+The aggregate audit line is **constant-shaped**: `tierId` + integer leaf counts
++ normalized-outcome enums only. Leaf endpoint/model/apiKeyEnv VALUES are
+**never** interpolated into any log line. The per-leaf summary logged alongside
+carries only the normalized outcome enum + integer retries/latency. All
+tool-call-derived content continues to pass through the existing
+`scrubTruncate`/`scrubCredentials` egress discipline.
+
 ## Where the plugin renders
 
 OpenCode **auto-discovers** plugins from `.opencode/plugins/*.js` — there is no
@@ -626,6 +719,13 @@ and `maxoutputtokens.js` all load automatically. This pack renders four units
   (stderr/audit egress) and `auto-gate-live.js` (HTTP-egress transcript). Does
   NOT export `server`. Also **self-testing**: run `vh-agent-harness exec node
   --test .opencode/plugins/auto-gate-scrub.js` to execute its regression suite
+  (importing it as a module runs no tests).
+- `plugins/auto-gate-tiered.js` → `.opencode/plugins/auto-gate-tiered.js` — the
+  Phase 2 multi-leaf consensus aggregation core (`LEAF`, `normalizeLeafOutcome`,
+  `aggregateLeafOutcomes`); a plugin dependency imported by `auto-tool-gate.js`
+  only when `mode === "live-tiered"`. Does NOT export `server`. Also
+  **self-testing**: run `vh-agent-harness exec node --test
+  .opencode/plugins/auto-gate-tiered.js` to execute its regression suite
   (importing it as a module runs no tests).
 
 No `opencode.jsonc` registration is needed (this pack's

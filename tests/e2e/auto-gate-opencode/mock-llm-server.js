@@ -37,7 +37,9 @@ import fs from "node:fs";
 
 const AGENT_PORT = parseInt(process.env.AGENT_PORT || "8080", 10);
 const CLASSIFIER_PORT = parseInt(process.env.CLASSIFIER_PORT || "8081", 10);
+const CLASSIFIER2_PORT = parseInt(process.env.CLASSIFIER2_PORT || "8082", 10);
 const VERDICT_FILE = process.env.VERDICT_FILE || "/tmp/classifier-verdict";
+const VERDICT_FILE_2 = process.env.VERDICT_FILE_2 || "/tmp/classifier-verdict-2";
 const READ_PATH = process.env.READ_PATH || "/workspace/target.txt";
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -251,12 +253,27 @@ const agentServer = http.createServer(async (req, res) => {
     sendJson(res, 404, { error: "not found", path: url });
 });
 
-// ── classifier server (port 8081) ────────────────────────────────────────
+// ── classifier server factory ─────────────────────────────────────────────
+//
+// A classifier server reads its OWN verdict control file and serves an
+// OpenAI-compatible chat completion. Two instances run on two ports so the
+// Phase 2 live-tiered consensus cases can give leaf-A and leaf-B DIFFERENT
+// verdicts deterministically (each leaf points at its own endpoint/port).
+//
+// VERDICT CONTROL FILE — supports these shapes:
+//   KEYWORD    : "allow"  → <block>no</block>
+//                "block"  → <block>yes</block><reason>scope creep</reason>
+//                "error"  → HTTP 500 (simulates a leaf transport/server failure
+//                            for the consensus INCOMPLETE case)
+//   PASSTHROUGH: any string starting with "<block>" is returned VERBATIM.
+//
+// COUNTER endpoints (per-port, same path on each instance):
+//   GET /count/classifier       → { count } of POSTs received
+//   GET /reset-classifier-count → resets the counter
 
-function readVerdict() {
+function readVerdictFile(file) {
     try {
-        const v = fs.readFileSync(VERDICT_FILE, "utf8").trim();
-        return v;
+        return fs.readFileSync(file, "utf8").trim();
     } catch {
         return "allow"; // fail-safe default
     }
@@ -275,83 +292,91 @@ function verdictContent(verdict) {
     return "<block>no</block>";
 }
 
-// Per-process counter of classifier POSTs. The live-mode cases query
-// GET /count/classifier to PROVE the live classifier HTTP egress actually
-// happened (not just the stub evaluator). Reset between cases via
-// GET /reset-classifier-count.
-let classifierCallCount = 0;
+function makeClassifierServer(port, verdictFile) {
+    let callCount = 0;
+    const server = http.createServer(async (req, res) => {
+        req.on("error", () => {});
+        res.on("error", () => {});
+        if (res.socket) res.socket.on("error", () => {});
 
-const classifierServer = http.createServer(async (req, res) => {
-    req.on("error", () => {});
-    res.on("error", () => {});
-    if (res.socket) res.socket.on("error", () => {});
+        const url = (req.url || "").split("?")[0];
 
-    const url = (req.url || "").split("?")[0];
-
-    if (req.method === "GET" && url === "/healthz") {
-        sendJson(res, 200, { ok: true, port: CLASSIFIER_PORT });
-        return;
-    }
-
-    if (req.method === "GET" && url === "/count/classifier") {
-        sendJson(res, 200, { ok: true, count: classifierCallCount });
-        return;
-    }
-
-    if (req.method === "GET" && url === "/reset-classifier-count") {
-        classifierCallCount = 0;
-        sendJson(res, 200, { ok: true, count: classifierCallCount });
-        return;
-    }
-
-    if (req.method === "POST" && url === "/v1/chat/completions") {
-        // Count EVERY classifier POST so the live-mode driver can prove the
-        // live classifier HTTP egress happened (count > 0 = the plugin really
-        // called the endpoint, not just the stub path).
-        classifierCallCount += 1;
-        const verdict = readVerdict();
-        const content = verdictContent(verdict);
-        // The plugin always sends stream:false, so non-streaming JSON is the
-        // primary path. Streaming support is included for robustness.
-        const body = await readJsonBody(req);
-        console.error(`[mock-classifier] POST call=${classifierCallCount} /v1/chat/completions verdict=${verdict} stream=${body.stream === true}`);
-        if (body.stream === true) {
-            res.writeHead(200, {
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache",
-                Connection: "keep-alive",
-            });
-            const id = genId("chatcmpl");
-            const base = { id, object: "chat.completion.chunk", model: "mock-classifier", choices: [] };
-            res.write("data: " + JSON.stringify({
-                ...base,
-                choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }],
-            }) + "\n\n");
-            res.write("data: " + JSON.stringify({
-                ...base,
-                choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-            }) + "\n\n");
-            res.write("data: [DONE]\n\n");
-            res.end();
-        } else {
-            sendJson(res, 200, {
-                id: genId("chatcmpl"),
-                object: "chat.completion",
-                model: "mock-classifier",
-                choices: [{
-                    index: 0,
-                    message: { role: "assistant", content },
-                    finish_reason: "stop",
-                }],
-            });
+        if (req.method === "GET" && url === "/healthz") {
+            sendJson(res, 200, { ok: true, port });
+            return;
         }
-        return;
-    }
 
-    sendJson(res, 404, { error: "not found", path: url });
-});
+        if (req.method === "GET" && url === "/count/classifier") {
+            sendJson(res, 200, { ok: true, count: callCount });
+            return;
+        }
 
-// ── start both servers ───────────────────────────────────────────────────
+        if (req.method === "GET" && url === "/reset-classifier-count") {
+            callCount = 0;
+            sendJson(res, 200, { ok: true, count: callCount });
+            return;
+        }
+
+        if (req.method === "POST" && url === "/v1/chat/completions") {
+            callCount += 1;
+            const verdict = readVerdictFile(verdictFile);
+            // ERROR mode: simulate a leaf server failure (HTTP 500) so the
+            // consensus INCOMPLETE case can exercise a FAIL outcome.
+            if (verdict === "error") {
+                const body = await readJsonBody(req);
+                console.error(`[mock-classifier:${port}] POST call=${callCount} -> 500 (error mode) stream=${body.stream === true}`);
+                sendJson(res, 500, {
+                    error: { message: "mock classifier error mode", type: "server_error" },
+                });
+                return;
+            }
+            const content = verdictContent(verdict);
+            const body = await readJsonBody(req);
+            console.error(`[mock-classifier:${port}] POST call=${callCount} verdict=${verdict} stream=${body.stream === true}`);
+            if (body.stream === true) {
+                res.writeHead(200, {
+                    "Content-Type": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                    Connection: "keep-alive",
+                });
+                const id = genId("chatcmpl");
+                const base = { id, object: "chat.completion.chunk", model: "mock-classifier", choices: [] };
+                res.write("data: " + JSON.stringify({
+                    ...base,
+                    choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }],
+                }) + "\n\n");
+                res.write("data: " + JSON.stringify({
+                    ...base,
+                    choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+                }) + "\n\n");
+                res.write("data: [DONE]\n\n");
+                res.end();
+            } else {
+                sendJson(res, 200, {
+                    id: genId("chatcmpl"),
+                    object: "chat.completion",
+                    model: "mock-classifier",
+                    choices: [{
+                        index: 0,
+                        message: { role: "assistant", content },
+                        finish_reason: "stop",
+                    }],
+                });
+            }
+            return;
+        }
+
+        sendJson(res, 404, { error: "not found", path: url });
+    });
+    return { server, getCount: () => callCount };
+}
+
+const classifier1 = makeClassifierServer(CLASSIFIER_PORT, VERDICT_FILE);
+const classifier2 = makeClassifierServer(CLASSIFIER2_PORT, VERDICT_FILE_2);
+const classifierServer = classifier1.server;
+const classifierServer2 = classifier2.server;
+
+// ── start all servers ────────────────────────────────────────────────────
 
 agentServer.listen(AGENT_PORT, () => {
     console.log(`[mock-llm] agent server on :${AGENT_PORT}`);
@@ -359,10 +384,21 @@ agentServer.listen(AGENT_PORT, () => {
 classifierServer.listen(CLASSIFIER_PORT, () => {
     console.log(`[mock-llm] classifier server on :${CLASSIFIER_PORT}`);
 });
+classifierServer2.listen(CLASSIFIER2_PORT, () => {
+    console.log(`[mock-llm] classifier2 server on :${CLASSIFIER2_PORT}`);
+});
 
 process.on("SIGTERM", () => {
-    agentServer.close(() => classifierServer.close(() => process.exit(0)));
+    agentServer.close(() =>
+        classifierServer.close(() =>
+            classifierServer2.close(() => process.exit(0)),
+        ),
+    );
 });
 process.on("SIGINT", () => {
-    agentServer.close(() => classifierServer.close(() => process.exit(0)));
+    agentServer.close(() =>
+        classifierServer.close(() =>
+            classifierServer2.close(() => process.exit(0)),
+        ),
+    );
 });
