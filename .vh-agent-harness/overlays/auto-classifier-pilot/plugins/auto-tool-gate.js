@@ -134,6 +134,7 @@
 // ---------------------------------------------------------------------------
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 // node:test + node:assert imported STATICALLY so the self-test registers
@@ -259,31 +260,54 @@ function repoRoot() {
 // ---------------------------------------------------------------------------
 // Two-file live config model (reload-free).
 //
-// Config is split across TWO sibling files under .opencode/repo-configs/ so
-// that LLM secrets-adjacent settings can NEVER be committed while plugin
-// behavior MAY be committed (or not) at the adopter's choice:
+// Config is split across TWO sibling files so that LLM secrets-adjacent
+// settings can NEVER be committed while plugin behavior MAY be committed (or
+// not) at the adopter's choice:
 //
 //   1. Plugin config → auto-gate-config.json (EXISTING path, kept).
-//      Holds the plugin-BEHAVIOR fields: {enabled, mode, stubVerdict, promptFile}.
-//      Committability: ADOPTER'S CHOICE — a team may commit a shared default
-//      (e.g. {"mode":"enforce"}). NOT gitignored. Fail-safe defaults:
-//      missing/invalid → {enabled:true, mode:"audit", stubVerdict:"block",
-//      promptFile:""}.
+//      Holds the plugin-BEHAVIOR fields: {enabled, mode, stubVerdict, promptFile,
+//      replyMode, onUncertain}. Committability: ADOPTER'S CHOICE — a team may
+//      commit a shared default (e.g. {"mode":"enforce"}). NOT gitignored.
+//      Fail-safe defaults: missing/invalid → {enabled:true, mode:"audit",
+//      stubVerdict:"block", promptFile:"", replyMode:"once", onUncertain:"reject"}.
 //
-//   2. LLM config    → auto-gate-llm.json  (NEW sibling file).
+//   2. LLM config    → auto-gate-llm.json  (sibling file).
 //      Holds the LLM fields: {modelEndpoint, model, apiKeyEnv, timeoutMs,
-//      maxRetries, retryDelayMs}. Committability: NEVER — gitignored in the
-//      dogfood repo (adopters add the pattern to their own .gitignore).
+//      maxRetries, retryDelayMs, leaves}. Committability: NEVER — gitignored in
+//      the dogfood repo (adopters add the pattern to their own .gitignore).
 //      Fail-safe defaults: missing/invalid → {modelEndpoint:"", model:"",
 //      apiKeyEnv:"AUTO_GATE_API_KEY", timeoutMs:8000, maxRetries:1,
-//      retryDelayMs:500}. A MISSING LLM file is NORMAL (only needed for live
-//      mode) and is SILENT — no audit spam; audit/enforce modes must NOT fail
-//      because the LLM file is absent. In live mode a missing/empty
+//      retryDelayMs:500, leaves:[]}. A MISSING LLM file is NORMAL (only needed
+//      for live mode) and is SILENT — no audit spam; audit/enforce modes must
+//      NOT fail because the LLM file is absent. In live mode a missing/empty
 //      modelEndpoint/model fail-closes to deny via the existing decision path.
+//
+// THREE-LEVEL LAYERED LOADING (defaults ← user ← project):
+//
+//   Each config TYPE (plugin, LLM) is loaded from up to TWO files and merged
+//   field-by-field (shallow merge). Precedence is PROJECT > USER > DEFAULT:
+//
+//     - PROJECT-level (the existing files under .opencode/repo-configs/) —
+//       per-repo override. The committability rules above apply here.
+//     - USER-level (under <XDG_CONFIG_HOME>/vh-agent-harness/) — a shared
+//       base across ALL of an operator's projects. Filenames MIRROR the
+//       project-level names (auto-gate-config.json / auto-gate-llm.json) so the
+//       override relationship is obvious: "same file, user-level base,
+//       project-level override." A user-level file is OPTIONAL — its absence is
+//       the normal case (most operators have only project-level config) and is
+//       SILENT (no audit spam), exactly like a missing project-level LLM file.
+//       Only a PRESENT-but-invalid user-level file emits an audit line (labeled
+//       with the level: "plugin/user", "llm/user").
+//     - DEFAULTS — the hardcoded fail-safe fallbacks below.
+//
+//   Both-missing (user AND project) for a type → fail-safe defaults, exactly
+//   today's behavior: the project-level "missing" audit line fires for the
+//   plugin config (existing behavior), and both levels are silent for the LLM
+//   config (its missing file is the normal no-live-setup case).
 //
 // Backward-compat (CLEAN CUT): an operator may still have LLM fields in the
 // OLD auto-gate-config.json. They are IGNORED entirely — readConfig() returns
-// ONLY the four plugin-behavior fields. This is a freshly-shipped pilot with
+// ONLY the six plugin-behavior fields. This is a freshly-shipped pilot with
 // no real install base, so a clean cut (no deprecation fallback) is safe and
 // keeps the two files strictly disjoint. LLM fields MUST come from
 // auto-gate-llm.json.
@@ -295,11 +319,12 @@ function repoRoot() {
 // Merge point: the live branch builds ONE merged object
 // ({...readConfig(), ...readLlmConfig()}) so downstream decideLive /
 // classifyLive / resolveSystemPrompt see a single config as before. The audit
-// and enforce branches only need readConfig() (plugin behavior).
+// and enforce branches only need readConfig() (plugin behavior). Each of those
+// readers already returns the fully three-level-merged result for its type.
 // ---------------------------------------------------------------------------
 
-// Plugin-config path, repo-relative. The `repo-configs/` dir is where the
-// harness already keeps operator-facing config-like data
+// Plugin-config PROJECT-level path, repo-relative. The `repo-configs/` dir is
+// where the harness already keeps operator-facing config-like data
 // (allowed-commands.js, forbidden-patterns.js, forbidden-patterns.core.js,
 // repo-recon-data.yml). The overlay does NOT render or seed this file — its
 // absence is the documented fail-safe default.
@@ -310,14 +335,30 @@ const CONFIG_PATH = path.resolve(
     "auto-gate-config.json",
 );
 
-// LLM-config path — a NEW sibling file. Same repo-configs/ dir. NEVER
-// committed (gitignored); only needed for live mode.
+// LLM-config PROJECT-level path — a sibling file. Same repo-configs/ dir.
+// NEVER committed (gitignored); only needed for live mode.
 const LLM_CONFIG_PATH = path.resolve(
     repoRoot(),
     ".opencode",
     "repo-configs",
     "auto-gate-llm.json",
 );
+
+// User-config dir: <XDG_CONFIG_HOME>/vh-agent-harness (NOT ~/.config/opencode/...
+// — config is owned by vh-agent-harness, which ships the plugin + defines the
+// schema; OpenCode already owns ~/.config/opencode/ for its own schema).
+// XDG_CONFIG_HOME resolves per the spec: env var if set, else ~/.config.
+function userConfigDir() {
+    return path.join(
+        process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"),
+        "vh-agent-harness",
+    );
+}
+
+// USER-level paths — mirror the project-level filenames so the override
+// relationship is obvious (same file, user-level base, project-level override).
+const USER_CONFIG_PATH = path.join(userConfigDir(), "auto-gate-config.json");
+const USER_LLM_CONFIG_PATH = path.join(userConfigDir(), "auto-gate-llm.json");
 
 // Plugin-behavior fail-safe defaults (auto-gate-config.json). `enabled` is the
 // master live kill-switch; `mode` is the behavior selector (`audit` = Phase 1
@@ -359,18 +400,59 @@ const DEFAULT_LLM_CONFIG = Object.freeze({
 // transition (missing -> present -> invalid) re-warns once. Module-level on
 // purpose — survives across hook invocations within one server process.
 //
-// TWO caches (one per file) are held as MUTABLE const objects (properties
-// reassigned, never the binding) so a shared private reader core can update
-// either without rebinding a module-level `let`.
+// THREE-LEVEL LAYERED LOADING needs to track BOTH files (user + project) per
+// config type. The cache is therefore split into:
+//
+//   - per-(level × type) SINGLE-FILE sub-caches (4 total): each owns the mtime
+//     cache + deduped fallback latch for ONE file, and is the cache argument
+//     to _readRawJsonConfig (contract: {mtime, rawParsed, fallbackReason}).
+//     The cached value is the RAW parsed object (NOT normalized) so the
+//     layered reader can merge raws field-by-field before normalizing once.
+//     The per-file fallback latch lives here so a failure state transition
+//     re-warns independently per file (e.g. user file invalid warns once with
+//     label "plugin/user"; project file missing warns once with label
+//     "plugin/project").
+//   - per-type TOP-LEVEL MERGE caches (2 total): hold the last-merged result +
+//     the last-seen mtimes for BOTH levels, so the steady-state fast path
+//     (both files unchanged) returns the cached merged object after just two
+//     statSyncs, with no re-read / re-parse / re-merge.
+//
+// All six are held as MUTABLE const objects (properties reassigned, never the
+// binding) so the readers can update them without rebinding module-level
+// `let`s.
+const pluginUserConfigCache = {
+    mtime: null,
+    rawParsed: null,
+    fallbackReason: null,
+};
+const pluginProjectConfigCache = {
+    mtime: null,
+    rawParsed: null,
+    fallbackReason: null,
+};
+const llmUserConfigCache = {
+    mtime: null,
+    rawParsed: null,
+    fallbackReason: null,
+};
+const llmProjectConfigCache = {
+    mtime: null,
+    rawParsed: null,
+    fallbackReason: null,
+};
+
+// Top-level merge caches. `merged` is null until the first successful merge.
+// `userMtime` / `projectMtime` are the mtimeMs seen at the last merge (null if
+// that file was missing); both matching the current stat is the fast-path hit.
 const pluginConfigCache = {
-    mtime: null, // last mtimeMs parsed successfully (null until first hit)
-    parsed: null, // last parsed + merged config object (null until first hit)
-    fallbackReason: null, // null | "missing" | "unreadable" | "invalid"
+    userMtime: null,
+    projectMtime: null,
+    merged: null,
 };
 const llmConfigCache = {
-    mtime: null,
-    parsed: null,
-    fallbackReason: null,
+    userMtime: null,
+    projectMtime: null,
+    merged: null,
 };
 
 // Normalize a parsed plugin-config object over defaults (field-by-field so a
@@ -471,24 +553,26 @@ function normalizeLlmConfig(parsed) {
     return { ...base, leaves };
 }
 
-// Private reader core: stat → (cache fast-path) → read → parse → normalize →
-// cache-latch. NEVER throws. Side effect: emits at most one console.error
-// audit line per failure-state transition (de-duped via cache.fallbackReason),
-// UNLESS silentOnMissing is true (a missing file is then the normal case and
-// emits NOTHING). `label` prefixes the audit line so the operator knows WHICH
-// file failed.
+// Private RAW-reading core: stat → (cache fast-path) → read → parse →
+// shape-guard → cache-latch. NEVER throws. Returns the RAW parsed object (the
+// JSON.parse result, shape-guarded to be a plain object) on success, or `null`
+// on missing / unreadable / invalid. Does NOT normalize — the layered reader
+// merges raw objects field-by-field FIRST and normalizes ONCE at the end, so a
+// partial file contributes ONLY the fields it actually specifies (not the
+// defaults a normalize-on-read would fabricate for every key).
+//
+// Side effect: emits at most one console.error audit line per failure-state
+// transition (de-duped via cache.fallbackReason), UNLESS silentOnMissing is
+// true (a missing file is then the normal case and emits NOTHING). `label`
+// prefixes the audit line so the operator knows WHICH file failed.
+//
+// The per-file sub-cache holds {mtime, rawParsed, fallbackReason}: the RAW
+// parse (never normalized), so it composes cleanly with field-by-field merge.
 //
 // `targetPath` is injectable (the public readers default it to the production
 // repo-configs path) so the self-tests can point the readers at temp files
 // under tmp/ without touching the real config location.
-function _readJsonConfig(
-    targetPath,
-    cache,
-    defaults,
-    normalize,
-    silentOnMissing,
-    label,
-) {
+function _readRawJsonConfig(targetPath, cache, silentOnMissing, label) {
     let st;
     try {
         st = fs.statSync(targetPath);
@@ -498,7 +582,7 @@ function _readJsonConfig(
             if (cache.fallbackReason !== "missing") {
                 console.error(
                     `[auto-gate-audit] ${label} config not found at ${targetPath}; ` +
-                    `using fail-safe defaults ${JSON.stringify(defaults)} ` +
+                    `using fail-safe defaults ` +
                     `(create the file to override).`,
                 );
             }
@@ -506,14 +590,14 @@ function _readJsonConfig(
         }
         // silentOnMissing: a missing file is the NORMAL case (e.g. no live
         // mode set up). Do NOT spam, do NOT latch a fallback state.
-        return defaults;
+        return null;
     }
 
     const mtimeMs = st.mtimeMs;
     // Fast path: unchanged since last successful parse AND not currently in a
-    // fallback state — return the cached parsed object (single statSync cost).
-    if (cache.parsed && cache.mtime === mtimeMs && !cache.fallbackReason) {
-        return cache.parsed;
+    // fallback state — return the cached RAW object (single statSync cost).
+    if (cache.rawParsed && cache.mtime === mtimeMs && !cache.fallbackReason) {
+        return cache.rawParsed;
     }
 
     let raw;
@@ -523,11 +607,11 @@ function _readJsonConfig(
         if (cache.fallbackReason !== "unreadable") {
             console.error(
                 `[auto-gate-audit] ${label} config unreadable at ${targetPath}; ` +
-                `using fail-safe defaults ${JSON.stringify(defaults)}.`,
+                `using fail-safe defaults.`,
             );
             cache.fallbackReason = "unreadable";
         }
-        return defaults;
+        return null;
     }
 
     let parsed;
@@ -543,10 +627,9 @@ function _readJsonConfig(
     }
     // Fail-safe (F3): a parse that SUCCEEDED but did not yield a plain object
     // (literal `null`, an array, or a bare primitive/string/number/boolean)
-    // must NEVER reach the normalizer — `normalize(parsed)` would throw on
-    // property access (e.g. `parsed.enabled` on null throws TypeError) instead
-    // of returning fail-safe defaults. Treat it exactly like invalid JSON:
-    // return defaults via the same "invalid" fallbackReason + deduped audit line.
+    // must NEVER reach the merger — it would contribute garbage keys. Treat it
+    // exactly like invalid JSON: return null via the same "invalid"
+    // fallbackReason + deduped audit line.
     if (
         invalidReason === null &&
         (parsed === null ||
@@ -559,67 +642,208 @@ function _readJsonConfig(
         if (cache.fallbackReason !== "invalid") {
             console.error(
                 `[auto-gate-audit] ${label} config ${invalidReason} at ${targetPath}; ` +
-                `using fail-safe defaults ${JSON.stringify(defaults)}.`,
+                `using fail-safe defaults.`,
             );
             cache.fallbackReason = "invalid";
         }
-        return defaults;
+        return null;
     }
 
-    // Successful parse of a plain object: normalize + merge over defaults (so
-    // partial configs resolve every field), latch the cache, clear any prior
-    // fallback state.
-    const merged = normalize(parsed);
+    // Successful parse of a plain object: cache the RAW object, latch the mtime,
+    // clear any prior fallback state. Do NOT normalize here — the layered
+    // reader merges raws field-by-field, then normalizes once.
     cache.mtime = mtimeMs;
-    cache.parsed = merged;
+    cache.rawParsed = parsed;
     cache.fallbackReason = null;
+    return parsed;
+}
+
+// _statMtime — return the file's mtimeMs, or null if missing/unreadable.
+// Used by the layered readers' top-level fast path to check BOTH files' mtimes
+// in one cheap pass (two statSyncs, no data read) before deciding whether to
+// re-read/re-merge.
+function _statMtime(targetPath) {
+    try {
+        return fs.statSync(targetPath).mtimeMs;
+    } catch (_) {
+        return null;
+    }
+}
+
+// _readLayeredConfig — the three-level merge core shared by readConfig /
+// readLlmConfig. Reads the user-level file and the project-level file (each via
+// the raw-reading core _readRawJsonConfig, with its OWN per-file sub-cache +
+// deduped audit latch), then merges RAW field-by-field and normalizes ONCE at
+// the end. Precedence: project > user > default. The merge is SHALLOW (both
+// config objects are flat key→value; a `leaves` array is a single key whose
+// value is replaced wholesale by the project array, not concatenated).
+//
+// SEMANTICS (the critical correctness property): this is a TRUE field-by-field
+// merge of the RAW parsed objects, NOT an all-or-nothing-per-file merge.
+//   - Each layer contributes ONLY the fields its file actually specifies. A
+//     missing/invalid file contributes NO fields (null → spread of `{}` → no
+//     keys). A present-but-PARTIAL file contributes only its specified keys.
+//   - Precedence is per FIELD: a field the project file specifies → project
+//     wins; a field only the user file specifies → user wins; a field neither
+//     specifies → default (filled by the single final normalize over defaults).
+//   - The reference-identity trick the OLD all-or-nothing merge used (returning
+//     `defaults` from the reader and testing `!== defaults`) is GONE: it was
+//     both unnecessary and the source of the wrong semantics, because a
+//     successfully-parsed-but-normalized object carried ALL keys (default-
+//     filled) and so overrode the other layer on every field.
+// This makes the feature's PRIMARY use case correct: an operator sets the LLM
+// endpoint/key ONCE at user level, and a project specializes just the model;
+// the user's endpoint/key survive a partial project file.
+//
+// Top-level fast path: statSync both files; if BOTH mtimes match the cached
+// mtimes (the last successful merge), return the cached merged object without
+// re-reading or re-merging. A missing file has mtime null; a transition
+// present↔missing changes the mtime (number↔null), so the cache invalidates
+// correctly on file creation/deletion too.
+//
+// Audit / silent rules (per the layered model):
+//   - USER-level file missing → SILENT (its absence is the normal case; most
+//     operators have only project-level config). Only a PRESENT-but-invalid
+//     user file emits an audit line, labeled with the level (e.g. "plugin/user").
+//   - PROJECT-level file — same silentOnMissing flag the caller supplies, so
+//     the project-level plugin file keeps its existing "missing warns once"
+//     behavior and the project-level LLM file keeps its existing "silent on
+//     missing" behavior.
+// This makes both-missing for a type behave EXACTLY as the old single-file
+// model: plugin both-missing → one project-level "missing" line + defaults
+// (user silent); LLM both-missing → fully silent + defaults.
+function _readLayeredConfig(
+    projectPath,
+    userPath,
+    projectCache,
+    userCache,
+    mergeCache,
+    defaults,
+    normalize,
+    projectSilentOnMissing,
+    projectLabel,
+    userLabel,
+) {
+    // Steady-state fast path: both mtimes unchanged → return cached merged.
+    const userMtime = _statMtime(userPath);
+    const projectMtime = _statMtime(projectPath);
+    if (
+        mergeCache.merged !== null &&
+        mergeCache.userMtime === userMtime &&
+        mergeCache.projectMtime === projectMtime
+    ) {
+        return mergeCache.merged;
+    }
+
+    // At least one file changed (or first read). Read both RAW (each handles its
+    // own mtime sub-cache + deduped audit latch). The user-level file is ALWAYS
+    // silent on missing (optional layer); the project-level file inherits the
+    // caller's silentOnMissing so existing per-type behavior is preserved
+    // exactly. Each read returns the RAW parsed object (null on missing /
+    // unreadable / invalid).
+    const userRaw = _readRawJsonConfig(
+        userPath,
+        userCache,
+        true, // user-missing is ALWAYS silent
+        userLabel,
+    );
+    const projectRaw = _readRawJsonConfig(
+        projectPath,
+        projectCache,
+        projectSilentOnMissing,
+        projectLabel,
+    );
+
+    // TRUE field-by-field merge of the RAW objects: project keys win per-key,
+    // user keys fill the rest, a missing/invalid layer (null) contributes NO
+    // keys (spread of `{}`). Then normalize ONCE, over defaults so fields
+    // absent from BOTH layers take their default. No reference-identity test
+    // is needed — null spreads to nothing, so a missing file can never clobber
+    // the other layer's values.
+    const mergedRaw = { ...(userRaw || {}), ...(projectRaw || {}) };
+    const merged = normalize({ ...defaults, ...mergedRaw });
+
+    mergeCache.userMtime = userMtime;
+    mergeCache.projectMtime = projectMtime;
+    mergeCache.merged = merged;
     return merged;
 }
 
-// Read the PLUGIN-BEHAVIOR config (auto-gate-config.json) with an mtime cache.
-// Returns {enabled, mode, stubVerdict, promptFile} on every call — never
-// throws. Emits one console.error audit line per failure-state transition
-// (missing / unreadable / invalid). LLM fields in this file are IGNORED.
-// `configPath` is injectable for the self-test; production callers omit it.
-export function readConfig(configPath = CONFIG_PATH) {
-    return _readJsonConfig(
-        configPath,
+// Read the PLUGIN-BEHAVIOR config with three-level merge (project > user >
+// default). Returns {enabled, mode, stubVerdict, promptFile, replyMode,
+// onUncertain} on every call — never throws. Emits one console.error audit
+// line per failure-state transition per file (user-level failures are labeled
+// "plugin/user"; project-level failures are labeled "plugin/project"). LLM
+// fields in either file are IGNORED.
+//
+// `projectPath` / `userPath` are injectable for the self-test; production
+// callers omit them (they default to the repo-configs path and the
+// <XDG_CONFIG_HOME>/vh-agent-harness path respectively). Existing call sites
+// that pass one positional arg pass the PROJECT path (backward-compatible
+// signature extension).
+export function readConfig(projectPath = CONFIG_PATH, userPath = USER_CONFIG_PATH) {
+    return _readLayeredConfig(
+        projectPath,
+        userPath,
+        pluginProjectConfigCache,
+        pluginUserConfigCache,
         pluginConfigCache,
         DEFAULT_PLUGIN_CONFIG,
         normalizePluginConfig,
-        false, // NOT silent: a missing plugin config warns once (existing behavior)
-        "plugin",
+        false, // project-missing is NOT silent (existing behavior: warns once)
+        "plugin/project",
+        "plugin/user",
     );
 }
 
-// Read the LLM config (auto-gate-llm.json) with its OWN mtime cache. Returns
-// {modelEndpoint, model, apiKeyEnv, timeoutMs, maxRetries, retryDelayMs} on
-// every call — never throws. A MISSING file is SILENT (no audit spam) — it is
-// the normal case when live mode is not set up; audit/enforce modes must NOT
-// fail because the LLM file is absent. Only a PRESENT-but-invalid file emits an
-// audit line (mirroring the existing invalid-JSON handling). `llmPath` is
-// injectable for the self-test; production callers omit it.
-export function readLlmConfig(llmPath = LLM_CONFIG_PATH) {
-    return _readJsonConfig(
-        llmPath,
+// Read the LLM config with three-level merge (project > user > default).
+// Returns {modelEndpoint, model, apiKeyEnv, timeoutMs, maxRetries,
+// retryDelayMs, leaves} on every call — never throws. A MISSING file at EITHER
+// level is SILENT (no audit spam) — it is the normal case when live mode is
+// not set up; audit/enforce modes must NOT fail because the LLM file is
+// absent. Only a PRESENT-but-invalid file emits an audit line, labeled with
+// the level ("llm/project", "llm/user").
+//
+// `projectPath` / `userPath` are injectable for the self-test; production
+// callers omit them.
+export function readLlmConfig(
+    projectPath = LLM_CONFIG_PATH,
+    userPath = USER_LLM_CONFIG_PATH,
+) {
+    return _readLayeredConfig(
+        projectPath,
+        userPath,
+        llmProjectConfigCache,
+        llmUserConfigCache,
         llmConfigCache,
         DEFAULT_LLM_CONFIG,
         normalizeLlmConfig,
-        true, // SILENT on missing: no live setup = no spam
-        "llm",
+        true, // project-missing is SILENT (existing behavior: no live setup = no spam)
+        "llm/project",
+        "llm/user",
     );
 }
 
-// Test-only: reset BOTH config caches so the self-test's filesystem tests are
-// isolated from each other and from any prior production read. Mirrors the
+// Test-only: reset ALL config caches (4 per-file raw sub-caches + 2 top-level
+// merge caches) so the self-test's filesystem tests are isolated from each
+// other and from any prior production read. Mirrors the
 // __resetCachedBinaryPrompt helper pattern in auto-gate-live.js.
 export function __resetConfigCaches() {
-    pluginConfigCache.mtime = null;
-    pluginConfigCache.parsed = null;
-    pluginConfigCache.fallbackReason = null;
-    llmConfigCache.mtime = null;
-    llmConfigCache.parsed = null;
-    llmConfigCache.fallbackReason = null;
+    for (const c of [
+        pluginUserConfigCache,
+        pluginProjectConfigCache,
+        llmUserConfigCache,
+        llmProjectConfigCache,
+    ]) {
+        c.mtime = null;
+        c.rawParsed = null;
+        c.fallbackReason = null;
+    }
+    for (const c of [pluginConfigCache, llmConfigCache]) {
+        c.userMtime = null;
+        c.projectMtime = null;
+        c.merged = null;
+    }
 }
 
 // The factory receives the full PluginInput ({client, project, directory,
@@ -630,17 +854,30 @@ export function __resetConfigCaches() {
 // passed as the SDK query param for transcript fetch). The audit and
 // enforce branches never touch either.
 //
-// `configPath` / `llmConfigPath` are optional test-injection points: production
-// callers omit them (the hooks default to the production repo-configs paths).
-// The self-tests pass temp-file paths under tmp/ to isolate the filesystem.
-export const server = async ({ client, directory, configPath, llmConfigPath } = {}) => {
+// `configPath` / `llmConfigPath` are optional test-injection points for the
+// PROJECT-level files: production callers omit them (the hooks default to the
+// production repo-configs paths). `userConfigPath` / `userLlmConfigPath` are
+// the optional test-injection points for the USER-level files: production
+// callers omit them too (they default to the <XDG_CONFIG_HOME>/vh-agent-harness
+// paths). The self-tests pass temp-file paths under tmp/ for ALL four to
+// isolate the filesystem (the user-level paths point at non-existent temp
+// files so the silent user-missing path is exercised deterministically,
+// independent of the dev machine's real user config).
+export const server = async ({
+    client,
+    directory,
+    configPath,
+    llmConfigPath,
+    userConfigPath = USER_CONFIG_PATH,
+    userLlmConfigPath = USER_LLM_CONFIG_PATH,
+} = {}) => {
     return {
         "tool.execute.before": async (input, output) => {
             // Live config — read on every call (mtime-cached, single statSync
             // in steady state). The operator can live-disable the plugin by
             // setting `enabled: false` in the config file; no OpenCode
             // restart, no re-render required.
-            const config = readConfig(configPath);
+            const config = readConfig(configPath, userConfigPath);
             if (config.enabled === false) {
                 // Operator kill-switch: the plugin is fully inert (no audit,
                 // no behavior change). This is the only branch that short-
@@ -681,7 +918,7 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
             // a RESERVE in case upstream wires permission.ask in a future
             // release — do NOT rely on it, but keep the investment intact.
             // Live config — read on every call (mtime-cached).
-            const config = readConfig(configPath);
+            const config = readConfig(configPath, userConfigPath);
             if (config.enabled === false) {
                 // Operator kill-switch: fully inert, no audit, no behavior
                 // change. output.status is left at its default so opencode's
@@ -768,7 +1005,7 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
                 // straight into the fail-closed validation below. Downstream
                 // decideLive / classifyLive / resolveSystemPrompt see a single
                 // merged object exactly as before the two-file split.
-                const liveConfig = { ...config, ...readLlmConfig(llmConfigPath) };
+                const liveConfig = { ...config, ...readLlmConfig(llmConfigPath, userLlmConfigPath) };
 
                 // (1) Validate live config up front so a misconfigured live
                 // mode fail-closes to deny with a CLEAR audit line instead of a
@@ -914,7 +1151,7 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
             if (!req || !req.id || !req.sessionID) return;
 
             // Kill-switch: same live-disable as the other two hooks.
-            const config = readConfig(configPath);
+            const config = readConfig(configPath, userConfigPath);
             if (config.enabled === false) return;
 
             // Scrubbed audit summary of the event payload. `patterns` and
@@ -1118,7 +1355,7 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
                     `[auto-gate] permission.asked type=${permType} ` +
                     `mode=live (deciding)`,
                 );
-                const liveConfig = { ...config, ...readLlmConfig(llmConfigPath) };
+                const liveConfig = { ...config, ...readLlmConfig(llmConfigPath, userLlmConfigPath) };
 
                 // (1) Validate live config — missing endpoint/model fail-closes.
                 if (!liveConfig.modelEndpoint) {
@@ -1226,7 +1463,7 @@ export const server = async ({ client, directory, configPath, llmConfigPath } = 
                     `[auto-gate] permission.asked type=${permType} ` +
                     `mode=live-tiered (deciding consensus)`,
                 );
-                const llmConfig = readLlmConfig(llmConfigPath);
+                const llmConfig = readLlmConfig(llmConfigPath, userLlmConfigPath);
 
                 // (1) Validate the leaves array. A well-formed leaf needs a
                 // non-empty modelEndpoint AND model (mirrors single-leaf live
@@ -1543,14 +1780,15 @@ if (__isMain) {
         assert.equal(scrubTruncate((undefined && undefined.pattern) || "", MAX_ARG_LEN), "");
     });
 
-    // ===== Config readers: two-file split model =====
+    // ===== Config readers: three-level layered model (project > user > default) =====
     //
     // Filesystem tests for readConfig() (plugin-behavior) and readLlmConfig()
-    // (LLM). Each test writes a temp file under tmp/auto-gate-config-test/,
-    // resets BOTH caches via __resetConfigCaches(), and asserts fail-safe
-    // behavior. The readers accept an injectable path (default the production
-    // repo-configs path) so tests never touch the real config location.
-    // Capture console.error to assert audit-spam / audit-line behavior.
+    // (LLM). Each test writes temp file(s) under tmp/auto-gate-config-test/,
+    // resets ALL caches via __resetConfigCaches(), and asserts fail-safe +
+    // layered-merge behavior. The readers accept injectable PROJECT and USER
+    // paths (defaulting to the production repo-configs + <XDG_CONFIG_HOME>
+    // paths) so tests never touch the real config locations. Capture
+    // console.error to assert audit-spam / audit-line behavior.
 
     const TEST_CONFIG_DIR = path.resolve(
         repoRoot(),
@@ -1570,6 +1808,16 @@ if (__isMain) {
         return path.join(TEST_CONFIG_DIR, name);
     }
 
+    // Non-existent USER-level paths for the existing single-file tests: they
+    // exercise the "user-level missing → SILENT → only project applies" path,
+    // so those tests stay semantically identical to the pre-layered behavior
+    // (a missing user file contributes nothing to the merge). Using a
+    // dedicated non-existent path ALSO keeps the tests deterministic
+    // independent of the dev machine's real user-level config (which the
+    // production default USER_*_PATH would otherwise read).
+    const NO_USER_PLUGIN = testConfigPath("no-such-user-plugin.json");
+    const NO_USER_LLM = testConfigPath("no-such-user-llm.json");
+
     // Ensure the test dir exists for the reader tests below (idempotent).
     fs.mkdirSync(TEST_CONFIG_DIR, { recursive: true });
 
@@ -1588,7 +1836,7 @@ if (__isMain) {
 
     test("readConfig (plugin): missing file -> fail-safe defaults {enabled:true, mode:audit}", () => {
         __resetConfigCaches();
-        const cfg = readConfig(testConfigPath("no-such-plugin.json"));
+        const cfg = readConfig(testConfigPath("no-such-plugin.json"), NO_USER_PLUGIN);
         assert.deepEqual(cfg, {
             enabled: true,
             mode: "audit",
@@ -1602,7 +1850,7 @@ if (__isMain) {
     test("readConfig (plugin): valid partial -> merged over defaults", () => {
         __resetConfigCaches();
         writeTestConfig("plugin-partial.json", { mode: "enforce" });
-        const cfg = readConfig(testConfigPath("plugin-partial.json"));
+        const cfg = readConfig(testConfigPath("plugin-partial.json"), NO_USER_PLUGIN);
         assert.deepEqual(cfg, {
             enabled: true,
             mode: "enforce",
@@ -1623,7 +1871,7 @@ if (__isMain) {
             apiKeyEnv: "IGNORED_KEY",
             timeoutMs: 9999,
         });
-        const cfg = readConfig(testConfigPath("plugin-with-llm.json"));
+        const cfg = readConfig(testConfigPath("plugin-with-llm.json"), NO_USER_PLUGIN);
         // Returns ONLY the 4 plugin-behavior fields; LLM keys absent.
         assert.deepEqual(cfg, {
             enabled: true,
@@ -1644,7 +1892,7 @@ if (__isMain) {
         __resetConfigCaches();
         writeTestConfig("plugin-invalid.json", "{ not valid json");
         captureErrors((errors) => {
-            const cfg = readConfig(testConfigPath("plugin-invalid.json"));
+            const cfg = readConfig(testConfigPath("plugin-invalid.json"), NO_USER_PLUGIN);
             assert.deepEqual(cfg, {
                 enabled: true,
                 mode: "audit",
@@ -1670,8 +1918,8 @@ if (__isMain) {
         __resetConfigCaches();
         writeTestConfig("plugin-null.json", "null");
         captureErrors((errors) => {
-            const a = readConfig(testConfigPath("plugin-null.json"));
-            const b = readConfig(testConfigPath("plugin-null.json"));
+            const a = readConfig(testConfigPath("plugin-null.json"), NO_USER_PLUGIN);
+            const b = readConfig(testConfigPath("plugin-null.json"), NO_USER_PLUGIN);
             assert.deepEqual(a, {
                 enabled: true,
                 mode: "audit",
@@ -1692,7 +1940,7 @@ if (__isMain) {
             __resetConfigCaches();
             writeTestConfig("plugin-shape.json", body);
             captureErrors((errors) => {
-                const cfg = readConfig(testConfigPath("plugin-shape.json"));
+                const cfg = readConfig(testConfigPath("plugin-shape.json"), NO_USER_PLUGIN);
                 assert.deepEqual(cfg, {
                     enabled: true,
                     mode: "audit",
@@ -1709,7 +1957,7 @@ if (__isMain) {
     test("readLlmConfig: missing file -> defaults, NO throw, NO audit spam", () => {
         __resetConfigCaches();
         captureErrors((errors) => {
-            const cfg = readLlmConfig(testConfigPath("no-such-llm.json"));
+            const cfg = readLlmConfig(testConfigPath("no-such-llm.json"), NO_USER_LLM);
             assert.deepEqual(cfg, {
                 modelEndpoint: "",
                 model: "",
@@ -1737,7 +1985,7 @@ if (__isMain) {
             maxRetries: 3,
             retryDelayMs: 250,
         });
-        const cfg = readLlmConfig(testConfigPath("llm-valid.json"));
+        const cfg = readLlmConfig(testConfigPath("llm-valid.json"), NO_USER_LLM);
         assert.deepEqual(cfg, {
             modelEndpoint: "https://provider.example/v1/chat/completions",
             model: "test-model",
@@ -1752,7 +2000,7 @@ if (__isMain) {
     test("readLlmConfig: partial config merges over defaults", () => {
         __resetConfigCaches();
         writeTestConfig("llm-partial.json", { modelEndpoint: "https://x" });
-        const cfg = readLlmConfig(testConfigPath("llm-partial.json"));
+        const cfg = readLlmConfig(testConfigPath("llm-partial.json"), NO_USER_LLM);
         assert.deepEqual(cfg, {
             modelEndpoint: "https://x",
             model: "",
@@ -1768,7 +2016,7 @@ if (__isMain) {
         __resetConfigCaches();
         writeTestConfig("llm-invalid.json", "{ broken json");
         captureErrors((errors) => {
-            const cfg = readLlmConfig(testConfigPath("llm-invalid.json"));
+            const cfg = readLlmConfig(testConfigPath("llm-invalid.json"), NO_USER_LLM);
             assert.deepEqual(cfg, {
                 modelEndpoint: "",
                 model: "",
@@ -1793,8 +2041,8 @@ if (__isMain) {
         __resetConfigCaches();
         writeTestConfig("llm-null.json", "null");
         captureErrors((errors) => {
-            const a = readLlmConfig(testConfigPath("llm-null.json"));
-            const b = readLlmConfig(testConfigPath("llm-null.json"));
+            const a = readLlmConfig(testConfigPath("llm-null.json"), NO_USER_LLM);
+            const b = readLlmConfig(testConfigPath("llm-null.json"), NO_USER_LLM);
             assert.deepEqual(a, {
                 modelEndpoint: "",
                 model: "",
@@ -1817,7 +2065,7 @@ if (__isMain) {
             __resetConfigCaches();
             writeTestConfig("llm-shape.json", body);
             captureErrors((errors) => {
-                const cfg = readLlmConfig(testConfigPath("llm-shape.json"));
+                const cfg = readLlmConfig(testConfigPath("llm-shape.json"), NO_USER_LLM);
                 assert.deepEqual(cfg, {
                     modelEndpoint: "",
                     model: "",
@@ -1838,7 +2086,7 @@ if (__isMain) {
             modelEndpoint: "https://x",
             model: "m",
         });
-        const cfg = readLlmConfig(testConfigPath("llm-no-env.json"));
+        const cfg = readLlmConfig(testConfigPath("llm-no-env.json"), NO_USER_LLM);
         assert.equal(cfg.apiKeyEnv, "AUTO_GATE_API_KEY");
     });
 
@@ -1855,7 +2103,7 @@ if (__isMain) {
             maxRetries: -2,
             retryDelayMs: "fast",
         });
-        const cfg = readLlmConfig(testConfigPath("llm-badtypes.json"));
+        const cfg = readLlmConfig(testConfigPath("llm-badtypes.json"), NO_USER_LLM);
         assert.deepEqual(cfg, {
             modelEndpoint: "",
             model: "",
@@ -1870,8 +2118,8 @@ if (__isMain) {
     test("readLlmConfig: mtime cache returns SAME object on unchanged file", () => {
         __resetConfigCaches();
         writeTestConfig("llm-cache.json", { model: "cached-model" });
-        const a = readLlmConfig(testConfigPath("llm-cache.json"));
-        const b = readLlmConfig(testConfigPath("llm-cache.json"));
+        const a = readLlmConfig(testConfigPath("llm-cache.json"), NO_USER_LLM);
+        const b = readLlmConfig(testConfigPath("llm-cache.json"), NO_USER_LLM);
         assert.equal(
             a,
             b,
@@ -1882,13 +2130,13 @@ if (__isMain) {
     test("readLlmConfig: re-read after file change sees new content", (t, done) => {
         __resetConfigCaches();
         writeTestConfig("llm-mutate.json", { model: "first" });
-        const a = readLlmConfig(testConfigPath("llm-mutate.json"));
+        const a = readLlmConfig(testConfigPath("llm-mutate.json"), NO_USER_LLM);
         assert.equal(a.model, "first");
         // Bump mtime by writing new content, then ensure a fresh mtime
         // (statSync resolution is ms-level; nudge with a tiny delay).
         setTimeout(() => {
             writeTestConfig("llm-mutate.json", { model: "second" });
-            const b = readLlmConfig(testConfigPath("llm-mutate.json"));
+            const b = readLlmConfig(testConfigPath("llm-mutate.json"), NO_USER_LLM);
             assert.equal(b.model, "second", "changed file must re-read");
             done();
         }, 20);
@@ -1910,8 +2158,8 @@ if (__isMain) {
             retryDelayMs: 750,
         });
         const merged = {
-            ...readConfig(testConfigPath("merge-plugin.json")),
-            ...readLlmConfig(testConfigPath("merge-llm.json")),
+            ...readConfig(testConfigPath("merge-plugin.json"), NO_USER_PLUGIN),
+            ...readLlmConfig(testConfigPath("merge-llm.json"), NO_USER_LLM),
         };
         assert.deepEqual(merged, {
             enabled: true,
@@ -1938,7 +2186,7 @@ if (__isMain) {
             modelEndpoint: "https://x",
             model: "m",
         });
-        const cfg = readLlmConfig(testConfigPath("llm-no-retry.json"));
+        const cfg = readLlmConfig(testConfigPath("llm-no-retry.json"), NO_USER_LLM);
         assert.equal(cfg.maxRetries, 1, "default maxRetries is 1");
         assert.equal(cfg.retryDelayMs, 500, "default retryDelayMs is 500");
     });
@@ -1953,7 +2201,7 @@ if (__isMain) {
             maxRetries: 0,
             retryDelayMs: 0,
         });
-        const cfg = readLlmConfig(testConfigPath("llm-no-retry-zero.json"));
+        const cfg = readLlmConfig(testConfigPath("llm-no-retry-zero.json"), NO_USER_LLM);
         assert.equal(cfg.maxRetries, 0, "maxRetries:0 must be preserved");
         assert.equal(cfg.retryDelayMs, 0, "retryDelayMs:0 must be preserved");
     });
@@ -1966,7 +2214,7 @@ if (__isMain) {
             maxRetries: "5",
             retryDelayMs: "1200",
         });
-        const cfg = readLlmConfig(testConfigPath("llm-retry-str.json"));
+        const cfg = readLlmConfig(testConfigPath("llm-retry-str.json"), NO_USER_LLM);
         assert.equal(cfg.maxRetries, 5);
         assert.equal(cfg.retryDelayMs, 1200);
     });
@@ -1979,7 +2227,7 @@ if (__isMain) {
             maxRetries: 2.9,
             retryDelayMs: 500.7,
         });
-        const cfg = readLlmConfig(testConfigPath("llm-retry-float.json"));
+        const cfg = readLlmConfig(testConfigPath("llm-retry-float.json"), NO_USER_LLM);
         assert.equal(cfg.maxRetries, 2);
         assert.equal(cfg.retryDelayMs, 500);
     });
@@ -2002,8 +2250,8 @@ if (__isMain) {
             retryDelayMs: 1000,
         });
         const liveConfig = {
-            ...readConfig(testConfigPath("merge-plugin2.json")),
-            ...readLlmConfig(testConfigPath("merge-llm2.json")),
+            ...readConfig(testConfigPath("merge-plugin2.json"), NO_USER_PLUGIN),
+            ...readLlmConfig(testConfigPath("merge-llm2.json"), NO_USER_LLM),
         };
         assert.equal(liveConfig.maxRetries, 4, "maxRetries must reach the live config");
         assert.equal(liveConfig.retryDelayMs, 1000, "retryDelayMs must reach the live config");
@@ -2011,6 +2259,251 @@ if (__isMain) {
         // LLM config has 7 (6 scalar + the leaves array); the merged object has
         // all 13 (6 plugin + 7 LLM).
         assert.equal(Object.keys(liveConfig).length, 13);
+    });
+
+    // ===================================================================
+    // THREE-LEVEL LAYERED CONFIG TESTS (user-level base, project-level override)
+    //
+    // Precedence: defaults <- user <- project (project wins per field).
+    // The tests inject BOTH paths via the 2-arg signature; production callers
+    // omit the second arg (defaults to <XDG_CONFIG_HOME>/vh-agent-harness/...).
+    // ===================================================================
+
+    test("readConfig: user-level missing -> project applies (existing behavior)", () => {
+        __resetConfigCaches();
+        writeTestConfig("layered-proj-1.json", { mode: "enforce" });
+        const cfg = readConfig(
+            testConfigPath("layered-proj-1.json"),
+            NO_USER_PLUGIN, // non-existent user file (silent missing)
+        );
+        assert.deepEqual(cfg, {
+            enabled: true,
+            mode: "enforce",
+            stubVerdict: "block",
+            promptFile: "",
+            replyMode: "once",
+            onUncertain: "reject",
+        });
+    });
+
+    test("readConfig: user-level present, project missing -> user applies", () => {
+        __resetConfigCaches();
+        writeTestConfig("layered-user-2.json", { mode: "enforce", stubVerdict: "allow" });
+        const cfg = readConfig(
+            testConfigPath("no-such-plugin.json"), // non-existent project file
+            testConfigPath("layered-user-2.json"),
+        );
+        assert.deepEqual(cfg, {
+            enabled: true,
+            mode: "enforce",
+            stubVerdict: "allow",
+            promptFile: "",
+            replyMode: "once",
+            onUncertain: "reject",
+        });
+    });
+
+    test("readConfig: BOTH present -> project overrides user field-by-field", () => {
+        __resetConfigCaches();
+        writeTestConfig("layered-user-3.json", { mode: "enforce" });
+        writeTestConfig("layered-proj-3.json", { mode: "live" });
+        const cfg = readConfig(
+            testConfigPath("layered-proj-3.json"),
+            testConfigPath("layered-user-3.json"),
+        );
+        // True field-by-field merge: project specifies ONLY mode, so it wins on
+        // mode; every other field is absent from both → defaults. (Both files
+        // here are single-field, so this is the same as full-file override —
+        // see the PARTIAL-override tests below for the discriminating case.)
+        assert.equal(cfg.mode, "live", "project mode must override user mode");
+    });
+
+    test("readConfig: BOTH missing -> defaults", () => {
+        __resetConfigCaches();
+        const cfg = readConfig(
+            testConfigPath("no-such-plugin.json"),
+            NO_USER_PLUGIN,
+        );
+        assert.deepEqual(cfg, {
+            enabled: true,
+            mode: "audit",
+            stubVerdict: "block",
+            promptFile: "",
+            replyMode: "once",
+            onUncertain: "reject",
+        });
+    });
+
+    test("readConfig: user invalid -> project applies + deduped audit (label includes level)", () => {
+        __resetConfigCaches();
+        writeTestConfig("layered-user-invalid-5.json", "{ not valid json");
+        writeTestConfig("layered-proj-5.json", { mode: "enforce" });
+        captureErrors((errors) => {
+            const cfg = readConfig(
+                testConfigPath("layered-proj-5.json"),
+                testConfigPath("layered-user-invalid-5.json"),
+            );
+            assert.equal(cfg.mode, "enforce", "project must apply when user is invalid");
+            assert.equal(
+                errors.length,
+                1,
+                "present-but-invalid user file must warn exactly once",
+            );
+            assert.match(errors[0], /plugin\/user/, "audit label must include the user level");
+        });
+    });
+
+    test("readLlmConfig: user present, project missing -> user applies (silent on user-missing)", () => {
+        __resetConfigCaches();
+        writeTestConfig("layered-llm-user-6.json", { model: "test-model" });
+        const cfg = readLlmConfig(
+            testConfigPath("no-such-llm.json"), // non-existent project file
+            testConfigPath("layered-llm-user-6.json"),
+        );
+        assert.equal(cfg.model, "test-model", "user model must apply when project is missing");
+    });
+
+    test("readLlmConfig: BOTH present -> project overrides user", () => {
+        __resetConfigCaches();
+        writeTestConfig("layered-llm-user-7.json", { model: "user-model" });
+        writeTestConfig("layered-llm-proj-7.json", { model: "project-model" });
+        const cfg = readLlmConfig(
+            testConfigPath("layered-llm-proj-7.json"),
+            testConfigPath("layered-llm-user-7.json"),
+        );
+        // True field-by-field merge: both files specify ONLY model, so project
+        // wins on model; the other fields are absent from both → defaults.
+        // (Full-file override is a special case of field-by-field — see the
+        // PARTIAL-override tests below for the discriminating case.)
+        assert.equal(cfg.model, "project-model", "project model must override user model");
+    });
+
+    test("mtime cache: BOTH files unchanged -> single merged result reused", () => {
+        __resetConfigCaches();
+        writeTestConfig("layered-user-cache-8.json", { mode: "enforce" });
+        writeTestConfig("layered-proj-cache-8.json", { mode: "live" });
+        const a = readConfig(
+            testConfigPath("layered-proj-cache-8.json"),
+            testConfigPath("layered-user-cache-8.json"),
+        );
+        const b = readConfig(
+            testConfigPath("layered-proj-cache-8.json"),
+            testConfigPath("layered-user-cache-8.json"),
+        );
+        assert.equal(
+            a,
+            b,
+            "both files unchanged must return the SAME cached merged object",
+        );
+    });
+
+    test("mtime cache: EITHER file changed -> re-read + re-merge", (t, done) => {
+        __resetConfigCaches();
+        writeTestConfig("layered-user-mut-9.json", { mode: "enforce" });
+        writeTestConfig("layered-proj-mut-9.json", { mode: "live" });
+        const a = readConfig(
+            testConfigPath("layered-proj-mut-9.json"),
+            testConfigPath("layered-user-mut-9.json"),
+        );
+        assert.equal(a.mode, "live", "initial read: project mode=live");
+        // Bump mtime by writing new content to the USER file, then re-read.
+        // statSync resolution is ms-level; nudge with a tiny delay.
+        setTimeout(() => {
+            writeTestConfig("layered-user-mut-9.json", { mode: "audit" });
+            const b = readConfig(
+                testConfigPath("layered-proj-mut-9.json"),
+                testConfigPath("layered-user-mut-9.json"),
+            );
+            // Project still wins (mode=live), but the cache must have been
+            // invalidated by the user-file mtime change — b is a NEW object.
+            assert.notEqual(
+                a,
+                b,
+                "user file changed -> cache invalidated -> new merged object",
+            );
+            assert.equal(b.mode, "live", "project still overrides user after re-merge");
+            done();
+        }, 20);
+    });
+
+    // -----------------------------------------------------------------
+    // PARTIAL-OVERRIDE REGRESSION GUARDS (the feature's primary use case).
+    //
+    // These are DISCRIMINATING tests: they FAIL on the OLD all-or-nothing-per-
+    // FILE merge (where a successfully-parsed project file normalized to a full
+    // object and, spread last, clobbered every user-level field with default-
+    // filled values) and PASS on the fixed field-by-field merge. They are the
+    // canonical regression guard for the raw-merge-then-normalize-once fix.
+    //
+    // The concrete failure the fix repairs: an operator sets the LLM endpoint/
+    // key ONCE at user level, a project specializes just the model — under the
+    // old code the user's endpoint/key were silently destroyed (project's
+    // default-filled modelEndpoint="" won), fail-closing live mode to deny.
+    // -----------------------------------------------------------------
+
+    test("readLlmConfig: PARTIAL project overrides ONLY specified field; user fills the rest", () => {
+        __resetConfigCaches();
+        writeTestConfig("layered-llm-user-partial.json", {
+            modelEndpoint: "http://u",
+            model: "user-model",
+            apiKeyEnv: "USER_KEY",
+            timeoutMs: 9000,
+            maxRetries: 2,
+            retryDelayMs: 400,
+        });
+        writeTestConfig("layered-llm-proj-partial.json", { model: "proj-model" }); // ONLY model
+        const merged = readLlmConfig(
+            testConfigPath("layered-llm-proj-partial.json"),
+            testConfigPath("layered-llm-user-partial.json"),
+        );
+        // Project overrides ONLY model; user fills every other field. OLD code
+        // would have set modelEndpoint="" and apiKeyEnv="AUTO_GATE_API_KEY"
+        // (project's default-filled keys winning).
+        assert.equal(merged.modelEndpoint, "http://u", "user modelEndpoint must survive (NOT default '')");
+        assert.equal(merged.model, "proj-model", "project model must override user model");
+        assert.equal(merged.apiKeyEnv, "USER_KEY", "user apiKeyEnv must survive (NOT default)");
+        assert.equal(merged.timeoutMs, 9000, "user timeoutMs must survive");
+        assert.equal(merged.maxRetries, 2, "user maxRetries must survive");
+        assert.equal(merged.retryDelayMs, 400, "user retryDelayMs must survive");
+    });
+
+    test("readConfig: PARTIAL project overrides ONLY specified field; user fills the rest", () => {
+        __resetConfigCaches();
+        writeTestConfig("layered-user-partial.json", {
+            enabled: true,
+            mode: "live",
+            stubVerdict: "allow",
+            promptFile: "/x",
+            replyMode: "once",
+            onUncertain: "reject",
+        });
+        writeTestConfig("layered-proj-partial.json", { mode: "enforce" }); // ONLY mode
+        const merged = readConfig(
+            testConfigPath("layered-proj-partial.json"),
+            testConfigPath("layered-user-partial.json"),
+        );
+        // Project overrides ONLY mode; user fills every other field. OLD code
+        // would have reset the user's stubVerdict/promptFile/replyMode/onUncertain
+        // to defaults (project's default-filled keys winning).
+        assert.equal(merged.mode, "enforce", "project mode must override user mode");
+        assert.equal(merged.enabled, true, "user enabled must survive");
+        assert.equal(merged.stubVerdict, "allow", "user stubVerdict must survive (NOT default 'block')");
+        assert.equal(merged.promptFile, "/x", "user promptFile must survive (NOT default '')");
+        assert.equal(merged.replyMode, "once", "user replyMode must survive");
+        assert.equal(merged.onUncertain, "reject", "user onUncertain must survive");
+    });
+
+    test("readLlmConfig: PARTIAL user + missing project -> user fields apply, absent fields default", () => {
+        __resetConfigCaches();
+        writeTestConfig("layered-llm-user-only-model.json", { model: "only-model" }); // ONLY model
+        const merged = readLlmConfig(
+            testConfigPath("no-such-llm.json"), // non-existent project file
+            testConfigPath("layered-llm-user-only-model.json"),
+        );
+        // User's single field applies; fields the user omits take defaults.
+        assert.equal(merged.model, "only-model", "user model must apply");
+        assert.equal(merged.modelEndpoint, "", "absent modelEndpoint must default to ''");
+        assert.equal(merged.apiKeyEnv, "AUTO_GATE_API_KEY", "absent apiKeyEnv must default");
     });
 
     // ===================================================================
@@ -2123,6 +2616,11 @@ if (__isMain) {
             llmConfigPath: testConfigPath(
                 llmCfg ? lName : "no-such-llm.json",
             ),
+            // Inject non-existent USER-level paths so the event-hook tests are
+            // deterministic independent of the dev machine's real user config
+            // (user-missing is silent → only the project path above applies).
+            userConfigPath: NO_USER_PLUGIN,
+            userLlmConfigPath: NO_USER_LLM,
         });
         return { hooks, replies: holder.replies };
     }
@@ -2421,6 +2919,8 @@ if (__isMain) {
             directory: TEST_CONFIG_DIR,
             configPath: testConfigPath(pName),
             llmConfigPath: testConfigPath("no-such-llm.json"),
+            userConfigPath: NO_USER_PLUGIN,
+            userLlmConfigPath: NO_USER_LLM,
         });
         await hooks["event"]({
             event: makeAskedEvent({ id: "req-v2-1" }),
@@ -2466,6 +2966,8 @@ if (__isMain) {
             directory: TEST_CONFIG_DIR,
             configPath: testConfigPath(pName),
             llmConfigPath: testConfigPath("no-such-llm.json"),
+            userConfigPath: NO_USER_PLUGIN,
+            userLlmConfigPath: NO_USER_LLM,
         });
         await hooks["event"]({ event: makeAskedEvent() });
         assert.equal(
@@ -2511,6 +3013,8 @@ if (__isMain) {
             directory: TEST_CONFIG_DIR,
             configPath: testConfigPath(pName),
             llmConfigPath: testConfigPath("no-such-llm.json"),
+            userConfigPath: NO_USER_PLUGIN,
+            userLlmConfigPath: NO_USER_LLM,
         });
         await hooks["event"]({ event: makeAskedEvent() });
         assert.equal(v1Calls.length, 1, "allow must hit v1 once");
@@ -2554,6 +3058,8 @@ if (__isMain) {
             directory: TEST_CONFIG_DIR,
             configPath: testConfigPath(pName),
             llmConfigPath: testConfigPath("no-such-llm.json"),
+            userConfigPath: NO_USER_PLUGIN,
+            userLlmConfigPath: NO_USER_LLM,
         });
         await hooks["event"]({ event: makeAskedEvent() });
         assert.equal(
@@ -2605,6 +3111,8 @@ if (__isMain) {
             directory: TEST_CONFIG_DIR,
             configPath: testConfigPath(pName),
             llmConfigPath: testConfigPath("no-such-llm.json"),
+            userConfigPath: NO_USER_PLUGIN,
+            userLlmConfigPath: NO_USER_LLM,
         });
         // The hook MUST resolve normally (no rejection thrown to the caller).
         await hooks["event"]({ event: makeAskedEvent() });
@@ -2641,6 +3149,8 @@ if (__isMain) {
             directory: TEST_CONFIG_DIR,
             configPath: testConfigPath(pName),
             llmConfigPath: testConfigPath("no-such-llm.json"),
+            userConfigPath: NO_USER_PLUGIN,
+            userLlmConfigPath: NO_USER_LLM,
         });
         await hooks["event"]({ event: makeAskedEvent() });
         assert.equal(
@@ -2737,14 +3247,14 @@ if (__isMain) {
     test("readConfig (plugin): invalid replyMode → default once", () => {
         __resetConfigCaches();
         writeTestConfig("evt-bad-reply.json", { replyMode: "forever" });
-        const cfg = readConfig(testConfigPath("evt-bad-reply.json"));
+        const cfg = readConfig(testConfigPath("evt-bad-reply.json"), NO_USER_PLUGIN);
         assert.equal(cfg.replyMode, "once");
     });
 
     test("readConfig (plugin): invalid onUncertain → default reject", () => {
         __resetConfigCaches();
         writeTestConfig("evt-bad-uncertain.json", { onUncertain: "maybe" });
-        const cfg = readConfig(testConfigPath("evt-bad-uncertain.json"));
+        const cfg = readConfig(testConfigPath("evt-bad-uncertain.json"), NO_USER_PLUGIN);
         assert.equal(cfg.onUncertain, "reject");
     });
 
@@ -2754,7 +3264,7 @@ if (__isMain) {
             replyMode: "always",
             onUncertain: "passthrough",
         });
-        const cfg = readConfig(testConfigPath("evt-valid-new.json"));
+        const cfg = readConfig(testConfigPath("evt-valid-new.json"), NO_USER_PLUGIN);
         assert.equal(cfg.replyMode, "always");
         assert.equal(cfg.onUncertain, "passthrough");
     });
@@ -2887,6 +3397,8 @@ if (__isMain) {
             directory: TEST_CONFIG_DIR,
             configPath: testConfigPath(pName),
             llmConfigPath: testConfigPath("no-such-llm.json"),
+            userConfigPath: NO_USER_PLUGIN,
+            userLlmConfigPath: NO_USER_LLM,
         });
         const errors = [];
         const orig = console.error;
@@ -2920,6 +3432,8 @@ if (__isMain) {
             directory: TEST_CONFIG_DIR,
             configPath: testConfigPath(pName),
             llmConfigPath: testConfigPath("no-such-llm.json"),
+            userConfigPath: NO_USER_PLUGIN,
+            userLlmConfigPath: NO_USER_LLM,
         });
         const errors = [];
         const orig = console.error;
@@ -3186,6 +3700,8 @@ if (__isMain) {
             directory: TEST_CONFIG_DIR,
             configPath: testConfigPath(pName),
             llmConfigPath: testConfigPath(lName),
+            userConfigPath: NO_USER_PLUGIN,
+            userLlmConfigPath: NO_USER_LLM,
         });
         const restore = mockFetchByEndpoint({
             "leaf-a-endpoint": "<block>no</block>",
@@ -3348,7 +3864,7 @@ if (__isMain) {
     test("readConfig (plugin): mode live-tiered accepted", () => {
         __resetConfigCaches();
         writeTestConfig("evt-tiered-mode.json", { mode: "live-tiered" });
-        const cfg = readConfig(testConfigPath("evt-tiered-mode.json"));
+        const cfg = readConfig(testConfigPath("evt-tiered-mode.json"), NO_USER_PLUGIN);
         assert.equal(cfg.mode, "live-tiered");
     });
 
@@ -3373,7 +3889,7 @@ if (__isMain) {
                 },
             ],
         });
-        const cfg = readLlmConfig(testConfigPath("evt-tiered-leaves.json"));
+        const cfg = readLlmConfig(testConfigPath("evt-tiered-leaves.json"), NO_USER_LLM);
         assert.ok(Array.isArray(cfg.leaves), "leaves must be an array");
         assert.equal(cfg.leaves.length, 2);
         assert.equal(cfg.leaves[0].modelEndpoint, "http://a");
@@ -3388,7 +3904,7 @@ if (__isMain) {
         writeTestConfig("evt-tiered-badleaves.json", {
             leaves: "not-an-array",
         });
-        const cfg = readLlmConfig(testConfigPath("evt-tiered-badleaves.json"));
+        const cfg = readLlmConfig(testConfigPath("evt-tiered-badleaves.json"), NO_USER_LLM);
         assert.ok(Array.isArray(cfg.leaves));
         assert.equal(cfg.leaves.length, 0);
     });
