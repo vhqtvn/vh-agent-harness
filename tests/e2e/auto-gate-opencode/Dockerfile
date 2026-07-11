@@ -52,21 +52,50 @@ RUN apt-get update && \
 # Copy the opencode source tree (run-from-source, no compile step).
 COPY --from=builder /opt/opencode /opt/opencode
 
-# ── INSTANCE MIDDLEWARE PATCH ─────────────────────────────────────────────
-# ROOT CAUSE: In createHono() Branch 2 (no OPENCODE_WORKSPACE_ID),
-# InstanceMiddleware is ONLY applied to workspaceLegacyApp — NOT to the main
-# app or InstanceRoutes. Session routes, permission reply routes, etc. run
-# WITHOUT instance context (no AsyncLocalStorage). Without instance context,
-# the permission reply route handler can't find the pending entry (different
-# ScopedCache key → different pending map) → the Deferred never resolves →
-# the read tool hangs.
+# ── FIX 1: InstanceMiddleware on line-139 InstanceRoutes mount ─────────────
+# ROOT CAUSE: In createHono() Branch 2 (no OPENCODE_WORKSPACE_ID — the default
+# multi-workspace path), InstanceRoutes is mounted at line 139 WITHOUT
+# InstanceMiddleware. Branch 1 (line 123) and workspaceLegacyApp (line 130)
+# BOTH wrap their InstanceRoutes mounts with InstanceMiddleware; only the
+# line-139 mount is the inconsistent outlier.
 #
-# FIX: Add InstanceMiddleware to the MAIN app chain in createHono(), right
-# after CorsMiddleware. In Hono v4, .use() on the main app applies to ALL
-# routes including those merged via .route("/", subApp).
-# InstanceMiddleware is already imported in server.ts (line 21).
+# Without InstanceMiddleware, the permission reply route handler
+# (POST /session/{id}/permissions/{permissionID}) has no instance context:
+# the permission pending map is an InstanceState ScopedCache keyed by
+# directory, and without instance context the handler resolves the wrong
+# directory → empty pending map → `if (!existing) return` → silent no-op.
+#
+# Under `opencode run`, effectCmd (instance:true) establishes ambient ALS
+# instance context for the whole handler, so the reply resolves via ambient
+# context WITHOUT needing the middleware. Under `opencode serve`,
+# effectCmd uses instance:false (no ambient ALS), so the middleware IS
+# required.
+#
+# FIX: Wrap the line-139 InstanceRoutes mount with InstanceMiddleware.
+# The sed targets ONLY line 139 (6-space indent, no trailing comma) to
+# avoid touching line 123 (8-space indent, trailing comma).
 RUN cd /opt/opencode/packages/opencode/src/server && \
-    sed -i '/\.use(CorsMiddleware(opts))/a\    .use(InstanceMiddleware())' server.ts
+    sed -i 's|^      \.route("/", InstanceRoutes(runtime\.upgradeWebSocket, opts))$|      .route("/", new Hono().use(InstanceMiddleware()).route("/", InstanceRoutes(runtime.upgradeWebSocket, opts)))|' server.ts
+
+# ── FIX 2: Route plugin reply through HTTP when serve listener is active ──
+# ROOT CAUSE (serve-specific): The plugin creates its SDK client with an
+# in-process fetch override: `fetch: Server.Default().app.fetch(...)`. This
+# processes the permission reply in the CALLER's async context (the bus
+# stream-consumer fiber), which has a different Effect fiber/scope lineage
+# than the serve listener that processed the ASK. The ScopedCache that backs
+# the permission pending map resolves to a different State object for the
+# reply vs the ask, so `pending.get(requestID)` returns undefined →
+# `if (!existing) return` → silent no-op.
+#
+# FIX: When Server.url is set (serve mode), use globalThis.fetch to send
+# the reply over HTTP to the live serve listener. This routes the reply
+# through Bun's HTTP server → a fresh async context → InstanceMiddleware →
+# the same fiber/scope lineage as the ASK. When Server.url is unset (run
+# mode), fall back to the original in-process fetch (which works via
+# ambient ALS from effectCmd instance:true).
+RUN cd /opt/opencode/packages/opencode/src/plugin && \
+    sed -i 's|baseUrl: "http://localhost:4096"|baseUrl: Server.url ? Server.url.origin : "http://localhost:4096"|' index.ts && \
+    sed -i 's|fetch: async (\.\.\.args) => Server\.Default()\.app\.fetch(\.\.\.args)|fetch: Server.url ? globalThis.fetch : (async (...args) => Server.Default().app.fetch(...args))|' index.ts
 
 # Copy test files.
 WORKDIR /opt/test

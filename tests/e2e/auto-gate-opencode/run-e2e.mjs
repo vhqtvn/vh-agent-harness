@@ -32,19 +32,25 @@
 // If the plugin LOSES the race, the outcome matches the run-default and the
 // case FAILS loudly — no false pass is possible.
 //
-// ── WHY opencode run (NOT serve) ──────────────────────────────────────────
+// ── WHY BOTH run AND serve ────────────────────────────────────────────────
 // `opencode run` uses ONLY Server.Default() (the singleton Hono app) as its
-// SDK fetch fn. Every code path — session creation, prompt, permission ask,
-// permission reply — goes through the SAME app with the SAME middleware chain
-// and the SAME ScopedCache. This guarantees the permission reply resolves the
-// Deferred (the pending map is shared).
+// SDK fetch fn — one app, one middleware chain, one ScopedCache. It also
+// auto-replies to permission.asked, creating a race with our plugin that we
+// exploit as an airtight two-case proof (see matrix above).
 //
-// `opencode serve` has TWO separate Hono apps: the HTTP listener (newly
-// created per serve call) and Server.Default() (singleton). The test driver's
-// HTTP requests hit the listener while the plugin's in-process SDK replies hit
-// DefaultHono. Different middleware chains → potentially different ALS context
-// → potentially different ScopedCache entries → the pending map mismatch → the
-// Deferred hangs forever. Using `opencode run` sidesteps this entirely.
+// `opencode serve` creates a SEPARATE Hono listener (createHono) distinct
+// from Server.Default(). The test driver's HTTP requests hit the listener
+// while the plugin's in-process SDK replies hit Server.Default(). Both apps
+// share the same InstanceState (and thus the same permission pending
+// ScopedCache) — but ONLY if the line-139 InstanceRoutes mount applies
+// InstanceMiddleware so the reply handler resolves the correct directory.
+// Without that fix (see Dockerfile patch), the reply is a silent no-op and
+// the permission Deferred hangs forever.
+//
+// Serve mode has NO auto-reply race (there is no --dangerously-skip-permissions
+// equivalent), so the plugin is the SOLE replier. This makes serve-mode
+// assertions simpler: allow → read proceeds, block → read rejected. Both
+// polarities are tested, proving the fix resolves plugin replies under serve.
 
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -59,6 +65,13 @@ const AGENT_PORT = 8080;
 const CLASSIFIER_PORT = 8081;
 const PROMPT_TEXT = "Read /workspace/target.txt";
 const TARGET_CONTENT = "readable-target-content";
+
+// ── serve-mode constants ──────────────────────────────────────────────────
+const SERVE_PORT = 3000;
+const SERVE_PASSWORD = "test-password";
+const SERVE_USERNAME = "opencode";
+const SERVE_BASE = `http://127.0.0.1:${SERVE_PORT}`;
+const SERVE_CASE_TIMEOUT_MS = 90_000;
 
 // ── utilities ────────────────────────────────────────────────────────────
 
@@ -200,6 +213,121 @@ function resetAgentCounter() {
     }
 }
 
+// ── serve-mode HTTP helpers ───────────────────────────────────────────────
+//
+// Plain fetch driver (NOT the SDK) against the opencode serve HTTP listener.
+// Every request carries:
+//   Authorization: Basic base64(opencode:test-password)
+//   x-opencode-directory: %2Fworkspace   (so InstanceMiddleware resolves /workspace)
+
+function serveAuthHeader() {
+    return (
+        "Basic " +
+        Buffer.from(`${SERVE_USERNAME}:${SERVE_PASSWORD}`).toString("base64")
+    );
+}
+
+async function serveFetch(method, urlPath, body) {
+    const headers = {
+        Authorization: serveAuthHeader(),
+        "x-opencode-directory": encodeURIComponent(WORKSPACE),
+    };
+    const init = { method, headers };
+    if (body !== undefined) {
+        headers["Content-Type"] = "application/json";
+        init.body = JSON.stringify(body);
+    }
+    return fetch(`${SERVE_BASE}${urlPath}`, init);
+}
+
+// Wait for the serve listener to respond healthy on GET /global/health.
+async function waitForServe(maxAttempts = 90) {
+    for (let i = 0; i < maxAttempts; i++) {
+        try {
+            const resp = await serveFetch("GET", "/global/health");
+            if (resp.ok) {
+                const data = await resp.json();
+                if (data.healthy) {
+                    log(`serve ready on :${SERVE_PORT}`);
+                    return true;
+                }
+            }
+        } catch {
+            // not ready yet
+        }
+        await sleep(500);
+    }
+    throw new Error(
+        `serve on :${SERVE_PORT} not ready after ${maxAttempts} attempts`,
+    );
+}
+
+// Run one serve-mode case: create session, prompt_async, poll messages.
+// Returns { messagesJson, sessionID }.
+async function runServeCase(opts) {
+    const { stubVerdict, label } = opts;
+
+    writeGateConfig(stubVerdict);
+    resetAgentCounter();
+
+    // Create a fresh session for this case.
+    const createResp = await serveFetch("POST", "/session", {});
+    if (!createResp.ok) {
+        throw new Error(
+            `[${label}] session create failed: ${createResp.status}`,
+        );
+    }
+    const session = await createResp.json();
+    const sessionID = session.id;
+    log(`[${label}] serve session created: ${sessionID}`);
+
+    // Fire the prompt asynchronously (returns 204 immediately).
+    const promptResp = await serveFetch(
+        "POST",
+        `/session/${sessionID}/prompt_async`,
+        { parts: [{ type: "text", text: PROMPT_TEXT }] },
+    );
+    if (!promptResp.ok && promptResp.status !== 204) {
+        throw new Error(
+            `[${label}] prompt_async failed: ${promptResp.status}`,
+        );
+    }
+    log(`[${label}] prompt_async sent`);
+
+    // Poll messages for an outcome (content or rejection) up to timeout.
+    const deadline = Date.now() + SERVE_CASE_TIMEOUT_MS;
+    let messagesJson = "[]";
+    while (Date.now() < deadline) {
+        await sleep(1000);
+        try {
+            const msgResp = await serveFetch(
+                "GET",
+                `/session/${sessionID}/message`,
+            );
+            if (msgResp.ok) {
+                messagesJson = JSON.stringify(await msgResp.json());
+                if (
+                    messagesJson.includes(TARGET_CONTENT) ||
+                    /reject/i.test(messagesJson)
+                ) {
+                    break; // outcome reached
+                }
+            }
+        } catch {
+            // keep polling
+        }
+    }
+
+    return { messagesJson, sessionID };
+}
+
+// Analyze a serve case's outcome from the polled messages JSON.
+function analyzeServeCase(label, messagesJson) {
+    const hasContent = messagesJson.includes(TARGET_CONTENT);
+    const hasRejection = /reject/i.test(messagesJson);
+    return { hasContent, hasRejection };
+}
+
 // ── run one opencode run case ────────────────────────────────────────────
 //
 // Runs `opencode run` as a child process, captures stdout (JSON lines) and
@@ -302,6 +430,8 @@ function printDiagnostics(label, stdout, stderr) {
 
 async function main() {
     let mockProc = null;
+    let serveProc = null;
+    let serveStderrBuf = "";
     let exitCode = 0;
 
     try {
@@ -379,18 +509,155 @@ async function main() {
         );
         if (!caseB_pass) printDiagnostics("B", caseB.stdout, caseB.stderr);
 
-        // ── SUMMARY ────────────────────────────────────────────────────
-        log("========== SUMMARY ==========");
-        log(`Case A (ALLOW proof): ${caseA_pass ? "PASS" : "FAIL"}`);
-        log(`Case B (BLOCK proof): ${caseB_pass ? "PASS" : "FAIL"}`);
-        log(`Overall: ${caseA_pass && caseB_pass ? "PASS" : "FAIL"}`);
+        // ── RUN-MODE SUMMARY ───────────────────────────────────────────
+        log("========== RUN-MODE SUMMARY ==========");
+        log(`Run Case A (ALLOW proof): ${caseA_pass ? "PASS" : "FAIL"}`);
+        log(`Run Case B (BLOCK proof): ${caseB_pass ? "PASS" : "FAIL"}`);
 
-        exitCode = caseA_pass && caseB_pass ? 0 : 1;
+        // ── SERVE MODE ─────────────────────────────────────────────────
+        //
+        // Start `opencode serve` (the long-lived HTTP listener). The plugin is
+        // loaded by the serve process. We drive sessions over HTTP and verify
+        // the plugin's permission reply resolves (allow → read proceeds,
+        // block → read rejected).
+        //
+        // Serve has NO --dangerously-skip-permissions auto-reply, so the plugin
+        // is the SOLE replier — no race. This is the direct proof that the
+        // line-139 InstanceMiddleware fix makes plugin replies resolve under
+        // serve (previously a silent no-op → Deferred hang → timeout).
+        log("========== STARTING SERVE MODE ==========");
+        serveProc = spawn(
+            "bun",
+            [
+                "run",
+                "--cwd", OPENCODE_SRC,
+                "--conditions=browser",
+                "src/index.ts",
+                "serve",
+                "--hostname", "127.0.0.1",
+                "--port", String(SERVE_PORT),
+            ],
+            {
+                cwd: OPENCODE_SRC,
+                env: {
+                    ...process.env,
+                    OPENCODE_SERVER_PASSWORD: SERVE_PASSWORD,
+                    OPENCODE_SERVER_USERNAME: SERVE_USERNAME,
+                    AUTO_GATE_API_KEY: "dummy-key",
+                    OPENCODE_LOG_LEVEL: "debug",
+                },
+                stdio: ["ignore", "pipe", "pipe"],
+            },
+        );
+        serveProc.stdout.on("data", (d) =>
+            process.stderr.write(`[serve] ${d}`),
+        );
+        serveProc.stderr.on("data", (d) => {
+            const s = d.toString();
+            serveStderrBuf += s;
+            process.stderr.write(`[serve] ${s}`);
+        });
+
+        await waitForServe();
+
+        // ── CASE serve-A: ALLOW proof ──────────────────────────────────
+        // stubVerdict="allow". The plugin is the sole replier (no run-default).
+        // PASS = read PROCEEDS (plugin's allow reply resolved under serve).
+        log("========== CASE serve-A (ALLOW proof) ==========");
+        const stderrMarkerA = serveStderrBuf.length;
+        const serveA = await runServeCase({
+            label: "serve-A",
+            stubVerdict: "allow",
+        });
+        const serveAnalysisA = analyzeServeCase(
+            "serve-A",
+            serveA.messagesJson,
+        );
+        const serveStderrA = serveStderrBuf.slice(stderrMarkerA);
+        const serveA_eventSeen =
+            /\[auto-gate\] permission\.asked type=read mode=enforce/.test(
+                serveStderrA,
+            );
+        const serveA_pass = serveA_eventSeen && serveAnalysisA.hasContent;
+        log(
+            `Case serve-A: eventSeen=${serveA_eventSeen} content=${serveAnalysisA.hasContent} rejection=${serveAnalysisA.hasRejection} → ${serveA_pass ? "PASS" : "FAIL"}`,
+        );
+        if (!serveA_pass) {
+            log(`--- [serve-A] messages JSON (first 3000 chars) ---`);
+            log(serveA.messagesJson.slice(0, 3000));
+            log(`--- [serve-A] serve stderr excerpt ---`);
+            serveStderrA
+                .split("\n")
+                .filter((l) =>
+                    /auto-gate|permission|reject|error|warn/i.test(l),
+                )
+                .slice(0, 40)
+                .forEach((l) => log(`  err> ${l}`));
+        }
+
+        // ── CASE serve-B: BLOCK proof ──────────────────────────────────
+        // stubVerdict="block". PASS = read BLOCKED (plugin's reject reply
+        // resolved under serve).
+        log("========== CASE serve-B (BLOCK proof) ==========");
+        const stderrMarkerB = serveStderrBuf.length;
+        const serveB = await runServeCase({
+            label: "serve-B",
+            stubVerdict: "block",
+        });
+        const serveAnalysisB = analyzeServeCase(
+            "serve-B",
+            serveB.messagesJson,
+        );
+        const serveStderrB = serveStderrBuf.slice(stderrMarkerB);
+        const serveB_eventSeen =
+            /\[auto-gate\] permission\.asked type=read mode=enforce/.test(
+                serveStderrB,
+            );
+        const serveB_pass =
+            serveB_eventSeen &&
+            !serveAnalysisB.hasContent &&
+            serveAnalysisB.hasRejection;
+        log(
+            `Case serve-B: eventSeen=${serveB_eventSeen} content=${serveAnalysisB.hasContent} rejection=${serveAnalysisB.hasRejection} → ${serveB_pass ? "PASS" : "FAIL"}`,
+        );
+        if (!serveB_pass) {
+            log(`--- [serve-B] messages JSON (first 3000 chars) ---`);
+            log(serveB.messagesJson.slice(0, 3000));
+            log(`--- [serve-B] serve stderr excerpt ---`);
+            serveStderrB
+                .split("\n")
+                .filter((l) =>
+                    /auto-gate|permission|reject|error|warn/i.test(l),
+                )
+                .slice(0, 40)
+                .forEach((l) => log(`  err> ${l}`));
+        }
+
+        // ── FULL SUMMARY ───────────────────────────────────────────────
+        log("========== FULL SUMMARY ==========");
+        log(`Run   Case A (ALLOW proof):   ${caseA_pass ? "PASS" : "FAIL"}`);
+        log(`Run   Case B (BLOCK proof):   ${caseB_pass ? "PASS" : "FAIL"}`);
+        log(`Serve Case A (ALLOW proof):   ${serveA_pass ? "PASS" : "FAIL"}`);
+        log(`Serve Case B (BLOCK proof):   ${serveB_pass ? "PASS" : "FAIL"}`);
+        const allPass =
+            caseA_pass && caseB_pass && serveA_pass && serveB_pass;
+        log(`Overall: ${allPass ? "PASS" : "FAIL"}`);
+
+        exitCode = allPass ? 0 : 1;
     } catch (err) {
         log(`FATAL: ${err.message}`);
         console.error(err.stack);
         exitCode = 1;
     } finally {
+        if (serveProc) {
+            try {
+                serveProc.kill("SIGTERM");
+                await sleep(500);
+                serveProc.kill("SIGKILL");
+            } catch {
+                // already dead
+            }
+        }
         if (mockProc) {
             try {
                 mockProc.kill("SIGTERM");
