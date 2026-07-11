@@ -89,6 +89,22 @@
 // /reject/i still works because CorrectedError's message prefix is
 // "The user rejected permission...". Run-mode detection also matches
 // CorrectedError explicitly + the plugin's own [auto-gate] blocked: audit line.
+//
+// PER-CALL-GATE PROOF (continuation + feedback). The serve block cases
+// (serve-B/D/F/G) additionally assert TWO properties that DISTINGUISH the
+// per-call-gate from the old session kill-switch — proving "when the
+// classifier denies a tool call, the agent knows to fix":
+//   1. CONTINUATION — agentModelCalls >= 2. The agent mock received a 2nd
+//      call (kill-switch = only 1 call, turn dies after the rejected tool
+//      call; per-call-gate = turn continues). This count is the clean
+//      discriminator and a real regression guard.
+//   2. FEEDBACK — the 2nd agent-model request body contains the rejection
+//      reason substring. opencode serializes the CorrectedError message
+//      ("The user rejected permission... with the following feedback: <reason>")
+//      as the tool-error errorText in the next request's messages, so the
+//      model actually receives WHY it was blocked.
+// The serve ALLOW cases (serve-A/C/E) are the negative control: their 2nd
+// request carries the read RESULT (file content), not a rejection.
 
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -363,6 +379,103 @@ async function getClassifier2Count() {
     } catch {
         return 0;
     }
+}
+
+// ── per-call-gate proof helpers (agent-model call count + body capture) ────
+//
+// The reject→per-call-gate fix (commit db032750) changed the plugin's deny
+// from a bare reply("reject") (→ RejectedError → ctx.blocked → the turn ENDS
+// — a session kill-switch) to reply("reject", {message: reason}) (→
+// CorrectedError → does NOT trip the kill-switch → the turn CONTINUES → the
+// model is called again and sees the reason as errorText on the next step).
+//
+// The existing block-case assertions only prove "the read was blocked" — which
+// is true for BOTH the kill-switch and the per-call-gate. The two checks below
+// DISTINGUISH them, proving the property "when the classifier denies a tool
+// call, the agent knows to fix" (the turn continues and the model receives the
+// rejection reason):
+//
+//   1. CONTINUATION — agentModelCalls >= 2. The agent mock must receive a 2nd
+//      call. Kill-switch behavior = only 1 call (the turn dies right after the
+//      rejected tool call; the model is never called again). Per-call-gate =
+//      the turn continues, so the model IS called again. This count is the
+//      clean discriminator.
+//   2. FEEDBACK — the 2nd agent-model request body contains the rejection
+//      reason substring. opencode serializes the rejected tool call into the
+//      next request's messages as a tool-error whose errorText carries the
+//      CorrectedError message ("The user rejected permission... with the
+//      following feedback: <reason>"). The mock captures the full 2nd request
+//      body — asserting the reason substring proves the model actually received
+//      WHY it was blocked.
+//
+// These are only asserted on the SERVE cases (deterministic — no run-mode
+// auto-reply race that muddies the call count). If the deny ever reverts to a
+// kill-switch, the agent-model call count drops to 1 and these assertions fail.
+
+// Poll the agent mock's /count/agent until it reaches targetCount, then return
+// the count. Returns the last-seen count on timeout (which may be < target).
+async function waitForAgentCalls(targetCount, maxAttempts = 60) {
+    let last = 0;
+    for (let i = 0; i < maxAttempts; i++) {
+        try {
+            const r = await fetch(`http://127.0.0.1:${AGENT_PORT}/count/agent`);
+            if (r.ok) {
+                const data = await r.json();
+                last = data.count || 0;
+                if (last >= targetCount) return last;
+            }
+        } catch {
+            // not ready yet
+        }
+        await sleep(500);
+    }
+    return last;
+}
+
+// Fetch the captured agent-model request bodies (tool-bearing POSTs only,
+// index-aligned with the agent call counter).
+async function getAgentBodies() {
+    try {
+        const r = await fetch(`http://127.0.0.1:${AGENT_PORT}/agent-bodies`);
+        if (!r.ok) return [];
+        const data = await r.json();
+        return data.bodies || [];
+    } catch {
+        return [];
+    }
+}
+
+// Per-call-gate proof for one serve case. Polls the agent call count up to 2,
+// fetches the 2nd request body, and checks continuation + feedback. For a
+// BLOCK case: the 2nd body must carry the rejection reason substring and must
+// NOT carry the read file content. For an ALLOW case (negative control): the
+// 2nd body must carry the read file content.
+//
+// Returns { agentModelCalls, continued, feedbackOk, secondBody }.
+async function checkPerCallGate(label, opts) {
+    const { expectBlock, reasonSubstring } = opts;
+    const agentModelCalls = await waitForAgentCalls(2);
+    const bodies = await getAgentBodies();
+    const secondBody = bodies.length >= 2 ? JSON.stringify(bodies[1]) : "";
+    const continued = agentModelCalls >= 2;
+    let feedbackOk;
+    if (expectBlock) {
+        feedbackOk =
+            secondBody.includes(reasonSubstring) &&
+            !secondBody.includes(TARGET_CONTENT);
+    } else {
+        feedbackOk = secondBody.includes(TARGET_CONTENT);
+    }
+    log(
+        `[${label}] per-call-gate: agentModelCalls=${agentModelCalls} ` +
+        `continued=${continued} feedbackOk=${feedbackOk} ` +
+        `expectBlock=${expectBlock} reasonSubstring="${reasonSubstring}"`,
+    );
+    if (!continued || !feedbackOk) {
+        log(`--- [${label}] 2nd agent-model body (first 1500 chars) ---`);
+        log(secondBody.slice(0, 1500));
+    }
+    return { agentModelCalls, continued, feedbackOk, secondBody };
 }
 
 // ── serve-mode HTTP helpers ───────────────────────────────────────────────
@@ -859,9 +972,21 @@ async function main() {
             /\[auto-gate\] permission\.asked type=read mode=enforce/.test(
                 serveStderrA,
             );
-        const serveA_pass = serveA_eventSeen && serveAnalysisA.hasContent;
+        // Per-call-gate negative control (ALLOW): the turn continued (>=2 agent
+        // calls) AND the model received the read RESULT (file content), not a
+        // rejection — confirming the allow-vs-block distinction in what the
+        // model sees on the 2nd call.
+        const serveA_gate = await checkPerCallGate("serve-A", {
+            expectBlock: false,
+            reasonSubstring: "(n/a — allow case)",
+        });
+        const serveA_pass =
+            serveA_eventSeen &&
+            serveAnalysisA.hasContent &&
+            serveA_gate.continued &&
+            serveA_gate.feedbackOk;
         log(
-            `Case serve-A: eventSeen=${serveA_eventSeen} content=${serveAnalysisA.hasContent} rejection=${serveAnalysisA.hasRejection} → ${serveA_pass ? "PASS" : "FAIL"}`,
+            `Case serve-A: eventSeen=${serveA_eventSeen} content=${serveAnalysisA.hasContent} rejection=${serveAnalysisA.hasRejection} agentCalls=${serveA_gate.agentModelCalls} → ${serveA_pass ? "PASS" : "FAIL"}`,
         );
         if (!serveA_pass) {
             log(`--- [serve-A] messages JSON (first 3000 chars) ---`);
@@ -894,12 +1019,26 @@ async function main() {
             /\[auto-gate\] permission\.asked type=read mode=enforce/.test(
                 serveStderrB,
             );
+        // Per-call-gate proof (BLOCK): the turn CONTINUED past the rejected tool
+        // call (agentModelCalls >= 2) AND the model received the rejection REASON
+        // as feedback in the 2nd request. The stub block reason is
+        // "[stub] blocked by deterministic stub" (from stubEvaluate → parseVerdict
+        // → decidePermission → reply("reject", reason)). opencode wraps it in the
+        // CorrectedError message ("The user rejected permission... with the
+        // following feedback: <reason>") and serializes that as the tool-error
+        // errorText in the 2nd request's messages.
+        const serveB_gate = await checkPerCallGate("serve-B", {
+            expectBlock: true,
+            reasonSubstring: "blocked by deterministic stub",
+        });
         const serveB_pass =
             serveB_eventSeen &&
             !serveAnalysisB.hasContent &&
-            serveAnalysisB.hasRejection;
+            serveAnalysisB.hasRejection &&
+            serveB_gate.continued &&
+            serveB_gate.feedbackOk;
         log(
-            `Case serve-B: eventSeen=${serveB_eventSeen} content=${serveAnalysisB.hasContent} rejection=${serveAnalysisB.hasRejection} → ${serveB_pass ? "PASS" : "FAIL"}`,
+            `Case serve-B: eventSeen=${serveB_eventSeen} content=${serveAnalysisB.hasContent} rejection=${serveAnalysisB.hasRejection} agentCalls=${serveB_gate.agentModelCalls} feedbackOk=${serveB_gate.feedbackOk} → ${serveB_pass ? "PASS" : "FAIL"}`,
         );
         if (!serveB_pass) {
             log(`--- [serve-B] messages JSON (first 3000 chars) ---`);
@@ -938,12 +1077,20 @@ async function main() {
                 serveStderrC,
             );
         const serveC_classifierCount = await getClassifierCount();
+        // Per-call-gate negative control (LIVE ALLOW): turn continued + model
+        // received the read result (file content), not a rejection.
+        const serveC_gate = await checkPerCallGate("serve-C", {
+            expectBlock: false,
+            reasonSubstring: "(n/a — allow case)",
+        });
         const serveC_pass =
             serveC_eventSeen &&
             serveAnalysisC.hasContent &&
-            serveC_classifierCount > 0;
+            serveC_classifierCount > 0 &&
+            serveC_gate.continued &&
+            serveC_gate.feedbackOk;
         log(
-            `Case serve-C: eventSeen=${serveC_eventSeen} content=${serveAnalysisC.hasContent} rejection=${serveAnalysisC.hasRejection} classifierCalls=${serveC_classifierCount} → ${serveC_pass ? "PASS" : "FAIL"}`,
+            `Case serve-C: eventSeen=${serveC_eventSeen} content=${serveAnalysisC.hasContent} rejection=${serveAnalysisC.hasRejection} classifierCalls=${serveC_classifierCount} agentCalls=${serveC_gate.agentModelCalls} → ${serveC_pass ? "PASS" : "FAIL"}`,
         );
         if (!serveC_pass) {
             log(`--- [serve-C] messages JSON (first 3000 chars) ---`);
@@ -983,13 +1130,23 @@ async function main() {
                 serveStderrD,
             );
         const serveD_classifierCount = await getClassifierCount();
+        // Per-call-gate proof (LIVE BLOCK): turn continued + model received the
+        // classifier's rejection reason "[test-block] classifier blocked" (from
+        // the live verdict's <reason> tag → decideLive → reply("reject", reason))
+        // as feedback in the 2nd request.
+        const serveD_gate = await checkPerCallGate("serve-D", {
+            expectBlock: true,
+            reasonSubstring: "[test-block]",
+        });
         const serveD_pass =
             serveD_eventSeen &&
             !serveAnalysisD.hasContent &&
             serveAnalysisD.hasRejection &&
-            serveD_classifierCount > 0;
+            serveD_classifierCount > 0 &&
+            serveD_gate.continued &&
+            serveD_gate.feedbackOk;
         log(
-            `Case serve-D: eventSeen=${serveD_eventSeen} content=${serveAnalysisD.hasContent} rejection=${serveAnalysisD.hasRejection} classifierCalls=${serveD_classifierCount} → ${serveD_pass ? "PASS" : "FAIL"}`,
+            `Case serve-D: eventSeen=${serveD_eventSeen} content=${serveAnalysisD.hasContent} rejection=${serveAnalysisD.hasRejection} classifierCalls=${serveD_classifierCount} agentCalls=${serveD_gate.agentModelCalls} feedbackOk=${serveD_gate.feedbackOk} → ${serveD_pass ? "PASS" : "FAIL"}`,
         );
         if (!serveD_pass) {
             log(`--- [serve-D] messages JSON (first 3000 chars) ---`);
@@ -1047,13 +1204,21 @@ async function main() {
             );
         const serveE_classifierCount = await getClassifierCount();
         const serveE_classifier2Count = await getClassifier2Count();
+        // Per-call-gate negative control (CONSENSUS ALLOW): turn continued +
+        // model received the read result (file content), not a rejection.
+        const serveE_gate = await checkPerCallGate("serve-E", {
+            expectBlock: false,
+            reasonSubstring: "(n/a — allow case)",
+        });
         const serveE_pass =
             serveE_eventSeen &&
             serveAnalysisE.hasContent &&
             serveE_classifierCount > 0 &&
-            serveE_classifier2Count > 0;
+            serveE_classifier2Count > 0 &&
+            serveE_gate.continued &&
+            serveE_gate.feedbackOk;
         log(
-            `Case serve-E: eventSeen=${serveE_eventSeen} content=${serveAnalysisE.hasContent} rejection=${serveAnalysisE.hasRejection} classifierCalls=${serveE_classifierCount} classifier2Calls=${serveE_classifier2Count} → ${serveE_pass ? "PASS" : "FAIL"}`,
+            `Case serve-E: eventSeen=${serveE_eventSeen} content=${serveAnalysisE.hasContent} rejection=${serveAnalysisE.hasRejection} classifierCalls=${serveE_classifierCount} classifier2Calls=${serveE_classifier2Count} agentCalls=${serveE_gate.agentModelCalls} → ${serveE_pass ? "PASS" : "FAIL"}`,
         );
         if (!serveE_pass) {
             log(`--- [serve-E] messages JSON (first 3000 chars) ---`);
@@ -1094,14 +1259,24 @@ async function main() {
             );
         const serveF_classifierCount = await getClassifierCount();
         const serveF_classifier2Count = await getClassifier2Count();
+        // Per-call-gate proof (CONSENSUS BLOCK — disagreement): turn continued
+        // + model received the consensus denial reason. The plugin synthesizes
+        // "[auto-gate] blocked by consensus: <audit>" (plugin line ~1349), so
+        // the stable substring is "blocked by consensus".
+        const serveF_gate = await checkPerCallGate("serve-F", {
+            expectBlock: true,
+            reasonSubstring: "blocked by consensus",
+        });
         const serveF_pass =
             serveF_eventSeen &&
             !serveAnalysisF.hasContent &&
             serveAnalysisF.hasRejection &&
             serveF_classifierCount > 0 &&
-            serveF_classifier2Count > 0;
+            serveF_classifier2Count > 0 &&
+            serveF_gate.continued &&
+            serveF_gate.feedbackOk;
         log(
-            `Case serve-F: eventSeen=${serveF_eventSeen} content=${serveAnalysisF.hasContent} rejection=${serveAnalysisF.hasRejection} classifierCalls=${serveF_classifierCount} classifier2Calls=${serveF_classifier2Count} → ${serveF_pass ? "PASS" : "FAIL"}`,
+            `Case serve-F: eventSeen=${serveF_eventSeen} content=${serveAnalysisF.hasContent} rejection=${serveAnalysisF.hasRejection} classifierCalls=${serveF_classifierCount} classifier2Calls=${serveF_classifier2Count} agentCalls=${serveF_gate.agentModelCalls} feedbackOk=${serveF_gate.feedbackOk} → ${serveF_pass ? "PASS" : "FAIL"}`,
         );
         if (!serveF_pass) {
             log(`--- [serve-F] messages JSON (first 3000 chars) ---`);
@@ -1142,14 +1317,23 @@ async function main() {
             );
         const serveG_classifierCount = await getClassifierCount();
         const serveG_classifier2Count = await getClassifier2Count();
+        // Per-call-gate proof (CONSENSUS BLOCK — incomplete): turn continued +
+        // model received the consensus denial reason. Same synthesized reason
+        // shape as serve-F ("[auto-gate] blocked by consensus: <audit>").
+        const serveG_gate = await checkPerCallGate("serve-G", {
+            expectBlock: true,
+            reasonSubstring: "blocked by consensus",
+        });
         const serveG_pass =
             serveG_eventSeen &&
             !serveAnalysisG.hasContent &&
             serveAnalysisG.hasRejection &&
             serveG_classifierCount > 0 &&
-            serveG_classifier2Count > 0;
+            serveG_classifier2Count > 0 &&
+            serveG_gate.continued &&
+            serveG_gate.feedbackOk;
         log(
-            `Case serve-G: eventSeen=${serveG_eventSeen} content=${serveAnalysisG.hasContent} rejection=${serveAnalysisG.hasRejection} classifierCalls=${serveG_classifierCount} classifier2Calls=${serveG_classifier2Count} → ${serveG_pass ? "PASS" : "FAIL"}`,
+            `Case serve-G: eventSeen=${serveG_eventSeen} content=${serveAnalysisG.hasContent} rejection=${serveAnalysisG.hasRejection} classifierCalls=${serveG_classifierCount} classifier2Calls=${serveG_classifier2Count} agentCalls=${serveG_gate.agentModelCalls} feedbackOk=${serveG_gate.feedbackOk} → ${serveG_pass ? "PASS" : "FAIL"}`,
         );
         if (!serveG_pass) {
             log(`--- [serve-G] messages JSON (first 3000 chars) ---`);

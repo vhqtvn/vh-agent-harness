@@ -10,8 +10,17 @@
 //                  hooks.
 //   2nd request → short text "Done." (finish_reason=stop) so the session
 //                  reaches idle and `opencode run` exits cleanly.
-//   GET /reset   → resets the call counter (called between Case A and Case B).
-//   GET /healthz → readiness probe.
+//   GET /reset          → resets the call counter + captured bodies (between cases).
+//   GET /healthz        → readiness probe.
+//   GET /count/agent    → { ok, count } of agent-model (tool-bearing) POSTs.
+//   GET /agent-bodies   → { ok, count, bodies:[...] } of each captured
+//                          tool-bearing request body (aligned with count, so
+//                          bodies[1] is the 2nd agent call). Used by the
+//                          per-call-gate continuation + feedback proof: a
+//                          block case's 2nd request carries the rejection
+//                          reason (CorrectedError errorText) as feedback to the
+//                          model; an allow case's 2nd request carries the read
+//                          result (file content).
 //
 // CLASSIFIER (:8081, POST /v1/chat/completions) — reads a control file:
 //   /tmp/classifier-verdict  →  supports TWO shapes:
@@ -205,6 +214,13 @@ function sendAgentTextJson(res) {
 // ── agent server (port 8080) ─────────────────────────────────────────────
 
 let agentCallCount = 0;
+// Captured request bodies for tool-bearing (agent-turn) POSTs. Index-aligned
+// with agentCallCount: agentBodies[0] is the 1st agent call, [1] the 2nd. The
+// per-call-gate proof inspects bodies[1]: under the per-call-gate the turn
+// CONTINUES past a rejected tool call, so the model receives the rejection
+// reason as errorText feedback in the 2nd request's messages. Under the old
+// session kill-switch the turn died at 1 call and there was no 2nd body.
+let agentBodies = [];
 
 const agentServer = http.createServer(async (req, res) => {
     req.on("error", () => {});
@@ -220,7 +236,22 @@ const agentServer = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url === "/reset") {
         agentCallCount = 0;
+        agentBodies = [];
         sendJson(res, 200, { ok: true, count: agentCallCount });
+        return;
+    }
+
+    if (req.method === "GET" && url === "/count/agent") {
+        sendJson(res, 200, { ok: true, count: agentCallCount });
+        return;
+    }
+
+    if (req.method === "GET" && url === "/agent-bodies") {
+        sendJson(res, 200, {
+            ok: true,
+            count: agentBodies.length,
+            bodies: agentBodies,
+        });
         return;
     }
 
@@ -235,6 +266,7 @@ const agentServer = http.createServer(async (req, res) => {
             //   1st → tool_call so opencode executes the read tool
             //   2nd+ → short text so the session reaches idle
             agentCallCount += 1;
+            agentBodies.push(body);
             if (agentCallCount === 1) {
                 if (wantsStream) writeAgentToolCallStream(res);
                 else sendAgentToolCallJson(res);
