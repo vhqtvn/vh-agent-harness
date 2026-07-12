@@ -77,7 +77,18 @@ export function truncate(value, max) {
 // swaps matched secret values for [redacted] and leaves the surrounding words
 // intact. Conservative by design: prefers false-positive redaction over
 // false-negative leakage — a safety layer that redacts too much is acceptable;
-// one that leaks a credential is not.
+//    one that leaks a credential is not.
+//
+// HEURISTIC LIMITS — this scrubber is a BEST-EFFORT heuristic, NOT a complete
+// secret detector. It catches common secret-bearing shapes (Bearer tokens,
+// key=value / key: value pairs, whitespace-separated secret CLI flags incl.
+// quoted/escaped values, standalone high-entropy blobs) but CANNOT catch
+// every secret-bearing input. Known gaps include base64-encoded secret
+// payloads, secrets referenced only by env-var name, and custom/non-standard
+// flag names outside the recognized set. Remaining narrow edge cases are
+// ACCEPTED heuristic limits, not bugs. For environments requiring stronger
+// guarantees, operators should avoid audit mode for secret-bearing commands
+// or route them through `promptFile` instead.
 //
 // Patterns (applied in order, each a global case-insensitive replace):
 //   1. Bearer tokens — `Bearer <token>` (covers header-style
@@ -88,7 +99,14 @@ export function truncate(value, max) {
 //      string (any length) or a 12+ char run of alnum/_-./+=, or an
 //      sk-/AKIA-prefixed token. The VALUE is redacted; the key name + separator
 //      is kept so surrounding context survives.
-//   3. Standalone high-entropy blobs — 32+ hex chars, 40+ base64-ish chars
+//   3. Whitespace-separated secret-bearing CLI flags — `--password hunter2`,
+//      `--token xyz`, `--api-key abc`, `-p secret`, etc. The flag name is kept
+//      and the following whitespace-separated VALUE token is redacted. Runs
+//      BEFORE the standalone-blob rules so a flag whose value is itself a
+//      high-entropy blob (e.g. `--password <40-hex>`) is caught here as
+//      `--password [redacted]` (flag survives) rather than being reduced to a
+//      bare `[redacted]` by the blob rules.
+//   4. Standalone high-entropy blobs — 32+ hex chars, 40+ base64-ish chars
 //      (alnum + / + +, optional =padding), or bare sk-/AKIA-prefixed keys.
 //      -> [redacted].
 //
@@ -120,7 +138,45 @@ export function scrubCredentials(text) {
         "$1=[redacted]",
     );
 
-    // 3. Standalone high-entropy blobs (not preceded by a recognized key).
+    // 3. Whitespace-separated secret-bearing CLI flags: --password hunter2,
+    //    --token xyz, --api-key abc, -p secret, etc. Keep the flag name; redact
+    //    the following value. The value capture tries a COMPLETELY-QUOTED value
+    //    ("hunter two" or 'secret value') FIRST — capturing the whole quoted
+    //    run including its internal spaces — and only falls back to a bare
+    //    \S+ token when there is no leading quote. This is essential: a naive
+    //    \S+-only capture would stop at the first space and leak the post-space
+    //    tail of a quoted credential (e.g. `--password "hunter two"` would
+    //    become `--password [redacted] two"`, leaking `two"`).
+    //
+    //    ESCAPE-AWARE QUOTED MATCHING: the quoted alternatives use
+    //    "(?:[^"\\]|\\.)*" / '(?:[^'\\]|\\.)*' so an escaped quote INSIDE a
+    //    quoted value (`\"` / `\'`) is consumed as an escaped pair rather than
+    //    treated as the closing delimiter. Without this, `--password
+    //    "secret\"tail value"` would match only `"secret\"` and leak
+    //    `tail value"`. The body `(?:[^"\\]|\\.)*` matches either a non-quote
+    //    non-backslash char OR a backslash-escaped pair (any char following a
+    //    backslash, including `\"` / `\\`).
+    //
+    //    The `--?` (one or two dashes) is wrapped in a non-capturing group
+    //    with the name alternation so it applies to EVERY alternative —
+    //    without it, alternation precedence would bind `--?` only to
+    //    `password`, leaving `--token`/`--api-key`/`-p` to match as bare
+    //    names with the dashes orphaned as prefix text. The short form `p`
+    //    is listed LAST so the longer `pass`/`passwd`/`pwd` alternatives are
+    //    tried first (ordered alternation + backtracking). A regex LITERAL is
+    //    used (not `new RegExp(string)`) so the backslashes in the escape-aware
+    //    value group are single-escaped (engine-native) rather than
+    //    double-escaped (string-then-regex), avoiding the `\\\\` readability
+    //    hazard. Placed BEFORE the standalone-blob rules below so a flag value
+    //    that is itself a 32+ hex / 40+ base64 / sk- / AKIA blob is caught here
+    //    (flag name survives) rather than being reduced to a bare `[redacted]`
+    //    by the blob rules.
+    out = out.replace(
+        /(--?(?:password|pass|passwd|pwd|token|api[_-]?key|apikey|secret|secret[_-]?key|access[_-]?key|auth|authorization|credential|private[_-]?key|p))\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/gi,
+        "$1 [redacted]",
+    );
+
+    // 4. Standalone high-entropy blobs (not preceded by a recognized key).
     //    32+ hex chars.
     out = out.replace(/[0-9a-f]{32,}/gi, "[redacted]");
     //    40+ base64-ish chars (alnum + / + +, optional = padding).
@@ -241,6 +297,97 @@ if (__isMain) {
         );
         const twice = scrubCredentials(once);
         assert.equal(once, twice);
+    });
+
+    // ===== scrubCredentials: whitespace-separated CLI flag form =====
+
+    test("scrub: --password flag form redacted", () => {
+        const out = scrubCredentials("curl --password hunter2 https://x");
+        assert.match(out, /--password \[redacted\]/);
+        assert.equal(out.includes("hunter2"), false);
+    });
+
+    test("scrub: --token flag form redacted", () => {
+        const out = scrubCredentials("--token abc-123-xyz");
+        assert.equal(out, "--token [redacted]");
+        assert.equal(out.includes("abc-123-xyz"), false);
+    });
+
+    test("scrub: --api-key flag form redacted", () => {
+        const out = scrubCredentials("--api-key sk_live_abc");
+        assert.equal(out, "--api-key [redacted]");
+        assert.equal(out.includes("sk_live_abc"), false);
+    });
+
+    test('scrub: --password "hunter two" (quoted whitespace value) fully redacted', () => {
+        const out = scrubCredentials('--password "hunter two"');
+        assert.match(out, /--password \[redacted\]/);
+        assert.equal(out.includes('two"'), false);
+        assert.equal(out.includes("hunter"), false);
+    });
+
+    test("scrub: --token 'secret value' (single-quoted) fully redacted", () => {
+        const out = scrubCredentials("--token 'secret value'");
+        assert.match(out, /--token \[redacted\]/);
+        assert.equal(out.includes("value"), false);
+        assert.equal(out.includes("secret"), false);
+    });
+
+    test('scrub: --password "secret\\"tail value" (escaped double-quote) fully redacted', () => {
+        const out = scrubCredentials('--password "secret\\"tail value"');
+        assert.match(out, /--password \[redacted\]/);
+        assert.equal(out.includes("tail value"), false);
+        assert.equal(out.includes("secret"), false);
+    });
+
+    test("scrub: --token 'a\\'b c' (escaped single-quote) fully redacted", () => {
+        const out = scrubCredentials("--token 'a\\'b c'");
+        assert.match(out, /--token \[redacted\]/);
+        assert.equal(out.includes("b c"), false);
+        assert.equal(out.includes("\\'"), false);
+    });
+
+    test("scrub: short flag -p (single dash) redacted", () => {
+        const out = scrubCredentials("-p secret123");
+        assert.equal(out, "-p [redacted]");
+        assert.equal(out.includes("secret123"), false);
+    });
+
+    test("scrub: flag value that is ALSO a high-entropy blob -> flag rule wins (flag kept, value redacted)", () => {
+        const out = scrubCredentials(
+            "--password 0123456789abcdef0123456789abcdef01234567",
+        );
+        // The flag name MUST survive (not reduced to a bare [redacted]).
+        assert.match(out, /--password \[redacted\]/);
+        assert.notEqual(out, "[redacted]");
+        assert.equal(
+            out.includes("0123456789abcdef0123456789abcdef01234567"),
+            false,
+        );
+    });
+
+    test("scrub: non-secret flag NOT redacted (regression)", () => {
+        // --verbose is not in the secret-flag set; value must survive unchanged.
+        const out = scrubCredentials("--verbose output.txt");
+        assert.equal(out, "--verbose output.txt");
+    });
+
+    test("scrub: flag-form rules are idempotent and pure (input not mutated)", () => {
+        const inputs = [
+            "curl --password hunter2 https://x",
+            "--token abc-123-xyz",
+            "--api-key sk_live_abc",
+            "-p secret123",
+            "--password 0123456789abcdef0123456789abcdef01234567",
+            "--verbose output.txt",
+        ];
+        for (const input of inputs) {
+            const snapshot = input; // strings are immutable; capture for clarity
+            const once = scrubCredentials(input);
+            const twice = scrubCredentials(once);
+            assert.equal(once, twice, "must be idempotent for: " + input);
+            assert.equal(input, snapshot, "input must not be mutated: " + input);
+        }
     });
 
     // ===== truncate =====
