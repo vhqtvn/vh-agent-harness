@@ -78,6 +78,17 @@ Rules:
   - if a frame-level concern arises during expansion, surface it as a
     frame-level objection or `need_researcher` outcome rather than silently
     absorbing it into an expanded option set
+- manual step-back (orchestrator-level, reactive; operator-initiated only):
+  - the operator may, at any point, force one step-back: re-run the debate
+    with a frame-level concern the operator names (still subject to evidence
+    rules — fabricated evidence is never authorized; the operator must cite
+    packet evidence or request a `researcher` refresh first)
+  - retain the original frame and option set; a manual step-back does NOT
+    authorize alternate-frame divergence
+  - manual override does NOT relax evidence discipline and does NOT extend
+    the revision budget
+  - this is reactive backstop behavior; the default debate flow is unchanged
+    when the operator does not intervene
 - if critical evidence is missing, stop and recommend a short `researcher`
   follow-up instead of improvising
 - when resolving an objection or evaluating an option requires material facts

@@ -22,7 +22,7 @@ Rules:
 - if no option is strong enough, recommend a short evidence-gathering step
 
 Return:
-- `recommendation`: `recommend|lean|tie|need_evidence`
+- `recommendation`: `recommend|lean|tie|need_evidence|need_researcher`
 - `recommended_option_id`
 - `criteria_comparison` with:
   - `criterion_id`
