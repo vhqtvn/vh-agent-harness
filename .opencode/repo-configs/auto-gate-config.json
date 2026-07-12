@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "mode": "audit",
+  "stubVerdict": "block",
+  "promptFile": "",
+  "replyMode": "once",
+  "onUncertain": "reject",
+  "harnessContext": true,
+  "guides": true
+}
