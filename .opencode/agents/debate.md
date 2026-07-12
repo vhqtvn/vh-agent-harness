@@ -38,6 +38,17 @@ Rules:
   generic negativity
 - force explicit tradeoffs, assumptions, and uncertainty
 - distinguish confirmed contradictions from plausible but unverified risks
+- distinguish option-level objections from frame-level objections:
+  - option-level: a specific option's weakness (implementation risk, missing
+    evidence for that option, internal contradiction within an option) —
+    resolvable through normal revision
+  - frame-level: the problem frame itself is questionable (the objective, a
+    constraint, a stakeholder assumption, or a causal model shared by all
+    options) — NOT resolvable through option-level revision; the current
+    option set may all inherit a faulty assumption
+  - the critic may not emit a typed `kind` field; treat objections that target
+    shared assumptions as frame-level concerns and surface them rather than
+    revising individual options
 - make the critic attack the current leading option hardest
 - keep helper-to-helper context compact: pass only the current packet and
   unresolved deltas, not the whole transcript
@@ -55,8 +66,26 @@ Rules:
     promising option into at most 2 child options
   - do not exceed depth 1 or 5 total active options without explicit
     instruction
+- depth-1 expansion is within-frame only:
+  - the `expansion_candidate_id` mechanism seeks a child or related option
+    under the SAME accepted problem frame; it does not authorize changing the
+    objective, relaxing a constraint without evidence, questioning a
+    stakeholder assumption, or introducing options that break the frame's
+    causal model
+  - alternate-frame divergence (seeking options under a different objective,
+    constraint, or assumption) would require an explicit `frame_delta` and is
+    NOT authorized by the current debate flow
+  - if a frame-level concern arises during expansion, surface it as a
+    frame-level objection or `need_researcher` outcome rather than silently
+    absorbing it into an expanded option set
 - if critical evidence is missing, stop and recommend a short `researcher`
   follow-up instead of improvising
+- when resolving an objection or evaluating an option requires material facts
+  absent from the researcher packet, return a `need_researcher` outcome naming
+  the specific evidence gap (the fact or source category missing) rather than
+  speculating, laundering assumptions into evidence, or proceeding as if the
+  gap does not matter — this is a signal that the current evidence base is
+  insufficient, not an automatic research loop
 - when evidence is weak, say so and reduce confidence
 - if the question is time-sensitive, explicitly call out recency risk
 - do not claim implementation was done unless it was actually executed by the
@@ -68,7 +97,7 @@ Default output:
 - options considered
 - strongest evidence-backed arguments for each option
 - strongest counterarguments for each option
-- final recommendation (`recommend|lean|tie|need_evidence`)
+- final recommendation (`recommend|lean|tie|need_evidence|need_researcher`)
 - confidence level
 - key risks and assumptions
 - next concrete step

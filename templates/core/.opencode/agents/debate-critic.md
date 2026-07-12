@@ -14,6 +14,9 @@ Rules:
 - only raise objections that are specific, plausible, and decision-relevant
 - do not invent weak objections just to create conflict
 - distinguish hard contradictions from mitigable risks and from open questions
+- objections may target a specific option (option-level) or the shared problem
+  frame itself (frame-level); a frame-level objection indicates the frame may
+  be wrong, not just that one option is weak — flag it explicitly
 - attack the strongest-looking option hardest
 - avoid generic criticism; tie every critique to a specific `option_id` and
   `claim_id`
