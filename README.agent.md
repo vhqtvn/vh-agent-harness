@@ -81,6 +81,8 @@ real target locations.
 | `.vh-agent-harness/harness-ownership.yml` | (optional; not seeded) Raise-only ownership overrides — create only to take a managed file to `project_owned`. |
 | `.vh-agent-harness/overlays/<pack>/` | Project overlay: `agents/`, `commands/`, `skills/`, `opencode-append.jsonc`, `permission-pack.jsonc`, `callable-graph-snippet.md`. |
 | `.opencode/repo-configs/forbidden-patterns.project.js` | (seeded blank) Project deny-rules (import builders from `forbidden-patterns.core.js`; each rule needs a `why`). |
+| `.vh-agent-harness/config-transform.mjs` | (seeded blank) Project permission transform (F-intent). Returns typed `permissionPatches` merged into every render. NO raw config mutation. See "Permission transform (F-intent)" below. |
+| `.vh-agent-harness/config-transform.core.mjs` | (regenerated) Harness-owned types + Decision constants + builder helpers for the transform. Import, do not edit. |
 | `.opencode/plugins/compaction-primitives.project.md` | Project compaction-recovery block (operational primitives an agent needs after context loss). |
 | `docs/coordination/LANES.yaml`, `docs/coordination/ROLES.md` | Coordination lanes/roles — define project-specific ones or keep the generic set. |
 | `.local/cleared-assumptions.yaml` | Operator-state ledger of cleared assumptions (usually operator-maintained). |
@@ -119,6 +121,102 @@ hard-dep closure (the releaser delegates to the gated-commit agents), so both
 selection paths render the same cluster. It renders into `.opencode/` on
 `update` exactly like a project-local pack, and is opt-in (a `minimal` profile
 that never names it renders nothing of it).
+
+## Permission transform (F-intent)
+
+The canonical permission emitter (`permconfig.Emit`) is the SOLE writer of
+`opencode.jsonc` — permission-packs are its input, never a post-render patch.
+Every agent's `permission.bash` block is regenerated from a `location`
+descriptor that has a fixed set of slots (`wildcard`, `readonly`,
+`git_readonly`, `gate`, `harness`, `edit`). There is **no slot for arbitrary
+project bash patterns** like `"./dev.sh *": "allow"`.
+
+The **permission transform** closes that gap as **F-intent**: the project
+maintains a JS function that returns *typed permission intent*; the Go
+pipeline validates it and feeds it to the same canonical emitter. The
+transform NEVER directly mutates `opencode.jsonc`.
+
+| File | Ownership | Role |
+| --- | --- | --- |
+| `.vh-agent-harness/config-transform.mjs` | `project_owned` (seeded blank, preserved) | Your transform function. Edit this. |
+| `.vh-agent-harness/config-transform.core.mjs` | `platform_managed` (regenerated) | JSDoc typedefs, `Decision` constants, `allow`/`deny`/`ask` builders. Import, do not edit. |
+
+### Contract
+
+```
+INPUT  = { context: { packs: string[], features: {k: string}, agents: string[] } }
+OUTPUT = { permissionPatches: [{ agent: string, bash: [{ pattern: string, decision: "allow"|"deny"|"ask" }] }] }
+```
+
+- `agent` must be in `context.agents` (the rendered roster: core + active-pack).
+  Unknown agent → fail-closed render error.
+- `pattern` must be non-empty and must NOT collide with a protected key
+  (`"*"`, command-group commands, `"vh-agent-harness *"`, backlog command).
+  Collision → fail-closed.
+- Duplicate pattern for the same agent → fail-closed.
+- Empty/absent `permissionPatches` → no-op (byte-identical to no-transform).
+
+### Trusted-code execution
+
+The transform is **trusted project-owned code** — the same trust model as
+`forbidden-patterns.project.js`. If you can edit the transform file, you already
+have commit authority on the repo, so the transform has the same authority as
+any project-owned source file. It is **not sandboxed**.
+
+The harness applies an **advisory source lint** that rejects obvious host-API
+usage (`process.env`, `require()`, `fs.*`, `http(s).request`, `child_process`,
+`Math.random`, `Date.now`, …) as defense-in-depth (comment-aware — documenting
+these APIs in comments is fine). This lint is **NOT a security boundary** — it
+is trivially evaded via string concatenation, dynamic imports, etc. The **real
+security boundary** is Go validation of the typed output
+(`ValidateTransformOutput`), which runs AFTER the transform returns and rejects
+any malformed, invalid, or non-JSON output **LOUD** (never silent). A hard 10s
+timeout kills hung transforms. No ambient env, no secrets, no file paths, no
+`process` state reach the function — the context is a deterministic snapshot of
+the render.
+
+### Emission ordering
+
+OpenCode permission matching is **last-match-wins** (`findLast` over the
+flattened ruleset). Extra transform entries are emitted AFTER the leading
+`"*"` wildcard and AFTER the sorted command-group region, BEFORE the
+`"vh-agent-harness *"` entry — sorted length-then-locale among themselves for
+determinism. This means an extra `allow` beats the leading `*:deny` (it comes
+later), and does not interfere with the `"vh-agent-harness *"` boundary
+(project patterns do not match `vh-agent-harness ...` commands).
+
+### Dry-run / failure behavior
+
+- `update --dry-run` runs the transform and shows the changed config; writes
+  nothing.
+- `doctor` runs the same render pipeline, so a broken transform surfaces as
+  drift/FAIL identically to `update`.
+- If the transform file is absent, the render is byte-identical to the
+  no-transform path (regression guard).
+
+### Types-import pattern
+
+```js
+// .vh-agent-harness/config-transform.mjs
+import { Decision, allow, deny, ask } from "./config-transform.core.mjs";
+
+export default function transform({ context }) {
+  return {
+    permissionPatches: [
+      { agent: "build", bash: [allow("./dev.sh *")] },
+    ],
+  };
+}
+```
+
+> **SECURITY NOTE:** The transform CAN alter core-agent permissions (including
+> the build agent), because it is trusted project-owned code (not sandboxed).
+> Review every project transform as a **security policy**: a compromised
+> transform could grant arbitrary bash access to any rendered agent. The Go
+> validator (`ValidateTransformOutput`) enforces the output shape and rejects
+> protected-key collisions, but the intent (which patterns to allow) is the
+> project's responsibility. The advisory lint catches only obvious host-API
+> misuse — it is not the security boundary.
 
 ## Common tasks
 

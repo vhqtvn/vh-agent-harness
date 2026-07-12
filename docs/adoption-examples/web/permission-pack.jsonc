@@ -23,7 +23,7 @@
         "readonly": "allow",
         "git_readonly": "allow",
         "gate": "deny",
-        "devSh": "allow"
+        "harness": "allow"
       },
       "task": { "*": "deny" },
       "delegateFrom": [
@@ -37,7 +37,7 @@
         "wildcard": "ask",
         "readonly": "allow",
         "git_readonly": "allow",
-        "devSh": "allow"
+        "harness": "allow"
       },
       "task": { "*": "deny", "committer": "allow" },
       "gateExempt": true,

@@ -934,3 +934,246 @@ func TestEmit_PresentAgentFilterNoopWhenAllPresent(t *testing.T) {
 		}
 	}
 }
+
+// Test 19 (Phase 1): parseLocation accepts "harness" (preferred spelling) and
+// sets both Harness and DevSh fields to the same normalized value.
+func TestParseLocation_HarnessPreferred(t *testing.T) {
+	rule, err := parseLocation(map[string]any{
+		"wildcard": "deny", "readonly": "allow", "git_readonly": "allow",
+		"gate": "allow", "harness": "deny",
+	})
+	if err != nil {
+		t.Fatalf("parseLocation harness-only: unexpected error %v", err)
+	}
+	if rule.Harness != Deny {
+		t.Fatalf("rule.Harness = %q, want %q", rule.Harness, Deny)
+	}
+	if rule.DevSh != Deny {
+		t.Fatalf("rule.DevSh = %q, want %q (must mirror Harness)", rule.DevSh, Deny)
+	}
+}
+
+// Test 19b (Phase 1): parseLocation still accepts legacy "devSh" spelling.
+func TestParseLocation_DevShLegacy(t *testing.T) {
+	rule, err := parseLocation(map[string]any{
+		"wildcard": "deny", "readonly": "allow", "git_readonly": "allow",
+		"gate": "allow", "devSh": "allow",
+	})
+	if err != nil {
+		t.Fatalf("parseLocation devSh-only: unexpected error %v", err)
+	}
+	if rule.Harness != Allow {
+		t.Fatalf("rule.Harness = %q, want %q (must mirror DevSh)", rule.Harness, Allow)
+	}
+	if rule.DevSh != Allow {
+		t.Fatalf("rule.DevSh = %q, want %q", rule.DevSh, Allow)
+	}
+}
+
+// Test 19c (Phase 1): both harness+devSh with the SAME decision is accepted.
+func TestParseLocation_BothSameAccepted(t *testing.T) {
+	rule, err := parseLocation(map[string]any{
+		"wildcard": "deny", "readonly": "allow", "git_readonly": "allow",
+		"gate": "allow", "harness": "allow", "devSh": "allow",
+	})
+	if err != nil {
+		t.Fatalf("parseLocation both-same: unexpected error %v", err)
+	}
+	if rule.Harness != Allow || rule.DevSh != Allow {
+		t.Fatalf("both-same: Harness=%q DevSh=%q, want both allow", rule.Harness, rule.DevSh)
+	}
+}
+
+// Test 19d (Phase 1): both harness+devSh with DIFFERENT decisions is rejected.
+func TestParseLocation_BothDifferentRejected(t *testing.T) {
+	_, err := parseLocation(map[string]any{
+		"wildcard": "deny", "readonly": "allow", "git_readonly": "allow",
+		"gate": "allow", "harness": "allow", "devSh": "deny",
+	})
+	if err == nil {
+		t.Fatal("parseLocation both-different: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "different decisions") {
+		t.Fatalf("parseLocation both-different: error %q does not mention 'different decisions'", err.Error())
+	}
+}
+
+// Test 19e (Phase 1): parsePack propagates the both-different error with pack
+// and agent context.
+func TestParsePack_BothDifferentErrorContext(t *testing.T) {
+	const pack = `{
+		"agents": {
+			"my-agent": {
+				"location": { "harness": "allow", "devSh": "deny" }
+			}
+		}
+	}`
+	_, err := parsePack([]byte(pack), "test-pack")
+	if err == nil {
+		t.Fatal("parsePack both-different: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "test-pack") {
+		t.Fatalf("error %q missing pack name", err.Error())
+	}
+	if !strings.Contains(err.Error(), "my-agent") {
+		t.Fatalf("error %q missing agent name", err.Error())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2a: permission-transform (ExtraBash) emission tests.
+// ---------------------------------------------------------------------------
+
+// mustEmitExtra is the transform-aware variant of mustEmit.
+func mustEmitExtra(t *testing.T, input string, packs []Pack, features Features, extra map[string][]BashEntry) []byte {
+	t.Helper()
+	out, err := EmitWithExtra([]byte(input), packs, features, extra)
+	if err != nil {
+		t.Fatalf("EmitWithExtra failed: %v", err)
+	}
+	return out
+}
+
+// Test 20 (Phase 2a): EmitWithExtra with nil extra is byte-identical to Emit
+// (regression guard — test matrix #1).
+func TestEmitWithExtra_NilIsByteIdentical(t *testing.T) {
+	plainOut := mustEmit(t, miniConfig, nil, Features{Backlog: true})
+	extraOut := mustEmitExtra(t, miniConfig, nil, Features{Backlog: true}, nil)
+	if string(plainOut) != string(extraOut) {
+		t.Fatalf("EmitWithExtra(nil) diverges from Emit:\n--- Emit ---\n%s\n--- EmitWithExtra ---\n%s", plainOut, extraOut)
+	}
+}
+
+// Test 21 (Phase 2a): a valid extra entry appears in the named agent's bash
+// block, AFTER the command-group region, BEFORE "vh-agent-harness *" (test
+// matrix #2). Under findLast semantics the extra allow wins over "*": "deny".
+func TestEmitWithExtra_ValidEntryEmitted(t *testing.T) {
+	extra := map[string][]BashEntry{
+		"build": {{Pattern: "./dev.sh *", Decision: Allow}},
+	}
+	out := mustEmitExtra(t, miniConfig, nil, Features{}, extra)
+	var root map[string]any
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatal(err)
+	}
+	bash := root["agent"].(map[string]any)["build"].(map[string]any)["permission"].(map[string]any)["bash"].(map[string]any)
+	if bash["./dev.sh *"] != "allow" {
+		t.Fatalf(`build.bash["./dev.sh *"] = %v, want "allow"`, bash["./dev.sh *"])
+	}
+	// Raw-byte ordering: "*" < command-group region < "./dev.sh *" < "vh-agent-harness *".
+	// Search by key prefix (not value) since build's wildcard is "ask", not "deny".
+	rawOut := string(out)
+	idxStar := strings.Index(rawOut, `"*": "`)
+	idxDev := strings.Index(rawOut, `"./dev.sh *": "`)
+	idxHarness := strings.Index(rawOut, `"vh-agent-harness *": "`)
+	if idxStar < 0 || idxDev < 0 || idxHarness < 0 {
+		t.Fatalf("missing expected keys in output:\n%s", rawOut)
+	}
+	if !(idxStar < idxDev && idxDev < idxHarness) {
+		t.Fatalf("ordering: want * < ./dev.sh * < vh-agent-harness *, got star=%d dev=%d harness=%d", idxStar, idxDev, idxHarness)
+	}
+}
+
+// Test 22 (Phase 2a): targeting an unknown (non-rendered) agent fails closed
+// (test matrix #3).
+func TestEmitWithExtra_UnknownAgentFails(t *testing.T) {
+	extra := map[string][]BashEntry{
+		"nonexistent-agent": {{Pattern: "./dev.sh *", Decision: Allow}},
+	}
+	_, err := EmitWithExtra([]byte(miniConfig), nil, Features{}, extra)
+	if err == nil {
+		t.Fatal("EmitWithExtra unknown agent: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "nonexistent-agent") {
+		t.Fatalf("error %q does not name the unknown agent", err.Error())
+	}
+}
+
+// Test 23 (Phase 2a): duplicate extra pattern for the same agent fails closed
+// (test matrix #4).
+func TestEmitWithExtra_DuplicatePatternFails(t *testing.T) {
+	extra := map[string][]BashEntry{
+		"build": {
+			{Pattern: "./dev.sh *", Decision: Allow},
+			{Pattern: "./dev.sh *", Decision: Deny},
+		},
+	}
+	_, err := EmitWithExtra([]byte(miniConfig), nil, Features{}, extra)
+	if err == nil {
+		t.Fatal("EmitWithExtra duplicate pattern: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("error %q does not mention 'duplicate'", err.Error())
+	}
+}
+
+// Test 24 (Phase 2a): protected-key collision (pattern == "*") fails closed.
+func TestEmitWithExtra_ProtectedKeyCollisionFails(t *testing.T) {
+	for _, pat := range []string{"*", "vh-agent-harness *"} {
+		extra := map[string][]BashEntry{
+			"build": {{Pattern: pat, Decision: Allow}},
+		}
+		_, err := EmitWithExtra([]byte(miniConfig), nil, Features{}, extra)
+		if err == nil {
+			t.Fatalf("EmitWithExtra protected pattern %q: expected error, got nil", pat)
+		}
+		if !strings.Contains(err.Error(), "protected key") {
+			t.Fatalf("error %q does not mention 'protected key'", err.Error())
+		}
+	}
+}
+
+// Test 25 (Phase 2a): collision with a command-group command (e.g. "ls *")
+// also fails closed.
+func TestEmitWithExtra_CommandGroupCollisionFails(t *testing.T) {
+	extra := map[string][]BashEntry{
+		"build": {{Pattern: "ls *", Decision: Allow}},
+	}
+	_, err := EmitWithExtra([]byte(miniConfig), nil, Features{}, extra)
+	if err == nil {
+		t.Fatal("EmitWithExtra command-group collision: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "protected key") {
+		t.Fatalf("error %q does not mention 'protected key'", err.Error())
+	}
+}
+
+// Test 26 (Phase 2a): determinism — same transform input produces byte-identical
+// output every time (test matrix #5). Also covers extra-entries internal sort.
+func TestEmitWithExtra_Deterministic(t *testing.T) {
+	extra := map[string][]BashEntry{
+		"build": {
+			{Pattern: "zzz", Decision: Allow},
+			{Pattern: "./dev.sh *", Decision: Allow},
+			{Pattern: "aaa", Decision: Deny},
+		},
+	}
+	out1 := mustEmitExtra(t, miniConfig, nil, Features{}, extra)
+	out2 := mustEmitExtra(t, miniConfig, nil, Features{}, extra)
+	if string(out1) != string(out2) {
+		t.Fatalf("non-deterministic transform emission:\n--- run 1 ---\n%s\n--- run 2 ---\n%s", out1, out2)
+	}
+	// Verify the extra-entries internal sort (length-then-locale: aaa(3) <
+	// zzz(3) < ./dev.sh *(11) in the bash block of the output).
+	raw := string(out1)
+	idxAaa := strings.Index(raw, `"aaa": "deny"`)
+	idxDev := strings.Index(raw, `"./dev.sh *": "allow"`)
+	idxZzz := strings.Index(raw, `"zzz": "allow"`)
+	if idxAaa < 0 || idxDev < 0 || idxZzz < 0 {
+		t.Fatalf("missing extra entries in:\n%s", raw)
+	}
+	if !(idxAaa < idxZzz && idxZzz < idxDev) {
+		t.Fatalf("extra-entries sort: want aaa < zzz < ./dev.sh * (length-sort), got aaa=%d zzz=%d dev=%d", idxAaa, idxZzz, idxDev)
+	}
+}
+
+// Test 27 (Phase 2a): invalid decision value in extra entry fails closed.
+func TestEmitWithExtra_InvalidDecisionFails(t *testing.T) {
+	extra := map[string][]BashEntry{
+		"build": {{Pattern: "./dev.sh *", Decision: "bogus"}},
+	}
+	_, err := EmitWithExtra([]byte(miniConfig), nil, Features{}, extra)
+	if err == nil {
+		t.Fatal("EmitWithExtra invalid decision: expected error, got nil")
+	}
+}

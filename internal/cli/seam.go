@@ -518,7 +518,22 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 		return nil, fmt.Errorf("seam: read staged opencode.jsonc for permission emission: %w", err)
 	}
 	features := permconfig.Features{Backlog: renderAnswers["features.backlog"] == "true"}
-	emitted, err := permconfig.Emit(data, permPacks, features)
+	// Phase 2c permission transform (F-intent): if the project maintains a
+	// config-transform.mjs, invoke it via Node, validate the typed permission
+	// intent, and feed the extra bash entries to the canonical emitter. The
+	// transform runs AFTER pack materialization and BEFORE canonical emission so
+	// the emitter (sole writer of opencode.jsonc) sees the merged intent. doctor
+	// re-renders via this same pipeline so a changed/malformed transform surfaces
+	// as drift or a loud FAIL — never silent.
+	roster, err := permconfig.ExtractRoster(data)
+	if err != nil {
+		return nil, fmt.Errorf("seam: extract agent roster: %w", err)
+	}
+	extra, err := applyConfigTransform(target, data, roster, renderPacks, renderAnswers)
+	if err != nil {
+		return nil, fmt.Errorf("seam: %w", err)
+	}
+	emitted, err := permconfig.EmitWithExtra(data, permPacks, features, extra)
 	if err != nil {
 		return nil, fmt.Errorf("seam: emit canonical permissions: %w", err)
 	}

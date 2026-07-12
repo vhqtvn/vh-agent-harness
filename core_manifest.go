@@ -31,6 +31,7 @@ const (
 // (every exception below is mirrored exactly in the switch + coreExceptionsForDoc):
 //
 //   - .vh-agent-harness/vh-harness-profile.yml             -> platform_armed     (provenance "core.profile")
+//   - .vh-agent-harness/config-transform.mjs               -> project_owned      (provenance "core.transform.project")
 //   - .opencode/repo-configs/forbidden-patterns.project.js -> project_owned      (provenance "core.deny.project")
 //   - .opencode/repo-configs/repo-recon-data.yml           -> external_generated (provenance "core.repo-recon.data")
 //   - docs/planning/backlog.md, docs/planning/roadmap.md   -> project_owned      (provenance "core.planning")
@@ -106,6 +107,13 @@ func CoreOwnershipDefaults() (ownership.ModuleDefaults, error) {
 			// engine (forbidden-patterns.core.js) stays platform_managed.
 			rule.Class = ownership.ClassProjectOwned
 			rule.Provenance = "core.deny.project"
+		case ".vh-agent-harness/config-transform.mjs":
+			// Project-owned permission transform: harness seeds a blank no-op
+			// scaffold on first install, then preserves project edits forever.
+			// The types/helpers support file (config-transform.core.mjs) stays
+			// platform_managed.
+			rule.Class = ownership.ClassProjectOwned
+			rule.Provenance = "core.transform.project"
 		case ".opencode/repo-configs/repo-recon-data.yml":
 			// Project-generated recon data: harness seeds a blank skeleton on
 			// first install, then leaves it to the project's recon-generator
@@ -152,6 +160,7 @@ func CorePaths() ([]string, error) {
 // constant for reference and for tests that assert the exception surface.
 var coreExceptionsForDoc = map[string]ownership.Class{
 	".vh-agent-harness/vh-harness-profile.yml":             ownership.ClassPlatformArmed,
+	".vh-agent-harness/config-transform.mjs":               ownership.ClassProjectOwned,
 	".opencode/repo-configs/forbidden-patterns.project.js": ownership.ClassProjectOwned,
 	".opencode/repo-configs/repo-recon-data.yml":           ownership.ClassExternalGenerated,
 	// Planning docs: canonical starter seeded once, then project-owned (living backlog).

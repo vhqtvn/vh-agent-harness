@@ -4,7 +4,7 @@
 - **harness-release-readiness** — read-only release-readiness reporter for THIS
   repo (`vh-agent-harness`); orchestrator ABOVE the existing `releaser`. Leaf
   reporter; accepts no downstream delegations (`task: {"*":"deny"}`). Performs no
-  mutation (read-only evidence-gathering only; `gate: deny`, `devSh: deny`).
+  mutation (read-only evidence-gathering only; `gate: deny`, `harness: deny`).
 
 ### Inbound
 

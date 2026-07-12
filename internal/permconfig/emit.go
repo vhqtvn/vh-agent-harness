@@ -20,6 +20,10 @@ import (
 // controlled-order permission blocks via orderedMap, 4-space indent, comments
 // dropped, trailing newline).
 //
+// Emit is the no-transform path: extra is nil, so output is byte-identical to
+// pre-transform behavior. Use EmitWithExtra to merge permission-transform
+// (config-transform.mjs) output.
+//
 // Task-edge capability gating: each agent's task allowlist is filtered to the
 // agents actually present in the rendered config. When a template capability
 // gate (e.g. {{if .capabilities.gated_commit}}) hides an agent block, every
@@ -34,6 +38,23 @@ import (
 // seamApply (install/update) and doctor (drift check) call the same pipeline,
 // so doctor auto-coheres with the emitted canonical form.
 func Emit(input []byte, packs []Pack, features Features) ([]byte, error) {
+	return emitCore(input, packs, features, nil)
+}
+
+// EmitWithExtra is the transform-aware entry point. It behaves exactly like Emit
+// but additionally merges extra bash entries (from the validated permission-
+// transform output) into the named agents' bash blocks. Each agent in extra must
+// be present in the rendered config (fail-closed otherwise). The extra entries
+// are validated for non-empty patterns, valid decisions, no duplicates, and no
+// protected-key collisions before emission.
+func EmitWithExtra(input []byte, packs []Pack, features Features, extra map[string][]BashEntry) ([]byte, error) {
+	return emitCore(input, packs, features, extra)
+}
+
+// emitCore is the shared pipeline for Emit (no transform) and EmitWithExtra
+// (transform active). When extra is nil or empty, output is byte-identical to
+// the pre-transform Emit — this is the regression guarantee (test matrix #1).
+func emitCore(input []byte, packs []Pack, features Features, extra map[string][]BashEntry) ([]byte, error) {
 	root, err := jsonc.Parse(input)
 	if err != nil {
 		return nil, fmt.Errorf("permconfig: parse opencode.jsonc: %w", err)
@@ -42,6 +63,19 @@ func Emit(input []byte, packs []Pack, features Features) ([]byte, error) {
 	// Resolve the active rule set: deep-copy core tables, merge overlay packs
 	// (overlay agent location/task rules, gateExempt, delegateFrom edges).
 	locations, tasks, gateExempt := resolveRules(packs)
+
+	// Compute the set of agents actually present in the rendered config. The
+	// transform may only target rendered agents; targeting a non-rendered agent
+	// (capability-gated out, or unknown) is a hard error.
+	agents, _ := root["agent"].(map[string]any)
+	present := make(map[string]bool, len(agents))
+	for name := range agents {
+		present[name] = true
+	}
+
+	if err := mergeExtraBash(locations, present, extra); err != nil {
+		return nil, fmt.Errorf("permconfig: %w", err)
+	}
 
 	if err := validate(locations, tasks, gateExempt); err != nil {
 		return nil, fmt.Errorf("permconfig: %w", err)
@@ -62,18 +96,8 @@ func Emit(input []byte, packs []Pack, features Features) ([]byte, error) {
 		}
 	}
 
-	// present is the set of agents that have a block in the rendered config.
-	// Task edges to absent agents — gated out of the template by a capability
-	// gate (e.g. committer when core/gated-commit is unselected) — are dropped
-	// from every orchestrator's task allowlist below. This keeps permconfig.Emit
-	// coherent with the template: no agent may delegate to an agent that isn't
-	// there. See Phase 3 capability gating in internal/cli/profile.go
-	// (resolveCapabilityAnswers) and the cluster gates in opencode.jsonc.tmpl.
-	agents, _ := root["agent"].(map[string]any)
-	present := make(map[string]bool, len(agents))
-	for name := range agents {
-		present[name] = true
-	}
+	// present was already computed above for the transform-merge check. It is
+	// reused below for the task-edge capability-gating filter.
 
 	// Overwrite each agent's permission.bash and permission.task blocks.
 	// Iteration order over the Go map is irrelevant — json.MarshalIndent sorts
@@ -112,6 +136,30 @@ func Emit(input []byte, packs []Pack, features Features) ([]byte, error) {
 	return append(out, '\n'), nil
 }
 
+// mergeExtraBash folds validated transform-contributed extra bash entries into
+// the resolved location rules. Each agent named in extra must be present in the
+// rendered config (present[agent]==true); targeting a non-rendered agent is a
+// hard error (fail-closed). Structural validation of the entries themselves
+// (non-empty pattern, valid decision, no duplicates, no protected-key
+// collisions) happens in validate, which runs after this merge.
+func mergeExtraBash(locations map[string]LocationRule, present map[string]bool, extra map[string][]BashEntry) error {
+	for agentName, entries := range extra {
+		if len(entries) == 0 {
+			continue
+		}
+		if !present[agentName] {
+			return fmt.Errorf("transform targets agent %q which is not in the rendered roster", agentName)
+		}
+		loc, ok := locations[agentName]
+		if !ok {
+			return fmt.Errorf("transform targets agent %q which has no location rule", agentName)
+		}
+		loc.ExtraBash = entries
+		locations[agentName] = loc
+	}
+	return nil
+}
+
 // resolveRules deep-copies the core tables and merges overlay pack
 // contributions: overlay agent location/task rules replace core entries (or
 // add new agents), gateExempt flags extend the base set, and delegateFrom
@@ -121,6 +169,12 @@ func Emit(input []byte, packs []Pack, features Features) ([]byte, error) {
 func resolveRules(packs []Pack) (locations map[string]LocationRule, tasks map[string][]TaskEntry, gateExempt map[string]bool) {
 	locations = make(map[string]LocationRule, len(CoreLocationRules))
 	for k, v := range CoreLocationRules {
+		// Core tables use the DevSh field directly. Mirror it into Harness so
+		// the invariant "Harness and DevSh carry the same normalized value"
+		// holds for core-table-sourced rules as well as parsed packs.
+		if v.Harness == "" && v.DevSh != "" {
+			v.Harness = v.DevSh
+		}
 		locations[k] = v // LocationRule is a value type; no deep copy needed
 	}
 
@@ -177,7 +231,13 @@ func resolveRules(packs []Pack) (locations map[string]LocationRule, tasks map[st
 //     ALL sorted by length-ascending then byte-locale. The backlog entry (if
 //     enabled and this is the top-level "default" location) participates in
 //     this same sort.
-//  3. "vh-agent-harness *" (devSh decision) — always LAST.
+//  3. Transform-contributed extra entries (rule.ExtraBash), sorted
+//     length-then-locale. These are merged AFTER the command-group region so
+//     that an extra allow (e.g. "./dev.sh *") wins over the leading "*": "deny"
+//     under OpenCode's findLast (last-match-wins) semantics. Protected-key
+//     collisions with "*", command-group commands, or "vh-agent-harness *" are
+//     rejected at validate time.
+//  4. "vh-agent-harness *" (devSh decision) — always LAST.
 func computeBashBlock(rule LocationRule, locationName string, features Features) *orderedMap {
 	om := newOrderedMap()
 	om.set("*", string(rule.Wildcard))
@@ -220,6 +280,25 @@ func computeBashBlock(rule LocationRule, locationName string, features Features)
 
 	for _, e := range entries {
 		om.set(e.cmd, e.decision)
+	}
+
+	// Merge transform-contributed extra entries (region 3): AFTER the
+	// command-group sort, BEFORE the devSh entry. Same length-then-locale sort
+	// for determinism. Protected-key and duplicate validation is in validate.
+	if len(rule.ExtraBash) > 0 {
+		extra := make([]cmdEntry, 0, len(rule.ExtraBash))
+		for _, e := range rule.ExtraBash {
+			extra = append(extra, cmdEntry{e.Pattern, string(e.Decision)})
+		}
+		sort.Slice(extra, func(i, j int) bool {
+			if len(extra[i].cmd) != len(extra[j].cmd) {
+				return len(extra[i].cmd) < len(extra[j].cmd)
+			}
+			return extra[i].cmd < extra[j].cmd
+		})
+		for _, e := range extra {
+			om.set(e.cmd, e.decision)
+		}
 	}
 
 	om.set(DevShCommand, string(rule.DevSh))
@@ -290,6 +369,50 @@ func computeTaskBlock(rule []TaskEntry, present map[string]bool) *orderedMap {
 	return om
 }
 
+// protectedBashKeys returns the set of bash-block keys that the transform's
+// extra entries may NEVER collide with: the "*" wildcard, every command-group
+// command (readonly + git_readonly + gate), the backlog command, and the fixed
+// "vh-agent-harness *" devSh entry. Colliding with any of these would either
+// shadow a canonical entry or corrupt the "vh-agent-harness *"-last boundary.
+func protectedBashKeys() map[string]bool {
+	protected := map[string]bool{"*": true, DevShCommand: true, BacklogCommand: true}
+	for _, group := range CommandGroups {
+		for _, cmd := range group.Commands {
+			protected[cmd] = true
+		}
+	}
+	return protected
+}
+
+// validateExtraBash checks transform-contributed extra bash entries for one
+// agent: each pattern must be non-empty, each decision a valid enum value, no
+// duplicate patterns within the agent's set, and no collision with a protected
+// key (the wildcard, command-group commands, the backlog command, or the
+// devSh entry). All checks are fail-closed.
+func validateExtraBash(agentName string, entries []BashEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	protected := protectedBashKeys()
+	seen := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if e.Pattern == "" {
+			return fmt.Errorf("agent %q: extra bash entry has empty pattern", agentName)
+		}
+		if !validDecision(e.Decision) {
+			return fmt.Errorf("agent %q: extra bash entry %q decision %q invalid", agentName, e.Pattern, e.Decision)
+		}
+		if seen[e.Pattern] {
+			return fmt.Errorf("agent %q: duplicate extra bash pattern %q", agentName, e.Pattern)
+		}
+		if protected[e.Pattern] {
+			return fmt.Errorf("agent %q: extra bash pattern %q collides with a protected key (wildcard, command group, backlog, or vh-agent-harness entry)", agentName, e.Pattern)
+		}
+		seen[e.Pattern] = true
+	}
+	return nil
+}
+
 // validate ports the legacy resolver's validateRules() contract:
 //
 //   - Every location rule has valid wildcard/devSh/readonly/git_readonly decisions.
@@ -330,6 +453,10 @@ func validate(locations map[string]LocationRule, tasks map[string][]TaskEntry, g
 			if !validDecision(rule.Gate) {
 				return fmt.Errorf("agent %q: gate decision %q invalid", name, rule.Gate)
 			}
+		}
+		// Transform-contributed ExtraBash validation.
+		if err := validateExtraBash(name, rule.ExtraBash); err != nil {
+			return err
 		}
 	}
 
@@ -492,7 +619,11 @@ func parsePack(data []byte, name string) (Pack, error) {
 		}
 		var agent PackAgent
 		if loc, ok := agentMap["location"].(map[string]any); ok {
-			agent.Location = parseLocation(loc)
+			rule, err := parseLocation(loc)
+			if err != nil {
+				return Pack{}, fmt.Errorf("pack %q agent %q: %w", name, agentName, err)
+			}
+			agent.Location = rule
 		}
 		if task, ok := agentMap["task"].(map[string]any); ok {
 			agent.Task = parseTaskEntries(task)
@@ -513,10 +644,17 @@ func parsePack(data []byte, name string) (Pack, error) {
 }
 
 // parseLocation converts a JSON object with wildcard/readonly/git_readonly/
-// gate/devSh keys into a LocationRule. The gate key is optional: its absence
-// means HasGate=false (the agent is gate-exempt or the pack author chose to
-// omit it).
-func parseLocation(m map[string]any) LocationRule {
+// gate/harness/devSh keys into a LocationRule. The gate key is optional: its
+// absence means HasGate=false (the agent is gate-exempt or the pack author
+// chose to omit it).
+//
+// "harness" (PREFERRED) and "devSh" (DEPRECATED alias) both set the fixed
+// "vh-agent-harness *" decision. If BOTH are present they must carry the SAME
+// decision; specifying both with different decisions is a hard error (a
+// confused pack is rejected rather than silently picking one). The normalized
+// value is stored in both rule.Harness and rule.DevSh so emission (which reads
+// rule.DevSh) and validation stay unchanged.
+func parseLocation(m map[string]any) (LocationRule, error) {
 	rule := LocationRule{}
 	if v, ok := m["wildcard"].(string); ok {
 		rule.Wildcard = Decision(v)
@@ -531,8 +669,24 @@ func parseLocation(m map[string]any) LocationRule {
 		rule.Gate = Decision(v)
 		rule.HasGate = true
 	}
-	if v, ok := m["devSh"].(string); ok {
-		rule.DevSh = Decision(v)
+	// Read the fixed "vh-agent-harness *" decision from the preferred "harness"
+	// key and the deprecated "devSh" alias. If both are present they must agree.
+	harnessRaw, hasHarness := m["harness"].(string)
+	devShRaw, hasDevSh := m["devSh"].(string)
+	if hasHarness && hasDevSh {
+		if harnessRaw != devShRaw {
+			return LocationRule{}, fmt.Errorf(
+				"location: 'harness' (%q) and 'devSh' (%q) both specified with different decisions — "+
+					"use 'harness' only (devSh is deprecated), or specify both with the same decision",
+				harnessRaw, devShRaw)
+		}
+	}
+	if hasHarness {
+		rule.Harness = Decision(harnessRaw)
+		rule.DevSh = Decision(harnessRaw)
+	} else if hasDevSh {
+		rule.Harness = Decision(devShRaw)
+		rule.DevSh = Decision(devShRaw)
 	}
 	if v, ok := m["edit"].(string); ok {
 		rule.Edit = Decision(v)
@@ -558,7 +712,7 @@ func parseLocation(m map[string]any) LocationRule {
 			}
 		}
 	}
-	return rule
+	return rule, nil
 }
 
 // parseTaskEntries converts a JSON object (target→decision) into an

@@ -51,14 +51,37 @@ func validDecision(d Decision) bool {
 // how the committer gets Write access to ONE scoped message-file path
 // (tmp/commit-gate-message/**) while edit stays denied everywhere else.
 type LocationRule struct {
-	Wildcard      Decision   // "*" entry
-	Readonly      Decision   // readonly group decision
-	GitReadonly   Decision   // git_readonly group decision
-	Gate          Decision   // gate group decision (only emitted when HasGate)
-	HasGate       bool       // whether the gate key is present
-	DevSh         Decision   // "vh-agent-harness *" entry
+	Wildcard    Decision // "*" entry
+	Readonly    Decision // readonly group decision
+	GitReadonly Decision // git_readonly group decision
+	Gate        Decision // gate group decision (only emitted when HasGate)
+	HasGate     bool     // whether the gate key is present
+	// Harness is the preferred spelling for the fixed "vh-agent-harness *"
+	// entry (the vh-agent-harness binary's own decision). It mirrors DevSh for
+	// backward compatibility: permission-pack.jsonc may use either "harness"
+	// (preferred) or "devSh" (deprecated alias); both must agree if present.
+	// At emit time Harness and DevSh carry the same normalized value.
+	Harness       Decision
+	DevSh         Decision   // "vh-agent-harness *" entry (DEPRECATED input alias; mirrors Harness)
 	Edit          Decision   // flat edit decision; also the "*" action when EditOverrides is non-empty
 	EditOverrides []EditRule // when non-empty, edit is emitted as an object map (deny-* first, overrides last)
+	// ExtraBash holds transform-contributed extra bash entries merged into this
+	// agent's bash block AFTER the command-group region and BEFORE the
+	// "vh-agent-harness *" entry. Populated by EmitWithExtra from validated
+	// transform output; nil when no transform is active. OpenCode uses findLast
+	// (last-match-wins), so an extra allow placed after "*": "deny" wins.
+	ExtraBash []BashEntry
+}
+
+// BashEntry is one extra pattern→decision pair contributed by the permission
+// transform (config-transform.mjs) for a specific agent. These are merged into
+// the agent's bash block AFTER the command-group sort region and BEFORE the
+// fixed "vh-agent-harness *" entry, sorted by length-then-locale for
+// determinism. Protected-key collisions (with "*", command-group commands, or
+// "vh-agent-harness *") and duplicate patterns are rejected at validate time.
+type BashEntry struct {
+	Pattern  string
+	Decision Decision
 }
 
 // EditRule is one pattern→decision pair in an agent's object-form edit block.

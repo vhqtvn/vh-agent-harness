@@ -457,7 +457,7 @@ func buildPermissionPack(pack, agentName string) string {
 	fmt.Fprintf(&sb, "        \"wildcard\": \"ask\",\n")
 	fmt.Fprintf(&sb, "        \"readonly\": \"allow\",\n")
 	fmt.Fprintf(&sb, "        \"git_readonly\": \"allow\",\n")
-	fmt.Fprintf(&sb, "        \"devSh\": \"allow\"\n")
+	fmt.Fprintf(&sb, "        \"harness\": \"allow\"\n")
 	fmt.Fprintf(&sb, "      },\n")
 	fmt.Fprintf(&sb, "      \"task\": { \"*\": \"deny\", \"committer\": \"allow\" },\n")
 	fmt.Fprintf(&sb, "      \"gateExempt\": true,\n")

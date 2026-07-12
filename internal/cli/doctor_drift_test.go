@@ -83,6 +83,14 @@ func findLiveDefaultNonManagedPath(t *testing.T, root string) string {
 		if rule.Class != ownership.ClassProjectOwned {
 			continue
 		}
+		// Exclude project_owned files that ARE read as render inputs —
+		// corrupting those would break the re-render itself, surfacing an
+		// orthogonal error rather than exercising the F3 skip path. The
+		// permission transform (config-transform.mjs) is read by
+		// applyConfigTransform inside renderSeamStaging.
+		if p == ".vh-agent-harness/config-transform.mjs" {
+			continue
+		}
 		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(p))); err == nil {
 			return p
 		}

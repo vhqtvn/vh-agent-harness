@@ -8,13 +8,46 @@
 // in that directory DYNAMICALLY (by directory listing, never by hardcoded pack
 // name) to resolve the active agent roster inside `vh-agent-harness update`.
 //
+// This file is CANONICAL EMITTER INPUT, not a post-render patch. The emitter
+// (permconfig.Emit) regenerates EVERY agent's permission.bash/task/edit blocks
+// from the `location` descriptor below; entries placed in opencode-append.jsonc
+// bash blocks are discarded. Single source of truth.
+//
 // Per-agent fields:
-//   location     -> permission.bash location decisions for the agent
+//   location     -> permission.bash location decisions for the agent (see below)
 //   task         -> permission.task allowlist for the agent
 //   gateExempt   -> true registers the agent as a committer-delegator that must
 //                   omit a `gate` decision
 //   delegateFrom -> core orchestrators whose task allowlist gets an auto-
 //                   injected allow entry for this agent while the pack is active
+//
+// `location` sub-keys (each value is a decision: "allow" | "deny" | "ask"):
+//   wildcard     REQUIRED. Decision for the leading "*" (catch-all) entry.
+//   readonly     REQUIRED. Decision for the read-only command group
+//                (ls/find/grep/cat/jq/git log/... etc.). Emitted after "*".
+//   git_readonly REQUIRED. Decision for the read-only Git verb group
+//                (git status/diff/show/rev-parse/... etc.).
+//   gate         REQUIRED unless `gateExempt: true`. Decision for the
+//                gated-commit command group (commit-gate.sh subcommands, git
+//                add/commit/push/reset/checkout/... etc.). Gate-exempt agents
+//                (build, coordination, project-coordinator, docs-steward,
+//                releaser) MUST omit this key so OpenCode's
+//                deriveSubagentSessionPermission does not bleed a parent gate
+//                deny into a delegated committer session.
+//   harness      PREFERRED. Decision for the fixed "vh-agent-harness *" entry
+//                (the vh-agent-harness binary's own invocation decision).
+//                NOTE: "harness" refers to the `"vh-agent-harness *"` permission
+//                decision — it does NOT refer to a consuming project's
+//                ./dev.sh script. Emitted LAST in the bash block.
+//   devSh        DEPRECATED alias for `harness`. If both are specified they must
+//                carry the SAME decision; specifying both with different
+//                decisions is a hard error. Prefer `harness`.
+//   edit         OPTIONAL, defaults to "deny". Flat edit-tool decision for the
+//                agent. Override with editOverrides for scoped write access.
+//   editOverrides OPTIONAL. Object of { "<glob>": "<decision>" } emitted after
+//                the broad edit decision, before the universal tmp/** carve-out.
+//                Use findLast semantics: a narrow allow override beats a broad
+//                deny.
 //
 // If you omit this file entirely, declare the agent + task allow-injections in
 // opencode-append.jsonc instead (the minimal path).
@@ -22,10 +55,13 @@
   "agents": {
     "<name>": {
       "location": {
-        "wildcard": "ask",
-        "readonly": "allow",
-        "git_readonly": "allow",
-        "devSh": "allow"
+        "wildcard": "ask",       // REQUIRED — leading "*" catch-all
+        "readonly": "allow",      // REQUIRED — read-only command group
+        "git_readonly": "allow",  // REQUIRED — read-only Git verb group
+        "harness": "allow",       // PREFERRED — fixed "vh-agent-harness *" decision
+        // "gate": "allow",       // REQUIRED unless gateExempt:true — gated-commit group
+        "edit": "deny"            // OPTIONAL (default deny) — flat edit-tool decision
+        // "editOverrides": { "tmp/scoped/**": "allow" }  // OPTIONAL — scoped overrides
       },
       "task": { "*": "deny", "committer": "allow" },
       "gateExempt": true,

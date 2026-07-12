@@ -491,8 +491,8 @@ func TestOverlayNew_PermissionPackIsValidForActiveAgent(t *testing.T) {
 			"(gate deny bleeds into committer subagent)\". Omit gate for gateExempt agents.")
 	}
 	// And the required non-gate command-group decisions must all be present +
-	// valid (wildcard/readonly/git_readonly/devSh), mirroring validateRules.
-	for _, key := range []string{"wildcard", "readonly", "git_readonly", "devSh"} {
+	// valid (wildcard/readonly/git_readonly/harness), mirroring validateRules.
+	for _, key := range []string{"wildcard", "readonly", "git_readonly", "harness"} {
 		v, has := loc[key]
 		if !has {
 			t.Errorf("agents.foo.location missing required key %q", key)

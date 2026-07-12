@@ -64,13 +64,13 @@ const harnessDogfoodAppendJSONC = `{
 `
 
 // harnessDogfoodPermissionPackJSONC mirrors the real pack's permission-pack.jsonc
-// (readonly + git_readonly allow, gate deny, devSh deny, task {"*":"deny"},
+// (readonly + git_readonly allow, gate deny, harness deny, task {"*":"deny"},
 // delegateFrom the three orchestrators, NO gateExempt — satisfies the validate
 // rule: gate key present + no gateExempt).
 const harnessDogfoodPermissionPackJSONC = `{
   "agents": {
     "harness-release-readiness": {
-      "location": { "wildcard": "deny", "readonly": "allow", "git_readonly": "allow", "gate": "deny", "devSh": "deny" },
+      "location": { "wildcard": "deny", "readonly": "allow", "git_readonly": "allow", "gate": "deny", "harness": "deny" },
       "task": { "*": "deny" },
       "delegateFrom": ["build", "coordination", "project-coordinator"]
     }

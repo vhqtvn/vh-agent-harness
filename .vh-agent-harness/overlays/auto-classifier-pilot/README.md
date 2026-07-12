@@ -155,7 +155,7 @@ Concretely:
 | Layer | Where | Toggleable? | Speed | Role |
 |---|---|---|---|---|
 | **shell-guard** (blocklist) | `tool.execute.before` hook | **No — always on, hard floor** for every adopter | instant (static pattern match) | absorbs the obvious-bad volume; circuit-breaks before any LLM cost |
-| **permission-pack** (table: readonly / git_read_only / gate / devSh) | OpenCode permission config | yes — per-overlay | instant (table lookup) | routes calls to allow (fast-path) / deny / ask |
+| **permission-pack** (table: readonly / git_read_only / gate / harness) | OpenCode permission config | yes — per-overlay | instant (table lookup) | routes calls to allow (fast-path) / deny / ask |
 | **auto-classifier** (LLM) | `permission.asked` event hook | **opt-in** (overlay selected + `enabled` / `mode` set) | slow (HTTP to the classifier model) | residual judge for the grey middle that survives Stage 1 + the table's `ask` |
 
 #### Key invariants
