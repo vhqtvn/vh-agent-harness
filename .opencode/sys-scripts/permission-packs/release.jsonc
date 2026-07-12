@@ -13,7 +13,7 @@
   //     mutations are (a) ONE narrow task delegation to `committer` (the
   //     migration-note commit — the committer, NOT the releaser, runs the
   //     gated-commit message-as-file protocol and holds the gate), and (b) the
-  //     single release-tag wrapper invocation via the devSh:allow group
+  //     single release-tag wrapper invocation via the harness:allow group
   //     (vh-agent-harness exec <wrapper>). The wrapper is tag-only; it never
   //     stages or commits the migration note. The releaser itself never runs
   //     commit-gate.sh — its bash block carries NONE of the commit-gate.sh
@@ -37,7 +37,7 @@
   //     orchestrators may delegate a release task to the releaser.
   "agents": {
     "releaser": {
-      "location": { "wildcard": "deny", "readonly": "allow", "git_readonly": "allow", "devSh": "allow" },
+      "location": { "wildcard": "deny", "readonly": "allow", "git_readonly": "allow", "harness": "allow" },
       "task": { "*": "deny", "committer": "allow" },
       "gateExempt": true,
       "delegateFrom": ["build", "coordination", "project-coordinator"]
