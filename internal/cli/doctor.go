@@ -789,10 +789,16 @@ func (f autoGateFile) label() string {
 // enums), NOT the coerce/normalize logic (e.g. _normNonNegInt accepting a
 // numeric string is a JS normalize concern; doctor treats a non-number as a
 // wrong-type FAIL). A future JS schema change (field added/removed/retyped or an
-// enum widened) MUST be mirrored in the known sets / validators below and in the
-// pinning tests (TestAutoGateConfig_PluginKnownFieldsPinned /
-// TestAutoGateConfig_LlmKnownFieldsPinned); the header comment + those tests are
-// the cross-reference so a JS schema change visibly breaks the Go test.
+// enum widened) MUST be mirrored in the known-field slices (autoGatePlugin/
+// LlmKnownFields — the unknown-field WARN source of truth) + the per-field
+// switch cases below, AND in the pinning tests (TestAutoGateConfig_Plugin/
+// LlmKnownFieldsPinned). The SELF-ENFORCING drift contract is
+// TestAutoGateConfig_SchemaParityWithJSSource, which parses the live JS source
+// (DEFAULT_PLUGIN_CONFIG / DEFAULT_LLM_CONFIG) and fails if its top-level field
+// set diverges from the Go known-field slices — so a JS schema change that
+// forgets Go breaks the parity test rather than silently WARN-ing on a valid
+// new field. The header comment + those tests are the cross-reference so a JS
+// schema change visibly breaks the Go test.
 //
 // XDG parity: Go's os.UserConfigDir() returns $XDG_CONFIG_HOME (if non-empty)
 // else $HOME/.config on Unix — matching the JS userConfigDir()
@@ -893,11 +899,27 @@ func validateAutoGateFile(kind string, doc map[string]any) (fails, warns []strin
 	return validateAutoGatePluginConfig(doc)
 }
 
+// autoGatePluginKnownFields is the top-level field set the plugin-config
+// validator accepts — the SCHEMA ENVELOPE of DEFAULT_PLUGIN_CONFIG in
+// auto-tool-gate.js. It is the single source of truth for the unknown-field
+// (WARN) detection; the per-field type/enum rules live in the switch below.
+// TestAutoGateConfig_SchemaParityWithJSSource pins this slice against the live
+// JS source so a JS schema change that forgets to update Go fails the parity
+// test rather than silently WARN-ing on a valid new field.
+var autoGatePluginKnownFields = []string{
+	"enabled", "mode", "stubVerdict", "promptFile",
+	"replyMode", "onUncertain", "harnessContext", "guides",
+}
+
 // validateAutoGatePluginConfig lints the field set + types + enums of a parsed
 // auto-gate-config.json object (the SCHEMA ENVELOPE only). See the DRIFT
 // CONTRACT on checkAutoGateConfig.
 func validateAutoGatePluginConfig(doc map[string]any) (fails, warns []string) {
 	for k, v := range doc {
+		if !slices.Contains(autoGatePluginKnownFields, k) {
+			warns = append(warns, fmt.Sprintf("unknown field %q", k))
+			continue
+		}
 		switch k {
 		case "enabled", "harnessContext", "guides":
 			if _, ok := v.(bool); !ok {
@@ -939,11 +961,20 @@ func validateAutoGatePluginConfig(doc map[string]any) (fails, warns []string) {
 			} else {
 				fails = append(fails, fmt.Sprintf("%s: wrong type %s (want string)", k, jsonTypeName(v)))
 			}
-		default:
-			warns = append(warns, fmt.Sprintf("unknown field %q", k))
 		}
 	}
 	return fails, warns
+}
+
+// autoGateLlmKnownFields is the top-level field set the LLM-config validator
+// accepts — the SCHEMA ENVELOPE of DEFAULT_LLM_CONFIG in auto-tool-gate.js. It
+// is the single source of truth for the unknown-field (WARN) detection; the
+// per-field type/range rules live in the switch below.
+// TestAutoGateConfig_SchemaParityWithJSSource pins this slice against the live
+// JS source (see autoGatePluginKnownFields for the full rationale).
+var autoGateLlmKnownFields = []string{
+	"modelEndpoint", "modelEndpointEnv", "model", "apiKey", "apiKeyEnv",
+	"timeoutMs", "maxRetries", "retryDelayMs", "leaves",
 }
 
 // validateAutoGateLlmConfig lints the field set + types + ranges of a parsed
@@ -952,6 +983,10 @@ func validateAutoGatePluginConfig(doc map[string]any) (fails, warns []string) {
 // be a JSON object (non-object → WARN); leaf field types are NOT deep-recurse'd.
 func validateAutoGateLlmConfig(doc map[string]any) (fails, warns []string) {
 	for k, v := range doc {
+		if !slices.Contains(autoGateLlmKnownFields, k) {
+			warns = append(warns, fmt.Sprintf("unknown field %q", k))
+			continue
+		}
 		switch k {
 		case "modelEndpoint", "modelEndpointEnv", "model", "apiKey", "apiKeyEnv":
 			if _, ok := v.(string); !ok {
@@ -982,8 +1017,6 @@ func validateAutoGateLlmConfig(doc map[string]any) (fails, warns []string) {
 					warns = append(warns, fmt.Sprintf("%s[%d]: not a JSON object (want object)", k, i))
 				}
 			}
-		default:
-			warns = append(warns, fmt.Sprintf("unknown field %q", k))
 		}
 	}
 	return fails, warns

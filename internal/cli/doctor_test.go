@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -505,6 +507,116 @@ func TestAutoGateConfig_LlmKnownFieldsPinned(t *testing.T) {
 	r := checkAutoGateConfig(dir)
 	if r.tier != tierPass {
 		t.Fatalf("all known llm fields valid should PASS; got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_SchemaParityWithJSSource is the SELF-ENFORCING drift
+// contract between the Go doctor schema envelope and the live JS source of
+// truth (.vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-tool-gate.js).
+// It parses DEFAULT_PLUGIN_CONFIG and DEFAULT_LLM_CONFIG out of the JS file and
+// asserts their top-level field sets equal the Go known-field slices
+// (autoGatePluginKnownFields / autoGateLlmKnownFields). If a future slice adds a
+// field to the JS and forgets the Go envelope, this test fails with a diff
+// naming the added/removed fields — instead of doctor silently WARN-ing on the
+// new valid field (the gap the existing Plugin/LlmKnownFieldsPinned tests could
+// not catch, since they pin a hardcoded set). The pinned tests are retained as
+// belt-and-suspenders: they additionally prove a VALID config end-to-end PASSES
+// through checkAutoGateConfig (this test only proves the field SET matches).
+func TestAutoGateConfig_SchemaParityWithJSSource(t *testing.T) {
+	// Reuse the package's existing findModuleRoot (walks up from the test cwd to
+	// go.mod) — the cli test binary runs from internal/cli/, so the JS overlay
+	// path is only repo-relative once the module root is resolved.
+	repoRoot := findModuleRoot(t)
+	jsPath := filepath.Join(repoRoot, ".vh-agent-harness", "overlays",
+		"auto-classifier-pilot", "plugins", "auto-tool-gate.js")
+	js, err := os.ReadFile(jsPath)
+	if err != nil {
+		t.Fatalf("read JS source of truth %s: %v\n"+
+			"(the parity test requires the auto-tool-gate.js overlay unit to exist "+
+			"at its repo-relative path)", jsPath, err)
+	}
+
+	t.Run("plugin_config", func(t *testing.T) {
+		jsFields, err := extractDefaultConfigFields(js, "DEFAULT_PLUGIN_CONFIG")
+		if err != nil {
+			t.Fatalf("extract DEFAULT_PLUGIN_CONFIG fields: %v", err)
+		}
+		assertSchemaParity(t, jsFields, autoGatePluginKnownFields, "plugin")
+	})
+	t.Run("llm_config", func(t *testing.T) {
+		jsFields, err := extractDefaultConfigFields(js, "DEFAULT_LLM_CONFIG")
+		if err != nil {
+			t.Fatalf("extract DEFAULT_LLM_CONFIG fields: %v", err)
+		}
+		assertSchemaParity(t, jsFields, autoGateLlmKnownFields, "llm")
+	})
+}
+
+// extractDefaultConfigFields parses the top-level field names out of a
+// `const <blockName> = Object.freeze({ ... });` block in the JS source. It
+// captures the identifier at the start of each indented `<ident>:` line inside
+// the block and stops at the closing `});`. Nested fields (e.g. entries inside
+// `leaves: []`) are intentionally ignored — only the top-level envelope is the
+// schema contract. Inline trailing comments after the value are harmless (the
+// regex matches only the leading identifier). Returns the fields in source
+// order; callers sort before comparing.
+func extractDefaultConfigFields(js []byte, blockName string) ([]string, error) {
+	marker := regexp.MustCompile(regexp.QuoteMeta(blockName) + `\s*=\s*Object\.freeze\(\s*\{`)
+	loc := marker.FindIndex(js)
+	if loc == nil {
+		return nil, fmt.Errorf("marker %q = Object.freeze({ not found in JS source", blockName)
+	}
+	body := string(js[loc[1]:])
+	fieldRe := regexp.MustCompile(`^[ \t]+([A-Za-z_$][A-Za-z0-9_$]*):`)
+	closeRe := regexp.MustCompile(`^[ \t]*\}\s*\)\s*;`)
+	var fields []string
+	for _, line := range strings.Split(body, "\n") {
+		if closeRe.MatchString(line) {
+			break
+		}
+		if m := fieldRe.FindStringSubmatch(line); m != nil {
+			fields = append(fields, m[1])
+		}
+	}
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("no top-level fields parsed from %q block (marker matched but body empty?)", blockName)
+	}
+	return fields, nil
+}
+
+// assertSchemaParity compares the JS-extracted field set against the Go known
+// field slice and fails with a diff naming the JS-only and Go-only fields, so
+// the fix (add the new JS field to the Go slice, or drop a stale Go field) is
+// obvious from the failure message.
+func assertSchemaParity(t *testing.T, jsFields, goFields []string, label string) {
+	t.Helper()
+	jsSet := make(map[string]bool, len(jsFields))
+	for _, f := range jsFields {
+		jsSet[f] = true
+	}
+	goSet := make(map[string]bool, len(goFields))
+	for _, f := range goFields {
+		goSet[f] = true
+	}
+	var jsOnly, goOnly []string
+	for f := range jsSet {
+		if !goSet[f] {
+			jsOnly = append(jsOnly, f)
+		}
+	}
+	for f := range goSet {
+		if !jsSet[f] {
+			goOnly = append(goOnly, f)
+		}
+	}
+	sort.Strings(jsOnly)
+	sort.Strings(goOnly)
+	if len(jsOnly) > 0 || len(goOnly) > 0 {
+		t.Errorf("%s schema drifted from JS source of truth "+
+			"(auto-tool-gate.js DEFAULT_%s_CONFIG): "+
+			"JS-only (add to Go autoGate...KnownFields) = %v; "+
+			"Go-only (remove stale field or add to JS) = %v",
+			label, strings.ToUpper(label[:1])+label[1:], jsOnly, goOnly)
 	}
 }
 

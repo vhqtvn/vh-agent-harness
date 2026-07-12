@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	corpus "github.com/vhqtvn/vh-agent-harness"
 	"github.com/vhqtvn/vh-agent-harness/internal/resolver"
@@ -120,10 +121,12 @@ func OpenPackFor(target, name string) (*Pack, error) {
 }
 
 // isUnitFile reports whether a pack-relative path is a renderable unit (i.e. not
-// one of the merge-content / catalog files that live at the pack root, and not a
-// prompt-extension snippet whose name matches <base>.extend.<slot>.<ext>).
-// Extension snippets are render-time injection material (see ExtensionSnippets),
-// never standalone units.
+// one of the merge-content / catalog files that live at the pack root, not a
+// prompt-extension snippet whose name matches <base>.extend.<slot>.<ext>, and
+// not a pack-documentation file like README.md / LICENSE). Extension snippets are
+// render-time injection material (see ExtensionSnippets), never standalone units.
+// Pack docs describe the pack for adopters, not the consumer's .opencode/
+// runtime, so they are excluded too (see isPackDocFile).
 func isUnitFile(rel string) bool {
 	switch rel {
 	case appendFileName, snippetFileName, permissionPackFileName, capabilityManifestFileName:
@@ -132,7 +135,33 @@ func isUnitFile(rel string) bool {
 	if isExtensionSnippet(rel) {
 		return false
 	}
+	if isPackDocFile(rel) {
+		return false
+	}
 	return true
+}
+
+// packDocBaseNames are pack-documentation file BASE NAMES (already lowercased)
+// that describe the pack itself (not the consumer's .opencode/ runtime tree) and
+// are therefore NEVER renderable units. A pack-root README.md otherwise pollutes
+// <target>/.opencode/README.md on every vh-agent-harness update.
+var packDocBaseNames = map[string]bool{
+	"readme.md":       true,
+	"license":         true,
+	"license.md":      true,
+	"changelog.md":    true,
+	"contributing.md": true,
+}
+
+// isPackDocFile reports whether rel is a pack-documentation file (README.md,
+// LICENSE, LICENSE.md, CHANGELOG.md, CONTRIBUTING.md) by BASE NAME,
+// case-insensitive. Pack docs describe the pack for adopters; they are not part
+// of the consumer's .opencode/ runtime, so RenderUnits must never copy them into
+// staging. Matching by base name (rather than pack-root only) deliberately also
+// excludes a README/LICENSE nested in a pack subdir — a doc stays a doc wherever
+// it sits in the pack tree — and is durable against future pack layouts.
+func isPackDocFile(rel string) bool {
+	return packDocBaseNames[strings.ToLower(path.Base(rel))]
 }
 
 // RenderUnits copies every unit file in the pack into

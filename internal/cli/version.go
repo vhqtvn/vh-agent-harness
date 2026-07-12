@@ -9,10 +9,16 @@ import (
 // Version is the harness binary version. It is a package var so it can be
 // overridden at link time via -ldflags:
 //
-//	-X github.com/vhqtvn/vh-agent-harness/internal/cli.Version=1.0.0
+//	-X github.com/vhqtvn/vh-agent-harness/internal/cli.Version=0.6.0+dev
 //
-// When not overridden, the dev default below is used.
-var Version = "0.1.0-dev"
+// When not overridden (e.g. `go run` without the Makefile ldflags stamp), this
+// fallback is "dev" — an honest "unstamped" marker. `make build` injects the
+// git-derived version via -ldflags -X: bare <tag> on an exact-tag commit
+// (release), <latest-tag>+dev when HEAD is ahead of the latest tag, or
+// 0.0.0+dev when no tags exist. Semver build metadata (+dev) sorts equal to
+// the tag, not below, so a dev build says "on top of <tag>" without claiming
+// an undecided next version.
+var Version = "dev"
 
 // BuildLabel is the human-readable build/slice tag shown alongside Version.
 // Override at link time:

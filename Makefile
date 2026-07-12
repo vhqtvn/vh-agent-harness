@@ -2,8 +2,22 @@
 # regenerates this repo's rendered .opencode/ from templates/core after a build.
 .PHONY: build test fmt vet check install update doctor test-auto-gate-live test-e2e-auto-gate test-e2e-auto-gate-opencode
 
+# Version: bare tag on an exact-tag commit (release); <latest-tag>+dev otherwise.
+# Semver build metadata (+dev) sorts equal to the tag, not below — honest "dev build
+# on top of <tag>" without claiming an undecided next version. Fallback "dev" when
+# built without ldflags (e.g. `go run`).
+VERSION ?= $(shell \
+  exact=$$(git describe --tags --exact-match 2>/dev/null); \
+  if [ -n "$$exact" ]; then \
+    echo "$$exact" | sed 's/^v//'; \
+  else \
+    latest=$$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//'); \
+    if [ -n "$$latest" ]; then echo "$$latest+dev"; \
+    else echo "0.0.0+dev"; fi; \
+  fi)
+
 build: ## Build the binary into bin/
-	go build -o bin/vh-agent-harness ./cmd/vh-agent-harness
+	go build -ldflags "-X github.com/vhqtvn/vh-agent-harness/internal/cli.Version=$(VERSION)" -o bin/vh-agent-harness ./cmd/vh-agent-harness
 
 test: ## Run the full test suite
 	go test ./...

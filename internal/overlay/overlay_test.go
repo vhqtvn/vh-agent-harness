@@ -253,6 +253,44 @@ func TestIsUnitFile_ClassifiesMergeContent(t *testing.T) {
 	}
 }
 
+// TestIsUnitFile_PackDocsExcluded confirms pack-documentation files (README.md,
+// LICENSE, LICENSE.md, CHANGELOG.md, CONTRIBUTING.md) are classified as
+// non-units by BASE NAME, case-insensitively, and at any depth — while a real
+// unit file sitting next to them still classifies as a unit. This is the
+// function-level pin for the .opencode/README.md pollution fix: pack docs
+// describe the pack, not the consumer's runtime, so they must never render.
+func TestIsUnitFile_PackDocsExcluded(t *testing.T) {
+	for _, doc := range []string{
+		"README.md", "readme.md", "Readme.md", // case-insensitive
+		"LICENSE", "license", "LICENSE.md", "license.md",
+		"CHANGELOG.md", "CONTRIBUTING.md",
+	} {
+		if isUnitFile(doc) {
+			t.Errorf("isUnitFile(%q): want false (pack-root doc)", doc)
+		}
+	}
+	// Nested pack docs (base-name match, not just pack-root).
+	for _, doc := range []string{
+		"subdir/README.md",
+		"deep/nested/license.md",
+	} {
+		if isUnitFile(doc) {
+			t.Errorf("isUnitFile(%q): want false (nested pack doc)", doc)
+		}
+	}
+	// A README without the .md extension is NOT a recognized doc name (only
+	// readme.md is), so it stays a unit — pins the exact base-name set.
+	if !isUnitFile("README") {
+		t.Errorf("isUnitFile(%q): want true (not in the doc base-name set)", "README")
+	}
+	// Real units sitting alongside pack docs still classify as units.
+	for _, unit := range []string{"agents/x.md", "plugins/gate.js"} {
+		if !isUnitFile(unit) {
+			t.Errorf("isUnitFile(%q): want true (unit)", unit)
+		}
+	}
+}
+
 // TestRenderUnits_SynthPackEmitsAgentSkillCmdFiles renders a synthetic web-style
 // pack into staging and confirms: (1) every expected agent/skill/command unit
 // lands under <staging>/.opencode/<pack-rel>, (2) the three merge-content files
@@ -844,6 +882,51 @@ func TestRenderUnits_FstestMap(t *testing.T) {
 	}
 	if string(deep) != "deep" {
 		t.Errorf("deep unit bytes: got %q", deep)
+	}
+}
+
+// --- MaterializePermissionPack (Pack-level) --------------------------------
+
+// TestRenderUnits_PackRootReadmeNotRendered confirms a pack-documentation file
+// (README.md, LICENSE) at the pack root is NOT rendered into the consumer's
+// .opencode/ tree, while a real unit file (plugins/*.js, agents/*.md) in the
+// SAME pack IS rendered. This is the integration-level regression guard for the
+// .opencode/README.md pollution fix: a pack-root README.md was previously copied
+// verbatim to <target>/.opencode/README.md on every vh-agent-harness update,
+// clobbering any core-rendered README. Pack docs describe the pack for adopters,
+// not the consumer's runtime, so RenderUnits must skip them.
+func TestRenderUnits_PackRootReadmeNotRendered(t *testing.T) {
+	p := &Pack{
+		Name: "doc-pack",
+		FS: fstest.MapFS{
+			"README.md":       {Data: []byte("# pack readme\n")},
+			"LICENSE":         {Data: []byte("MIT License\n")},
+			"plugins/gate.js": {Data: []byte("// gate\n")},
+			"agents/x.md":     {Data: []byte("# x agent\n")},
+		},
+	}
+	staging := t.TempDir()
+	rendered, err := p.RenderUnits(staging, nil)
+	if err != nil {
+		t.Fatalf("RenderUnits: %v", err)
+	}
+	// Pack docs must NOT be in the rendered list NOR on disk.
+	for _, doc := range []string{".opencode/README.md", ".opencode/LICENSE"} {
+		if contains(rendered, doc) {
+			t.Errorf("pack doc %q was rendered; pack docs must not be units", doc)
+		}
+		if _, err := os.Stat(filepath.Join(staging, filepath.FromSlash(doc))); err == nil {
+			t.Errorf("pack doc %q was written to disk; it must not be", doc)
+		}
+	}
+	// Real unit files DID render (proves the doc filter is not over-eager).
+	for _, unit := range []string{".opencode/plugins/gate.js", ".opencode/agents/x.md"} {
+		if !contains(rendered, unit) {
+			t.Errorf("unit %q was NOT rendered; got %v", unit, rendered)
+		}
+		if _, err := os.Stat(filepath.Join(staging, filepath.FromSlash(unit))); err != nil {
+			t.Errorf("unit %q not on disk: %v", unit, err)
+		}
 	}
 }
 
