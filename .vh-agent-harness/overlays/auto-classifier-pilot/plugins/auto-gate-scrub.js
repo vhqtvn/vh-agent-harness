@@ -17,7 +17,9 @@
 // It has NO OpenCode coupling: no `server()`, no hooks, no I/O, no config reads,
 // no side effects. It mirrors the auto-gate-verdict.js precedent (a pure module
 // that OpenCode tolerates as a non-plugin under .opencode/plugins/ because it
-// does NOT export `server`).
+// has a NON-FUNCTION export — the `__autoGateLibrary` sentinel below — NOT
+// merely because it lacks `server`; a module whose exports are ALL functions
+// crashes the loader, see the loader-guard comment below for the full rule).
 //
 // Naming: all identifiers GENERIC. The upstream is referred to only as "the
 // reference agent system" — never by product name.
@@ -37,6 +39,21 @@ import path from "node:path";
 // __isMain so the consumer import path never fires them.
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
+
+// ---------------------------------------------------------------------------
+// OpenCode plugin-loader guard — DO NOT REMOVE.
+//
+// OpenCode auto-loads EVERY module under .opencode/plugins/ and treats it as a
+// plugin. A module with no `server` but whose exports are ALL functions gets
+// each function invoked as a plugin factory; they return non-hook values and
+// OpenCode then crashes calling `config`/`event`/`dispose` on them ("null is
+// not an object") — a FATAL server error that stops OpenCode from starting.
+// A single NON-FUNCTION export trips the loader's "export is not a function"
+// guard, so the whole file is skipped as a non-plugin (non-fatal). The sibling
+// pure-library modules (auto-gate-tiered.js `LEAF`, auto-gate-live.js prompt-key
+// consts) are tolerated only because they happen to have such an export; this
+// one's exports were all functions, so it needs an explicit sentinel.
+export const __autoGateLibrary = "scrub";
 
 // ---------------------------------------------------------------------------
 // truncate(value, max) — plain truncation helper shared by both surfaces.

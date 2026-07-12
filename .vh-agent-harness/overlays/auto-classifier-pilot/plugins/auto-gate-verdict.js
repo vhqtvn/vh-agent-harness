@@ -4,9 +4,12 @@
 // This module holds NO OpenCode coupling: no `server()`, no hooks, no I/O, no
 // config disk reads, no side effects. It mirrors the shell-guard-core.js
 // precedent (a pure decision module that the OpenCode plugin imports, and that
-// OpenCode tolerates as a non-plugin under .opencode/plugins/ because it does
-// not export `server`). The plugin (auto-tool-gate.js) imports `decidePermission`
-// from here; `parseVerdict` and `stubEvaluate` are its internal building blocks.
+// OpenCode tolerates as a non-plugin under .opencode/plugins/ because it has a
+// NON-FUNCTION export — the `__autoGateLibrary` sentinel below — NOT merely
+// because it lacks `server`; a module whose exports are ALL functions crashes
+// the loader, see the loader-guard comment below for the full rule). The plugin
+// (auto-tool-gate.js) imports `decidePermission` from here; `parseVerdict` and
+// `stubEvaluate` are its internal building blocks.
 //
 // DRY invariant: there is exactly ONE verdict-parse path. The plugin never
 // re-implements parsing; it composes evaluate -> parseVerdict -> decision
@@ -64,6 +67,21 @@ import path from "node:path";
 // __isMain so the plugin-loader path never fires them.
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
+
+// ---------------------------------------------------------------------------
+// OpenCode plugin-loader guard — DO NOT REMOVE.
+//
+// OpenCode auto-loads EVERY module under .opencode/plugins/ and treats it as a
+// plugin. A module with no `server` but whose exports are ALL functions gets
+// each function invoked as a plugin factory; they return non-hook values and
+// OpenCode then crashes calling `config`/`event`/`dispose` on them ("null is
+// not an object") — a FATAL server error that stops OpenCode from starting.
+// A single NON-FUNCTION export trips the loader's "export is not a function"
+// guard, so the whole file is skipped as a non-plugin (non-fatal). shell-guard-
+// core.js is tolerated only because it has such an export (`id`); this module's
+// exports were all functions (the regexes above are module-internal, not
+// exported), so it needs an explicit sentinel.
+export const __autoGateLibrary = "verdict";
 
 // ---------------------------------------------------------------------------
 // Verdict regexes (non-global first-match; i-flag mirrors the reference's gi).

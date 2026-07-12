@@ -5,8 +5,11 @@
 // `server()` export, no hooks, no I/O, no config disk reads, no side effects.
 // It mirrors the auto-gate-verdict.js / auto-gate-live.js / auto-gate-scrub.js
 // precedent (pure decision/substrate modules that the plugin imports, and that
-// OpenCode tolerates as non-plugins under .opencode/plugins/ because they do
-// NOT export `server`). Phase 1 is NOT wired into auto-tool-gate.js or any live
+// OpenCode tolerates as non-plugins under .opencode/plugins/ because each has a
+// NON-FUNCTION export — this module's is `LEAF` below — NOT merely because they
+// lack `server`; a module whose exports are ALL functions crashes the loader
+// (see auto-gate-scrub.js's loader-guard comment for the full rule). Phase 1 is
+// NOT wired into auto-tool-gate.js or any live
 // hook — the default single-call behavior stays byte-identical. The
 // dispatch/wiring/live-call parts are Phase 2 (out of scope here).
 //
