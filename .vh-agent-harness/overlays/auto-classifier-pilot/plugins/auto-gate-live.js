@@ -47,7 +47,7 @@ import { test } from "node:test";
 import { strict as assert } from "node:assert";
 
 import { decidePermission } from "./auto-gate-verdict.js";
-import { scrubCredentials, scrubTruncate } from "./auto-gate-scrub.js";
+import { scrubCredentials, scrubTruncate, truncate } from "./auto-gate-scrub.js";
 
 // Re-export scrubCredentials so this module keeps its public scrubber surface
 // (and its self-test references it). The implementation lives in the shared
@@ -132,14 +132,16 @@ export function defaultSpawnPromptRunner(name) {
 //
 // Input: the SDK transcript (Array<{info:{role}, parts:Array<Part>}>) + the
 // current permission payload. Output: a single text string in "text mode":
-// User: / Assistant: / Tool: prefixes, tool name + a SHORT redacted summary of
-// args, the most recent permission request emphasized at the end.
+// User: / Assistant: / Tool: prefixes, tool name + a SHORT length-capped
+// summary of args, the most recent permission request emphasized at the end.
 //
-// Redaction: we surface only the load-bearing IDENTIFYING fields of a tool's
-// input (command / path / pattern / query / url / workdir), truncated — NEVER
-// full file bodies, command outputs, edit diffs, or secret-shaped values. Tool
-// RESULTS are intentionally omitted: per the source packet the classifier sees
-// tool INPUTS, not results (results are large, untrusted, and lower-signal).
+// STAGE-1 RELAXATION: we surface the load-bearing IDENTIFYING fields of a
+// tool's input (command / path / pattern / query / url / workdir), length-
+// capped ONLY — NOT secret-scrubbed. The classifier needs the raw command to
+// judge intent accurately. Tool RESULTS (state.output) are still intentionally
+// omitted: per the source packet the classifier sees tool INPUTS, not results
+// (results are large, untrusted, and lower-signal). See serializeTranscript's
+// doc comment for the full relaxation rationale.
 // ---------------------------------------------------------------------------
 
 // Truncation limits for the serialized transcript. Bounded so the resulting
@@ -148,53 +150,63 @@ const TX_FIELD_LEN = 240; // identifying field value (command/path/pattern/...)
 const TX_TEXT_LEN = 1200; // a single text part
 const TX_MAX_MESSAGES = 40; // cap to the most recent N messages
 
-// txScrub — scrub-then-truncate, delegating to the SHARED scrubber
-// (auto-gate-scrub.js) so the HTTP-egress path (this module) and the
-// audit/stderr-log egress path (auto-tool-gate.js) use the IDENTICAL scrubber
-// with no drift. The shared scrubTruncate is scrubCredentials then truncate
-// (secrets removed BEFORE truncation so a value split across the truncation
-// boundary cannot survive in part). Used for the text / reasoning /
-// delegation-description fields in serializeTranscript, the allowlisted
-// tool-input fields in redactToolInput, AND the permission `pattern` field —
-// every field that lands in the egress payload to the external model passes
-// through txScrub so no secret-shaped value can egress.
+// txTruncate — length-cap ONLY (no scrubbing). Under the STAGE-1 RELAXATION
+// (operator directive), serializeTranscript sends FULL length-capped content
+// to the classifier: the classifier needs the raw command/text to judge
+// intent accurately, and it transits to the operator's own configured
+// endpoint (trusted). Regex-based secret scrubbing is intentionally NOT
+// applied here; an LLM-based secret-stripper layer may be added later. Used
+// for the text / reasoning / delegation-description fields in
+// serializeTranscript, the allowlisted tool-input fields in redactToolInput,
+// AND the permission `pattern` field.
+const txTruncate = truncate;
+
+// txScrub — scrub-then-truncate (scrubCredentials then truncate), delegating
+// to the SHARED scrubber (auto-gate-scrub.js) so this module and the
+// audit/stderr-log egress path (auto-tool-gate.js) share the IDENTICAL
+// scrubber with no drift. RETAINED but NOT used by serializeTranscript under
+// the stage-1 relaxation — the STDERR audit path (auto-tool-gate.js) still
+// imports scrubTruncate/scrubCredentials directly and applies the heuristic
+// scrubber (best-effort, not in the classifier's hot path). Kept defined here
+// so the live module's scrubber surface stays available for a future
+// re-enablement or an LLM-based stripper fallback.
 const txScrub = scrubTruncate;
 
-// Redacted summary of a tool's input args. Mirrors the plugin's summarizeArgs
-// identifying-field allowlist: we emit ONLY known load-bearing keys (scrubbed +
-// truncated) and NEVER dump the raw args object. Unknown tools get an arg-key
-// count only. This is the same redaction posture as the audit line, so the
-// model sees the same redacted signal an operator would see in the log.
+// Allowlisted summary of a tool's input args. Mirrors the plugin's
+// summarizeArgs identifying-field allowlist: we emit ONLY known load-bearing
+// keys (length-capped via txTruncate) and NEVER dump the raw args object.
+// Unknown tools get an arg-key count only. Tool RESULTS (state.output) are
+// intentionally omitted: per the source packet the classifier sees tool
+// INPUTS, not results (results are large, untrusted, and lower-signal).
 //
-// SECURITY: every field below passes through txScrub (scrubCredentials THEN
-// truncate, via the shared scrubber), NOT truncate alone. All of these fields land in the egress
-// payload that classifyLive POSTs to an external model endpoint, so a bearer
-// token / DB connection string / cloud key embedded in a `command` or `pattern`
-// MUST be scrubbed the same way as transcript text — otherwise an identical
-// secret redacted in text would leak via a tool input. A bare `command`/`path`
-// string CAN carry secrets (e.g. `curl -H "Authorization: Bearer ..."`), so
-// scrubbing is mandatory, not optional.
+// STAGE-1 RELAXATION: every field below passes through txTruncate (length-cap
+// ONLY, NO scrubbing), NOT txScrub. A bare `command`/`path` string CAN carry
+// secrets (e.g. `curl -H "Authorization: Bearer ..."`); under the operator
+// directive these are sent to the classifier RAW (length-capped) so intent can
+// be judged accurately. The allowlist itself is retained (unknown fields +
+// state.output still never egress). An LLM-based secret-stripper layer may be
+// added later.
 function redactToolInput(input) {
     if (!input || typeof input !== "object") return "";
     const parts = [];
     if (typeof input.command === "string") {
-        parts.push(`command=${txScrub(input.command, TX_FIELD_LEN)}`);
+        parts.push(`command=${txTruncate(input.command, TX_FIELD_LEN)}`);
     }
     const fp = input.filePath ?? input.path;
     if (typeof fp === "string") {
-        parts.push(`path=${txScrub(fp, TX_FIELD_LEN)}`);
+        parts.push(`path=${txTruncate(fp, TX_FIELD_LEN)}`);
     }
     if (typeof input.pattern === "string") {
-        parts.push(`pattern=${txScrub(input.pattern, TX_FIELD_LEN)}`);
+        parts.push(`pattern=${txTruncate(input.pattern, TX_FIELD_LEN)}`);
     }
     if (typeof input.query === "string") {
-        parts.push(`query=${txScrub(input.query, TX_FIELD_LEN)}`);
+        parts.push(`query=${txTruncate(input.query, TX_FIELD_LEN)}`);
     }
     if (typeof input.url === "string") {
-        parts.push(`url=${txScrub(input.url, TX_FIELD_LEN)}`);
+        parts.push(`url=${txTruncate(input.url, TX_FIELD_LEN)}`);
     }
     if (typeof input.workdir === "string") {
-        parts.push(`workdir=${txScrub(input.workdir, TX_FIELD_LEN)}`);
+        parts.push(`workdir=${txTruncate(input.workdir, TX_FIELD_LEN)}`);
     }
     if (parts.length === 0) {
         const keys = Object.keys(input);
@@ -215,6 +227,14 @@ function roleLabel(role) {
 // fallback string that still describes the permission payload (the action under
 // evaluation), so the live path degrades gracefully when the transcript fetch
 // fails: the model still gets the type+pattern to judge.
+//
+// STAGE-1 RELAXATION (operator directive): the classifier receives FULL
+// (length-capped, NOT secret-scrubbed) content. The classifier needs the raw
+// command to judge intent accurately, and it transits to the operator's own
+// configured endpoint (trusted). Regex-based secret scrubbing is intentionally
+// NOT applied here; an LLM-based secret-stripper layer may be added later.
+// The STDERR audit path (auto-tool-gate.js) still applies the heuristic
+// scrubber — that path is best-effort and not in the classifier's hot path.
 export function serializeTranscript(messages, permission) {
     const lines = [];
     const list = Array.isArray(messages) ? messages : [];
@@ -235,7 +255,7 @@ export function serializeTranscript(messages, permission) {
                 case "text": {
                     const txt = typeof part.text === "string" ? part.text : "";
                     if (txt.length === 0) break;
-                    lines.push(`${role}: ${txScrub(txt, TX_TEXT_LEN)}`);
+                    lines.push(`${role}: ${txTruncate(txt, TX_TEXT_LEN)}`);
                     break;
                 }
                 case "tool": {
@@ -257,22 +277,24 @@ export function serializeTranscript(messages, permission) {
                     // Assistant internal monologue: useful context for judging
                     // composite / scope actions, but heavily truncated and
                     // clearly marked so it is never mistaken for operator
-                    // intent. Credential-scrubbed (txScrub) before truncation.
+                    // intent. Length-capped ONLY (txTruncate) under the stage-1
+                    // relaxation — NOT credential-scrubbed.
                     const txt = typeof part.text === "string" ? part.text : "";
                     if (txt.length === 0) break;
                     lines.push(
-                        `Assistant: [reasoning] ${txScrub(txt, TX_FIELD_LEN)}`,
+                        `Assistant: [reasoning] ${txTruncate(txt, TX_FIELD_LEN)}`,
                     );
                     break;
                 }
                 case "agent":
                 case "subtask": {
                     // Sub-agent delegation marker — the prompt cares about this.
-                    // Description is credential-scrubbed (txScrub) in transit.
+                    // Description is length-capped ONLY (txTruncate) under the
+                    // stage-1 relaxation — NOT credential-scrubbed.
                     const name = part.name || part.agent || "sub-agent";
                     const desc = part.description || part.prompt || "";
                     lines.push(
-                        `Assistant: [delegates to ${name}] ${txScrub(desc, TX_FIELD_LEN)}`,
+                        `Assistant: [delegates to ${name}] ${txTruncate(desc, TX_FIELD_LEN)}`,
                     );
                     break;
                 }
@@ -288,14 +310,14 @@ export function serializeTranscript(messages, permission) {
 
     // The action under evaluation — ALWAYS present, emphasized last. This is the
     // single most recent permission request, the thing being judged.
-    // SECURITY: `pattern` is a command/path string that CAN carry secrets (e.g.
-    // a Bearer header in a curl pattern, a connection string in a db command),
-    // and it lands in the egress payload to the external model. It MUST pass
-    // through txScrub (scrubCredentials then truncate), NOT truncate alone.
-    // `type` is a fixed enum ("bash"/"edit"/...) with no secret risk, so it is
-    // left as-is.
+    // STAGE-1 RELAXATION: `pattern` is a command/path string that CAN carry
+    // secrets (e.g. a Bearer header in a curl pattern, a connection string in a
+    // db command). Under the operator directive it is sent to the classifier
+    // RAW (length-capped via txTruncate, NOT scrubbed) so intent can be judged
+    // accurately. `type` is a fixed enum ("bash"/"edit"/...) with no secret
+    // risk, so it is left as-is.
     const type = (permission && permission.type) || "unknown";
-    const pattern = txScrub(
+    const pattern = txTruncate(
         (permission && permission.pattern) || "",
         TX_FIELD_LEN,
     );
@@ -955,12 +977,12 @@ if (__isMain) {
         assert.match(out, /<\/transcript>/);
     });
 
-    test("serialize: long values are redacted/truncated", () => {
-        // Use a long NON-secret-shaped value (a repeated readable phrase) so
-        // this exercises the truncation path specifically. A pure high-entropy
-        // blob (e.g. "x".repeat(5000)) is now correctly REDACTED to [redacted]
-        // by scrubCredentials before truncation — covered by the scrub-egress
-        // tests below — so it no longer reaches the truncation marker path.
+    test("serialize: long values are truncated (length-cap only)", () => {
+        // A long NON-secret-shaped value (a repeated readable phrase) exercises
+        // the length-cap (txTruncate) path specifically. Under the stage-1
+        // relaxation NO scrubbing is applied, so a long value is truncated with
+        // "..." and never redacted. (A high-entropy blob would likewise be
+        // truncated, not redacted — the scrubber is off for the HTTP path.)
         const huge = "the quick brown fox jumps over the lazy dog. ".repeat(150);
         const msgs = [
             {
@@ -978,8 +1000,7 @@ if (__isMain) {
         const out = serializeTranscript(msgs, { type: "write", pattern: huge });
         // The huge value must NOT appear verbatim anywhere in the output.
         assert.equal(out.includes(huge), false, "huge value must be truncated");
-        // Truncation marker present (value is long-but-not-secret, so it is
-        // truncated, not redacted).
+        // Truncation marker present (length-cap applied; nothing redacted).
         assert.match(out, /\.\.\./);
     });
 
@@ -1052,16 +1073,20 @@ if (__isMain) {
         assert.match(out, /pattern=https:\/\/evil\.example\/x/);
     });
 
-    // ===== credential scrubbing (leak-regression for B-F1) =====
+    // ===== full-content egress (STAGE-1 RELAXATION) =====
     //
     // In live mode the transcript travels to an external classifier endpoint.
-    // Text / reasoning / delegation-description fields are credential-scrubbed
-    // in transit (txScrub = scrubCredentials then txTruncate). These tests
-    // place secret-shaped values in each field and assert the VALUE does not
-    // survive into the serialized output — only the [redacted] placeholder
-    // (and surrounding context) does. Tool inputs stay on redactToolInput.
+    // Under the operator stage-1 directive the classifier receives FULL
+    // (length-capped, NOT secret-scrubbed) content: the classifier needs the
+    // raw command/text to judge intent accurately, and it transits to the
+    // operator's own configured endpoint (trusted). These tests place
+    // secret-shaped values in each field and assert the VALUE SURVIVES into the
+    // serialized output (length-capped), documenting the relaxation. The
+    // [redacted] marker is intentionally NOT produced here — the old
+    // scrubbed-egress behavior is reverted. The STDERR audit path
+    // (auto-tool-gate.js) still applies the heuristic scrubber.
 
-    test("scrub: api_key value in text field is redacted", () => {
+    test("serialize: full text sent to classifier (stage-1 relax) — api_key value present", () => {
         const secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
         const msgs = [
             {
@@ -1075,15 +1100,18 @@ if (__isMain) {
             },
         ];
         const out = serializeTranscript(msgs, { type: "edit", pattern: "x" });
+        // STAGE-1 RELAXATION: the raw text (length-capped) is sent to the
+        // classifier UN-SCRUBBED, so the api_key value SURVIVES.
         assert.equal(
             out.includes(secret),
-            false,
-            "api_key value must not leak into the transcript",
+            true,
+            "api_key value must survive into the transcript (stage-1 relax)",
         );
-        assert.match(out, /api_key=\[redacted\]/);
+        // The [redacted] marker is intentionally NOT produced (scrubbing off).
+        assert.doesNotMatch(out, /\[redacted\]/);
     });
 
-    test("scrub: Bearer jwt in reasoning field is redacted", () => {
+    test("serialize: full reasoning sent to classifier (stage-1 relax) — Bearer jwt present", () => {
         const jwt =
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature";
         const msgs = [
@@ -1100,13 +1128,13 @@ if (__isMain) {
         const out = serializeTranscript(msgs, { type: "edit", pattern: "x" });
         assert.equal(
             out.includes(jwt),
-            false,
-            "bearer token in reasoning must not leak",
+            true,
+            "bearer token in reasoning must survive (stage-1 relax)",
         );
-        assert.match(out, /Bearer \[redacted\]/);
+        assert.doesNotMatch(out, /\[redacted\]/);
     });
 
-    test("scrub: bare 40-char hex blob in text is redacted", () => {
+    test("serialize: full text sent to classifier (stage-1 relax) — hex blob present", () => {
         const hex = "0123456789abcdef0123456789abcdef01234567";
         const msgs = [
             {
@@ -1117,13 +1145,13 @@ if (__isMain) {
         const out = serializeTranscript(msgs, { type: "edit", pattern: "x" });
         assert.equal(
             out.includes(hex),
-            false,
-            "hex blob must not leak into the transcript",
+            true,
+            "hex blob must survive into the transcript (stage-1 relax)",
         );
-        assert.match(out, /\[redacted\]/);
+        assert.doesNotMatch(out, /\[redacted\]/);
     });
 
-    test("scrub: password value in text is redacted", () => {
+    test("serialize: full text sent to classifier (stage-1 relax) — password value present", () => {
         const secret = "hunter2supersecretvalue1234567890";
         const msgs = [
             {
@@ -1139,13 +1167,13 @@ if (__isMain) {
         const out = serializeTranscript(msgs, { type: "edit", pattern: "x" });
         assert.equal(
             out.includes(secret),
-            false,
-            "password value must not leak into the transcript",
+            true,
+            "password value must survive into the transcript (stage-1 relax)",
         );
-        assert.match(out, /password=\[redacted\]/);
+        assert.doesNotMatch(out, /\[redacted\]/);
     });
 
-    test("scrub: Authorization Bearer header in pasted tool output within text", () => {
+    test("serialize: full text sent to classifier (stage-1 relax) — pasted Bearer header present", () => {
         const token = "sk-deadbeefcafef00dbaadf00dcafebabe1234";
         const msgs = [
             {
@@ -1161,13 +1189,13 @@ if (__isMain) {
         const out = serializeTranscript(msgs, { type: "bash", pattern: "curl" });
         assert.equal(
             out.includes(token),
-            false,
-            "bearer token in pasted header must not leak",
+            true,
+            "bearer token in pasted header must survive (stage-1 relax)",
         );
-        assert.match(out, /Bearer \[redacted\]/);
+        assert.doesNotMatch(out, /\[redacted\]/);
     });
 
-    test("scrub: delegation description token is redacted", () => {
+    test("serialize: full delegation description sent to classifier (stage-1 relax) — token present", () => {
         const secret = "sk-zyxwvutsrqponmlkjihgfedcba987654";
         const msgs = [
             {
@@ -1184,10 +1212,10 @@ if (__isMain) {
         const out = serializeTranscript(msgs, { type: "task", pattern: "x" });
         assert.equal(
             out.includes(secret),
-            false,
-            "token in delegation description must not leak",
+            true,
+            "token in delegation description must survive (stage-1 relax)",
         );
-        assert.match(out, /token=\[redacted\]/);
+        assert.doesNotMatch(out, /\[redacted\]/);
     });
 
     test("scrub: scrubCredentials is a pure exported function", () => {
@@ -1233,20 +1261,19 @@ if (__isMain) {
         );
     });
 
-    // ===== Egress-scrub regression for F1 (tool-input + permission.pattern) =====
+    // ===== Full-content egress for tool-input + permission.pattern (stage-1 relax) =====
     //
-    // B-F1: the allowlisted tool-input fields (command/path/pattern/query/url/
-    // workdir) and permission.pattern used txTruncate (truncate-only, NO
-    // scrubbing), so a secret embedded in a judged `command` or `pattern`
-    // egressed UN-SCRUBBED while the identical secret in transcript text would
-    // be redacted. Now every egress field passes through txScrub. These tests
-    // place secret-shaped values in BOTH a tool `command` AND the permission
-    // `pattern` and assert the raw secret is ABSENT from the serialized
-    // egress string — only [redacted] survives.
+    // These fields (command/path/pattern/query/url/workdir + permission.pattern)
+    // now pass through txTruncate (length-cap ONLY, NO scrubbing) under the
+    // operator stage-1 directive. These tests place secret-shaped values in
+    // BOTH a tool `command` AND the permission `pattern` and assert the raw
+    // secret SURVIVES into the serialized egress string (length-capped),
+    // documenting that the F1 scrubbed-egress behavior is intentionally
+    // reverted. The STDERR audit path (auto-tool-gate.js) still scrubs.
 
-    test("scrub-egress: Bearer jwt in a tool command field is redacted", () => {
+    test("serialize: full tool command sent to classifier (stage-1 relax) — Bearer jwt present", () => {
         // A Bearer <jwt> embedded in a judged `command` — the allowlisted
-        // tool-input path. Before F1 this leaked verbatim (truncate-only).
+        // tool-input path. Under stage-1 relax this SURVIVES (length-capped).
         const jwt =
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature";
         const msgs = [
@@ -1268,15 +1295,15 @@ if (__isMain) {
         const out = serializeTranscript(msgs, { type: "bash", pattern: "curl" });
         assert.equal(
             out.includes(jwt),
-            false,
-            "Bearer jwt in tool command must not leak into egress payload",
+            true,
+            "Bearer jwt in tool command must survive into egress payload (stage-1 relax)",
         );
-        assert.match(out, /Bearer \[redacted\]/);
+        assert.doesNotMatch(out, /\[redacted\]/);
     });
 
-    test("scrub-egress: api_key in permission pattern is redacted", () => {
+    test("serialize: full permission pattern sent to classifier (stage-1 relax) — api_key present", () => {
         // A secret-shaped value in the permission `pattern` (the action under
-        // evaluation). Before F1 this leaked verbatim (truncate-only).
+        // evaluation). Under stage-1 relax this SURVIVES (length-capped).
         const secret = "sk-abcdefghij1234567890qrstuvwxyz";
         const out = serializeTranscript(
             [{ info: { role: "user" }, parts: [{ type: "text", text: "hi" }] }],
@@ -1284,15 +1311,15 @@ if (__isMain) {
         );
         assert.equal(
             out.includes(secret),
-            false,
-            "api_key value in permission pattern must not leak into egress payload",
+            true,
+            "api_key value in permission pattern must survive into egress payload (stage-1 relax)",
         );
-        assert.match(out, /api_key=\[redacted\]/);
+        assert.doesNotMatch(out, /\[redacted\]/);
     });
 
-    test("scrub-egress: connection string in permission pattern is redacted", () => {
+    test("serialize: full permission pattern sent to classifier (stage-1 relax) — connection-string password present", () => {
         // A connection-string-style secret in the permission `pattern`.
-        // `password` key triggers the key=value scrubber rule.
+        // Under stage-1 relax the `password` value SURVIVES (length-capped).
         const secret = "supersecretpasswordvalue1234567890";
         const out = serializeTranscript(
             [{ info: { role: "user" }, parts: [{ type: "text", text: "hi" }] }],
@@ -1303,14 +1330,15 @@ if (__isMain) {
         );
         assert.equal(
             out.includes(secret),
-            false,
-            "password in connection string (permission pattern) must not leak",
+            true,
+            "password in connection string (permission pattern) must survive (stage-1 relax)",
         );
-        assert.match(out, /password=\[redacted\]/);
+        assert.doesNotMatch(out, /\[redacted\]/);
     });
 
-    test("scrub-egress: secret in tool command AND pattern both redacted in one payload", () => {
-        // Combined: both leak vectors present in a single egress payload.
+    test("serialize: full tool command + pattern sent to classifier (stage-1 relax) — both secrets present", () => {
+        // Combined: both vectors present in a single egress payload. Under
+        // stage-1 relax BOTH secrets SURVIVE (length-capped).
         const cmdToken =
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature";
         const patKey = "AKIAABCDEFGHIJKLMNOP";
@@ -1336,16 +1364,15 @@ if (__isMain) {
         });
         assert.equal(
             out.includes(cmdToken),
-            false,
-            "Bearer jwt in command must not leak",
+            true,
+            "Bearer jwt in command must survive (stage-1 relax)",
         );
         assert.equal(
             out.includes(patKey),
-            false,
-            "AWS key in permission pattern must not leak",
+            true,
+            "AWS key in permission pattern must survive (stage-1 relax)",
         );
-        assert.match(out, /Bearer \[redacted\]/);
-        assert.match(out, /\[redacted\]/);
+        assert.doesNotMatch(out, /\[redacted\]/);
     });
 
     // ===== resolveSystemPrompt =====
