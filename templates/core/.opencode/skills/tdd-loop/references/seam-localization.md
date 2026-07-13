@@ -5,6 +5,11 @@ at. In a consumer repo this is a file such as `<repo>-tdd-seams.md`, authored by
 the overlay (or by the user on first run). The core skill never hardcodes repo
 hotpaths; this file does.
 
+This file instantiates the **S1 localization-split pattern** defined in
+`templates/core/.opencode/skills/skill-creator/references/skill-lifecycle.md`
+(`## S1 — Localization split as a first-class pattern`): the core skill holds
+the discipline domain-free, and this file holds the repo-specific map.
+
 ## What a seam is
 
 A seam is the contract boundary a test attaches to — the place where a new

@@ -49,7 +49,7 @@ This skill is for new or changed behavior. For an EXISTING bug, use
 5. **Refactor (in-loop).**
    While tests are green, make at most one small, behavior-preserving clarity
    improvement within the current vertical slice; rerun the relevant tests.
-   Complete when: the relevant tests pass AND (the refactor is verified OR you
+   Completion: the relevant tests pass AND (the refactor is verified OR you
    explicitly record that no refactor is needed). Do not begin another behavior
    change until this check is complete.
 
