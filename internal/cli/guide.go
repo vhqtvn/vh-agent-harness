@@ -149,7 +149,8 @@ func nextSteps(st harnessState) []string {
 				"the full recipe; `vh-agent-harness example` for a pack skeleton.")
 		} else {
 			steps = append(steps, "Active overlays: "+strings.Join(st.Overlays, ", ")+
-				" (pack sources under .vh-agent-harness/overlays/). Edit the pack "+
+				" (each resolves from a project-local pack under .vh-agent-harness/overlays/, "+
+				"falling back to a pack shipped in the binary). Edit a project-local pack's sources "+
 				"(agents/<name>.md, opencode-append.jsonc, optional permission-pack.jsonc) and run "+
 				"`vh-agent-harness update` to apply — it renders the pack into .opencode/ AND "+
 				"resolves overlay agent permissions + delegateFrom edges from each active pack's "+

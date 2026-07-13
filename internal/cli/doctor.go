@@ -779,7 +779,7 @@ func (f autoGateFile) label() string {
 //
 // DRIFT CONTRACT — SCHEMA SOURCE OF TRUTH is the JS plugin:
 //
-//	.vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-tool-gate.js
+//	templates/overlays/auto-classifier-pilot/plugins/auto-tool-gate.js
 //	  - DEFAULT_PLUGIN_CONFIG  (~L376-385): the plugin-config field set + defaults
 //	  - DEFAULT_LLM_CONFIG     (~L403-413): the LLM-config field set + defaults
 //	  - normalizePluginConfig  (~L480-521): plugin field type/enum rules

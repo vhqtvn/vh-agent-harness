@@ -42,9 +42,9 @@ RUN vh-agent-harness sys-prompt auto-gate-classifier > /tmp/prompt-check.md && \
 #   3. Run `vh-agent-harness update --target /tmpproj`. This calls seamApply,
 #      which calls renderSeamStaging, which opens the pack via
 #      OpenPackFor(/tmpproj, "auto-classifier-pilot") (project-local resolution)
-#      and renders the 4 plugin files into /tmpproj/.opencode/plugins/*.js.
+#      and renders the 5 plugin files into /tmpproj/.opencode/plugins/*.js.
 RUN mkdir -p /tmpproj/.vh-agent-harness/overlays/auto-classifier-pilot && \
-    cp -r .vh-agent-harness/overlays/auto-classifier-pilot/. \
+    cp -r templates/overlays/auto-classifier-pilot/. \
           /tmpproj/.vh-agent-harness/overlays/auto-classifier-pilot/
 COPY tests/e2e/auto-gate-classifier/vh-harness-profile.yml \
      /tmpproj/.vh-agent-harness/vh-harness-profile.yml
@@ -58,7 +58,8 @@ RUN RUN_FROM_AGENT=1 vh-agent-harness update --target /tmpproj --force
 RUN test -f /tmpproj/.opencode/plugins/auto-tool-gate.js && \
     test -f /tmpproj/.opencode/plugins/auto-gate-live.js && \
     test -f /tmpproj/.opencode/plugins/auto-gate-verdict.js && \
-    test -f /tmpproj/.opencode/plugins/auto-gate-scrub.js
+    test -f /tmpproj/.opencode/plugins/auto-gate-scrub.js && \
+    test -f /tmpproj/.opencode/plugins/auto-gate-tiered.js
 
 # ===========================================================================
 # Stage 2: runtime image with the binary on PATH + rendered temp project.

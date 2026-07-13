@@ -7,17 +7,19 @@ package overlay
 // rendering, the JSONC deep-merge edge cases, or the callable-graph append is
 // caught at the package level rather than only through an end-to-end seam run.
 //
-// PACK FIXTURE POLICY (2026-06-25 pre-publish clearance, updated 2026-07-01):
-// the harness ships ONE embedded overlay pack — `release` (Phase-3
+// PACK FIXTURE POLICY (2026-06-25 pre-publish clearance, updated 2026-07-01,
+// extended 2026-07-14 with the auto-classifier-pilot embed promotion):
+// the harness ships TWO embedded overlay packs — `auto-classifier-pilot` (the
+// opt-in auto-classifier safety pilot) and `release` (Phase-3
 // capability-installer overlay-integration reference implementation, the first
 // shipped pack). web-overlay was relocated to a non-shipped adoption reference
 // under docs/adoption-examples/web/, so it is NOT a shipped pack. KnownPacks
-// therefore returns ["release"]. To keep exercising the Pack API + merge/render
-// contract against a richer shape than the single shipped pack carries, every
-// pack-touching test below builds a SYNTHETIC pack from testing/fstest.MapFS
-// (mirroring the on-disk layout a real pack would ship) and constructs a *Pack
-// directly. The merge/render/lineage logic under test is identical whether the
-// fs.FS came from an embed or a MapFS.
+// therefore returns ["auto-classifier-pilot", "release"] (sorted). To keep
+// exercising the Pack API + merge/render contract against a richer shape than
+// the shipped packs carry, every pack-touching test below builds a SYNTHETIC
+// pack from testing/fstest.MapFS (mirroring the on-disk layout a real pack
+// would ship) and constructs a *Pack directly. The merge/render/lineage logic
+// under test is identical whether the fs.FS came from an embed or a MapFS.
 
 import (
 	"encoding/json"
@@ -33,13 +35,15 @@ import (
 )
 
 // knownPackNames is the sorted list of overlay packs shipped under
-// templates/overlays. As of the Phase-3 capability-installer overlay
-// integration (2026-07-01) the harness ships the `release` pack as its first
-// embedded overlay pack, so KnownPacks returns ["release"]. web-overlay remains
-// relocated to docs/adoption-examples/web/ and is NOT a shipped pack, so it is
-// deliberately absent here. (See TestKnownPacks_ShipsReleasePack for the
-// live assertion that pins this fixture to reality.)
-var knownPackNames = []string{"release"}
+// templates/overlays. The harness ships two embedded overlay packs:
+// `auto-classifier-pilot` (opt-in auto-classifier safety pilot, promoted to the
+// embed on 2026-07-14) and `release` (Phase-3 capability-installer reference,
+// the first shipped pack), so KnownPacks returns ["auto-classifier-pilot",
+// "release"] (sorted). web-overlay remains relocated to
+// docs/adoption-examples/web/ and is NOT a shipped pack, so it is deliberately
+// absent here. (See TestKnownPacks_ShipsEmbeddedPacks for the live assertion
+// that pins this fixture to reality.)
+var knownPackNames = []string{"auto-classifier-pilot", "release"}
 
 // synthWebStyleFS builds an in-memory fs.FS that mirrors the on-disk layout the
 // real web-overlay pack shipped: agent/command/skill UNIT files plus the three
@@ -116,9 +120,9 @@ func asMap(t *testing.T, v any, path string) map[string]any {
 // --- OpenPackFor (project-local resolution) --------------------------------
 
 // TestOpenPackFor_ProjectLocal confirms a pack shipped under the project's
-// .vh-agent-harness/overlays/<name>/ is resolved (and shadows the embedded FS,
-// which ships no packs anyway). This is the seam that keeps the binary
-// domain-free: projects supply their own overlays.
+// .vh-agent-harness/overlays/<name>/ is resolved (and shadows any embedded pack
+// of the same name). This is the seam that keeps the binary domain-free:
+// projects supply their own overlays.
 func TestOpenPackFor_ProjectLocal(t *testing.T) {
 	target := t.TempDir()
 	packDir := filepath.Join(target, filepath.FromSlash(ProjectOverlaysSubdir), "acme")
@@ -142,8 +146,8 @@ func TestOpenPackFor_ProjectLocal(t *testing.T) {
 }
 
 // TestOpenPackFor_FallsBackToEmbedded confirms that when the project ships no
-// such pack, OpenPackFor falls back to the embedded FS (which ships none, so it
-// fails closed exactly like OpenPack).
+// such pack, OpenPackFor falls back to the embedded FS; "acme" is not a shipped
+// embedded name, so it fails closed exactly like OpenPack.
 func TestOpenPackFor_FallsBackToEmbedded(t *testing.T) {
 	target := t.TempDir() // no .vh-agent-harness/overlays here
 	_, err := OpenPackFor(target, "acme")
@@ -154,23 +158,30 @@ func TestOpenPackFor_FallsBackToEmbedded(t *testing.T) {
 
 // --- KnownPacks ------------------------------------------------------------
 
-// TestKnownPacks_ShipsReleasePack confirms KnownPacks lists the `release` pack —
-// the first shipped embedded overlay pack (Phase-3 capability-installer overlay
-// integration reference implementation). web-overlay remains relocated to a
-// non-shipped adoption reference; release is the sole shipped pack today.
-func TestKnownPacks_ShipsReleasePack(t *testing.T) {
+// TestKnownPacks_ShipsEmbeddedPacks confirms KnownPacks lists BOTH shipped
+// embedded overlay packs — `auto-classifier-pilot` (opt-in auto-classifier
+// safety pilot) and `release` (Phase-3 capability-installer reference). Both
+// are name-selectable out of the box. web-overlay remains relocated to a
+// non-shipped adoption reference and is deliberately absent.
+func TestKnownPacks_ShipsEmbeddedPacks(t *testing.T) {
 	got, err := KnownPacks()
 	if err != nil {
 		t.Fatalf("KnownPacks: %v", err)
 	}
-	if len(got) != 1 || got[0] != "release" {
-		t.Fatalf("KnownPacks: expected exactly [release], got %v", got)
+	want := []string{"auto-classifier-pilot", "release"}
+	if len(got) != len(want) {
+		t.Fatalf("KnownPacks: expected %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("KnownPacks: expected %v, got %v", want, got)
+		}
 	}
 }
 
 // TestKnownPacks_MatchesEmbeddedDir confirms the pack list agrees with a direct
-// readdir of the embedded overlays tree (the embed source of truth). With no
-// pack directories shipped, both must be empty.
+// readdir of the embedded overlays tree (the embed source of truth) — whatever
+// pack directories are shipped, KnownPacks mirrors them exactly.
 func TestKnownPacks_MatchesEmbeddedDir(t *testing.T) {
 	sub, err := fs.Sub(corpus.OverlaysFS, corpus.OverlaysDir)
 	if err != nil {
@@ -199,8 +210,9 @@ func TestKnownPacks_MatchesEmbeddedDir(t *testing.T) {
 
 // TestOpenPack_UnknownNamesFailClosed confirms OpenPack fails closed (wrapping
 // fs.ErrNotExist) for any name that is not a shipped pack. This is the contract
-// a profile that references a non-existent pack hits. (The `release` pack is the
-// one shipped name today; every name listed below is deliberately NOT it.)
+// a profile that references a non-existent pack hits. (The shipped names today
+// are `auto-classifier-pilot` and `release`; every name listed below is
+// deliberately NOT one of them.)
 func TestOpenPack_UnknownNamesFailClosed(t *testing.T) {
 	for _, name := range []string{"web-overlay", "anything", "acme", "acme-cockpit"} {
 		t.Run(name, func(t *testing.T) {

@@ -262,7 +262,11 @@ endpoint/model.
 
 ## How to enable
 
-This pack is **opt-in** — it is not selected by default.
+This pack is **opt-in** — it is not selected by default. It **ships embedded in
+the binary**, so it is name-selectable out of the box: there is nothing to
+vendor, copy, or recreate. (A project that keeps a pack of the same name under
+`.vh-agent-harness/overlays/auto-classifier-pilot/` still shadows the embed
+wholly — that override seam is unchanged.)
 
 1. Add `auto-classifier-pilot` to the `overlays:` list in
    `.vh-agent-harness/vh-harness-profile.yml`:
@@ -1098,9 +1102,10 @@ All identifiers are **generic** — `auto-tool-gate`, `auto-gate-audit`,
 reference agent system" / "a security-monitor classifier". No product names
 appear anywhere in this pack.
 
-## Design source
+## Design lineage
 
-- `researches/sources/2026-07-10-auto-mode-classifier-source-packet.local.md` — the
-  design packet for the reference agent system's
-  auto/classifier permission mode (the security-monitor LLM tool-call gate).
-  The porting-notes section (§10) frames the later phases.
+The verdict protocol, system-prompt anatomy, and transcript-serialization shape
+were derived from the **structure** of a reference agent system's auto/classifier
+permission mode (a security-monitor LLM tool-call gate). The wording throughout
+this pack is original; nothing is copied or paraphrased from any proprietary
+bundle. All identifiers are generic.

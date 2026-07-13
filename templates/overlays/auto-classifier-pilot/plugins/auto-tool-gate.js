@@ -79,8 +79,6 @@
 // failure denies; LLM allow only valid when no lower layer denied; LLM
 // failure/timeout/malformed blocks.
 //
-// Design source: researches/sources/2026-07-10-auto-mode-classifier-source-packet.local.md
-//
 // Naming: all identifiers here are GENERIC (auto-tool-gate / auto-gate-audit).
 // The upstream mechanism is referred to only as "the reference agent system" /
 // "a security-monitor classifier" — never by product name.

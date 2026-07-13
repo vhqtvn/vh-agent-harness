@@ -151,7 +151,7 @@ Response (allow scenario):
 ## Placement rationale
 
 These files live under `tests/integration/auto-gate-live-http/`, not under the
-overlay pack (`.vh-agent-harness/overlays/auto-classifier-pilot/`). Reasons:
+overlay pack (`templates/overlays/auto-classifier-pilot/`). Reasons:
 
 1. **No render pollution**: the overlay `RenderUnits` walk copies non-excluded
    files from `.vh-agent-harness/overlays/<pack>/` into `.opencode/`. A `test/`
@@ -161,7 +161,7 @@ overlay pack (`.vh-agent-harness/overlays/auto-classifier-pilot/`). Reasons:
    integration or layer handoffs" — a Dockerized mock + real HTTP path is
    exactly this category.
 3. **The SUT is COPY'd** into the tester image from the overlay source path
-   (`.vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-live.js`),
+   (`templates/overlays/auto-classifier-pilot/plugins/auto-gate-live.js`),
    which is stable regardless of whether the pack is selected or rendered.
 
 ## Files

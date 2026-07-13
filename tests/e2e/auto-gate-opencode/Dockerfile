@@ -69,11 +69,11 @@ COPY tests/e2e/auto-gate-opencode/classifier-prompt.md /opt/test/
 # normalizeLeafOutcome + aggregateLeafOutcomes from it. The bun build step
 # inlines all imports into a single bundled file, so only auto-tool-gate.js
 # is discovered as a plugin (the sibling modules do not export `server`).
-COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-tool-gate.js /tmp/plugins-src/
-COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-live.js /tmp/plugins-src/
-COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-verdict.js /tmp/plugins-src/
-COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-scrub.js /tmp/plugins-src/
-COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-tiered.js /tmp/plugins-src/
+COPY templates/overlays/auto-classifier-pilot/plugins/auto-tool-gate.js /tmp/plugins-src/
+COPY templates/overlays/auto-classifier-pilot/plugins/auto-gate-live.js /tmp/plugins-src/
+COPY templates/overlays/auto-classifier-pilot/plugins/auto-gate-verdict.js /tmp/plugins-src/
+COPY templates/overlays/auto-classifier-pilot/plugins/auto-gate-scrub.js /tmp/plugins-src/
+COPY templates/overlays/auto-classifier-pilot/plugins/auto-gate-tiered.js /tmp/plugins-src/
 
 # Bundle the 5 plugin modules into a SINGLE self-contained file.
 # REASON: OpenCode's plugin auto-discovery scans plugins/*.{ts,js} and loads

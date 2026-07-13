@@ -31,9 +31,10 @@
 // __isMain guard uses an explicit __filename comparison so an accidental import
 // cannot fire the suite.
 //
-// Design source (structure only): researches/sources/2026-07-10-auto-mode-classifier-source-packet.local.md
-//   - §3 system-prompt anatomy (mirrored in STRUCTURE, original wording)
-//   - §6 transcript serialization, text mode (User:/Assistant:/Tool: prefixes,
+// Design lineage (structure only, original wording throughout — nothing copied
+// or paraphrased from any proprietary bundle):
+//   - system-prompt anatomy (mirrored in STRUCTURE only)
+//   - transcript serialization, text mode (User:/Assistant:/Tool: prefixes,
 //     tool name + indented args; classifier sees tool INPUTS not results;
 //     the LAST tool call is the action being judged)
 

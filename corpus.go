@@ -50,17 +50,22 @@ var CoreFS embed.FS
 // Phase-3 capability-installer overlay integration: it carries a
 // capability-manifest.yml (id: core/release, hard_dep: core/gated-commit) and is
 // discovered automatically by internal/cli/profile.go discoverPackContributions.
-// The web-overlay pack was relocated to a non-shipped adoption reference under
-// docs/adoption-examples/web/. The internal/overlay/ infra
-// (KnownPacks/OpenPack/Pack) lists any directory dropped here automatically — no
-// code change. The directory retains a .gitkeep so the embed directive still
-// matches at least one file even if every pack directory is later removed.
+// The `auto-classifier-pilot` pack is the second shipped embedded pack: an
+// overlay-only pack (no capability-manifest.yml) selected via the `overlays:`
+// list, surfaced out-of-the-box by name. The web-overlay pack was relocated to a
+// non-shipped adoption reference under docs/adoption-examples/web/. The
+// internal/overlay/ infra (KnownPacks/OpenPack/Pack) lists any directory dropped
+// here automatically — no code change. The directory retains a .gitkeep so the
+// embed directive still matches at least one file even if every pack directory
+// is later removed.
 const OverlaysDir = "templates/overlays"
 
 // OverlaysFS is the read-only embedded overlay packs tree. Callers read from
 // the OverlaysDir sub-directory. internal/overlay lists/opens packs from here.
-// Currently embeds the `release` pack plus the retained .gitkeep; KnownPacks()
-// returns ["release"] and OpenPack("release") opens the shipped pack.
+// Currently embeds two shipped packs — `auto-classifier-pilot` (opt-in
+// auto-classifier safety pilot) and `release` (Phase-3 capability-installer
+// reference) — plus the retained .gitkeep; KnownPacks() returns
+// ["auto-classifier-pilot", "release"] (sorted) and OpenPack(<name>) opens either.
 //
 //go:embed all:templates/overlays
 var OverlaysFS embed.FS

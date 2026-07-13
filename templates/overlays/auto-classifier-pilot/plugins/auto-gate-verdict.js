@@ -15,9 +15,9 @@
 // re-implements parsing; it composes evaluate -> parseVerdict -> decision
 // matrix via decidePermission().
 //
-// Verdict contract (faithful port of the reference classifier's tag protocol —
-// see researches/sources/2026-07-10-auto-mode-classifier-source-packet.local.md §3
-// "Output Format" + §10 porting note 3):
+// Verdict contract (faithful port of the reference classifier's tag protocol
+// — a block/no XML-tag disposition format described by its output-format and
+// porting notes):
 //
 //   The classifier's ENTIRE response is text that must begin with `<block>`.
 //     - <block>yes</block>                         -> BLOCK (deny)

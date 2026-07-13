@@ -218,7 +218,7 @@ func TestOverlayPermissionState_SkipWhenNoOpencodeJSONC(t *testing.T) {
 //
 // These cases pin the SCHEMA ENVELOPE of the auto-classifier-pilot overlay's
 // config files. The SCHEMA SOURCE OF TRUTH is the JS plugin
-// .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-tool-gate.js
+// templates/overlays/auto-classifier-pilot/plugins/auto-tool-gate.js
 // (DEFAULT_PLUGIN_CONFIG ~L376-385, DEFAULT_LLM_CONFIG ~L403-413,
 // normalizePluginConfig ~L480-521, normalizeLlmConfig ~L543-588). If the JS
 // schema gains/drops/retypes a field or widens an enum, update Go's validators
@@ -512,7 +512,7 @@ func TestAutoGateConfig_LlmKnownFieldsPinned(t *testing.T) {
 
 // TestAutoGateConfig_SchemaParityWithJSSource is the SELF-ENFORCING drift
 // contract between the Go doctor schema envelope and the live JS source of
-// truth (.vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-tool-gate.js).
+// truth (templates/overlays/auto-classifier-pilot/plugins/auto-tool-gate.js).
 // It parses DEFAULT_PLUGIN_CONFIG and DEFAULT_LLM_CONFIG out of the JS file and
 // asserts their top-level field sets equal the Go known-field slices
 // (autoGatePluginKnownFields / autoGateLlmKnownFields). If a future slice adds a
@@ -527,7 +527,7 @@ func TestAutoGateConfig_SchemaParityWithJSSource(t *testing.T) {
 	// go.mod) — the cli test binary runs from internal/cli/, so the JS overlay
 	// path is only repo-relative once the module root is resolved.
 	repoRoot := findModuleRoot(t)
-	jsPath := filepath.Join(repoRoot, ".vh-agent-harness", "overlays",
+	jsPath := filepath.Join(repoRoot, "templates", "overlays",
 		"auto-classifier-pilot", "plugins", "auto-tool-gate.js")
 	js, err := os.ReadFile(jsPath)
 	if err != nil {

@@ -108,19 +108,28 @@ override to force-render a pack regardless of capability resolution.
 
 ### Shipped overlay packs
 
-Besides project packs you author under `.vh-agent-harness/overlays/`, one
-overlay pack ships **embedded in the binary**: `release` — the tag-driven
-`releaser` workflow (the first embedded pack). It is selected either way and
-the two paths converge:
+Besides project packs you author under `.vh-agent-harness/overlays/`, two
+overlay packs ship **embedded in the binary**, selectable by name with no
+vendoring:
 
-- `capabilities: [core/release]` — the explicit capability opt-in, OR
-- `overlays: [release]` — the expert-override pack selection.
+- `release` — the tag-driven `releaser` workflow (the first embedded pack). It
+  is selected either way and the two paths converge:
+  - `capabilities: [core/release]` — the explicit capability opt-in, OR
+  - `overlays: [release]` — the expert-override pack selection.
 
-Selecting `core/release` also pulls the `core/gated-commit` cluster in via
-hard-dep closure (the releaser delegates to the gated-commit agents), so both
-selection paths render the same cluster. It renders into `.opencode/` on
-`update` exactly like a project-local pack, and is opt-in (a `minimal` profile
-that never names it renders nothing of it).
+  Selecting `core/release` also pulls the `core/gated-commit` cluster in via
+  hard-dep closure (the releaser delegates to the gated-commit agents), so both
+  selection paths render the same cluster.
+
+- `auto-classifier-pilot` — the opt-in auto-classifier safety pilot (a
+  three-hook tool-call gate with `audit`/`enforce`/`live` modes). It is
+  **overlay-only** (no capability-manifest), so it is selected solely via
+  `overlays: [auto-classifier-pilot]`. See the pack's own README for the live
+  config model and mode behavior.
+
+Each renders into `.opencode/` on `update` exactly like a project-local pack,
+and each is opt-in (a `minimal` profile that never names it renders nothing of
+it). A project-local pack of the same name still shadows the embed wholly.
 
 ## Permission transform (F-intent)
 

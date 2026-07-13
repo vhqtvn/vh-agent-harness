@@ -57,11 +57,14 @@ type Pack struct {
 // vh-harness-profile.yml: overlays:[...]). Unknown names in a profile are skipped
 // at apply time rather than aborting the install.
 //
-// As of the 2026-06-25 pre-publish clearance the shipped overlays tree carries
-// NO packs (web-overlay was relocated to a non-shipped adoption reference), so
-// KnownPacks returns an empty slice. The mechanism is retained as the forward
-// path: drop a pack directory under templates/overlays/ and it is listed here
-// with no code change.
+// The shipped overlays tree carries EMBEDDED packs that are selectable by name
+// out of the box: `release` (Phase-3 capability-installer reference, first
+// shipped pack) and `auto-classifier-pilot` (the opt-in auto-classifier safety
+// pilot). KnownPacks therefore returns ["auto-classifier-pilot", "release"]
+// (sorted). A project-local pack at .vh-agent-harness/overlays/<name>/ still
+// shadows an embedded pack of the same name (project-wins) via OpenPackFor.
+// Dropping a new pack directory under templates/overlays/ is listed here with no
+// code change.
 func KnownPacks() ([]string, error) {
 	sub, err := fs.Sub(corpus.OverlaysFS, corpus.OverlaysDir)
 	if err != nil {

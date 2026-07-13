@@ -18,9 +18,9 @@ WORKDIR /app
 # --- Classifier SUT (System Under Test) ---
 # auto-gate-live.js is the module under test. It imports two sibling modules
 # (relative ./ imports), so all three must be co-located in the same directory.
-COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-live.js      ./sut/
-COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-verdict.js   ./sut/
-COPY .vh-agent-harness/overlays/auto-classifier-pilot/plugins/auto-gate-scrub.js     ./sut/
+COPY templates/overlays/auto-classifier-pilot/plugins/auto-gate-live.js      ./sut/
+COPY templates/overlays/auto-classifier-pilot/plugins/auto-gate-verdict.js   ./sut/
+COPY templates/overlays/auto-classifier-pilot/plugins/auto-gate-scrub.js     ./sut/
 
 # --- Classifier system prompt ---
 # classifyLive calls resolveSystemPrompt, which by default shells out to
