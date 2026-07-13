@@ -268,9 +268,15 @@ capabilities: [core/debate]
 }
 
 func TestHarnessProfileReconcile_CapabilitiesAbsentStaysAbsent(t *testing.T) {
-	// When neither side declares capabilities, the merged output omits the key
-	// (no spurious empty capabilities: [] line).
-	project := []byte(`profile: minimal
+	// When neither side declares any append-only array, the merged output must
+	// OMIT every empty-array key (no spurious `capabilities: []` / `modules: []`
+	// line). This must hold on the REAL Apply path (a non-noop merge), not only
+	// the byte-identical noop fast-path. The inputs diverge on `profile` so the
+	// reconcile produces an Apply outcome with merged bytes to assert against.
+	// (Regression for the bare `yaml.Marshal` over `harnessProfileData` that
+	// re-emitted empty arrays as `[]` on every non-noop reconcile, defeating the
+	// documented `modules:` deprecation.)
+	project := []byte(`profile: coordination
 `)
 	platformDefault := []byte(`profile: minimal
 `)
@@ -278,8 +284,46 @@ func TestHarnessProfileReconcile_CapabilitiesAbsentStaysAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile errored: %v", err)
 	}
-	if res.Outcome != OutcomeNoop {
-		t.Fatalf("expected Noop for byte-identical input, got %s", res.Outcome)
+	if res.Outcome != OutcomeApply {
+		t.Fatalf("expected Apply (non-noop merge), got %s", res.Outcome)
+	}
+	merged := string(res.Merged)
+	// project selection (coordination) is within the enum -> project-wins.
+	if !strings.Contains(merged, "profile: coordination") {
+		t.Fatalf("merged output missing project profile: %s", merged)
+	}
+	// Empty append-only arrays must drop out of the merged bytes, not be
+	// re-emitted as `[]`. Asserting against the line key (trailing colon) keeps
+	// this precise: a field VALUE containing the word would not match.
+	for _, key := range []string{"modules:", "capabilities:", "overlays:", "policy_packs:"} {
+		if strings.Contains(merged, key) {
+			t.Fatalf("merged output must not contain empty-array key %q (omitempty regression); got:\n%s", key, merged)
+		}
+	}
+}
+
+func TestHarnessProfileReconcile_AbsentModulesNotReadded(t *testing.T) {
+	// Focused regression: a project that has removed an empty `modules:`
+	// (deprecated field) must NOT have it re-added by a non-noop reconcile.
+	// The project profile omits `modules:` and diverges from the platform
+	// default on `profile`, forcing the Apply path. The merged output must
+	// contain no `modules:` line at all — so a consumer's deprecation migration
+	// is both completable (the field does not come back) and the empty stub
+	// never reappears (so the silent-on-empty warning gate is irrelevant).
+	project := []byte(`profile: coordination
+`)
+	platformDefault := []byte(`profile: minimal
+`)
+	res, err := HarnessProfile{}.Reconcile(project, platformDefault)
+	if err != nil {
+		t.Fatalf("reconcile errored: %v", err)
+	}
+	if res.Outcome != OutcomeApply {
+		t.Fatalf("expected Apply, got %s", res.Outcome)
+	}
+	merged := string(res.Merged)
+	if strings.Contains(merged, "modules:") {
+		t.Fatalf("absent modules: must not be re-added by reconcile; got:\n%s", merged)
 	}
 }
 

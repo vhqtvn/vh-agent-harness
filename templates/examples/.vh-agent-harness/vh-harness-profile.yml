@@ -13,10 +13,6 @@
 # profile: the feature bundle. Enum; the core ships "minimal".
 profile: minimal
 
-# modules: harness modules to render. "core" is always present.
-modules:
-  - core
-
 # features: per-feature toggles (keyed; your value wins on reconcile).
 features:
   backlog: false        # enable the backlog/planning command surface

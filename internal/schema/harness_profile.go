@@ -48,12 +48,21 @@ var profileEnumList = func() string {
 }()
 
 // harnessProfileData is the parsed, typed projection of a vh-harness-profile.yml.
+//
+// The four append-only array fields (Modules, Overlays, PolicyPacks,
+// Capabilities) carry `omitempty` so an absent/empty array stays ABSENT in the
+// reconciled marshaled output. Without it, marshalHarnessProfile re-emits every
+// empty array as `[]` on every non-noop reconcile, which defeats the documented
+// `modules:` deprecation: a consumer who removes an empty `modules:` gets it
+// re-added silently (and the re-added empty stub emits no deprecation warning,
+// since the warning gate is silent-on-empty by design). Non-empty arrays still
+// emit normally, so existing `modules: [core]` fixtures keep their shape.
 type harnessProfileData struct {
 	Profile     string          `yaml:"profile"`
-	Modules     []string        `yaml:"modules"`
+	Modules     []string        `yaml:"modules,omitempty"`
 	Features    map[string]bool `yaml:"features"`
-	Overlays    []string        `yaml:"overlays"`
-	PolicyPacks []string        `yaml:"policy_packs"`
+	Overlays    []string        `yaml:"overlays,omitempty"`
+	PolicyPacks []string        `yaml:"policy_packs,omitempty"`
 	// Capabilities is the profile's selected capability IDs (grammar
 	// namespace/name, e.g. core/gated-commit). Phase 1 accepts and validates the
 	// field (non-empty, de-duplicated entries, like the other string arrays);
@@ -61,7 +70,7 @@ type harnessProfileData struct {
 	// Catalog and expand preset semantics. The legacy modules: key is NOT
 	// deprecated by this field yet. ID grammar and existence are resolver
 	// concerns, not schema concerns: the schema only carries the selection list.
-	Capabilities []string `yaml:"capabilities"`
+	Capabilities []string `yaml:"capabilities,omitempty"`
 }
 
 // allowedTopLevel is the exhaustive set of top-level keys a vh-harness-profile.yml
