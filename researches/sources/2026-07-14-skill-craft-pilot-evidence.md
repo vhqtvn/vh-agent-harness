@@ -25,8 +25,9 @@ record, not a recommendation — the decision lives in the memo.
   against a real repo), not a speculative yes. This is what discharges S2's
   "real pilot" requirement.
   - **Confidence: HIGH** — recorded in the skill-craft-import session memory and
-    reflected in the committed `f56b964` artifact (tdd-loop) and the held
-    debugging-loop files.
+    reflected in the committed `f56b964` artifact (tdd-loop) and the committed
+    `c52268a` artifact (debugging-loop, including the D2C escape the VH-Solara
+    forward pilot validated).
 
 ## Finding 1 — tdd-loop / TrueAI pilot (SATISFIED)
 
@@ -71,44 +72,98 @@ record, not a recommendation — the decision lives in the memo.
     "clean up + write a ≤3-line post-mortem" tail, which landed in the held skill.
     - **Confidence: HIGH** — in the held `SKILL.md`.
 
-## Finding 3 — debugging-loop D2C escape / VH-Solara forward pilot (PENDING)
+## Finding 3 — debugging-loop D2C escape / VH-Solara forward pilot (SATISFIED)
 
 - **Skill:** debugging-loop core skill, **D2C (non-deterministic red) hybrid
   escape** specifically.
 - **Pilot repo:** VH-Solara (forward pilot — volunteered).
-- **S2 verdict:** **PENDING.** This is the open gate for `P2-SKILLS-002`.
+- **S2 verdict:** **SATISFIED.** This was the open gate for `P2-SKILLS-002`; the
+  pilot discharged it. Skill committed `c52268a`; row moved `blocked → done`.
 - **Why VH-Solara is the stress-test repo:** VH-Solara runs a 6-lane
   Go + Vitest + Playwright stack with a **GPU/WebRender heat-saga** — a class of
   non-deterministic red signals that **breaks the deterministic-red keystone** of
   the debugging-loop. It is the canonical case the D2C escape was designed for:
   a red signal that is `human-observed | non-deterministic | not agent-runnable`,
   where theorizing into the noise is the failure mode the escape prevents.
-- **What the pilot must validate:** the D2C downgrade-and-handoff escape — that
-  the agent (1) classifies the non-deterministic signal correctly, (2) stops
-  theorizing after the downgrade, (3) packages the handoff via
-  `diagnostics-export`, and (4) ends the loop. And the five guardrails
-  (human-observation-never-promoted-to-deterministic-red;
-  do-not-continue-theorizing-after-downgrade; diagnostics-export packages the
-  handoff; bgshell-job only for non-GPU long probes; END the loop after handoff).
-- **Slot to fill when the VH-Solara report arrives:**
+- **Pilot outcome (the heat saga):** the D2C escape was validated against
+  VH-Solara's Firefox/WebRender GPU/thermal defect (a `mask-image` gradient
+  rendering failure under real GPU load). The pre-pilot MEDIUM-confidence-on-
+  wording hold **resolved**: the escape wording held up under a real
+  non-deterministic saga.
+  - **All FIVE guardrails fire correctly.** (1) The `human-observed` label was
+    correctly applied — the defect needs a human eye to read the rendered frame,
+    so it was NOT promoted to an agent-owned deterministic red/green gate.
+    (2) The agent did NOT continue theorizing after the downgrade. (3)
+    `diagnostics-export` packaged the handoff bundle (environment, repro attempts,
+    the next human-observation request). (4) `bgshell-job` was kept inside the
+    deterministic-red attempt boundary (NON-GPU long probes only) — the GPU/
+    compositor probing correctly routed to the Downgrade, not to bgshell. (5) The
+    agent-owned loop ENDED after the labeled handoff (no "one more hypothesis").
+  - **The `human-observed | non-deterministic | not agent-runnable` label is the
+    taxonomy the five guardrails operate ON — it is NOT a sixth guardrail.** This
+    packet and the decision memo both use **five** as the guardrail count.
+  - **Statistical-sample red correctly stayed in-loop (NOT downgraded).**
+    VH-Solara's serial ×50 reproduction of a flaky-race signal — the
+    `downgrade-protocol.md:46-49` case ("Race that fails 1-in-50 but tightens
+    under 50× serial repeat → NOT a downgrade yet") — was correctly driven with
+    `bgshell-job` rather than downgraded. The downgrade fired only for the
+    genuinely human-observed GPU signal. This is the key negative-space
+    validation: the escape does not over-fire on legitimate deterministic-red
+    attempts that happen to be slow.
+  - **`diagnostics-export` + `bgshell-job` boundary holds.** The two skills occupy
+    disjoint regions: bgshell inside the deterministic-red attempt (its output CAN
+    become a red signal); diagnostics-export at the downgrade boundary (packaging
+    a handoff for a human). No role confusion observed.
+  - **Confidence on the design (post-pilot): HIGH.** The escape wording survived a
+    real non-deterministic saga; the five guardrails fired; the statistical-sample
+    red was not falsely downgraded.
+- **One flagged non-blocking tension → `P2-SKILLS-003`.** VH-Solara's
+  competent-team-validated serial ×50 red takes 15–27min wall-clock per run. The
+  `red-signal-recipes.md` "fast" property (step-1 completion: deterministic +
+  fast + agent-runnable) and its "slow" anti-pattern can be misread as flagging
+  this legitimate predeclared-aggregate red. Non-blocking: the guardrails in
+  `SKILL.md` and `downgrade-protocol.md:46-49` need NO change; the follow-up is a
+  wording clarification in `red-signal-recipes.md` only — bless the
+  predeclared-aggregate red shape (predeclared threshold + reproducible count +
+  no cheaper seam + bgshell-hosted) into the "fast" property + "slow" anti-pattern
+  so a validated slow aggregate red is not falsely flagged. Tracked as
+  `P2-SKILLS-003` (todo, skills).
+- **Evidence tier: retrospective.** The heat saga was already fixed by the time
+  the pilot reported; the validation reconstructed the loop against the resolved
+  defect rather than running it live. This is adequate for a wording/escape
+  validation (the failure mode and the guardrail behavior are observable in
+  retrospect), but it is not a live forward-run. Noted for honesty, not as a
+  blocker.
 
-  > **[PENDING — what held vs what broke; whether the escape needs a
-  > statistical-sample variant.]** Specifically: did the downgrade classification
-  > fire correctly on the GPU/WebRender heat-saga signals? Did the agent hold the
-  > "do not continue theorizing" guardrail? Did the handoff bundle carry enough
-  > for a human to pick up? And: does the flip condition (a compact
-  > agent-runnable statistical protocol with a predeclared aggregate gate) need to
-  > be authored now, or can it stay deferred?
+## Finding 4 — incidental dogfood findings from the VH-Solara pilot
 
-- **Confidence on the *design* (pre-pilot): MED.** The escape is reasoned from the
-  deterministic-red keystone and the failure mode (theorizing into noise), but the
-  wording has not been stress-validated against a real non-deterministic saga.
-  This MED confidence is **why the skill holds untracked** rather than
-  blanket-committing (see the decision memo's held-vs-committed policy).
-- **Next decision (on pilot report):**
-  - if the escape **holds** → `commit-review` + commit `debugging-loop/` to core,
-    move `P2-SKILLS-002` to `done`;
-  - if it **breaks** → iterate the wording → re-validate against VH-Solara.
+The D2C validation surfaced two incidental findings that are NOT blockers for
+`P2-SKILLS-002` (the skill is promoted) but are captured as follow-ups or
+near-miss notes for the craft record.
+
+- **Inherited harness testing boilerplate → `P2-SKILLS-004`.** VH-Solara's D3-
+  reconcile step (the tdd-loop authority-honesty rule: localize the consumer's
+  testing rules in the same slice) surfaced that the harness `AGENTS.md` testing
+  section ships a generic `pytest` / `tests/{unit,integration,e2e}` block that
+  consumers inherit verbatim and never reconcile to their real topology.
+  VH-Solara is Go + Vitest + Playwright (6 lanes, no pytest, no `tests/unit/`),
+  so the inherited block is actively misleading until a human rewrites it. This
+  is a harness-side dogfood defect, not a skill defect. Tracked as `P2-SKILLS-004`
+  (todo, skills): investigate whether the testing section should be
+  tokenized / localize-on-install-nudged or carry an explicit "reconcile to your
+  real topology" marker. A draft fix sketch lived at
+  `tmp/agent-runs/skill-craft-import/vh-solara-agents-testing-section-draft.md`
+  (ephemeral, not committed).
+  - **Confidence: HIGH** — the inherited block is verifiable in this repo's own
+    `AGENTS.md` ("Testing rules" section).
+- **web-unit `node`-default-vs-`jsdom` authority-honesty near-miss (no row).**
+  During the same pilot arc, a localization seam-map nearly cited a `jsdom`
+  environment for a web-unit test that actually ran under the default `node`
+  environment — the kind of aspirational/wrong authority reference D3 forbids.
+  Caught before commit; no artifact carried the wrong reference. Recorded here as
+  a near-miss confirming the D3 rule is load-bearing, not as a follow-up row.
+  - **Confidence: MED** — pilot-reported near-miss; no committed artifact to point
+    at (by construction — it was caught pre-commit).
 
 ## Contradiction audit
 
@@ -131,13 +186,19 @@ Two contradictions were surfaced during this cycle:
 
 - `templates/core/.opencode/skills/tdd-loop/` — committed skill (in `f56b964`).
   - `SKILL.md` (+84), `references/seam-localization.md` (+81).
-- `templates/core/.opencode/skills/debugging-loop/` — **held untracked** pending
-  the VH-Solara pilot on the D2C escape.
+- `templates/core/.opencode/skills/debugging-loop/` — committed skill (in
+  `c52268a`; previously held untracked pending the VH-Solara pilot on the D2C
+  escape — that pilot has now validated the escape, see Finding 3).
   - `SKILL.md` (+110), `references/red-signal-recipes.md` (+66),
     `references/downgrade-protocol.md` (+90).
+  - The committed `SKILL.md` carries exactly **five** D2C guardrails (the
+    `human-observed | non-deterministic | not agent-runnable` label is the
+    taxonomy those guardrails operate on, not a sixth guardrail).
 - `templates/core/.opencode/skills/skill-creator/references/skill-lifecycle.md` —
-  where the S2 rule shipped (no tracking mechanism; this slice closes that gap).
+  where the S2 rule shipped (no tracking mechanism; the 2026-07-14 decision memo
+  + this packet closed that gap).
 - `docs/planning/backlog.md` — canonical status rows `P2-SKILLS-001` (done),
-  `P2-SKILLS-002` (blocked).
+  `P2-SKILLS-002` (done — promoted `c52268a`), plus follow-ups `P2-SKILLS-003`
+  and `P2-SKILLS-004` (todo, skills).
 - `.opencode/state/sessions/skill-craft-import/memory/open-questions.md` —
   reconciled session note (disposable; corrected to stop contradicting canon).

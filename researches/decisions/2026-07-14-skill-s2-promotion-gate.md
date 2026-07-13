@@ -1,13 +1,13 @@
 # Decision: Skill S2 Promotion Gate (Overlay-Pilot-Then-Promote Tracking)
 
 **Date:** 2026-07-14
-**Status:** Accepted (tdd-loop promoted; debugging-loop gated on forward pilot).
+**Status:** Accepted (tdd-loop promoted `f56b964`; debugging-loop promoted `c52268a` after the VH-Solara forward pilot validated the D2C escape).
 **Supersedes:** none.
 **See also:**
 [`../sources/2026-07-14-skill-craft-pilot-evidence.md`](../sources/2026-07-14-skill-craft-pilot-evidence.md)
-(evidence trail: the TrueAI retrospective pilots + the VH-Solara forward-pilot slot).
+(evidence trail: the TrueAI retrospective pilots + the VH-Solara forward pilot — D2C escape SATISFIED).
 [`../../docs/planning/backlog.md`](../../docs/planning/backlog.md)
-(canonical status home: rows `P2-SKILLS-001` done, `P2-SKILLS-002` blocked).
+(canonical status home: rows `P2-SKILLS-001` done, `P2-SKILLS-002` done).
 
 ## Problem
 
@@ -35,6 +35,15 @@ Both were held only in
 `.opencode/state/sessions/skill-craft-import/memory/open-questions.md`, which
 marked *both* as "deferred per S2, awaiting pilot" — a stale record that already
 contradicts reality (#4 is committed).
+
+> **Resolution note (2026-07-14, post-pilot):** both skills are now promoted —
+> `tdd-loop` as `f56b964` and `debugging-loop` as `c52268a`. The
+> `debugging-loop` D2C escape's MEDIUM-confidence-on-wording hold **resolved**
+> when the VH-Solara forward pilot validated the escape against their
+> GPU/WebRender heat saga (all five guardrails fire; statistical-sample red
+> correctly NOT downgraded). See Finding 3 of the evidence packet. This memo
+> records the gate's design; the paragraphs below are updated to reflect the
+> resolved state rather than the interim held state.
 
 ## Options Considered
 
@@ -76,16 +85,21 @@ contradicts reality (#4 is committed).
 ## Decision
 
 **(a) Canonical status home.** Each skill promotion is tracked as a backlog row:
-`P2-SKILLS-001` (tdd-loop, `done`) and `P2-SKILLS-002` (debugging-loop, `blocked`
-on the VH-Solara forward pilot). The backlog is the status source of truth; this
-memo records the *decision*; the companion source packet records the *evidence*.
+`P2-SKILLS-001` (tdd-loop, `done` @ `f56b964`) and `P2-SKILLS-002`
+(debugging-loop, `done` @ `c52268a` — the VH-Solara forward pilot validated the
+D2C escape). The backlog is the status source of truth; this memo records the
+*decision*; the companion source packet records the *evidence*.
 
 **(b) Held-vs-committed policy.** Commit-to-core iff **all** design decisions are
 HIGH-confidence **and** the S2 gate is satisfied (a real overlay pilot returned
 real positive signal, not a speculative yes). Otherwise hold untracked pending
 the specific validating pilot. This is the operationalization of S2: the gate is
 not "did a pilot happen" but "did a pilot return evidence on the specific
-uncertain design."
+uncertain design." The policy's one live exercise was `debugging-loop`'s D2C
+escape, which was MEDIUM-confidence-on-wording pre-pilot: it correctly held
+untracked until the VH-Solara forward pilot returned positive signal on the
+specific uncertain design, then promoted `c52268a`. The policy worked as
+designed — the hold was bounded, one round-trip, and discharged by real evidence.
 
 **(c) Promotion conditions — the three design decisions.** A skill is promotable
 when each of its open design decisions has reached the confidence bar below. For
@@ -101,8 +115,9 @@ this cycle:
   the overlay is free to override the single Refactor step. The skill's Refactor
   step now runs under green, in-loop.
 
-- **D2C — non-deterministic red signal: hybrid escape (MEDIUM confidence → held,
-  gated on VH-Solara forward pilot).** Deterministic red stays the **only**
+- **D2C — non-deterministic red signal: hybrid escape (MEDIUM confidence →
+  resolved: VH-Solara forward pilot validated the escape → promoted `c52268a`).**
+  Deterministic red stays the **only**
   agent-iterated flagship (the reproduce→minimise→hypothesise→instrument→fix→regress
   loop runs to a fix). For a **non-deterministic** red signal, the agent takes an
   explicit **downgrade-and-handoff** path rather than theorizing into noise: the
@@ -111,10 +126,21 @@ this cycle:
   silently promoted to a deterministic-red claim; (2) the agent does **not**
   continue theorizing after the downgrade; (3) `diagnostics-export` packages the
   handoff bundle; (4) `bgshell-job` is allowed **only** for non-GPU long probes;
-  (5) the agent loop **ends** after the handoff (no "one more hypothesis"). **Flip
-  condition:** a compact agent-runnable statistical protocol yielding a
-  predeclared aggregate gate would graduate non-deterministic red back into the
-  agent-iterated flagship; until such a protocol exists, the escape stands.
+  (5) the agent loop **ends** after the handoff (no "one more hypothesis"). (The
+  `human-observed | non-deterministic | not agent-runnable` triple is the **label
+  taxonomy** the five guardrails operate on — it is not a sixth guardrail; use
+  **five** as the count.) **Pilot outcome:** the VH-Solara forward pilot ran the
+  escape against their Firefox/WebRender GPU/thermal heat saga (a `mask-image`
+  gradient defect under real GPU load). All five guardrails fired correctly; the
+  `human-observed` label was correctly applied; the statistical-sample serial ×50
+  red was correctly kept in-loop and NOT downgraded (the
+  `downgrade-protocol.md:46-49` case). One non-blocking wording clarification
+  followed up as `P2-SKILLS-003` (the `red-signal-recipes.md` "fast" property vs
+  legitimate slow predeclared-aggregate reds); the guardrails themselves needed
+  no change. **Flip condition:** a compact agent-runnable statistical protocol
+  yielding a predeclared aggregate gate would graduate non-deterministic red back
+  into the agent-iterated flagship; until such a protocol exists, the escape
+  stands.
 
 - **D3 — localization authority-honesty: YES (HIGH confidence → committed in
   tdd-loop).** A localization file's authority references **must be real and
@@ -134,23 +160,38 @@ this cycle:
   pilot), not paid by every consumer on their next `update`.
 - **(+)** Reuses existing surfaces (backlog + decisions/sources) — no new
   mechanism to learn or drift.
-- **(−)** The D2C escape ships only after the willing pilot (VH-Solara) rather
-  than blanket-committing now. This costs a round-trip and leaves
-  debugging-loop untracked-but-held in the interim. Accepted: the alternative
-  (blanket-commit a MEDIUM-confidence-on-wording design into core) is worse.
+- **(−)** The D2C escape shipped only after the willing pilot (VH-Solara) rather
+  than blanket-committing now. This cost a round-trip and left
+  debugging-loop untracked-but-held in the interim. **(Resolved: the round-trip
+  completed and the skill promoted `c52268a`. The interim cost was bounded to one
+  pilot cycle.)** Accepted: the alternative (blanket-commit a
+  MEDIUM-confidence-on-wording design into core) is worse.
 - **(−)** There is no automated pilot-completion trigger: the debugging-loop row
-  stays `blocked` until an operator-relayed pilot report arrives. Manual, by
-  design (a pilot is a real validation, not a CI signal).
+  stayed `blocked` until an operator-relayed pilot report arrived. **(Resolved in
+  this instance; the structural gap remains.)** Manual, by design (a pilot is a
+  real validation, not a CI signal). See Deferred Work.
 
 ## Deferred Work
 
-- **debugging-loop core commit.** Gated on the VH-Solara forward pilot validating
-  the D2C escape. On pilot report: if the escape holds → `commit-review` + commit;
-  if it breaks → iterate wording → re-validate. Tracked as `P2-SKILLS-002`.
+- **debugging-loop core commit — DONE (`c52268a`).** The VH-Solara forward pilot
+  validated the D2C escape; the escape held; `commit-review` + commit completed;
+  `P2-SKILLS-002` moved `blocked → done`. No longer deferred.
+- **`P2-SKILLS-003` — `red-signal-recipes.md` "fast" property clarification
+  (non-blocking follow-up from the VH-Solara pilot).** The pilot's
+  competent-team-validated serial ×50 red (15–27min wall-clock) can be misread as
+  the "slow" anti-pattern. Bless the predeclared-aggregate red shape into the
+  "fast" property + "slow" anti-pattern so a validated slow aggregate red is not
+  falsely flagged. The `SKILL.md` guardrails + `downgrade-protocol.md:46-49` need
+  NO change; this is a wording clarification in `red-signal-recipes.md` only.
+- **`P2-SKILLS-004` — make the harness `AGENTS.md` testing section localizable
+  (dogfood finding from the VH-Solara D3-reconcile step).** The generic
+  `pytest` / `tests/{unit,integration,e2e}` block is inherited verbatim by
+  consumers with a different topology (VH-Solara is Go/Vitest/Playwright).
+  Investigate tokenizing it or adding a "reconcile to your real topology" marker.
 - **S2-tracking automation.** No automated pilot-completion trigger exists today.
   A future slice could add a trigger predicate (e.g. `overlay-pilot-returns-positive-signal`)
   wired into the DEFER/follow-up curation path. Low priority; the manual relay
-  works at current scale.
+  worked at current scale (and just discharged the debugging-loop hold).
 - **`researches/AGENTS.md` dangling-reference cleanup.** Pre-existing dated refs
   to memo filenames that do not (yet) exist remain; out of scope for this slice.
 - **Stray scratch in `researches/sources/`.** A scratch artifact from the research
@@ -161,15 +202,19 @@ this cycle:
 - Companion evidence packet:
   [`../sources/2026-07-14-skill-craft-pilot-evidence.md`](../sources/2026-07-14-skill-craft-pilot-evidence.md)
   — the TrueAI retrospective pilots (tdd-loop S2 SATISFIED; debugging-loop core
-  discipline S2 SATISFIED) and the VH-Solara forward-pilot slot (D2C escape,
-  PENDING).
+  discipline S2 SATISFIED) and the VH-Solara forward pilot (D2C escape SATISFIED).
 - **tdd-loop commit:** `f56b964` (SKILL.md +84, `references/seam-localization.md`
   +81). S2 gate satisfied via the TrueAI overlay pilot (in-loop refactor + seam
   discipline validated).
-- **debugging-loop held files:** `templates/core/.opencode/skills/debugging-loop/`
-  (SKILL.md +110, `references/red-signal-recipes.md` +66,
-  `references/downgrade-protocol.md` +90) — built but held untracked pending the
-  VH-Solara pilot on the D2C escape.
+- **debugging-loop commit:** `c52268a` (SKILL.md +110,
+  `references/red-signal-recipes.md` +66, `references/downgrade-protocol.md` +90).
+  S2 gate satisfied: the TrueAI retrospective pilot validated the core discipline
+  (step-0 absence-contract + step-7 post-mortem), and the VH-Solara forward pilot
+  validated the D2C escape against the GPU/WebRender heat saga — all five
+  guardrails fire; the statistical-sample serial ×50 red correctly stays in-loop
+  (not downgraded). The committed `SKILL.md` carries exactly five guardrails; the
+  `human-observed | non-deterministic | not agent-runnable` triple is the label
+  taxonomy those guardrails operate on, not a sixth guardrail.
 - **Pilot provenance:** the pilot contributions came from **two consuming repos**
   (TrueAI, VH-Solara) responding to an adopt-question; both returned **real pilot
   evidence** rather than a speculative yes. This is what discharges S2's
