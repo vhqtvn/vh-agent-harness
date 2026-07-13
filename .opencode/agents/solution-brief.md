@@ -62,10 +62,14 @@ Manual step-back (reactive backstop, operator-initiated only):
   - force: re-run `debate` with a frame-level concern the operator names
     (still subject to evidence rules — the operator must cite packet evidence
     or request a `researcher` refresh first; no fabricated evidence)
-  - retain the original frame and option set; a manual step-back does NOT
-    authorize alternate-frame divergence
+  - suppress: if `debate` auto-triggered a reframe-and-diverge, the operator
+    may suppress it — discard the alternate-frame candidates, retain the
+    original frame, and proceed with the original-frame recommendation. The
+    suppression and its reason are recorded in the output.
 - the loop-back does NOT add a specialist call beyond a single extra `debate`
   pass, and only when the operator explicitly requests it
+- manual override does NOT relax evidence discipline and does NOT extend the
+  revision budget
 - this is reactive backstop behavior; the default solution-brief flow is
   unchanged when the operator does not intervene
 

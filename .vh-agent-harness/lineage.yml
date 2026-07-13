@@ -7,7 +7,7 @@ lineage_version: "1"
 template:
     source: templates/core
     commit: ""
-    ref: harness/0.6.0+dev
+    ref: harness/0.7.0
 copier:
     version: ""
 answers:
@@ -19,6 +19,6 @@ answers:
         project_name: vh-agent-harness
         project_slug: vh-agent-harness
 render:
-    last_successful_update_id: 3d658207f7214fe1
-    last_successful_render_at: "2026-07-12T10:56:36Z"
+    last_successful_update_id: 8d2491dbc943bf64
+    last_successful_render_at: "2026-07-13T00:24:30Z"
     rendered_by: embed-fs
