@@ -129,6 +129,64 @@ Notes:
 - Only include workstream commands when the task is part of a broader long-lived theme.
 - Keep the bootstrap list tight. Name only the docs, paths, and commands that materially affect the next decision.
 
+## Iterative alignment interview (grilling)
+
+Before building, alignment is sometimes more valuable than any prompt template. When the request is ambiguous, underspecified, or touches something irreversible, run an iterative alignment interview — a short, one-question-at-a-time exchange whose only purpose is to reach a shared understanding confident enough to write the task contract.
+
+This is a conversation shape, not a batch primitive. `researcher`, `debate`, and `solution-brief` return artifacts; grilling returns a convergent understanding between you and the human.
+
+### When to use
+
+- Before building when alignment is uncertain — the request could be read several plausible ways.
+- When the request is ambiguous or underspecified (missing scope, missing acceptance bar, unclear which surface is in play).
+- Before enacting anything irreversible (deletions, promotions, migrations, config changes with no clean rollback).
+
+It complements, and does not replace, the task contract (which captures the shared understanding once it exists) and `solution-brief` (which returns a brief from a compare-and-plan pass). Grilling is what you do to make either of those writable with confidence.
+
+### The technique
+
+The discipline has four load-bearing rules:
+
+1. **One question at a time.** Ask a single sharp question; wait for the answer before proceeding. Do not batch a list of questions — a batch forces the human to hold context across answers and hides dependencies between them. Sequential questions let each answer sharpen the next.
+2. **Look up facts yourself.** If a question has a factual answer discoverable in the repo, docs, or codebase, find it. Do not ask the human for information you can read. Grilling is for judgment gaps and ambiguity, not for facts you were too lazy to read.
+3. **Put decisions to the human WITH a recommended answer.** When the question is a judgment call (not a fact), state your recommendation and a one-line why, then ask the human to confirm or override. Never present a bare open question when you have a defensible recommendation — a recommendation gives the human a fast path and surfaces your reasoning for correction.
+4. **Do not enact until shared understanding.** No file edits, no commits, no side effects until the interview converges. The interview's purpose is to reach the point where the task contract can be written with confidence. If you cannot yet write the contract, you are not done interviewing.
+
+### Example
+
+A short, illustrative exchange — one question at a time, each carrying a recommendation:
+
+```text
+Agent: The request says "clean up the module." I read the code: the module
+has 47 files, 12 of which are unreferenced. Should "clean up" mean deleting
+the 12 unreferenced files only, or also refactoring the kept 35? I recommend
+delete-only — refactoring is a separate scope and riskier. Confirm or override?
+
+Human: Delete-only, but keep the two files under the api/ surface — they are
+used by an external consumer I have not wired yet.
+
+Agent: Noted — that leaves 10 to delete. One more decision: delete in a single
+commit, or one commit per file for easier revert? I recommend a single commit
+with all 10 — granular reverts are cheap via version control anyway, and it
+keeps history clean. Confirm or override?
+```
+
+### When NOT to use
+
+- **Routine or obvious work** — send it straight to `build`. Grilling adds latency for no gain when the task is already clear.
+- **Pure research / fact-finding** — use `researcher`. Grilling is not the tool for a knowledge gap.
+- **High-uncertainty compare-and-plan** — when the real question is "which approach among several," use `solution-brief` (it runs researcher → debate → planner and returns a brief).
+
+Grilling is for the **alignment** gap (do you and the human mean the same thing?), not the **knowledge** gap (do you know a fact?). If you are unsure because you do not know something, go read it; if you are unsure because the request is ambiguous, grill.
+
+### Relationship to existing primitives
+
+Grilling is a conversation shape; `researcher`, `debate`, and `solution-brief` are artifact-returning shapes. They compose rather than compete:
+
+- A grilling session often **concludes by writing a task contract** — the convergent understanding becomes the contract's mission, scope, and constraints.
+- It may then **delegate to `solution-brief`** if the now-aligned task still carries genuine approach uncertainty, or **straight to `build`** if alignment resolved the ambiguity.
+- Grilling never *replaces* the contract; it produces the clarity the contract needs to be writable.
+
 ## Task-type templates
 
 ### Research prompt
