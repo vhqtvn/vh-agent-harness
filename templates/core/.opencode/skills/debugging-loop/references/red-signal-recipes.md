@@ -23,9 +23,11 @@ keystone — fix it or go to the Downgrade section in `SKILL.md`.
     **reproducible count** — the aggregate verdict repeats across runs (same
     direction, same approximate count), not a one-off; **no cheaper seam** — the
     isolation seam is green, so faster seams provably cannot go red (the runtime
-    is necessary, not lazy); **bgshell-hosted** — the long runtime runs under
-    `bgshell-job`, not blocking one shell call. Shape: cross-test contamination
-    where isolation is green and only the serial aggregate goes red.
+    is necessary, not lazy); if the isolation seam itself goes red, the
+    exception does not apply — the red signal is already fast at the cheaper
+    seam; **bgshell-hosted** — the long runtime runs under `bgshell-job`, not
+    blocking one shell call. Shape: cross-test contamination where isolation is
+    green and only the serial aggregate goes red.
 - **Agent-runnable** — invocable as one named command or procedure with no human
   in the loop (no clicking, no typing into a prompt, no "look at the screen and
   tell me if it is wrong").
