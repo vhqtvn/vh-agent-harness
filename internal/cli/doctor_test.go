@@ -473,7 +473,9 @@ func TestAutoGateConfig_AcceptsZeroFractionFloat(t *testing.T) {
 // normalizePluginConfig ~L480-521 in auto-tool-gate.js). Every known field with a
 // valid value — including the enum edges (live-tiered, fail, always, passthrough)
 // — must yield PASS. If the JS schema gains/drops a field, update Go's known set
-// AND this test together.
+// AND this test together. The LLM config carries a well-formed leaf so the
+// mode=live-tiered cross-validation (step 4b) does not flag it — this test pins
+// the PLUGIN field set, not the LLM one.
 func TestAutoGateConfig_PluginKnownFieldsPinned(t *testing.T) {
 	dir := t.TempDir()
 	isolateXDG(t)
@@ -483,6 +485,7 @@ func TestAutoGateConfig_PluginKnownFieldsPinned(t *testing.T) {
 	  "promptFile": "/x/p.md", "replyMode": "always", "onUncertain": "passthrough",
 	  "harnessContext": false, "guides": false
 	}`)
+	writeAutoGateConfig(t, dir, "llm", `{"leaves":[{"model":"m","modelEndpoint":"https://x"}]}`)
 
 	r := checkAutoGateConfig(dir)
 	if r.tier != tierPass {
@@ -656,5 +659,169 @@ func TestAutoGateConfig_MissingOptionalIsNotFailure(t *testing.T) {
 	r := checkAutoGateConfig(dir)
 	if r.tier != tierPass {
 		t.Fatalf("want PASS when selected but all configs absent (defaults apply), got %s: %s", r.tier, r.detail)
+	}
+}
+
+// --- auto-gate mode↔LLM cross-validation (checkAutoGateConfig step 4b) ---
+//
+// These cases pin the SEMANTIC cross-check that catches mode↔LLM mismatches
+// BEFORE the runtime fail-close. The runtime authority is the JS plugin
+// (auto-tool-gate.js): mode=live needs top-level model+modelEndpoint;
+// mode=live-tiered needs a well-formed leaves[] entry; audit/enforce are exempt.
+// Each case writes a project-level plugin config selecting the mode and (when
+// needed) a project-level LLM config, then asserts the cross-validation tier.
+
+// TestAutoGateConfig_LiveModeMissingModel: mode=live + LLM config with only
+// leaves[] (no top-level model) → FAIL with the mode=live message. This is the
+// motivating operational failure: a leaves-only LLM config passed shape lint but
+// fail-closed at runtime with "no model".
+func TestAutoGateConfig_LiveModeMissingModel(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"live"}`)
+	writeAutoGateConfig(t, dir, "llm", `{"leaves":[{"model":"m","modelEndpoint":"https://x"}]}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for mode=live with no top-level model, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "mode=live") {
+		t.Errorf("FAIL detail should name mode=live; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_LiveModeDefaultEndpoint: mode=live + LLM config with only
+// model (no explicit modelEndpoint/modelEndpointEnv) → PASS. The runtime's
+// normalizeLlmConfig supplies the DEFAULT_LLM_CONFIG default modelEndpointEnv
+// ("AUTO_GATE_MODEL_ENDPOINT"), so the live preflight's "no modelEndpoint" check
+// never fires; doctor mirrors that default via autoGateEffectiveEndpoint. (The
+// env VALUE is resolved at call time — a passing config may still fail-close at
+// runtime if the env var is unset, but that is an environment concern, not a
+// config-shape FAIL.) This was previously a false-positive FAIL (B1).
+func TestAutoGateConfig_LiveModeDefaultEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"live"}`)
+	writeAutoGateConfig(t, dir, "llm", `{"model":"m"}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for mode=live with model only (default modelEndpointEnv applies), got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_LiveModeValid: mode=live + LLM config with both model and
+// modelEndpoint → PASS (cross-check satisfied).
+func TestAutoGateConfig_LiveModeValid(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"live"}`)
+	writeAutoGateConfig(t, dir, "llm", `{"model":"m","modelEndpoint":"https://x"}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for mode=live with model+modelEndpoint, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_LiveTieredMissingLeaves: mode=live-tiered + LLM config with
+// only a top-level model (no leaves[]) → FAIL (runtime "no leaves").
+func TestAutoGateConfig_LiveTieredMissingLeaves(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"live-tiered"}`)
+	writeAutoGateConfig(t, dir, "llm", `{"model":"m","modelEndpoint":"https://x"}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for mode=live-tiered with no leaves, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "mode=live-tiered") {
+		t.Errorf("FAIL detail should name mode=live-tiered; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_LiveTieredEmptyLeaves: mode=live-tiered + LLM config with
+// "leaves": [] → FAIL (explicit empty array is a present-but-empty override).
+func TestAutoGateConfig_LiveTieredEmptyLeaves(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"live-tiered"}`)
+	writeAutoGateConfig(t, dir, "llm", `{"leaves":[]}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for mode=live-tiered with empty leaves, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "mode=live-tiered") {
+		t.Errorf("FAIL detail should name mode=live-tiered; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_LiveTieredValid: mode=live-tiered + non-empty leaves[] where
+// a leaf has model+modelEndpoint → PASS (a well-formed leaf is usable at runtime).
+func TestAutoGateConfig_LiveTieredValid(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"live-tiered"}`)
+	writeAutoGateConfig(t, dir, "llm", `{"leaves":[{"model":"m","modelEndpoint":"https://x"}]}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for mode=live-tiered with a well-formed leaf, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_LiveTieredDefaultEndpoint: mode=live-tiered + leaves[]
+// where a leaf has only model (no explicit endpoint form) → PASS. The runtime
+// normalizes each leaf through normalizeLlmConfig, which supplies the
+// DEFAULT_LLM_CONFIG default modelEndpointEnv ("AUTO_GATE_MODEL_ENDPOINT") per
+// leaf, so a model-only leaf is well-formed; doctor mirrors that via
+// autoGateLeafHasEndpoint. (The env VALUE is resolved at call time.) This was
+// previously a false-positive FAIL (B1).
+func TestAutoGateConfig_LiveTieredDefaultEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"live-tiered"}`)
+	writeAutoGateConfig(t, dir, "llm", `{"leaves":[{"model":"m"}]}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for mode=live-tiered with a model-only leaf (default modelEndpointEnv applies), got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_AuditModeNoLlmConfig: mode=audit + no LLM config → PASS
+// (audit makes no LLM call; cross-check is exempt).
+func TestAutoGateConfig_AuditModeNoLlmConfig(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"audit"}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for mode=audit with no LLM config, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_EnforceModeNoLlmConfig: mode=enforce + no LLM config → PASS
+// (enforce makes no LLM call; cross-check is exempt).
+func TestAutoGateConfig_EnforceModeNoLlmConfig(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"enforce"}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for mode=enforce with no LLM config, got %s: %s", r.tier, r.detail)
 	}
 }

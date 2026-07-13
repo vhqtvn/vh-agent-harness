@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -156,6 +157,13 @@ func nextSteps(st harnessState) []string {
 				"resolves overlay agent permissions + delegateFrom edges from each active pack's "+
 				"permission-pack.jsonc. See `/harness` for the full recipe.")
 		}
+		if slices.Contains(st.Overlays, "auto-classifier-pilot") {
+			steps = append(steps, "Auto-classifier active: configure `.opencode/repo-configs/auto-gate-config.json` "+
+				"(set `mode`) and optionally `auto-gate-llm.json` (LLM endpoint/model). See "+
+				"README.agent.md → 'Auto-classifier configuration' section, or run "+
+				"`vh-agent-harness overlay docs auto-classifier-pilot` for the full reference. "+
+				"Verify config health with `vh-agent-harness doctor`.")
+		}
 		steps = append(steps, "Choose your agent roster in .vh-agent-harness/vh-harness-profile.yml: "+
 			"`profile:` is the preset enum (`minimal`/`coordination`/`web` → the 8-agent baseline "+
 			"only; `supervised` → baseline + the gated-commit and debate clusters); `capabilities:` "+
@@ -180,6 +188,9 @@ func nextSteps(st harnessState) []string {
 				"will NOT push a template fix into an existing copy. Re-seed manually: `rm <file>` then "+
 				"`vh-agent-harness update` (warning: this loses local edits — back the file up first).",
 			"Verify health anytime: `vh-agent-harness doctor`.",
+			"Pack documentation: run `vh-agent-harness overlay docs <name>` to read any active "+
+				"overlay pack's README (configuration reference, enablement steps) directly from "+
+				"the embedded or project-local pack.",
 		)
 		return steps
 	}

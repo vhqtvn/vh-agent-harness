@@ -760,13 +760,23 @@ func (f autoGateFile) label() string {
 }
 
 // checkAutoGateConfig validates the SHAPE (field set + types + enums) of the
-// auto-classifier-pilot overlay's config files. Modeled on
+// auto-classifier-pilot overlay's config files, then cross-validates the
+// EFFECTIVE mode against the EFFECTIVE LLM config. Modeled on
 // checkOverlayPermissionState: it is a no-op (SKIP) when the overlay is
 // unselected AND no config files are present, and validates each present file
-// standalone (it does NOT merge layers or reimplement the JS coerce/normalize
-// logic). Missing optional files are never failures — LLM config is normally
-// absent (live mode only) and plugin config defaults apply on absence — but a
-// PRESENT-but-invalid file (corrupt JSON, wrong type, bad enum) FAILs.
+// standalone for shape (it does NOT reimplement the JS coerce/normalize
+// logic). Missing optional files are never shape failures — LLM config is
+// normally absent (live mode only) and plugin config defaults apply on absence
+// — but a PRESENT-but-invalid file (corrupt JSON, wrong type, bad enum) FAILs.
+//
+// After the shape pass, step 4b applies a two-level (project overrides user)
+// merge to compute the effective mode + effective LLM fields and FAILs when the
+// selected mode's runtime requirements are unmet (e.g. mode=live with no
+// top-level model, mode=live-tiered with no/empty leaves[]). This is a SEMANTIC
+// check, not a shape check: it mirrors what the JS plugin requires at runtime
+// (see the runtime authority below) so doctor catches mode↔LLM mismatches
+// BEFORE the runtime fail-close. It does NOT resolve env vars (an env-var NAME
+// counts as present); audit/enforce are exempt (they make no LLM call).
 //
 // Dual trigger: overlay-unselected + no-files → SKIP (clean no-op);
 // overlay-unselected + corrupt-file-present → FAIL (safety net so a stale file
@@ -784,6 +794,19 @@ func (f autoGateFile) label() string {
 //	  - DEFAULT_LLM_CONFIG     (~L403-413): the LLM-config field set + defaults
 //	  - normalizePluginConfig  (~L480-521): plugin field type/enum rules
 //	  - normalizeLlmConfig     (~L543-588): LLM field type/range rules
+//	  - RUNTIME MODE REQUIREMENTS (step 4b cross-validation authority):
+//	    normalizeLlmConfig (~L541-585) supplies a non-empty default
+//	    modelEndpointEnv ("AUTO_GATE_MODEL_ENDPOINT", ~L403) whenever the merged
+//	    config lacks one, so the endpoint NAME is never empty post-normalize.
+//	    mode=live        -> top-level model (gate ~L1057 "no model"); the
+//	                        endpoint check (~L1048) never fires post-normalize
+//	                        (the env VALUE is resolved in classifyLive). doctor
+//	                        applies the same default (autoGateEffectiveEndpoint)
+//	                        so a model-only config is not false-FAILed.
+//	    mode=live-tiered -> leaves[] with a well-formed leaf (model + endpoint
+//	                        form; default endpoint env applies per leaf)
+//	                        (gate ~L1515-1533 "no leaves" when none well-formed)
+//	    mode=audit|enforce -> no LLM config read (exempt from cross-check)
 //
 // This Go check reimplements only the SCHEMA ENVELOPE (field set + types +
 // enums), NOT the coerce/normalize logic (e.g. _normNonNegInt accepting a
@@ -840,11 +863,17 @@ func checkAutoGateConfig(target string) checkResult {
 			detail: "overlay not selected; no config files present"}
 	}
 
-	// 4. Validate each present file standalone (NO layered merge — each file must
-	//    be independently well-formed). Accumulate FAIL-level and WARN-level
-	//    findings across all present files.
+	// 4. Validate each present file standalone (each file must be independently
+	//    well-formed). Accumulate FAIL-level and WARN-level findings across all
+	//    present files. Successfully-parsed docs are also retained, keyed by
+	//    level, so step 4b can resolve EFFECTIVE (two-level-merged) values for
+	//    the mode↔LLM cross-validation. A file that fails to parse is NOT
+	//    retained — its shape FAIL already covers it, and there is no doc to
+	//    merge.
 	var fails, warns []string
 	validated := 0
+	pluginDocs := map[string]map[string]any{} // level ("project"/"user") -> parsed plugin doc
+	llmDocs := map[string]map[string]any{}    // level ("project"/"user") -> parsed llm doc
 	for _, c := range candidates {
 		if !isRegularFile(c.path) {
 			continue // absent optional file — not a failure
@@ -865,12 +894,61 @@ func checkAutoGateConfig(target string) checkResult {
 			fails = append(fails, fmt.Sprintf("%s: top-level value is not a JSON object", c.label()))
 			continue
 		}
+		if c.kind == "plugin" {
+			pluginDocs[c.level] = doc
+		} else {
+			llmDocs[c.level] = doc
+		}
 		ff, fw := validateAutoGateFile(c.kind, doc)
 		for _, m := range ff {
 			fails = append(fails, fmt.Sprintf("%s: %s", c.label(), m))
 		}
 		for _, m := range fw {
 			warns = append(warns, fmt.Sprintf("%s: %s", c.label(), m))
+		}
+	}
+
+	// 4b. Cross-validate the EFFECTIVE mode against the EFFECTIVE LLM config.
+	//     Step 4 lints each file's SHAPE independently; it does NOT check that
+	//     the LLM config carries the fields the selected mode requires at
+	//     runtime. The auto-gate plugin is the runtime authority (see DRIFT
+	//     CONTRACT): mode=live reads top-level model+modelEndpoint (fail-closes
+	//     "no model"; the "no modelEndpoint" gate never fires post-normalize
+	//     because normalizeLlmConfig defaults modelEndpointEnv to
+	//     "AUTO_GATE_MODEL_ENDPOINT"); mode=live-tiered reads leaves[]
+	//     (fail-closes "no leaves" when no leaf is well-formed); audit/enforce
+	//     make no LLM call. The endpoint helpers apply the same default so
+	//     doctor does not false-FAIL a model-only config the runtime accepts
+	//     (the env VALUE is resolved at call time, not by doctor). This step
+	//     catches the mismatch BEFORE runtime, using the same two-level
+	//     (project overrides user) layering the plugin applies. It runs only
+	//     when at least one plugin config was successfully parsed — no plugin
+	//     doc means there is no mode to cross-check (the short-circuit at step
+	//     3 already handled the no-files case).
+	if len(pluginDocs) > 0 {
+		mode := autoGateEffectiveString(pluginDocs, "mode", "audit")
+		switch mode {
+		case "live":
+			model := autoGateEffectiveString(llmDocs, "model", "")
+			endpoint := autoGateEffectiveEndpoint(llmDocs)
+			if model == "" || endpoint == "" {
+				fails = append(fails,
+					"mode=live requires LLM config with non-empty model "+
+						"(modelEndpoint/modelEndpointEnv default to AUTO_GATE_MODEL_ENDPOINT when omitted); runtime would fail-close "+
+						"(run 'vh-agent-harness overlay docs auto-classifier-pilot' for configuration reference)")
+			}
+		case "live-tiered":
+			leaves := autoGateEffectiveLeaves(llmDocs)
+			if len(leaves) == 0 {
+				fails = append(fails,
+					"mode=live-tiered requires LLM config with non-empty leaves[]; runtime would fail-close "+
+						"(run 'vh-agent-harness overlay docs auto-classifier-pilot' for configuration reference)")
+			} else if !autoGateLeafHasModelAndEndpoint(leaves) {
+				fails = append(fails,
+					"mode=live-tiered: no leaf in leaves[] has a non-empty model "+
+						"(modelEndpoint/modelEndpointEnv default to AUTO_GATE_MODEL_ENDPOINT per leaf); runtime would fail-close "+
+						"(run 'vh-agent-harness overlay docs auto-classifier-pilot' for configuration reference)")
+			}
 		}
 	}
 
@@ -1066,4 +1144,158 @@ func numberDisplay(v any) any {
 		return n
 	}
 	return v
+}
+
+// --- auto-gate mode↔LLM cross-validation helpers (checkAutoGateConfig step 4b) ---
+//
+// These resolve EFFECTIVE values across the two-level (project overrides user)
+// config layering the JS plugin applies at runtime. "Present" means the level's
+// doc was successfully parsed AND the field key exists in it. The endpoint
+// helpers apply the DEFAULT_LLM_CONFIG default for modelEndpointEnv
+// (autoGateDefaultModelEndpointEnv = "AUTO_GATE_MODEL_ENDPOINT") when no level
+// contributes an explicit endpoint form — this mirrors the runtime's
+// normalizeLlmConfig (auto-tool-gate.js ~L541-585), which supplies that default
+// so the live preflight's "no modelEndpoint" check (~L1048) never fires on a
+// config that omits an explicit endpoint. They do NOT resolve env vars (an
+// env-var NAME counts as present): doctor lints config FILES, so a config that
+// passes may still fail-close at runtime if the named env var is unset — that
+// is an environment concern, not a config-shape concern. See the DRIFT CONTRACT
+// on checkAutoGateConfig.
+
+// autoGateDefaultModelEndpointEnv is the DEFAULT_LLM_CONFIG default for the
+// modelEndpointEnv field (auto-tool-gate.js ~L403). The runtime's
+// normalizeLlmConfig applies it whenever the merged config lacks a non-empty
+// modelEndpointEnv, so the live preflight never fail-closes on a missing
+// endpoint NAME (the env VALUE is resolved at call time inside classifyLive).
+// doctor mirrors this so a config the runtime accepts (e.g. a model-only
+// {"model":"m"} under mode=live) is not false-FAILed. DRIFT: if the JS default
+// changes, update this constant — the field-set parity test
+// (TestAutoGateConfig_SchemaParityWithJSSource) does NOT pin default values;
+// the default-reliance tests exercise the behavior but not the literal.
+const autoGateDefaultModelEndpointEnv = "AUTO_GATE_MODEL_ENDPOINT"
+
+// autoGateNonEmptyString returns doc[field] when it is a non-empty string, else
+// "". A missing key, a non-string value (the shape validator owns wrong-type
+// FAILs), or an empty string all return "".
+func autoGateNonEmptyString(doc map[string]any, field string) string {
+	if v, ok := doc[field]; ok {
+		if s, ok := v.(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// autoGateEffectiveString resolves a string field across the two-level (project
+// overrides user) layering. A level contributes its value when its doc was
+// parsed AND the field key exists AND the value is a string; a present-but-empty
+// string IS returned (it is a present override, even if empty), and a present-
+// but-wrong-type value stops the walk and returns def (the shape validator
+// already FAILs on the wrong type — do not silently fall through to a user
+// value that the wrong-typed project field was meant to override).
+func autoGateEffectiveString(docs map[string]map[string]any, field, def string) string {
+	for _, lvl := range []string{"project", "user"} {
+		d, ok := docs[lvl]
+		if !ok {
+			continue
+		}
+		v, ok := d[field]
+		if !ok {
+			continue
+		}
+		if s, ok := v.(string); ok {
+			return s
+		}
+		return def // present but wrong type — shape validator owns this
+	}
+	return def
+}
+
+// autoGateEffectiveEndpoint resolves the effective model endpoint across the
+// two-level layering, honoring the dual-form fields modelEndpoint (literal URL)
+// / modelEndpointEnv (env-var NAME) where the literal wins over the env-var name
+// within a level. When no level contributes a non-empty literal or env-var name,
+// it returns the DEFAULT_LLM_CONFIG default modelEndpointEnv
+// (autoGateDefaultModelEndpointEnv) — mirroring normalizeLlmConfig, which
+// supplies that default so the live preflight never fail-closes on a missing
+// endpoint NAME. The result is therefore never empty (an env-var NAME always
+// applies); the env VALUE is resolved at call time inside classifyLive, so a
+// passing config may still fail-close at runtime if the named env var is unset.
+func autoGateEffectiveEndpoint(docs map[string]map[string]any) string {
+	for _, lvl := range []string{"project", "user"} {
+		d, ok := docs[lvl]
+		if !ok {
+			continue
+		}
+		if s := autoGateNonEmptyString(d, "modelEndpoint"); s != "" {
+			return s
+		}
+		if s := autoGateNonEmptyString(d, "modelEndpointEnv"); s != "" {
+			return s
+		}
+	}
+	return autoGateDefaultModelEndpointEnv
+}
+
+// autoGateEffectiveLeaves resolves the effective leaves array across the
+// two-level layering. Returns the project-level leaves when present (an explicit
+// [] is a present override, even when empty), else the user-level leaves, else
+// nil. A present-but-wrong-type value returns nil (the shape validator owns it).
+func autoGateEffectiveLeaves(docs map[string]map[string]any) []any {
+	for _, lvl := range []string{"project", "user"} {
+		d, ok := docs[lvl]
+		if !ok {
+			continue
+		}
+		v, ok := d["leaves"]
+		if !ok {
+			continue
+		}
+		if arr, ok := v.([]any); ok {
+			return arr
+		}
+		return nil // present but wrong type — shape validator owns it
+	}
+	return nil
+}
+
+// autoGateLeafHasEndpoint reports whether a leaf has a non-empty endpoint form,
+// applying the DEFAULT_LLM_CONFIG default for modelEndpointEnv when the leaf
+// specifies neither a literal modelEndpoint nor an explicit modelEndpointEnv.
+// This mirrors normalizeLlmConfig, which normalizes each leaf through the same
+// field rules as the top-level config (auto-tool-gate.js ~L577-584) so a
+// model-only leaf is well-formed at runtime (its modelEndpointEnv defaults to
+// autoGateDefaultModelEndpointEnv).
+func autoGateLeafHasEndpoint(leaf map[string]any) bool {
+	if autoGateNonEmptyString(leaf, "modelEndpoint") != "" {
+		return true
+	}
+	if autoGateNonEmptyString(leaf, "modelEndpointEnv") != "" {
+		return true
+	}
+	return autoGateDefaultModelEndpointEnv != ""
+}
+
+// autoGateLeafHasModelAndEndpoint reports whether any leaf in the array is
+// well-formed for runtime use: a non-empty model AND a non-empty endpoint form
+// (literal modelEndpoint, explicit modelEndpointEnv, or the DEFAULT_LLM_CONFIG
+// default modelEndpointEnv). This mirrors the JS wellFormedLeaves filter
+// (auto-tool-gate.js ~L1515-1528) AFTER normalizeLlmConfig has applied defaults
+// to each leaf: when no leaf is well-formed, live-tiered fail-closes with "no
+// leaves".
+func autoGateLeafHasModelAndEndpoint(leaves []any) bool {
+	for _, el := range leaves {
+		leaf, ok := el.(map[string]any)
+		if !ok {
+			continue
+		}
+		if autoGateNonEmptyString(leaf, "model") == "" {
+			continue
+		}
+		if !autoGateLeafHasEndpoint(leaf) {
+			continue
+		}
+		return true
+	}
+	return false
 }

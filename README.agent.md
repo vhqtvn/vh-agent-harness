@@ -122,14 +122,71 @@ vendoring:
   selection paths render the same cluster.
 
 - `auto-classifier-pilot` — the opt-in auto-classifier safety pilot (a
-  three-hook tool-call gate with `audit`/`enforce`/`live` modes). It is
-  **overlay-only** (no capability-manifest), so it is selected solely via
-  `overlays: [auto-classifier-pilot]`. See the pack's own README for the live
-  config model and mode behavior.
+  three-hook tool-call gate with `audit`/`enforce`/`live`/`live-tiered` modes).
+  It is **overlay-only** (no capability-manifest), so it is selected solely via
+  `overlays: [auto-classifier-pilot]`. See "Auto-classifier configuration"
+  below, or run `vh-agent-harness overlay docs auto-classifier-pilot` for the
+  full reference.
 
 Each renders into `.opencode/` on `update` exactly like a project-local pack,
 and each is opt-in (a `minimal` profile that never names it renders nothing of
 it). A project-local pack of the same name still shadows the embed wholly.
+
+### Auto-classifier configuration
+
+The `auto-classifier-pilot` overlay renders 5 plugins (the `auto-tool-gate`
+hook set). Its config lives in TWO files under `.opencode/repo-configs/`.
+
+| File | Purpose | Committed? |
+|------|---------|------------|
+| `auto-gate-config.json` | Behavior: mode, reply disposition, prompt composition | Adopter's choice |
+| `auto-gate-llm.json` | LLM endpoint, model, API key | NEVER (secrets-adjacent) |
+
+Behavior config (`auto-gate-config.json`) — all 8 fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Master switch. |
+| `mode` | enum | `"audit"` | `audit`=observe; `enforce`=stub; `live`=real single-model; `live-tiered`=multi-leaf consensus. |
+| `stubVerdict` | enum | `"block"` | Drives enforce-mode stub. Test only. |
+| `promptFile` | string | `""` | Full-override escape hatch for classifier system prompt. |
+| `replyMode` | enum | `"once"` | `once`=approve this call; `always`=persist to in-memory allowlist (powerful). |
+| `onUncertain` | enum | `"reject"` | `reject`=fail-closed; `passthrough`=hang risk in headless. |
+| `harnessContext` | bool | `true` | Include harness-context fragment in composed prompt. |
+| `guides` | bool | `true` | Include adopter guide files in composed prompt. |
+
+Mode → LLM requirements:
+
+| Mode | LLM config | Fields needed |
+|------|-----------|---------------|
+| `audit` | No | — |
+| `enforce` | No | — |
+| `live` | Yes (top-level) | `model` + `modelEndpoint`/`modelEndpointEnv` (default `AUTO_GATE_MODEL_ENDPOINT`) + `apiKey`/`apiKeyEnv` (default `AUTO_GATE_API_KEY`) |
+| `live-tiered` | Yes (`leaves[]`) | ≥1 leaf with `model` + endpoint + key (endpoint/key env-var names default to `AUTO_GATE_MODEL_ENDPOINT`/`AUTO_GATE_API_KEY` per leaf) |
+
+The `modelEndpointEnv` / `apiKeyEnv` env-var NAME fields default to
+`AUTO_GATE_MODEL_ENDPOINT` / `AUTO_GATE_API_KEY` (from `DEFAULT_LLM_CONFIG`) when
+omitted, so an adopter can supply just `model` and set those env vars at runtime.
+`vh-agent-harness doctor` cross-checks config SHAPE (field names non-empty after
+normalization) — it cannot verify the env vars are actually SET, so a config that
+passes doctor may still fail-close at runtime if an env var is unset.
+
+Enablement steps:
+
+1. Ensure `auto-classifier-pilot` is listed under `overlays:` in
+   `.vh-agent-harness/vh-harness-profile.yml`, then `vh-agent-harness update`.
+2. Create `.opencode/repo-configs/auto-gate-config.json` with your `mode`.
+3. For `live`/`live-tiered`, create `.opencode/repo-configs/auto-gate-llm.json`
+   with at least `model` (the `*Env` endpoint/key names default to
+   `AUTO_GATE_MODEL_ENDPOINT`/`AUTO_GATE_API_KEY`; set explicit `*Env` or literal
+   values to override). Set the named env vars at runtime.
+4. Run `vh-agent-harness doctor` to verify config health (it cross-checks mode
+   against the LLM config shape).
+5. Restart OpenCode so the plugins load.
+
+For the complete reference (all modes, fail-closed behavior, prompt
+composition, per-call gate flow), run
+`vh-agent-harness overlay docs auto-classifier-pilot`.
 
 ## Permission transform (F-intent)
 
