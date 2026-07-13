@@ -42,7 +42,7 @@ Return:
   - `frame_level_trigger` (only for frame-level objections) with:
     - `kind`: `frame_level`
     - `evidence_ids`: [ ≥1 real evidence_id from the register ]
-    - `original_frame_element`: <one specific objective | constraint | assumption | stakeholder | success_criterion | causal_assumption | root_mechanism_family>
+    - `original_frame_element`: <one specific objective | stakeholder | scope | constraint | assumption | success_criterion | causal_assumption | root_mechanism_family>
     - `conflict`: <how the cited evidence contradicts that element>
 - `leader_assessment`: `viable|fragile|blocked`
 - `blocked_option_ids`

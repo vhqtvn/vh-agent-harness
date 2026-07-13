@@ -51,8 +51,8 @@ Rules:
     the orchestrator can audit it; option-level objections keep their
     ordinary shape unchanged. The trigger object requires all of:
     `kind: frame_level`, `evidence_ids` (≥1 real evidence_id from the
-    register), `original_frame_element` (one specific objective, constraint,
-    assumption, stakeholder, success_criterion, causal_assumption, or
+    register), `original_frame_element` (one specific objective, stakeholder,
+    scope, constraint, assumption, success_criterion, causal_assumption, or
     root_mechanism_family), and `conflict` (how the cited evidence
     contradicts that element). The orchestrator MUST reject any
     `frame_level_trigger` missing any of these four fields.
@@ -106,9 +106,9 @@ Rules:
     - `evidence_ids`
     - `revised_frame`
     - `frame_delta`     # MUST change ≥1 of: objective, stakeholder, scope,
-                        #   constraint, success_criterion, causal_assumption,
-                        #   root_mechanism_family
-    - `outside_frame_candidates`: [ ≤2 option_ids ]
+                        #   constraint, assumption, success_criterion,
+                        #   causal_assumption, root_mechanism_family
+    - `outside_frame_candidates`: ≤2 full option objects
     - if `frame_delta` changes no dimension → this is within-frame diversity,
       NOT a reframe; reject and route back to ordinary revision
   - evidence-gap behavior: if an outside-frame candidate requires material

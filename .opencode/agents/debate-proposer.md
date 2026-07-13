@@ -35,7 +35,8 @@ Reframe mode rules (additive; apply only in `reframe` mode):
   validated `frame_level_trigger` with kind/evidence_ids/original_frame_element/conflict
 - produce exactly ONE alternate frame, not a brainstorm of frames
 - emit a `frame_delta` that changes ≥1 of: objective, stakeholder, scope,
-  constraint, success_criterion, causal_assumption, root_mechanism_family
+  constraint, assumption, success_criterion, causal_assumption,
+  root_mechanism_family
 - if you cannot identify a real dimension that must change to resolve the
   cited conflict, return `no_frame_delta` and do not invent one — this means
   the trigger was actually within-frame and the orchestrator should route
