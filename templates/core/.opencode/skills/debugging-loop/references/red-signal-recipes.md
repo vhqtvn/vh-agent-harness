@@ -17,6 +17,15 @@ keystone — fix it or go to the Downgrade section in `SKILL.md`.
   red signal; tighten it or serialize it (see `bgshell-job` boundary below).
 - **Fast** — seconds, not minutes. A slow red signal gets skipped under time
   pressure and breaks the iterate-fast rhythm of the loop.
+  - *Exception — predeclared-aggregate red.* A slow signal still satisfies *fast*
+    when ALL of: **predeclared threshold** — the pass/fail gate was stated before
+    running (e.g. "0 failures in serial ×50"), not chosen after the result;
+    **reproducible count** — the aggregate verdict repeats across runs (same
+    direction, same approximate count), not a one-off; **no cheaper seam** — the
+    isolation seam is green, so faster seams provably cannot go red (the runtime
+    is necessary, not lazy); **bgshell-hosted** — the long runtime runs under
+    `bgshell-job`, not blocking one shell call. Shape: cross-test contamination
+    where isolation is green and only the serial aggregate goes red.
 - **Agent-runnable** — invocable as one named command or procedure with no human
   in the loop (no clicking, no typing into a prompt, no "look at the screen and
   tell me if it is wrong").
@@ -50,7 +59,10 @@ one, stop and rebuild.
   network dependent). Fails *deterministic*. Tighten by pinning the varying
   input; if it cannot be pinned, the signal may belong in the Downgrade.
 - **Slow** — takes minutes or needs a cold start. Fails *fast*. Move work out of
-  the path, or drop to a cheaper seam.
+  the path, or drop to a cheaper seam. **Exception:** if the slow red is a
+  predeclared-aggregate (isolation green, serial red, bgshell-hosted — see the
+  *fast* exception above), the long runtime is necessary and the aggregate count
+  is the red; do NOT drop to a cheaper seam that cannot go red.
 - **Requires-interactive** — needs a human to click, type, or visually confirm.
   Fails *agent-runnable*. This is the most common trigger for the Downgrade (see
   `references/downgrade-protocol.md`).
