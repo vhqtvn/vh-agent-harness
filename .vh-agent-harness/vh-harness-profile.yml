@@ -1,9 +1,6 @@
 profile: supervised
-modules: []
 features:
     backlog: true
 overlays:
     - auto-classifier-pilot
     - harness-dogfood
-policy_packs: []
-capabilities: []
