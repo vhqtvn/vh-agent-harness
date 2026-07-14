@@ -293,20 +293,23 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 		fmt.Fprintf(os.Stderr, "seam: warning: agent-model seed failed: %v\n", err)
 	}
 
-	// Persist the rendered-outputs manifest ONLY after a successful non-dry-run
-	// apply (and after the post-apply side effects above). The manifest is the
-	// provenance record that lets a FUTURE run distinguish a real orphan (source
-	// removed) from a merely-deselected pack, so it must never claim a generation
-	// that did not apply. It carries the lineage's last-successful-update id as
-	// its successful_render_id so the two records stay correlated.
+	// Persist the rendered-outputs manifest after a non-dry-run apply (and after
+	// the post-apply side effects above) — but ONLY when no currently-rendered,
+	// manifest-tracked overlay-skill destination reports WriteFailed (the gate
+	// enforced immediately below). The manifest is the provenance record that
+	// lets a FUTURE run distinguish a real orphan (source removed) from a
+	// merely-deselected pack, so it must never claim a generation whose tracked
+	// overlay-skill writes did not all land. It carries the lineage's
+	// last-successful-update id as its successful_render_id so the two records
+	// stay correlated.
 	//
 	// Lifecycle: NextManifest merges the fresh skill records (this render) with
 	// stale prior records whose source is still missing but whose destination is
 	// still present (so an orphan keeps reporting across runs until the operator
 	// removes the destination or restores the source). Write is atomic
 	// (temp-file + rename); a write failure is warned, NOT rolled back — the live
-	// tree was already updated successfully and orphan reporting will simply be
-	// one generation stale until the next successful apply.
+	// tree writes are real and orphan reporting will simply be one generation
+	// stale until the next non-dry-run apply that passes the gate.
 	//
 	// Blocker #1 gate (P1-LINEAGE-002 v1.1, option (c)): correlate the
 	// manifest-tracked overlay-skill destinations with the apply outcomes by
@@ -517,7 +520,8 @@ func seedRunShapeDefault(target string) error {
 // aborting the apply (a stale profile entry should not block install). Returns
 // the sorted LIVE .opencode-relative paths contributed by overlays and the
 // per-FILE renderstate records for overlay-rendered SKILLS (the provenance
-// material the rendered-outputs manifest persists after a successful apply).
+// material the rendered-outputs manifest persists after a non-dry-run apply,
+// gated on no tracked overlay-skill destination reporting WriteFailed).
 // Non-skill overlay units (agents/commands, permission packs) are NOT recorded:
 // v1 orphan detection is overlay-skill-scoped only.
 func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswers map[string]string, target string) ([]string, []renderstate.Record, error) {

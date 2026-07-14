@@ -15,14 +15,18 @@
 //
 // # What this package does (v1: REPORT-ONLY)
 //
-// This package persists a per-FILE manifest of what the last successful
-// (non-dry-run) apply rendered, keyed by normalized destination path and carrying
-// producer provenance (pack name + source-relative path) plus a rendered digest.
-// On every apply it compares the PRIOR manifest against the CURRENT render and
-// surfaces records whose producing SOURCE has gone missing (a definite orphan) as
-// long as the destination is still on disk. It NEVER deletes anything: the only
-// side effect is reporting findings through substrate.ApplyReport and persisting
-// the manifest itself after a successful apply.
+// This package persists a per-FILE manifest of what the last non-dry-run apply
+// rendered, keyed by normalized destination path and carrying producer provenance
+// (pack name + source-relative path) plus a rendered digest. (The persist is
+// gated: it happens only when no currently-rendered, manifest-tracked overlay-skill
+// destination reports WriteFailed; non-skill write failures do not gate, and
+// substrate.Apply return semantics are unchanged — Apply still returns nil on a
+// live-write failure.) On every apply it compares the PRIOR manifest against the
+// CURRENT render and surfaces records whose producing SOURCE has gone missing (a
+// definite orphan) as long as the destination is still on disk. It NEVER deletes
+// anything: the only side effect is reporting findings through
+// substrate.ApplyReport and persisting the manifest itself after a non-dry-run
+// apply under that gate.
 //
 // # Spec (locked)
 //
@@ -49,9 +53,12 @@
 // manifest_version field to let a reader migrate forward; v1 readers reject an
 // unknown version rather than guessing.
 //
-// Lifecycle / atomicity: the manifest is written ONLY after a successful
-// NON-dry-run apply (dry-run reads + compares but never writes). The manifest
-// must never claim a generation that did not apply successfully. Persistence is
+// Lifecycle / atomicity: the manifest is written ONLY after a NON-dry-run apply
+// in which no currently-rendered, manifest-tracked overlay-skill destination
+// reports WriteFailed (dry-run reads + compares but never writes; non-skill write
+// failures do not gate; substrate.Apply return semantics are unchanged — Apply
+// still returns nil on a live-write failure). The manifest must never claim a
+// generation whose tracked overlay-skill writes did not all land. Persistence is
 // atomic: the new bytes are written to a temp file in the same directory and
 // renamed into place, so the on-disk manifest is either the prior generation or
 // the new one, never a half-written mix. If the live-tree apply succeeded but the
@@ -260,8 +267,11 @@ func Read(targetDir string) (*Manifest, error) {
 
 // Write persists the manifest as indented JSON via an atomic temp-file + rename,
 // after validating it. Entries are sorted by destination_path so the output is
-// deterministic across idempotent re-applies. The manifest is written ONLY after
-// a successful apply; this function is the single persistence site.
+// deterministic across idempotent re-applies. This function is the single
+// persistence site; it is reached only after a non-dry-run apply in which no
+// currently-rendered, manifest-tracked overlay-skill destination reports
+// WriteFailed (the caller gates; non-skill write failures do not gate, and
+// substrate.Apply return semantics are unchanged).
 func (m *Manifest) Write(targetDir string) error {
 	if err := m.Validate(); err != nil {
 		return err

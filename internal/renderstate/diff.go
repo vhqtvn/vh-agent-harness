@@ -224,7 +224,10 @@ func Compare(prior *Manifest, current []Record, checker SourceChecker, projectRo
 	return findings
 }
 
-// NextManifest builds the manifest to persist after a successful apply. It is the
+// NextManifest builds the manifest to persist after a non-dry-run apply (the
+// caller gates: it reaches NextManifest only when no currently-rendered,
+// manifest-tracked overlay-skill destination reports WriteFailed; non-skill write
+// failures do not gate, and substrate.Apply return semantics are unchanged). It is the
 // union of the freshly rendered records and the stale prior records that must be
 // RETAINED so their orphans keep reporting across runs (decision: retain a record
 // whose source is missing while its destination remains present; retire only when

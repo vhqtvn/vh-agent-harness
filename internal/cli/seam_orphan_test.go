@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -342,6 +344,36 @@ func manifestDestSet(t *testing.T, root string) map[string]bool {
 	return set
 }
 
+// captureStderr runs fn with os.Stderr redirected into a buffer and returns the
+// captured bytes. The seam writes operator-facing warnings (e.g. the
+// manifest-NOT-persisted gate warning) via fmt.Fprintf(os.Stderr, ...), which
+// bypasses cobra's cmd.SetErr buffer that seamUpdateOut captures; this helper is
+// the only way a test can observe those warnings. It swaps the process-global
+// os.Stderr, so (like runWithCwd) it is NOT safe for t.Parallel — matching the
+// existing non-parallel convention of the seam orphan suite.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = saved }()
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stderr write end: %v", err)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("drain captured stderr: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close stderr read end: %v", err)
+	}
+	return string(data)
+}
+
 // TestSeamOrphan_ManifestSkipped_OnTrackedSkillWriteFailure (ship-review blocker
 // #1, option c): when a TRACKED overlay-skill destination's live write fails
 // inside Apply, the rendered-outputs manifest must NOT be advanced — the prior
@@ -354,6 +386,13 @@ func manifestDestSet(t *testing.T, root string) map[string]bool {
 // Decisiveness: a SECOND skill is added so a successful persist would be
 // observable (the manifest gains second-skill's entry). The gate firing means
 // second-skill is NOT recorded even though Apply wrote it to disk.
+//
+// Locking the byte-intact guarantee: the test asserts BOTH the decoded entry
+// set (second-skill absent, ghost-skill retained) AND that the RAW manifest
+// bytes are byte-for-byte unchanged across the failing update — a decoded-set
+// check alone could not detect a successful_render_id bump or a reformat that
+// left the entries identical. It also captures stderr and asserts the
+// "manifest NOT persisted" warning fires AND names the failed destination.
 func TestSeamOrphan_ManifestSkipped_OnTrackedSkillWriteFailure(t *testing.T) {
 	root := renderBaseline(t) // manifest = {ghost-skill/SKILL.md}
 	// A second tracked skill whose write will succeed. If the manifest persists,
@@ -370,9 +409,26 @@ func TestSeamOrphan_ManifestSkipped_OnTrackedSkillWriteFailure(t *testing.T) {
 		t.Fatalf("plant blocker file at ghost-skill dir path: %v", err)
 	}
 
-	out, err := seamUpdateOut(t, root)
+	// Snapshot the RAW manifest bytes immediately before the failing update. The
+	// gate must leave the prior manifest byte-for-byte intact — not merely decode
+	// to the same entry set. A regression that bumped successful_render_id, or
+	// rewrote the manifest with the same entries but different bytes, would slip
+	// past a decoded-set check but fail a raw byte-equality check.
+	manifestPath := renderstate.FilePath(root)
+	beforeBytes, err := os.ReadFile(manifestPath)
 	if err != nil {
-		t.Fatalf("update must succeed (Apply returns nil on live-write failure): %v (out=%q)", err, out)
+		t.Fatalf("read manifest bytes before failing update: %v", err)
+	}
+
+	// The gate warning is written to os.Stderr (not the cobra buffer seamUpdateOut
+	// captures), so wrap the update in captureStderr to assert it fires.
+	var out string
+	var uerr error
+	stderr := captureStderr(t, func() {
+		out, uerr = seamUpdateOut(t, root)
+	})
+	if uerr != nil {
+		t.Fatalf("update must succeed (Apply returns nil on live-write failure): %v (out=%q)", uerr, out)
 	}
 
 	// The gate fired: prior manifest intact, second-skill NOT recorded.
@@ -388,6 +444,28 @@ func TestSeamOrphan_ManifestSkipped_OnTrackedSkillWriteFailure(t *testing.T) {
 	// confirming the failure was specific to ghost-skill and Apply returned nil.
 	if !pathExists(t, filepath.Join(root, ".opencode", "skills", "second-skill", "SKILL.md")) {
 		t.Error("second-skill live file must exist on disk (Apply ran and wrote it; only the manifest persist was gated)")
+	}
+
+	// Byte-intact guarantee: the prior manifest must be left EXACTLY as it was
+	// (the gate returns before NextManifest/Write, so the file is never touched).
+	// This is the property the test's leading comment promises — a decoded-set
+	// check alone could not detect a successful_render_id bump or a reformat.
+	afterBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest bytes after failing update: %v", err)
+	}
+	if !bytes.Equal(beforeBytes, afterBytes) {
+		t.Errorf("manifest must be byte-for-byte intact after a tracked skill write failure (gate must skip persist entirely); bytes differ (before=%d after=%d)\n--- before ---\n%s\n--- after ---\n%s",
+			len(beforeBytes), len(afterBytes), beforeBytes, afterBytes)
+	}
+
+	// The gate must emit a stderr warning naming the failed tracked destination,
+	// so an operator can see the manifest was deliberately not advanced.
+	if !strings.Contains(stderr, "manifest NOT persisted") {
+		t.Errorf("update must emit the \"manifest NOT persisted\" warning on stderr; got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, ".opencode/skills/ghost-skill/SKILL.md") {
+		t.Errorf("the manifest-NOT-persisted warning must name the failed tracked destination path (.opencode/skills/ghost-skill/SKILL.md); got:\n%s", stderr)
 	}
 }
 
