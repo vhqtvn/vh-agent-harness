@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -224,7 +225,12 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 		fmt.Fprintf(os.Stderr, "seam: warning: rendered-outputs manifest unreadable (%v); orphan reporting skipped this run\n", perr)
 		prior = nil
 	}
-	report.Orphans = renderstate.Compare(prior, skillRecords, overlaySkillChecker, target)
+	// Tri-state orphan detection: an INDETERMINATE source (unreadable /
+	// transient / permission) is warned to stderr and skipped — it is NEVER
+	// classified as a definite orphan. Only a CONFIRMED-missing source (pack
+	// gone or source file gone) whose destination is still on disk is a definite
+	// preserved orphan.
+	report.Orphans = renderstate.Compare(prior, skillRecords, overlaySkillChecker, target, os.Stderr)
 
 	// Dry-run: substrate.Apply wrote nothing (it returned the plan only). Skip
 	// every side-effecting post-apply step too — the proposal ledger append, the
@@ -301,6 +307,29 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	// (temp-file + rename); a write failure is warned, NOT rolled back — the live
 	// tree was already updated successfully and orphan reporting will simply be
 	// one generation stale until the next successful apply.
+	//
+	// Blocker #1 gate (P1-LINEAGE-002 v1.1, option (c)): correlate the
+	// manifest-tracked overlay-skill destinations with the apply outcomes by
+	// normalized destination path. If ANY tracked overlay-skill destination
+	// FAILED its live write (substrate.WriteFailed), do NOT persist the manifest
+	// — leave the prior manifest byte-for-byte intact — so provenance never
+	// claims a generation that did not fully apply for the tracked skills. Only
+	// FAILED tracked overlay-skill destinations gate the persist: a failed
+	// NON-skill managed destination is reported but does NOT gate (the manifest
+	// tracks overlay skills only). This preserves substrate.Apply's return
+	// semantics (it still returns nil here) — lifting a live-write failure into
+	// an Apply error / lineage halt is tracked separately (P1-SUBSTRATE-001).
+	trackedSkillDest := make(map[string]bool, len(skillRecords))
+	for _, sr := range skillRecords {
+		trackedSkillDest[renderstate.NormalizeDestination(sr.DestinationPath)] = true
+	}
+	for _, o := range report.Outcomes {
+		if o.WriteState == substrate.WriteFailed && trackedSkillDest[renderstate.NormalizeDestination(o.Path)] {
+			fmt.Fprintf(os.Stderr, "seam: warning: rendered-outputs manifest NOT persisted — a tracked overlay-skill destination (%s) failed its live write; the prior manifest is left intact and orphan reporting stays one generation behind (see P1-SUBSTRATE-001)\n", o.Path)
+			return report, nil
+		}
+	}
+
 	renderID := ""
 	if lin, lerr := lineage.Read(target); lerr == nil && lin != nil {
 		renderID = lin.Render.LastSuccessfulUpdateID
@@ -313,27 +342,51 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 }
 
 // overlaySkillSourceChecker implements renderstate.SourceChecker for the
-// overlay-skill orphan path. It answers "is the producing overlay SOURCE for
-// this record still present?" — opening the producer pack BY NAME (independent
-// of whether the pack is currently selected in the live profile) and probing
-// the recorded source-relative path inside the pack's FS.
+// overlay-skill orphan path. It answers the TRI-STATE source state for a record
+// — opening the producer pack BY NAME (independent of whether the pack is
+// currently selected in the live profile) and probing the recorded
+// source-relative path inside the pack's FS.
 //
 // This is the provenance check that distinguishes a real orphan (source
 // removed from its pack, or the whole pack removed) from a merely-deselected
-// pack (source still present, just not selected this render). A pack that will
-// not open at all is treated as source-missing: the producer is gone, so any
-// record it produced is now an orphan.
+// pack (source still present, just not selected this render) and from an
+// UNREADABLE source (permission / transient / malformed pack). Only a CONFIRMED
+// absence is SourceMissing (a definite-orphan candidate); anything unreadable
+// is SourceIndeterminate (warned + skipped — a transient error must never
+// produce a false-positive orphan).
 type overlaySkillSourceChecker struct{ target string }
 
-func (c overlaySkillSourceChecker) SourceExists(rec renderstate.Record) bool {
+func (c overlaySkillSourceChecker) CheckSource(rec renderstate.Record) renderstate.SourceState {
+	// Probe the project-local producer pack dir directly. OpenPackFor swallows
+	// a non-ErrNotExist stat error on it (permission / ENOTDIR / transient)
+	// and falls back to the embedded pack; if the embedded pack is also absent
+	// it surfaces fs.ErrNotExist, which would otherwise false-positive as
+	// SourceMissing. A transient/unreadable producer-pack state must classify
+	// as SourceIndeterminate so a transient error never produces a
+	// false-positive orphan (the tri-state contract this checker enforces).
+	projDir := filepath.Join(c.target, filepath.FromSlash(overlay.ProjectOverlaysSubdir), rec.OverlayPack)
+	if _, err := os.Stat(projDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return renderstate.SourceIndeterminate
+	}
 	pack, err := overlay.OpenPackFor(c.target, rec.OverlayPack)
 	if err != nil {
-		return false
+		// A confirmed-absent pack (embedded FS has no such dir) wraps
+		// fs.ErrNotExist → SourceMissing. Any other open error (unreadable,
+		// transient, malformed) → SourceIndeterminate (do not false-positive).
+		if errors.Is(err, fs.ErrNotExist) {
+			return renderstate.SourceMissing
+		}
+		return renderstate.SourceIndeterminate
 	}
 	if _, err := fs.ReadFile(pack.FS, rec.SourceRelativePath); err != nil {
-		return false
+		// Source file gone from the pack → confirmed missing. Anything else
+		// (permission, transient I/O) → indeterminate.
+		if errors.Is(err, fs.ErrNotExist) {
+			return renderstate.SourceMissing
+		}
+		return renderstate.SourceIndeterminate
 	}
-	return true
+	return renderstate.SourcePresent
 }
 
 // agentModelRefRe matches the per-agent model-file references opencode.jsonc

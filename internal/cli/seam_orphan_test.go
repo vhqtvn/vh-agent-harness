@@ -296,3 +296,241 @@ func TestSeamOrphan_DryRunSurfacesOrphan(t *testing.T) {
 		t.Error("rendered ghost-skill dir must still exist after dry-run")
 	}
 }
+
+// --- helpers for the v1.1 ship-review fix tests (blocker #1 + #2) ------------
+
+// writeTestSkillFile writes an ADDITIONAL source file into the orphan-test skill
+// pack dir (besides SKILL.md), so a single rendered skill dir can carry multiple
+// files (the mixed-directory precondition for blocker #2).
+func writeTestSkillFile(t *testing.T, root, skill, file, body string) {
+	t.Helper()
+	p := filepath.Join(root, filepath.FromSlash(overlay.ProjectOverlaysSubdir), "orphan-test", "skills", skill, file)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatalf("mkdir skill source dir for %s: %v", file, err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatalf("write skill source file %s: %v", file, err)
+	}
+}
+
+// removeTestSkillFile removes a SINGLE source file from a test skill dir (leaving
+// siblings in place) — the file-level removal precondition.
+func removeTestSkillFile(t *testing.T, root, skill, file string) {
+	t.Helper()
+	p := filepath.Join(root, filepath.FromSlash(overlay.ProjectOverlaysSubdir), "orphan-test", "skills", skill, file)
+	if err := os.Remove(p); err != nil {
+		t.Fatalf("remove skill source file %s: %v", file, err)
+	}
+}
+
+// manifestDestSet reads the rendered-outputs manifest and returns the normalized
+// set of recorded destination paths. Returns an empty set when no manifest
+// exists (bootstrap).
+func manifestDestSet(t *testing.T, root string) map[string]bool {
+	t.Helper()
+	m, err := renderstate.Read(root)
+	if err != nil {
+		t.Fatalf("read rendered-outputs manifest: %v", err)
+	}
+	set := make(map[string]bool)
+	if m == nil {
+		return set
+	}
+	for _, e := range m.Entries {
+		set[renderstate.NormalizeDestination(e.DestinationPath)] = true
+	}
+	return set
+}
+
+// TestSeamOrphan_ManifestSkipped_OnTrackedSkillWriteFailure (ship-review blocker
+// #1, option c): when a TRACKED overlay-skill destination's live write fails
+// inside Apply, the rendered-outputs manifest must NOT be advanced — the prior
+// manifest is left byte-for-byte intact and a warning is emitted. This guards
+// the provenance contract: the manifest records what was rendered AT PERSIST
+// TIME, so persisting a fresh manifest that claims success while a tracked skill
+// write silently failed would make the manifest lie. Apply's return semantics are
+// UNCHANGED (it still returns nil) — only the manifest persist is gated.
+//
+// Decisiveness: a SECOND skill is added so a successful persist would be
+// observable (the manifest gains second-skill's entry). The gate firing means
+// second-skill is NOT recorded even though Apply wrote it to disk.
+func TestSeamOrphan_ManifestSkipped_OnTrackedSkillWriteFailure(t *testing.T) {
+	root := renderBaseline(t) // manifest = {ghost-skill/SKILL.md}
+	// A second tracked skill whose write will succeed. If the manifest persists,
+	// it gains this entry; if the gate fires, it does not.
+	writeTestSkillPack(t, root, "second-skill", "# second-skill\n")
+	// Deterministically break the tracked ghost-skill live write (NOT chmod): the
+	// rendered dir is replaced by a regular FILE, so MkdirAll for its SKILL.md
+	// fails inside Apply.
+	ghostDir := renderedSkillDir(root, "ghost-skill")
+	if err := os.RemoveAll(ghostDir); err != nil {
+		t.Fatalf("remove ghost-skill rendered dir: %v", err)
+	}
+	if err := os.WriteFile(ghostDir, []byte("BLOCKER"), 0o644); err != nil {
+		t.Fatalf("plant blocker file at ghost-skill dir path: %v", err)
+	}
+
+	out, err := seamUpdateOut(t, root)
+	if err != nil {
+		t.Fatalf("update must succeed (Apply returns nil on live-write failure): %v (out=%q)", err, out)
+	}
+
+	// The gate fired: prior manifest intact, second-skill NOT recorded.
+	dests := manifestDestSet(t, root)
+	if dests[".opencode/skills/second-skill/SKILL.md"] {
+		t.Errorf("manifest must NOT persist when a tracked skill write failed (second-skill was recorded → gate did not fire)")
+	}
+	// ghost-skill remains recorded (the baseline manifest was left untouched).
+	if !dests[".opencode/skills/ghost-skill/SKILL.md"] {
+		t.Errorf("baseline ghost-skill record must remain in the untouched prior manifest")
+	}
+	// Apply DID run and DID write second-skill to disk (its write succeeded) —
+	// confirming the failure was specific to ghost-skill and Apply returned nil.
+	if !pathExists(t, filepath.Join(root, ".opencode", "skills", "second-skill", "SKILL.md")) {
+		t.Error("second-skill live file must exist on disk (Apply ran and wrote it; only the manifest persist was gated)")
+	}
+}
+
+// TestSeamOrphan_ManifestPersisted_OnNonSkillWriteFailure (scope boundary for
+// blocker #1): a failed NON-skill managed destination must NOT gate the manifest.
+// The gate fires ONLY on failed TRACKED overlay-skill destinations; a regular
+// managed file (here a rendered agent) failing its write leaves the manifest
+// persist path intact. This keeps the v1.1 gate tightly scoped to the orphan-
+// skill provenance contract and avoids collateral suppression.
+func TestSeamOrphan_ManifestPersisted_OnNonSkillWriteFailure(t *testing.T) {
+	root := renderBaseline(t)
+	writeTestSkillPack(t, root, "second-skill", "# second-skill\n")
+	// Deterministically break a NON-skill managed write: turn a rendered agent
+	// file into a DIRECTORY so its WriteFile fails (EISDIR). All tracked skill
+	// writes still succeed.
+	agentFile := filepath.Join(root, ".opencode", "agents", "build.md")
+	if err := os.RemoveAll(agentFile); err != nil {
+		t.Fatalf("remove agent file: %v", err)
+	}
+	if err := os.MkdirAll(agentFile, 0o755); err != nil {
+		t.Fatalf("plant blocker dir at agent file path: %v", err)
+	}
+
+	out, err := seamUpdateOut(t, root)
+	if err != nil {
+		t.Fatalf("update must succeed: %v (out=%q)", err, out)
+	}
+
+	// Gate did NOT fire for the non-skill failure → manifest persisted with the
+	// freshly rendered second-skill.
+	dests := manifestDestSet(t, root)
+	if !dests[".opencode/skills/second-skill/SKILL.md"] {
+		t.Errorf("a failed NON-skill dest must NOT gate the manifest; second-skill missing (gate fired wrongly)")
+	}
+	// The non-skill write really did fail: build.md is still a directory.
+	info, err := os.Stat(agentFile)
+	if err != nil || !info.IsDir() {
+		t.Errorf("precondition check failed: non-skill write should have failed (build.md still a dir); got info=%v err=%v", info, err)
+	}
+}
+
+// TestSeamOrphan_MixedDirectory_FileAccurateReporting (ship-review blocker #2):
+// when ONE file in a skill directory is orphaned (source removed) while a SIBLING
+// file in the SAME directory is still actively rendered, the orphan notice must
+// be FILE-ACCURATE: it names the specific orphaned file by its full destination
+// path, and the guidance removes only that FILE (warning against whole-directory
+// removal while an active file remains). This is the regression guard against the
+// old whole-directory "delete .opencode/skills/<name>/" advice, which would have
+// nuked the still-active sibling.
+func TestSeamOrphan_MixedDirectory_FileAccurateReporting(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	writeProfile(t, root, testPackSelects)
+	// One skill dir carrying TWO source files.
+	writeTestSkillPack(t, root, "ghost-skill", "# ghost-skill\n")
+	writeTestSkillFile(t, root, "ghost-skill", "NOTES.md", "# ghost notes\n")
+	if out, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("baseline render of the two-file skill: %v (out=%q)", err, out)
+	}
+	// Both files rendered and recorded — the mixed-dir precondition.
+	dests := manifestDestSet(t, root)
+	if !dests[".opencode/skills/ghost-skill/SKILL.md"] || !dests[".opencode/skills/ghost-skill/NOTES.md"] {
+		t.Fatalf("baseline must record BOTH skill files in the dir; got %v", dests)
+	}
+	// Remove ONLY NOTES.md's source. SKILL.md stays active. NOTES.md becomes an
+	// orphan living in a dir that still has an actively-rendered file.
+	removeTestSkillFile(t, root, "ghost-skill", "NOTES.md")
+
+	out, err := seamUpdateOut(t, root)
+	if err != nil {
+		t.Fatalf("update after partial source removal: %v (out=%q)", err, out)
+	}
+	if !orphanMarkerPresent(out) {
+		t.Fatalf("update must report the preserved orphan; got:\n%s", out)
+	}
+	// File-accurate: the SPECIFIC orphaned file is named by its destination path.
+	if !strings.Contains(out, "NOTES.md") {
+		t.Errorf("mixed-dir report must name the SPECIFIC orphaned FILE (NOTES.md); got:\n%s", out)
+	}
+	// The guidance must be file-level (not the old whole-directory advice): it
+	// warns to verify EVERY file is orphaned before removing the directory.
+	if !strings.Contains(out, "verifying EVERY file in it is orphaned") {
+		t.Errorf("guidance must be file-level (verify-every-file before dir removal); got:\n%s", out)
+	}
+	// The active sibling is untouched on disk (only NOTES.md was orphaned).
+	if !pathExists(t, filepath.Join(root, ".opencode", "skills", "ghost-skill", "SKILL.md")) {
+		t.Error("the still-active SKILL.md must remain on disk (only NOTES.md was orphaned)")
+	}
+}
+
+// TestOverlayChecker_ProjectLocalPackUnreadable_IsIndeterminate pins the
+// tri-state contract's fail-safe for the path where the producer pack's
+// project-local dir is UNREADABLE (a non-ErrNotExist stat error). Without the
+// direct probe in CheckSource, OpenPackFor swallows that error, falls back to
+// an absent embedded pack, and surfaces fs.ErrNotExist — which would
+// false-positive as SourceMissing (a definite orphan). The fix classifies such
+// a transient/unreadable state as SourceIndeterminate so a transient error
+// never produces a false-positive orphan.
+//
+// The injection is deterministic and chmod-free: making the overlays PARENT a
+// regular file causes os.Stat of overlays/<pack> to return ENOTDIR (verified to
+// NOT satisfy errors.Is(err, fs.ErrNotExist)). This is a focused checker unit
+// test; the downstream effects of SourceIndeterminate (Compare warns + skips the
+// finding; NextManifest does not retain the stale record) are covered by
+// internal/renderstate/manifest_test.go
+// (TestCompare_SourceIndeterminate_NotFlagged_Warns,
+// TestNextManifest_SourceIndeterminate_NotRetained).
+func TestOverlayChecker_ProjectLocalPackUnreadable_IsIndeterminate(t *testing.T) {
+	root := t.TempDir()
+	// Normal project-local producer pack with one skill source.
+	writeTestSkillPack(t, root, "ghost-skill", "# body\n")
+	rec := renderstate.Record{
+		DestinationPath:    renderstate.NormalizeDestination(".opencode/skills/ghost-skill/SKILL.md"),
+		ProducerKind:       "overlay_skill",
+		OverlayPack:        "orphan-test",
+		SourceRelativePath: "skills/ghost-skill/SKILL.md",
+	}
+	checker := overlaySkillSourceChecker{target: root}
+
+	// Baseline: source present and readable -> SourcePresent.
+	if got := checker.CheckSource(rec); got != renderstate.SourcePresent {
+		t.Fatalf("baseline (source present): got %s want %s", got, renderstate.SourcePresent)
+	}
+
+	// Source removed -> confirmed missing (definite-orphan candidate).
+	removeTestSkillSource(t, root, "ghost-skill")
+	if got := checker.CheckSource(rec); got != renderstate.SourceMissing {
+		t.Fatalf("removed source: got %s want %s", got, renderstate.SourceMissing)
+	}
+
+	// Now corrupt the producer-pack dir state so os.Stat returns a
+	// non-ErrNotExist error (ENOTDIR via a file where the overlays dir is
+	// expected). The source is still genuinely absent underneath, but the
+	// producer-pack state is indeterminate — the checker must NOT fall through
+	// to the embedded pack and false-positive as SourceMissing.
+	overlaysDir := filepath.Join(root, filepath.FromSlash(overlay.ProjectOverlaysSubdir))
+	if err := os.RemoveAll(overlaysDir); err != nil {
+		t.Fatalf("remove overlays dir: %v", err)
+	}
+	if err := os.WriteFile(overlaysDir, []byte("x"), 0o644); err != nil {
+		t.Fatalf("plant file at overlays path: %v", err)
+	}
+	if got := checker.CheckSource(rec); got != renderstate.SourceIndeterminate {
+		t.Fatalf("unreadable project-local pack: got %s want %s (must not false-positive as missing)", got, renderstate.SourceIndeterminate)
+	}
+}

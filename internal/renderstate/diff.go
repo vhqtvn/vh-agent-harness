@@ -1,6 +1,8 @@
 package renderstate
 
 import (
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,15 +72,40 @@ type OrphanFinding struct {
 	Action OrphanAction
 }
 
-// SourceChecker reports whether the producing source for a record still exists,
-// INDEPENDENT of whether the pack is currently selected. This is the provenance
-// contract: a definite orphan requires the source to be gone, not merely a
-// deselected pack. The seam supplies a concrete implementation that opens the
-// pack by name and stats the source-relative path inside the pack FS.
+// SourceState is the tri-state result of probing whether the producing source
+// for a record still exists, INDEPENDENT of whether the pack is currently
+// selected. It is the typed correctness signal that separates a DEFINITE orphan
+// (confirmed source-missing) from an unreadable/transient probe (cannot
+// classify) and from a still-present source (not an orphan).
+type SourceState string
+
+const (
+	// SourcePresent: the producing source can still be read → not an orphan
+	// (covers a deselected-but-extant pack).
+	SourcePresent SourceState = "present"
+	// SourceMissing: the source is CONFIRMED absent — the file is gone from its
+	// pack (fs.ErrNotExist) or the whole pack is gone. This is the only
+	// definite-orphan condition.
+	SourceMissing SourceState = "missing"
+	// SourceIndeterminate: the probe could not classify the source — a
+	// permission error, an unreadable/malformed pack, or a transient I/O error.
+	// This is NEVER classified as a definite orphan: Compare warns and skips the
+	// record (a transient error must not produce a false-positive orphan), and
+	// NextManifest does NOT retain it as a stale orphan.
+	SourceIndeterminate SourceState = "indeterminate"
+)
+
+// SourceChecker reports the source state for a record. The seam supplies a
+// concrete implementation that opens the pack by name and probes the
+// source-relative path inside the pack FS, distinguishing a confirmed-absent
+// source (fs.ErrNotExist / pack gone) from an unreadable one (permission /
+// transient). This is the provenance contract: a definite orphan requires the
+// source to be CONFIRMED missing, not merely unreadable or deselected.
 type SourceChecker interface {
-	// SourceExists reports whether the source that produced rec can still be
-	// read. false means the source is missing (definite-orphan candidate).
-	SourceExists(rec Record) bool
+	// CheckSource returns the source state for rec. Only SourceMissing makes rec
+	// a definite-orphan candidate; SourceIndeterminate must be skipped (warned),
+	// never flagged.
+	CheckSource(rec Record) SourceState
 }
 
 // skillDirFromDestination derives the containing skill directory from a rendered
@@ -111,12 +138,16 @@ func diskDigest(projectRoot, dest string) string {
 
 // Compare evaluates the PRIOR manifest against the current render and produces
 // the report-only orphan findings. A record is a definite orphan only when its
-// source is missing (checker.SourceExists false) AND its destination is still on
-// disk. A record whose source still exists is never an orphan, even if its pack
-// is currently deselected (the source may simply not have been rendered this
-// run). A record whose source is missing but whose destination is also gone is
-// retired silently (nothing to preserve). checker must be non-nil.
-func Compare(prior *Manifest, current []Record, checker SourceChecker, projectRoot string) []OrphanFinding {
+// source is CONFIRMED missing (checker.CheckSource == SourceMissing) AND its
+// destination is still on disk. A record whose source still exists is never an
+// orphan, even if its pack is currently deselected (the source may simply not
+// have been rendered this run). A record whose source is INDETERMINATE
+// (unreadable / transient / permission) is WARNED and skipped — it must never be
+// classified as a definite orphan on a transient error. A record whose source is
+// missing but whose destination is also gone is retired silently (nothing to
+// preserve). checker must be non-nil. warn receives one line per indeterminate
+// record; pass io.Discard (or nil) to suppress, or a buffer in tests to assert.
+func Compare(prior *Manifest, current []Record, checker SourceChecker, projectRoot string, warn io.Writer) []OrphanFinding {
 	if prior == nil || checker == nil {
 		return nil
 	}
@@ -146,8 +177,27 @@ func Compare(prior *Manifest, current []Record, checker SourceChecker, projectRo
 		if currentByDest[dest] {
 			continue
 		}
-		// Source present → not an orphan (covers deselected-but-extant packs).
-		if checker.SourceExists(rec) {
+		// Tri-state source probe. Only CONFIRMED missing → definite-orphan
+		// candidate. Indeterminate → warn + skip (never a false-positive orphan).
+		switch checker.CheckSource(rec) {
+		case SourcePresent:
+			continue
+		case SourceIndeterminate:
+			if warn != nil {
+				fmt.Fprintf(warn, "renderstate: warning: source state indeterminate for %q (pack %q, source %q); orphan detection skipped for this record (not classified as an orphan)\n",
+					dest, rec.OverlayPack, rec.SourceRelativePath)
+			}
+			continue
+		case SourceMissing:
+			// fall through to the orphan-candidate checks below.
+		default:
+			// An unexpected/unknown SourceState (e.g. a future value a stale
+			// checker returns) must NEVER false-positive as a definite orphan.
+			// Treat it as indeterminate: warn + skip (fail-safe).
+			if warn != nil {
+				fmt.Fprintf(warn, "renderstate: warning: source state unknown for %q (pack %q, source %q); orphan detection skipped for this record (not classified as an orphan)\n",
+					dest, rec.OverlayPack, rec.SourceRelativePath)
+			}
 			continue
 		}
 		// Source missing. Report only if the destination is still on disk.
@@ -194,7 +244,11 @@ func NextManifest(prior *Manifest, current []Record, checker SourceChecker, proj
 	//    (deselected → no longer tracked, correct).
 	if prior != nil {
 		for _, rec := range prior.Entries {
-			if checker != nil && !checker.SourceExists(rec) {
+			// Retain a prior record as a stale orphan ONLY when its source is
+			// CONFIRMED missing (not merely indeterminate — a transient probe
+			// must not promote a record to tracked-orphan state) AND its
+			// destination is still present (keep reporting the orphan).
+			if checker != nil && checker.CheckSource(rec) == SourceMissing {
 				if diskDigest(projectRoot, rec.DestinationPath) != "" {
 					byDest[NormalizeDestination(rec.DestinationPath)] = rec
 				}

@@ -670,10 +670,17 @@ operator-authored content. Previously this left removed-source skills
 **invisible**: live, unreported, and not surfaced by `update --dry-run`.
 
 `update` and `update --dry-run` now surface those as **preserved orphans** — a
-report-only notice naming the skill, the producing pack, and the removed source.
+report-only notice naming the orphaned **file** (its full destination path, e.g.
+`.opencode/skills/<name>/SKILL.md`), the producing pack, the destination state
+(`unchanged`/`modified`), and the removed source. The notice is **file-accurate**:
+it lists each removed-source file individually, so a skill directory that still
+contains an actively-rendered file is never suggested for whole-directory removal.
 The notice is informational; **nothing is deleted.** To actually remove a
-preserved orphan, delete its `.opencode/skills/<name>/` directory by hand, or
-restore the overlay source to clear the notice on the next update.
+preserved orphan, delete the **file** named in the notice (e.g.
+`rm .opencode/skills/<name>/SKILL.md`). Remove the **whole** skill directory only
+after verifying that **every** file inside it is orphaned — a directory may mix
+orphaned files with files still being actively rendered. Or restore the overlay
+source to clear the notice on the next update.
 
 How a **definite orphan** is told apart from benign cases:
 

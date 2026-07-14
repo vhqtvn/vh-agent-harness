@@ -1,6 +1,7 @@
 package renderstate
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,13 +10,22 @@ import (
 )
 
 // fakeChecker is a SourceChecker backed by an explicit set of (pack,src) keys
-// that still exist. Everything else is missing.
+// that are confirmed present, plus an explicit set of indeterminate keys
+// (unreadable/transient). Everything else is confirmed missing.
 type fakeChecker struct {
-	exist map[string]bool
+	exist         map[string]bool
+	indeterminate map[string]bool
 }
 
-func (f fakeChecker) SourceExists(rec Record) bool {
-	return f.exist[rec.OverlayPack+"\x00"+rec.SourceRelativePath]
+func (f fakeChecker) CheckSource(rec Record) SourceState {
+	k := rec.OverlayPack + "\x00" + rec.SourceRelativePath
+	if f.indeterminate[k] {
+		return SourceIndeterminate
+	}
+	if f.exist[k] {
+		return SourcePresent
+	}
+	return SourceMissing
 }
 
 func key(pack, src string) string { return pack + "\x00" + src }
@@ -197,7 +207,7 @@ func TestCompare_SourceMissing_ReportsOrphan(t *testing.T) {
 	}}
 	// source "p/skills/tdd/SKILL.md" is NOT in exist → missing.
 	chk := fakeChecker{exist: map[string]bool{}}
-	findings := Compare(prior, nil, chk, root)
+	findings := Compare(prior, nil, chk, root, nil)
 	if len(findings) != 1 {
 		t.Fatalf("findings = %d want 1: %+v", len(findings), findings)
 	}
@@ -226,7 +236,7 @@ func TestCompare_SourcePresent_NotOrphan(t *testing.T) {
 		rec(".opencode/skills/tdd/SKILL.md", "p", "skills/tdd/SKILL.md", Digest([]byte("x"))),
 	}}
 	chk := fakeChecker{exist: map[string]bool{key("p", "skills/tdd/SKILL.md"): true}}
-	findings := Compare(prior, nil, chk, root)
+	findings := Compare(prior, nil, chk, root, nil)
 	if len(findings) != 0 {
 		t.Fatalf("source-present record must NOT be flagged; got %d findings", len(findings))
 	}
@@ -243,7 +253,7 @@ func TestCompare_FreshlyRendered_NotOrphan(t *testing.T) {
 	current := []Record{rec(".opencode/skills/tdd/SKILL.md", "p", "skills/tdd/SKILL.md", Digest([]byte("x")))}
 	// checker says missing, but current render reproduced it → not orphan.
 	chk := fakeChecker{exist: map[string]bool{}}
-	findings := Compare(prior, current, chk, root)
+	findings := Compare(prior, current, chk, root, nil)
 	if len(findings) != 0 {
 		t.Fatalf("freshly rendered record must NOT be flagged; got %d findings", len(findings))
 	}
@@ -266,7 +276,7 @@ func TestCompare_NonNormalizedPriorMatchesCurrent(t *testing.T) {
 	// Current render carries the canonical form.
 	current := []Record{rec(".opencode/skills/tdd/SKILL.md", "p", "skills/tdd/SKILL.md", Digest([]byte("x")))}
 	chk := fakeChecker{exist: map[string]bool{}}
-	findings := Compare(prior, current, chk, root)
+	findings := Compare(prior, current, chk, root, nil)
 	if len(findings) != 0 {
 		t.Fatalf("non-normalized prior that matches the current render must NOT be flagged; got %d findings: %+v", len(findings), findings)
 	}
@@ -285,7 +295,7 @@ func TestCompare_NonNormalizedPriorStillDetectedOrphan(t *testing.T) {
 		rec("./.opencode/skills/ghost/SKILL.md", "p", "skills/ghost/SKILL.md", Digest(content)),
 	}}
 	chk := fakeChecker{exist: map[string]bool{}}
-	findings := Compare(prior, nil, chk, root)
+	findings := Compare(prior, nil, chk, root, nil)
 	if len(findings) != 1 {
 		t.Fatalf("non-normalized prior orphan must still be detected; got %d findings: %+v", len(findings), findings)
 	}
@@ -303,7 +313,7 @@ func TestCompare_DestinationGone_RetiresSilently(t *testing.T) {
 		rec(".opencode/skills/tdd/SKILL.md", "p", "skills/tdd/SKILL.md", Digest([]byte("x"))),
 	}}
 	chk := fakeChecker{exist: map[string]bool{}}
-	findings := Compare(prior, nil, chk, root)
+	findings := Compare(prior, nil, chk, root, nil)
 	if len(findings) != 0 {
 		t.Fatalf("destination-gone record must retire silently; got %d findings", len(findings))
 	}
@@ -317,7 +327,7 @@ func TestCompare_ModifiedDestination(t *testing.T) {
 		rec(".opencode/skills/tdd/SKILL.md", "p", "skills/tdd/SKILL.md", Digest([]byte("original\n"))),
 	}}
 	chk := fakeChecker{exist: map[string]bool{}}
-	findings := Compare(prior, nil, chk, root)
+	findings := Compare(prior, nil, chk, root, nil)
 	if len(findings) != 1 || findings[0].DestinationState != DestModified {
 		t.Fatalf("want 1 modified finding, got %+v", findings)
 	}
@@ -333,7 +343,7 @@ func TestCompare_ProjectAddedDir_NeverFlagged(t *testing.T) {
 	writeDest(t, root, ".opencode/skills/my-own/SKILL.md", []byte("mine\n"))
 	prior := &Manifest{ManifestVersion: ManifestVersion, Entries: nil}
 	chk := fakeChecker{exist: map[string]bool{}}
-	findings := Compare(prior, nil, chk, root)
+	findings := Compare(prior, nil, chk, root, nil)
 	if len(findings) != 0 {
 		t.Fatalf("unrecorded project-added dir must never be flagged; got %d findings", len(findings))
 	}
@@ -345,28 +355,84 @@ func TestCompare_NilPriorIsBootstrap(t *testing.T) {
 	root := t.TempDir()
 	writeDest(t, root, ".opencode/skills/old/SKILL.md", []byte("pre-existing\n"))
 	chk := fakeChecker{exist: map[string]bool{}}
-	if findings := Compare(nil, nil, chk, root); len(findings) != 0 {
+	if findings := Compare(nil, nil, chk, root, nil); len(findings) != 0 {
 		t.Fatalf("nil prior (bootstrap) must surface no findings; got %d", len(findings))
 	}
 }
 
 // TestCompare_PackGone_TreatedAsSourceMissing confirms a record whose whole pack
-// can no longer be opened (SourceExists false) is treated identically to a
-// missing source file — both are source_missing.
+// can no longer be opened (CheckSource == SourceMissing) is treated identically
+// to a missing source file — both are source_missing.
 func TestCompare_PackGone_TreatedAsSourceMissing(t *testing.T) {
 	root := t.TempDir()
 	writeDest(t, root, ".opencode/skills/tdd/SKILL.md", []byte("x"))
 	prior := &Manifest{ManifestVersion: ManifestVersion, Entries: []Record{
 		rec(".opencode/skills/tdd/SKILL.md", "gone-pack", "skills/tdd/SKILL.md", Digest([]byte("x"))),
 	}}
-	// checker has no entry for gone-pack → SourceExists false.
+	// checker has no entry for gone-pack → CheckSource == SourceMissing.
 	chk := fakeChecker{exist: map[string]bool{key("other", "skills/x/SKILL.md"): true}}
-	findings := Compare(prior, nil, chk, root)
+	findings := Compare(prior, nil, chk, root, nil)
 	if len(findings) != 1 || findings[0].Reason != ReasonSourceMissing {
 		t.Fatalf("pack-gone must be source_missing; got %+v", findings)
 	}
 	if findings[0].OverlayPack != "gone-pack" {
 		t.Errorf("finding must carry the producing pack name; got %q", findings[0].OverlayPack)
+	}
+}
+
+// TestCompare_SourceIndeterminate_NotFlagged_Warns is the tri-state safety net
+// (ship-review blocker #3): a prior record whose source is UNREADABLE — not
+// confirmed missing (e.g. a permission error or transient I/O failure) — must
+// NOT be classified as a definite orphan. Classifying it as missing would
+// false-positive and wrongly advise the operator to delete a skill whose source
+// merely could not be read this run. Instead Compare emits a warning to the
+// provided sink and skips the finding entirely.
+func TestCompare_SourceIndeterminate_NotFlagged_Warns(t *testing.T) {
+	root := t.TempDir()
+	writeDest(t, root, ".opencode/skills/tdd/SKILL.md", []byte("x"))
+	prior := &Manifest{ManifestVersion: ManifestVersion, Entries: []Record{
+		rec(".opencode/skills/tdd/SKILL.md", "p", "skills/tdd/SKILL.md", Digest([]byte("x"))),
+	}}
+	// The source is indeterminate (unreadable/transient), NOT confirmed missing.
+	chk := fakeChecker{
+		exist:         map[string]bool{},
+		indeterminate: map[string]bool{key("p", "skills/tdd/SKILL.md"): true},
+	}
+	var warn bytes.Buffer
+	findings := Compare(prior, nil, chk, root, &warn)
+	if len(findings) != 0 {
+		t.Fatalf("indeterminate source must NOT be flagged as an orphan (false positive risk); got %d findings: %+v", len(findings), findings)
+	}
+	if !strings.Contains(warn.String(), "indeterminate") || !strings.Contains(warn.String(), "skills/tdd/SKILL.md") {
+		t.Errorf("indeterminate source must emit a warning naming the record; got:\n%s", warn.String())
+	}
+}
+
+// TestCompare_SourceIndeterminate_vs_Missing pins the behavioral contrast at
+// the heart of the tri-state checker: the SAME prior record flips between
+// "skip (indeterminate)" and "report (missing)" solely on the checker verdict.
+// This guards against a regression that collapses indeterminate back into
+// missing (the boolean SourceExists bug this slice replaced).
+func TestCompare_SourceIndeterminate_vs_Missing(t *testing.T) {
+	root := t.TempDir()
+	writeDest(t, root, ".opencode/skills/tdd/SKILL.md", []byte("x"))
+	prior := &Manifest{ManifestVersion: ManifestVersion, Entries: []Record{
+		rec(".opencode/skills/tdd/SKILL.md", "p", "skills/tdd/SKILL.md", Digest([]byte("x"))),
+	}}
+
+	// Indeterminate → not flagged.
+	ind := fakeChecker{
+		exist:         map[string]bool{},
+		indeterminate: map[string]bool{key("p", "skills/tdd/SKILL.md"): true},
+	}
+	if got := Compare(prior, nil, ind, root, nil); len(got) != 0 {
+		t.Fatalf("indeterminate: want 0 findings, got %d", len(got))
+	}
+
+	// Confirmed missing (same key, no exist/indeterminate entry) → flagged.
+	missing := fakeChecker{exist: map[string]bool{}}
+	if got := Compare(prior, nil, missing, root, nil); len(got) != 1 {
+		t.Fatalf("missing: want 1 finding, got %d", len(got))
 	}
 }
 
@@ -392,6 +458,30 @@ func TestNextManifest_RetainsStaleOrphan(t *testing.T) {
 	}
 	if next.SuccessfulRenderID != "render-2" {
 		t.Errorf("render id = %q want render-2", next.SuccessfulRenderID)
+	}
+}
+
+// TestNextManifest_SourceIndeterminate_NotRetained pins the retention decision
+// for the indeterminate case (tri-state, blocker #3). A stale prior record whose
+// source is UNREADABLE must NOT be promoted into the next manifest as a tracked
+// orphan: a transient probe failure is not evidence the source is gone, and
+// retaining it would carry a phantom record forward indefinitely. It is dropped
+// (neither fresh nor confirmed-missing). If the source is genuinely gone, a
+// later readable run has no prior record — but indeterminate by definition means
+// "could not determine", so dropping is the conservative, no-false-positive choice.
+func TestNextManifest_SourceIndeterminate_NotRetained(t *testing.T) {
+	root := t.TempDir()
+	writeDest(t, root, ".opencode/skills/tdd/SKILL.md", []byte("x"))
+	prior := &Manifest{ManifestVersion: ManifestVersion, Entries: []Record{
+		rec(".opencode/skills/tdd/SKILL.md", "p", "skills/tdd/SKILL.md", Digest([]byte("x"))),
+	}}
+	chk := fakeChecker{
+		exist:         map[string]bool{},
+		indeterminate: map[string]bool{key("p", "skills/tdd/SKILL.md"): true},
+	}
+	next := NextManifest(prior, nil, chk, root, "render-2")
+	if len(next.Entries) != 0 {
+		t.Fatalf("indeterminate source must NOT be retained as a tracked orphan; got %d entries: %+v", len(next.Entries), next.Entries)
 	}
 }
 
@@ -454,14 +544,14 @@ func TestNextManifest_RepeatedReportingAcrossRuns(t *testing.T) {
 	chk := fakeChecker{exist: map[string]bool{}} // source missing
 
 	// Run 1: detect, then persist next manifest.
-	f1 := Compare(prior, nil, chk, root)
+	f1 := Compare(prior, nil, chk, root, nil)
 	if len(f1) != 1 {
 		t.Fatalf("run 1: want 1 finding, got %d", len(f1))
 	}
 	next := NextManifest(prior, nil, chk, root, "render-2")
 
 	// Run 2: compare against the persisted next manifest.
-	f2 := Compare(next, nil, chk, root)
+	f2 := Compare(next, nil, chk, root, nil)
 	if len(f2) != 1 {
 		t.Fatalf("run 2: want the orphan to keep reporting (1 finding), got %d", len(f2))
 	}

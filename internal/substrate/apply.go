@@ -60,14 +60,46 @@ const (
 	ActionIgnoredLocal     FileAction = "ignored-local-only"
 )
 
+// WriteState is the additive, machine-readable execution state of one staged
+// file's live write. It is the TYPED correctness signal that distinguishes a
+// write that SUCCEEDED from one that FAILED (or was never attempted), independent
+// of the human-readable Note string. Provenance consumers gate ONLY on this typed
+// field — the Note string must NEVER become a correctness signal (the corrupt
+// "ERROR ..." Note-scanning pattern is explicitly rejected by P1-LINEAGE-002 v1.1).
+//
+// This field is ADDITIVE: it carries the zero value "" (normalized to
+// WriteNotAttempted at plan time) on outcomes produced by older code, so a
+// reader built against this struct never sees a state it cannot interpret. It
+// does NOT change substrate.Apply's return semantics — Apply still returns an
+// error only for walk/plan/lineage failures; a live-write failure sets
+// WriteState=WriteFailed (and a Note) and returns normally. Lifting a
+// live-write failure into an Apply error / lineage halt is tracked separately
+// (P1-SUBSTRATE-001).
+type WriteState string
+
+const (
+	// WriteNotAttempted: no live write was performed (dry-run, preserved,
+	// proposal, noop, unsupported, ignored, or any non-write action). This is
+	// also the plan-time default for every outcome before execution.
+	WriteNotAttempted WriteState = "not_attempted"
+	// WriteSucceeded: the live write completed (the destination now holds the
+	// staged/reconciled value).
+	WriteSucceeded WriteState = "succeeded"
+	// WriteFailed: a write WAS attempted but did not complete — a staged-read,
+	// mkdir, reconcile, or live-write error. The live destination was NOT
+	// updated for this path.
+	WriteFailed WriteState = "failed"
+)
+
 // FileOutcome is the seam's per-file result.
 type FileOutcome struct {
-	Path      string
-	Class     ownership.Class
-	Action    FileAction
-	Applied   []string          // human-readable merge notes (armed-merged)
-	Proposals []schema.Proposal // populated when Action == ActionArmedProposal
-	Note      string            // extra context (e.g. why skipped)
+	Path       string
+	Class      ownership.Class
+	Action     FileAction
+	Applied    []string          // human-readable merge notes (armed-merged)
+	Proposals  []schema.Proposal // populated when Action == ActionArmedProposal
+	Note       string            // extra context (e.g. why skipped) — human diagnostics ONLY, never a correctness signal
+	WriteState WriteState        // typed live-write execution state (not_attempted/succeeded/failed)
 }
 
 // ApplyReport is the seam's result.
@@ -124,6 +156,18 @@ func Apply(r Renderer, opts ApplyOptions) (*ApplyReport, error) {
 	for i := range planned {
 		if planned[i].Action == ActionArmedProposal {
 			report.Proposals = append(report.Proposals, planned[i].Proposals...)
+		}
+	}
+
+	// Normalize the additive typed write-state for every planned outcome. Every
+	// outcome starts at WriteNotAttempted (the plan is pre-execution; even the
+	// managed-overwrite/seed/armed-merge outcomes have NOT written yet). The
+	// zero value "" (from a freshly-built outcome) is normalized here so
+	// provenance consumers never see an untyped state. executeOutcome and
+	// writeArmedManaged flip it to WriteSucceeded / WriteFailed during EXECUTE.
+	for i := range planned {
+		if planned[i].WriteState == "" {
+			planned[i].WriteState = WriteNotAttempted
 		}
 	}
 
@@ -341,7 +385,11 @@ func executeOutcome(opts ApplyOptions, o *FileOutcome) {
 }
 
 // writeArmedManaged computes the bytes to write (copy for managed/seed; reconcile
-// result for armed) and writes them exactly once into the live tree.
+// result for armed) and writes them exactly once into the live tree. The typed
+// WriteState field is the machine-readable execution signal: WriteSucceeded on a
+// completed write, WriteFailed on any staged-read/mkdir/reconcile/live-write
+// error. The human-readable Note carries the error detail for diagnostics but is
+// NEVER a correctness signal.
 func writeArmedManaged(opts ApplyOptions, o *FileOutcome) {
 	rel := o.Path
 	stagedPath := filepath.Join(opts.StagingDir, rel)
@@ -353,6 +401,7 @@ func writeArmedManaged(opts ApplyOptions, o *FileOutcome) {
 		b, err := os.ReadFile(stagedPath)
 		if err != nil {
 			o.Note = fmt.Sprintf("ERROR reading staged: %v", err)
+			o.WriteState = WriteFailed
 			return
 		}
 		bytes = b
@@ -363,6 +412,7 @@ func writeArmedManaged(opts ApplyOptions, o *FileOutcome) {
 			b, err := os.ReadFile(stagedPath)
 			if err != nil {
 				o.Note = fmt.Sprintf("ERROR reading staged: %v", err)
+				o.WriteState = WriteFailed
 				return
 			}
 			bytes = b
@@ -371,6 +421,7 @@ func writeArmedManaged(opts ApplyOptions, o *FileOutcome) {
 			stagedDefault, err := os.ReadFile(stagedPath)
 			if err != nil {
 				o.Note = fmt.Sprintf("ERROR reading staged: %v", err)
+				o.WriteState = WriteFailed
 				return
 			}
 			sch, _ := schema.SchemaForPath(rel)
@@ -378,6 +429,7 @@ func writeArmedManaged(opts ApplyOptions, o *FileOutcome) {
 			if err != nil || res.Outcome != schema.OutcomeApply {
 				o.Note = fmt.Sprintf("ERROR re-deriving merge: %v", err)
 				o.Action = ActionArmedProposal
+				o.WriteState = WriteFailed
 				return
 			}
 			bytes = res.Merged
@@ -386,12 +438,15 @@ func writeArmedManaged(opts ApplyOptions, o *FileOutcome) {
 
 	if err := os.MkdirAll(filepath.Dir(livePath), 0o755); err != nil {
 		o.Note = fmt.Sprintf("ERROR mkdir: %v", err)
+		o.WriteState = WriteFailed
 		return
 	}
 	if err := os.WriteFile(livePath, bytes, renderWriteMode(livePath)); err != nil {
 		o.Note = fmt.Sprintf("ERROR write: %v", err)
+		o.WriteState = WriteFailed
 		return
 	}
+	o.WriteState = WriteSucceeded
 }
 
 // --- small helpers ---
