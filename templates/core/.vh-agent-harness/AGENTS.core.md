@@ -175,32 +175,21 @@ Follow these rules to stay on the parsed, sanctioned path:
 
 ## Testing rules
 
-Every meaningful change should add or update tests.
+Every meaningful behavior change should add or update appropriate verification.
 
-The `tests/` folder is explicitly organized into three categories. Do not create test files directly in the root `tests/` directory except for shared utilities.
+Repository-specific test locations, runners, commands, seam classes, and
+acceptance signals must come from the repository's verified testing seam
+localization, not from generic defaults in this managed core.
 
-1. **`tests/unit/`**
-   - Pure, fast tests mocking external dependencies.
-   - Organized by package/boundary.
-   - Minimum expected coverage: domain/core, contracts, and the primary business logic.
-
-2. **`tests/integration/`**
-   - Tests that verify infrastructure integration or layer handoffs without booting the entire stack.
-   - Example: storage materialization, queue handoff.
-
-3. **`tests/e2e/`**
-   - Full-stack tests that boot the app's entrypoints and exercise the real service stack.
-   - Example: end-to-end request → handler → response flow, endpoint validation.
-
-Execution examples:
-
-```bash
-vh-agent-harness exec pytest tests/unit/
-vh-agent-harness exec pytest tests/integration/
-vh-agent-harness exec pytest tests/e2e/
-```
-
-For any substantial boundary change, also update the relevant docs.
+- Begin with the narrowest verified repository seam that covers the behavior.
+- Do not invent test directories, runners, or commands that are not supported
+  by the current repository.
+- If the required testing seam localization does not exist, establish and
+  verify it from the repository's actual structure and commands before
+  prescribing test placement or execution.
+- Keep project-specific AGENTS.md testing guidance synchronized with that
+  localization and make it defer to the localization rather than declaring a
+  competing test taxonomy.
 
 ## Output expectations for agents
 
