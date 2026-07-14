@@ -299,6 +299,18 @@ func printDryRunPlan(out io.Writer, verb, target string, report *substrate.Apply
 	if sp := summarizeProposals(report.Proposals); sp != "" {
 		fmt.Fprintln(out, sp)
 	}
+	// Preserved orphan overlay skills (P1-LINEAGE-002). These are
+	// previously-rendered skill files whose overlay SOURCE has since been
+	// removed; the renderer deliberately does NOT delete them, so they are
+	// surfaced here for operator visibility. Report-only — nothing is written
+	// or deleted by this command.
+	if n := len(report.Orphans); n > 0 {
+		fmt.Fprintf(out, "\nPRESERVED ORPHAN SKILL(S) — %d previously-rendered overlay skill file(s) whose source was removed; left in place (report-only, NOT deleted):\n", n)
+		for _, o := range report.Orphans {
+			fmt.Fprintf(out, "  %s  [%s, from pack %q, source %q]\n", o.SkillDir, o.DestinationState, o.OverlayPack, o.SourceRelativePath)
+		}
+		fmt.Fprintln(out, "Remove the destination manually if you no longer want it, or restore the overlay source to clear this notice.")
+	}
 	fmt.Fprintf(out, "\nRe-run `vh-agent-harness %s` without --dry-run to apply.\n", verb)
 }
 

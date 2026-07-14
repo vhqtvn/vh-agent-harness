@@ -378,7 +378,7 @@ func checkManagedDrift(target string) checkResult {
 	// install answers the token-bearing managed files would false-flag drift
 	// whenever the install name/slug differ from the target dir basename.
 	answers := mergeRenderAnswers(installRenderAnswers(target), readProfileAnswers(target))
-	if _, err := renderSeamStaging(staging, r, answers, target); err != nil {
+	if _, _, err := renderSeamStaging(staging, r, answers, target); err != nil {
 		return checkResult{name: "managed-drift", tier: tierFail,
 			detail: fmt.Sprintf("render staging: %v", err)}
 	}

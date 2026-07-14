@@ -659,6 +659,44 @@ blocks + `delegateFrom` edges via the Go-native emitter — no separate step) �
   file taken to `project_owned` via `harness-ownership.yml`) as a non-failing
   `preserved` (INFO) signal — never a FAIL, never blocks install/update.
 
+## Preserved orphan overlay skills (report-only)
+
+When you remove an overlay skill source
+(`.vh-agent-harness/overlays/<pack>/skills/<name>/`) and re-run
+`vh-agent-harness update`, the previously-rendered `.opencode/skills/<name>/`
+stays on disk. The renderer **never deletes** files a render no longer
+contributes — that is the deliberate conservative posture that protects
+operator-authored content. Previously this left removed-source skills
+**invisible**: live, unreported, and not surfaced by `update --dry-run`.
+
+`update` and `update --dry-run` now surface those as **preserved orphans** — a
+report-only notice naming the skill, the producing pack, and the removed source.
+The notice is informational; **nothing is deleted.** To actually remove a
+preserved orphan, delete its `.opencode/skills/<name>/` directory by hand, or
+restore the overlay source to clear the notice on the next update.
+
+How a **definite orphan** is told apart from benign cases:
+
+- A skill is flagged **only** when its producing overlay SOURCE is now MISSING
+  (the source file is gone from its pack, or the whole pack is gone). Removing
+  a skill from its pack and re-running `update` flags it.
+- **Pack deselection** (removing the pack from `overlays:` while its source dir
+  is still on disk) is NOT an orphan — the source still exists, it is just not
+  selected. No notice.
+- A **project-added** skill dir you created directly under `.opencode/skills/`
+  (never produced by an overlay render) is never recorded, so it can never be
+  flagged.
+
+This provenance is tracked in a generated manifest at
+**`.vh-agent-harness/rendered-outputs.json`** — a JSON file with a
+`manifest_version` field, written atomically only after a successful non-dry-run
+`update`/`install`. It records each overlay-rendered skill file's destination,
+producing pack, source-relative path, and content digest. If the manifest is
+absent (a project first updated by a pre-v0.10.0 binary), the first `update`
+establishes a baseline from the current render — it does NOT retroactively
+adopt pre-existing `.opencode/skills/` dirs as managed (there is no historical
+proof they were overlay-rendered).
+
 ## Git global-flag detection (shell-guard)
 
 Agents routinely run read-only git commands prefixed with global flags such as

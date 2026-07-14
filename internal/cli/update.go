@@ -181,6 +181,17 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 	if report.LineagePath != "" {
 		fmt.Fprintf(out, "lineage: %s\n", report.LineagePath)
 	}
+	// Preserved orphan overlay skills (P1-LINEAGE-002, report-only v1). A
+	// non-empty report.Orphans means previously-rendered skill files whose
+	// overlay source was removed are still sitting on disk; the renderer does
+	// not delete them, so surface them here. Report-only — nothing is deleted.
+	if n := len(report.Orphans); n > 0 {
+		fmt.Fprintf(out, "\nPreserved orphan skill(s) — %d previously-rendered overlay skill file(s) whose source was removed; left in place (report-only, NOT deleted):\n", n)
+		for _, o := range report.Orphans {
+			fmt.Fprintf(out, "  %s  [%s, from pack %q, source %q]\n", o.SkillDir, o.DestinationState, o.OverlayPack, o.SourceRelativePath)
+		}
+		fmt.Fprintln(out, "Remove the destination manually if you no longer want it, or restore the overlay source to clear this notice.")
+	}
 	printNextStepsFooter(out, abs)
 	return nil
 }

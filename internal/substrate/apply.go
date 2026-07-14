@@ -11,6 +11,7 @@ import (
 
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
+	"github.com/vhqtvn/vh-agent-harness/internal/renderstate"
 	"github.com/vhqtvn/vh-agent-harness/internal/schema"
 )
 
@@ -76,6 +77,12 @@ type ApplyReport struct {
 	LineagePath  string // absolute path to the written lineage.yml
 	Proposals    []schema.Proposal
 	RendererName string
+	// Orphans are the report-only preserved-orphan findings (overlay skills
+	// whose producing source has been removed but whose rendered copy is still
+	// on disk). Populated by the seam (internal/cli/seam.go) after Apply; it is
+	// NOT computed by Apply itself. v1 reports only — the platform never deletes
+	// these files. Surfaced in both update --dry-run and normal update.
+	Orphans []renderstate.OrphanFinding
 }
 
 // Apply runs the seam: it walks the staged tree, classifies every candidate via

@@ -612,7 +612,7 @@ func TestMigration_AllowedCommandsCustomized(t *testing.T) {
 	}
 	renderer := substrate.EmbedFSRenderer{Source: sub}
 	answers := mergeRenderAnswers(installRenderAnswers(root), readProfileAnswers(root))
-	if _, err := renderSeamStaging(staging, renderer, answers, root); err != nil {
+	if _, _, err := renderSeamStaging(staging, renderer, answers, root); err != nil {
 		t.Fatalf("render staging: %v", err)
 	}
 	if isAllowedCommandsCustomized(root, staging) {

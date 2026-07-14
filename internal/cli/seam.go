@@ -7,11 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
+	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
 	"github.com/vhqtvn/vh-agent-harness/internal/overlay"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 	"github.com/vhqtvn/vh-agent-harness/internal/permconfig"
 	"github.com/vhqtvn/vh-agent-harness/internal/proposals"
+	"github.com/vhqtvn/vh-agent-harness/internal/renderstate"
 	"github.com/vhqtvn/vh-agent-harness/internal/runshape"
 	"github.com/vhqtvn/vh-agent-harness/internal/substrate"
 
@@ -145,7 +148,7 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	// profile) and perform the overlay merges (opencode-append deep-merge,
 	// callable-graph append). Returns the LIVE .opencode-relative paths the
 	// overlays contributed so the classifier can mark them overlay_extension.
-	overlayFiles, err := renderSeamStaging(staging, renderer, renderAnswers, target)
+	overlayFiles, skillRecords, err := renderSeamStaging(staging, renderer, renderAnswers, target)
 	if err != nil {
 		return nil, err
 	}
@@ -198,6 +201,30 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	if err != nil {
 		return nil, fmt.Errorf("seam: apply: %w", err)
 	}
+
+	// Orphan detection (P1-LINEAGE-002, report-only v1). Load the prior
+	// rendered-outputs manifest recorded at the PREVIOUS successful render and
+	// compare it against the skill records just rendered. A DEFINITE orphan is a
+	// prior record whose producing overlay SOURCE is now MISSING (not merely a
+	// deselected pack) while its destination file still sits on disk — those are
+	// preserved in place and surfaced via report.Orphans for operator visibility.
+	// The source check opens the producer pack BY NAME (independent of whether it
+	// is currently selected) and probes the recorded source-relative path.
+	//
+	// This runs for BOTH dry-run and live apply: dry-run must surface orphans
+	// (the bug report required update --dry-run visibility) and live apply must
+	// surface them in its normal report. The manifest is NEVER written on dry-run
+	// (see the persistence step after the post-apply side effects below).
+	overlaySkillChecker := overlaySkillSourceChecker{target: target}
+	prior, perr := renderstate.Read(target)
+	if perr != nil {
+		// A present-but-unreadable manifest is warned, not fatal: the operator
+		// still gets a successful apply, just without orphan visibility this run.
+		// A missing manifest (nil,nil) is the normal first-run / bootstrap case.
+		fmt.Fprintf(os.Stderr, "seam: warning: rendered-outputs manifest unreadable (%v); orphan reporting skipped this run\n", perr)
+		prior = nil
+	}
+	report.Orphans = renderstate.Compare(prior, skillRecords, overlaySkillChecker, target)
 
 	// Dry-run: substrate.Apply wrote nothing (it returned the plan only). Skip
 	// every side-effecting post-apply step too — the proposal ledger append, the
@@ -259,7 +286,54 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	if err := seedAgentModelDefaults(target); err != nil {
 		fmt.Fprintf(os.Stderr, "seam: warning: agent-model seed failed: %v\n", err)
 	}
+
+	// Persist the rendered-outputs manifest ONLY after a successful non-dry-run
+	// apply (and after the post-apply side effects above). The manifest is the
+	// provenance record that lets a FUTURE run distinguish a real orphan (source
+	// removed) from a merely-deselected pack, so it must never claim a generation
+	// that did not apply. It carries the lineage's last-successful-update id as
+	// its successful_render_id so the two records stay correlated.
+	//
+	// Lifecycle: NextManifest merges the fresh skill records (this render) with
+	// stale prior records whose source is still missing but whose destination is
+	// still present (so an orphan keeps reporting across runs until the operator
+	// removes the destination or restores the source). Write is atomic
+	// (temp-file + rename); a write failure is warned, NOT rolled back — the live
+	// tree was already updated successfully and orphan reporting will simply be
+	// one generation stale until the next successful apply.
+	renderID := ""
+	if lin, lerr := lineage.Read(target); lerr == nil && lin != nil {
+		renderID = lin.Render.LastSuccessfulUpdateID
+	}
+	next := renderstate.NextManifest(prior, skillRecords, overlaySkillChecker, target, renderID)
+	if werr := next.Write(target); werr != nil {
+		fmt.Fprintf(os.Stderr, "seam: warning: rendered-outputs manifest write failed (%v); orphan reporting will be stale until the next successful update\n", werr)
+	}
 	return report, nil
+}
+
+// overlaySkillSourceChecker implements renderstate.SourceChecker for the
+// overlay-skill orphan path. It answers "is the producing overlay SOURCE for
+// this record still present?" — opening the producer pack BY NAME (independent
+// of whether the pack is currently selected in the live profile) and probing
+// the recorded source-relative path inside the pack's FS.
+//
+// This is the provenance check that distinguishes a real orphan (source
+// removed from its pack, or the whole pack removed) from a merely-deselected
+// pack (source still present, just not selected this render). A pack that will
+// not open at all is treated as source-missing: the producer is gone, so any
+// record it produced is now an orphan.
+type overlaySkillSourceChecker struct{ target string }
+
+func (c overlaySkillSourceChecker) SourceExists(rec renderstate.Record) bool {
+	pack, err := overlay.OpenPackFor(c.target, rec.OverlayPack)
+	if err != nil {
+		return false
+	}
+	if _, err := fs.ReadFile(pack.FS, rec.SourceRelativePath); err != nil {
+		return false
+	}
+	return true
 }
 
 // agentModelRefRe matches the per-agent model-file references opencode.jsonc
@@ -388,8 +462,12 @@ func seedRunShapeDefault(target string) error {
 //
 // Unknown pack names in the profile are skipped with a stderr notice rather than
 // aborting the apply (a stale profile entry should not block install). Returns
-// the sorted LIVE .opencode-relative paths contributed by overlays.
-func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswers map[string]string, target string) ([]string, error) {
+// the sorted LIVE .opencode-relative paths contributed by overlays and the
+// per-FILE renderstate records for overlay-rendered SKILLS (the provenance
+// material the rendered-outputs manifest persists after a successful apply).
+// Non-skill overlay units (agents/commands, permission packs) are NOT recorded:
+// v1 orphan detection is overlay-skill-scoped only.
+func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswers map[string]string, target string) ([]string, []renderstate.Record, error) {
 	// Fold in the project.config.json-sourced tokens (mission/architecture/db).
 	// project.config.json is project_owned and read LIVE from the target so the
 	// seeded CLAUDE.md/Makefile resolve {{MISSION_SUMMARY}} etc. The config keys
@@ -406,7 +484,7 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// false-flag drift on every gated agent block.
 	capAnswers, renderPacks, err := resolveCapabilityAnswers(target)
 	if err != nil {
-		return nil, fmt.Errorf("seam: %w", err)
+		return nil, nil, fmt.Errorf("seam: %w", err)
 	}
 	renderAnswers = mergeRenderAnswers(renderAnswers, capAnswers)
 	// Phase 5 modules deprecation: warn (to the swappable profileDeprecationSink)
@@ -421,7 +499,7 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 		TemplateSource: corpus.CoreDir,
 		Answers:        renderAnswers,
 	}); err != nil {
-		return nil, fmt.Errorf("seam: render into staging: %w", err)
+		return nil, nil, fmt.Errorf("seam: render into staging: %w", err)
 	}
 	// existing is the set of LIVE .opencode-relative paths already on disk in
 	// staging. Core has just rendered the builtin corpus; an overlay MUST NOT
@@ -430,6 +508,7 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// pack's units either.
 	existing := walkStagedLivePaths(staging)
 	var overlayFiles []string
+	var skillRecords []renderstate.Record
 	var packs []*overlay.Pack
 	for _, name := range renderPacks {
 		pack, err := overlay.OpenPackFor(target, name)
@@ -446,7 +525,7 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 			// from the profile overlays: list / capabilities: selection.
 			// Refusing the whole render is correct: a partial overlay set is
 			// unpredictable state.
-			return nil, fmt.Errorf("seam: overlay %q (selected via the profile overlays: list or a resolved capability) failed to open: %w\n"+
+			return nil, nil, fmt.Errorf("seam: overlay %q (selected via the profile overlays: list or a resolved capability) failed to open: %w\n"+
 				"fix the pack or remove it from the profile overlays: list / capabilities: selection; refusing to render an incomplete overlay set",
 				name, err)
 		}
@@ -455,24 +534,52 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 		// at the explicit S2 managed→owned replacement path.
 		shadow, err := pack.DetectShadowing(existing)
 		if err != nil {
-			return nil, fmt.Errorf("seam: overlay %s: shadow check: %w", name, err)
+			return nil, nil, fmt.Errorf("seam: overlay %s: shadow check: %w", name, err)
 		}
 		if shadow != nil {
-			return nil, shadow
+			return nil, nil, shadow
 		}
 		rendered, err := pack.RenderUnits(staging, renderAnswers)
 		if err != nil {
-			return nil, fmt.Errorf("seam: overlay %s: %w", name, err)
+			return nil, nil, fmt.Errorf("seam: overlay %s: %w", name, err)
 		}
 		overlayFiles = append(overlayFiles, rendered...)
 		for _, rel := range rendered {
 			existing[rel] = true
 		}
+		// Capture per-FILE renderstate records for overlay-rendered SKILLS only
+		// (v1 orphan scope). Non-skill overlay units (agents/commands) and the
+		// materialized permission pack are deliberately NOT recorded: they fall
+		// outside the report-only orphan-detection scope. The source-relative
+		// path is the pack-FS path (the ".opencode/" prefix stripped), and the
+		// rendered digest is computed from the staged bytes so the manifest can
+		// later label an orphan's destination as unchanged vs modified. Read
+		// failures fall back to a zero digest; Validate rejects "" , so guard
+		// with a placeholder that still parses (a real read failure is a render
+		// bug surfaced elsewhere).
+		for _, liveRel := range rendered {
+			if !strings.HasPrefix(liveRel, skillsPathPrefix) {
+				continue
+			}
+			srcRel := strings.TrimPrefix(liveRel, opencodePrefixCLI)
+			stagedBytes, rerr := os.ReadFile(filepath.Join(staging, filepath.FromSlash(liveRel)))
+			dig := renderstate.Digest(nil) // safe placeholder for an empty body
+			if rerr == nil {
+				dig = renderstate.Digest(stagedBytes)
+			}
+			skillRecords = append(skillRecords, renderstate.Record{
+				DestinationPath:    renderstate.NormalizeDestination(liveRel),
+				ProducerKind:       renderstate.ProducerOverlaySkill,
+				OverlayPack:        pack.Name,
+				SourceRelativePath: srcRel,
+				RenderedDigest:     dig,
+			})
+		}
 		if err := pack.MergeAppend(staging); err != nil {
-			return nil, fmt.Errorf("seam: overlay %s: %w", name, err)
+			return nil, nil, fmt.Errorf("seam: overlay %s: %w", name, err)
 		}
 		if err := pack.AppendCallableGraph(staging); err != nil {
-			return nil, fmt.Errorf("seam: overlay %s: %w", name, err)
+			return nil, nil, fmt.Errorf("seam: overlay %s: %w", name, err)
 		}
 		// Materialize the pack's self-describing permission descriptor (if any)
 		// so the Go-native permission emitter (internal/permconfig) can resolve
@@ -480,7 +587,7 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 		// canonical Go tables hardcoding any pack's agents.
 		ppRel, err := pack.MaterializePermissionPack(staging)
 		if err != nil {
-			return nil, fmt.Errorf("seam: overlay %s: %w", name, err)
+			return nil, nil, fmt.Errorf("seam: overlay %s: %w", name, err)
 		}
 		if ppRel != "" {
 			overlayFiles = append(overlayFiles, ppRel)
@@ -493,7 +600,7 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// silently dropped.
 	report, err := overlay.InjectExtensionSnippets(staging, packs, renderAnswers)
 	if err != nil {
-		return nil, fmt.Errorf("seam: inject prompt-extension snippets: %w", err)
+		return nil, nil, fmt.Errorf("seam: inject prompt-extension snippets: %w", err)
 	}
 	for _, o := range report.Orphans {
 		fmt.Fprintf(os.Stderr, "seam: warning: orphan prompt-extension snippet (no matching anchor): pack=%s target=%s slot=%s\n", o.Pack, o.TargetRel, o.Slot)
@@ -510,12 +617,12 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// auto-coheres with the canonical form.
 	permPacks, err := permconfig.LoadPacks(staging)
 	if err != nil {
-		return nil, fmt.Errorf("seam: load permission-packs: %w", err)
+		return nil, nil, fmt.Errorf("seam: load permission-packs: %w", err)
 	}
 	cfgPath := filepath.Join(staging, "opencode.jsonc")
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
-		return nil, fmt.Errorf("seam: read staged opencode.jsonc for permission emission: %w", err)
+		return nil, nil, fmt.Errorf("seam: read staged opencode.jsonc for permission emission: %w", err)
 	}
 	features := permconfig.Features{Backlog: renderAnswers["features.backlog"] == "true"}
 	// Phase 2c permission transform (F-intent): if the project maintains a
@@ -527,18 +634,18 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// as drift or a loud FAIL — never silent.
 	roster, err := permconfig.ExtractRoster(data)
 	if err != nil {
-		return nil, fmt.Errorf("seam: extract agent roster: %w", err)
+		return nil, nil, fmt.Errorf("seam: extract agent roster: %w", err)
 	}
 	extra, err := applyConfigTransform(target, data, roster, renderPacks, renderAnswers)
 	if err != nil {
-		return nil, fmt.Errorf("seam: %w", err)
+		return nil, nil, fmt.Errorf("seam: %w", err)
 	}
 	emitted, err := permconfig.EmitWithExtra(data, permPacks, features, extra)
 	if err != nil {
-		return nil, fmt.Errorf("seam: emit canonical permissions: %w", err)
+		return nil, nil, fmt.Errorf("seam: emit canonical permissions: %w", err)
 	}
 	if err := os.WriteFile(cfgPath, emitted, 0o644); err != nil {
-		return nil, fmt.Errorf("seam: write canonical opencode.jsonc: %w", err)
+		return nil, nil, fmt.Errorf("seam: write canonical opencode.jsonc: %w", err)
 	}
 	// Phase 4 capability-installer: post-render fail-closed reference
 	// validation. Assert that no reference in the just-emitted opencode.jsonc
@@ -552,7 +659,7 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// closed before the broken artifact reaches the live tree. True no-op when
 	// the render is consistent (the dogfood render today).
 	if err := validateRenderedRefs(staging, emitted); err != nil {
-		return nil, fmt.Errorf("seam: %w", err)
+		return nil, nil, fmt.Errorf("seam: %w", err)
 	}
 	// Generate allowed-commands.js from the same Go canonical tables so the
 	// shell-guard runtime hook (which imports it as a JS module at exec time)
@@ -561,13 +668,21 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// artifact. The file is platform_managed; see README.agent.md.
 	acDir := filepath.Join(staging, ".opencode", "repo-configs")
 	if err := os.MkdirAll(acDir, 0o755); err != nil {
-		return nil, fmt.Errorf("seam: ensure repo-configs dir: %w", err)
+		return nil, nil, fmt.Errorf("seam: ensure repo-configs dir: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(acDir, "allowed-commands.js"), permconfig.GenerateAllowedCommandsJS(), 0o644); err != nil {
-		return nil, fmt.Errorf("seam: write generated allowed-commands.js: %w", err)
+		return nil, nil, fmt.Errorf("seam: write generated allowed-commands.js: %w", err)
 	}
-	return overlayFiles, nil
+	return overlayFiles, skillRecords, nil
 }
+
+// skillsPathPrefix and opencodePrefixCLI are the live-path prefixes the skill
+// record capture in renderSeamStaging filters on. They mirror overlay's
+// opencodePrefix (".opencode/") and scope v1 orphan detection to skills/.
+const (
+	skillsPathPrefix  = ".opencode/skills/"
+	opencodePrefixCLI = ".opencode/"
+)
 
 // walkStagedLivePaths returns the set of LIVE .opencode-relative paths already
 // present in staging (the builtin corpus the renderer just wrote, plus anything
