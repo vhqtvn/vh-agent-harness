@@ -48,3 +48,36 @@ Piloting first proves the trigger surface, completion criteria, and failure-mode
 coverage against a real workload. This dovetails with the existing `--dry-run`
 preview discipline and the domain-free-core rule (AGENTS.md): pilot, observe,
 then promote only what survived.
+
+### Stable hold-ID + evidence-record contract (release-relevant state)
+
+S2's "held for pilot" state is release-relevant: a release-readiness gate must
+be able to discover, from canonical records alone, whether a held skill's pilot
+has landed. Rather than redesigning S2, pin a two-surface contract that any
+release gate can cross-check by a stable join key:
+
+- **Canonical backlog row (the hold).** When a skill/design is held under S2,
+  create a tagged row in the project's canonical backlog carrying a STABLE HOLD
+  ID of the form `s2-hold: S2-<skill>-001` — the `s2-hold:` token prefix is what
+  a release gate enumerates rows by. This row is authoritative for "a strict S2
+  hold exists."
+- **Evidence packet slot (the verdict).** In the project's evidence/research
+  packet, create a slot joined to that SAME stable hold ID, carrying a verdict
+  of `PENDING` or `SATISFIED`. This slot is authoritative for "the pilot
+  succeeded."
+
+Lifecycle of the hold:
+
+1. **On hold:** create the tagged backlog row + a `PENDING` evidence slot, both
+   carrying the same stable hold ID.
+2. **On pilot landing:** add real pilot provenance (which repo, which workload,
+   what was observed) + positive evidence to the slot, then set its verdict to
+   `SATISFIED`.
+3. **On resolution:** only AFTER the slot is `SATISFIED`, resolve (close) the
+   backlog row.
+
+The join key is the STABLE HOLD ID — never narrative prose. A release gate
+cross-checks both surfaces and blocks while any hold is `PENDING`, while the two
+surfaces disagree, or while the join is missing, duplicated, or ambiguous. This
+keeps S2's release-relevant state discoverable without altering S2's core
+pilot-then-promote discipline.

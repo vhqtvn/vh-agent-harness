@@ -15,7 +15,10 @@ package cli
 // six changes; is the roster shrink BREAKING) lives inside the agent prompt and
 // is NOT testable without a live model. These tests cover the PACK MECHANICS
 // (discovery / closure / render / prompt-form) — the same surface the release
-// pack's tests cover — not the agent's G1–G5 evaluation.
+// pack's tests cover — not the agent's G1–G5 evaluation. The G6 section's
+// DETERMINISTIC prose (skill-pilot evidence / S2 holds) IS pinned by
+// TestHarnessDogfood_ReleaseReadinessCarriesG6Gate below: it is content a
+// regression can silently delete, not model reasoning, so it is assertable.
 
 import (
 	"encoding/json"
@@ -303,4 +306,51 @@ func containsStr(s []string, x string) bool {
 		}
 	}
 	return false
+}
+
+// TestHarnessDogfood_ReleaseReadinessCarriesG6Gate is the deterministic content
+// contract for the G6 release gate (skill-pilot evidence / S2 holds). Unlike the
+// G1–G5 reasoning (not assertable without a live model), the G6 section is
+// deterministic prose a regression can silently delete — so this test pins its
+// presence in BOTH the AUTHORITATIVE overlay source
+// (.vh-agent-harness/overlays/harness-dogfood/agents/harness-release-readiness.md)
+// AND its 1:1 RENDERED MIRROR (.opencode/agents/harness-release-readiness.md):
+// the source catches a direct edit that drops G6; the mirror catches a stale or
+// hand-edited render (the update path must regenerate it, never hand-edit it).
+// If G6 drifts out of either surface, this test fails before a held-for-pilot
+// skill can ship unaudited.
+func TestHarnessDogfood_ReleaseReadinessCarriesG6Gate(t *testing.T) {
+	root := findModuleRoot(t)
+	relPaths := []string{
+		filepath.Join(".vh-agent-harness", "overlays", "harness-dogfood", "agents", "harness-release-readiness.md"),
+		filepath.Join(".opencode", "agents", "harness-release-readiness.md"),
+	}
+	for _, rel := range relPaths {
+		body, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("read readiness agent %s: %v", rel, err)
+		}
+		assertG6GateContent(t, rel, string(body))
+	}
+}
+
+// assertG6GateContent asserts the distinctive G6 tokens are present in one
+// readiness agent body. Each needle is new content the pre-G6 readiness agent
+// did NOT carry (or, for SATISFIED, is confirmed alongside the distinctive
+// siblings), so a regression that drops the G6 section fails here.
+func assertG6GateContent(t *testing.T, label, got string) {
+	t.Helper()
+	checks := []struct{ name, needle string }{
+		{"G6 section header", "## G6 — Skill pilot evidence (S2 holds)"},
+		{"G6 blocker id G6_Skill_Pilot_Evidence", "G6_Skill_Pilot_Evidence"},
+		{"PENDING verdict token", "PENDING"},
+		{"SATISFIED verdict token", "SATISFIED"},
+		{"stable hold ID cross-check requirement", "stable hold ID"},
+		{"ready:no + null-handoff behavior (scoped to G6)", "G6 blocker forces"},
+	}
+	for _, c := range checks {
+		if !strings.Contains(got, c.needle) {
+			t.Errorf("%s: missing %s — %q (G6 gate content drifted out of the readiness agent)", label, c.name, c.needle)
+		}
+	}
 }
