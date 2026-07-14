@@ -24,6 +24,18 @@ never hardcodes a repo's hotpaths; the overlay never reimplements the
 discipline. A consumer that lacks the localization file gets a clear, actionable
 gap instead of a skill that silently assumes the wrong repo.
 
+### Placement — overlay dir mirroring the core skill name
+
+The localization file's recommended home is an **overlay directory mirroring the
+core skill name** — `.vh-agent-harness/overlays/<consumer>/skills/<skill-name>/<repo>-<localization>.md`,
+holding only the localization file (no `SKILL.md`). Per the overlay merge model
+documented in `.opencode/commands/harness.md` (→ Overlay anatomy / Shadowing
+rule: overlays ADD new units and render 1:1 into `.opencode/skills/`; they do
+not shadow-and-replace a core builtin), the core's `SKILL.md` and `references/`
+survive byte-identical and the localization file lands as a sibling — no shadow,
+no drop. This placement has been validated in practice via
+`vh-agent-harness update --dry-run` and a real `update`.
+
 ## S2 — Overlay-pilot-then-promote
 
 A new core skill MUST pilot in at least one overlay against a real repo before
