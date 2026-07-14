@@ -8,14 +8,13 @@ package cli
 // It resolves the pack the SAME way a render does: project-local first
 // (target/.vh-agent-harness/overlays/<name>/) then the embedded overlays FS,
 // via overlay.OpenPackFor. Pack READMEs are deliberately excluded from the
-// rendered .opencode/ tree (overlay.isPackDocFile), so this command is the
+// rendered .opencode/ tree (overlay.IsPackDocFile), so this command is the
 // canonical way to surface that documentation to a consumer who already has
 // the binary but has not authored a project-local pack of the same name.
 
 import (
 	"fmt"
 	"io/fs"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -125,20 +124,15 @@ func runOverlayDocs(cmd *cobra.Command, args []string) error {
 
 // listPackDocFiles walks the pack FS and returns the sorted list of files whose
 // base name is a documentation file (README/LICENSE/CHANGELOG/CONTRIBUTING,
-// case-insensitive) — i.e. the same set overlay.isPackDocFile recognizes, but
+// case-insensitive) — i.e. the same set overlay.IsPackDocFile recognizes, but
 // enumerated here so the no-README error can tell the operator what IS present.
 func listPackDocFiles(fsys fs.FS) []string {
-	docBaseNames := map[string]bool{
-		"readme.md": true, "license": true, "license.md": true,
-		"changelog.md": true, "contributing.md": true,
-	}
 	var found []string
 	_ = fs.WalkDir(fsys, ".", func(rel string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		base := strings.ToLower(path.Base(rel))
-		if docBaseNames[base] {
+		if overlay.IsPackDocFile(rel) {
 			found = append(found, rel)
 		}
 		return nil

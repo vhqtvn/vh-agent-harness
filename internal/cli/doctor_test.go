@@ -825,3 +825,71 @@ func TestAutoGateConfig_EnforceModeNoLlmConfig(t *testing.T) {
 		t.Fatalf("want PASS for mode=enforce with no LLM config, got %s: %s", r.tier, r.detail)
 	}
 }
+
+// TestAutoGateConfig_TwoLevelMergeLiveMode: the two-level (project overrides
+// user) merge feeds the mode=live cross-check. A PROJECT-level LLM config
+// contributing only `model` plus a USER-level LLM config contributing only
+// `modelEndpoint` must merge to a well-formed live config (both required fields
+// present across levels) → PASS. This exercises
+// autoGateEffectiveString / autoGateEffectiveEndpoint across BOTH levels — all
+// existing cross-validation tests use project-level-only LLM configs and thus
+// never exercise the user-level fallback in the merge.
+func TestAutoGateConfig_TwoLevelMergeLiveMode(t *testing.T) {
+	dir := t.TempDir()
+	xdg := isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"live"}`)
+	// Project-level LLM contributes the model but no endpoint.
+	writeAutoGateConfig(t, dir, "llm", `{"model":"m"}`)
+	// User-level LLM contributes the endpoint but no model.
+	writeUserAutoGateConfig(t, xdg, "llm", `{"modelEndpoint":"https://x"}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for two-level merge (project model + user endpoint), got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_LiveTieredAllLeavesMalformed: mode=live-tiered + a
+// non-empty leaves[] where NO leaf has a model → FAIL. Every leaf is malformed
+// (missing the required `model` field), so the early-return loop in
+// autoGateLeafHasModelAndEndpoint finds no well-formed leaf and live-tiered
+// fail-closes. This complements the existing empty-leaves FAIL and
+// single-valid-leaf PASS cases with the all-malformed consensus case.
+func TestAutoGateConfig_LiveTieredAllLeavesMalformed(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"live-tiered"}`)
+	// No leaf has a model — both are malformed for runtime use.
+	writeAutoGateConfig(t, dir, "llm", `{"leaves":[{"modelEndpoint":"https://x"},{"apiKey":"k"}]}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for live-tiered with all leaves malformed, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "mode=live-tiered") {
+		t.Errorf("FAIL detail should name mode=live-tiered; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_LiveTieredMixedLeaves: mode=live-tiered + a non-empty
+// leaves[] where at least ONE leaf is well-formed (has model; endpoint defaults
+// via autoGateDefaultModelEndpointEnv) → PASS. The early-return loop in
+// autoGateLeafHasModelAndEndpoint returns true on the first well-formed leaf,
+// so a mixed array (one malformed + one well-formed) passes. This complements
+// the existing single-valid-leaf PASS case with the mixed consensus case.
+func TestAutoGateConfig_LiveTieredMixedLeaves(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"live-tiered"}`)
+	// First leaf has only an endpoint (no model — malformed); second leaf has
+	// only a model (well-formed: endpoint defaults to AUTO_GATE_MODEL_ENDPOINT).
+	writeAutoGateConfig(t, dir, "llm", `{"leaves":[{"modelEndpoint":"https://x"},{"model":"m"}]}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for live-tiered with mixed leaves (one well-formed), got %s: %s", r.tier, r.detail)
+	}
+}

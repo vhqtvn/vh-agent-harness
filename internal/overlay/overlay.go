@@ -129,7 +129,7 @@ func OpenPackFor(target, name string) (*Pack, error) {
 // not a pack-documentation file like README.md / LICENSE). Extension snippets are
 // render-time injection material (see ExtensionSnippets), never standalone units.
 // Pack docs describe the pack for adopters, not the consumer's .opencode/
-// runtime, so they are excluded too (see isPackDocFile).
+// runtime, so they are excluded too (see IsPackDocFile).
 func isUnitFile(rel string) bool {
 	switch rel {
 	case appendFileName, snippetFileName, permissionPackFileName, capabilityManifestFileName:
@@ -138,7 +138,7 @@ func isUnitFile(rel string) bool {
 	if isExtensionSnippet(rel) {
 		return false
 	}
-	if isPackDocFile(rel) {
+	if IsPackDocFile(rel) {
 		return false
 	}
 	return true
@@ -156,14 +156,18 @@ var packDocBaseNames = map[string]bool{
 	"contributing.md": true,
 }
 
-// isPackDocFile reports whether rel is a pack-documentation file (README.md,
+// IsPackDocFile reports whether rel is a pack-documentation file (README.md,
 // LICENSE, LICENSE.md, CHANGELOG.md, CONTRIBUTING.md) by BASE NAME,
 // case-insensitive. Pack docs describe the pack for adopters; they are not part
 // of the consumer's .opencode/ runtime, so RenderUnits must never copy them into
 // staging. Matching by base name (rather than pack-root only) deliberately also
 // excludes a README/LICENSE nested in a pack subdir — a doc stays a doc wherever
 // it sits in the pack tree — and is durable against future pack layouts.
-func isPackDocFile(rel string) bool {
+//
+// Exported so the CLI's `overlay docs` command (internal/cli/overlay_docs.go)
+// can enumerate the same documentation set when listing a pack's doc files
+// without duplicating the base-name map.
+func IsPackDocFile(rel string) bool {
 	return packDocBaseNames[strings.ToLower(path.Base(rel))]
 }
 
