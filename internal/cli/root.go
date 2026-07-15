@@ -24,6 +24,18 @@ import (
 
 const rootShort = "vh-agent-harness: install, manage, and run a repo-resident AI agent harness"
 
+// Command groups. These drive the grouped "Available Commands:" layout printed
+// by `--help`/no-args. AddGroup order is the display order; within a group cobra
+// sorts commands alphabetically. Every registered command should carry one of
+// these GroupIDs so the surface renders under a titled group rather than the
+// catch-all "Additional Commands:" bucket.
+const (
+	groupLifecycle   = "lifecycle"
+	groupOrientation = "orientation"
+	groupHealth      = "health"
+	groupRuntime     = "runtime"
+)
+
 var rootCmd = &cobra.Command{
 	Use:   "vh-agent-harness",
 	Short: rootShort,
@@ -35,17 +47,43 @@ through a substrate seam), the manager (diff, doctor, proposals), and the
 executor (driving a runtime backend abstraction). State is lineage-governed
 and repo-relative.
 
-Agent orientation
-  guide                detect harness state + the exact next steps (run this first in any repo)
+Lifecycle
   install              install/adopt the harness (preview with --dry-run)
   update               re-render the corpus after a config or binary change (--dry-run)
-  doctor               verify install health
-  diff                 inspect drift vs. the embedded corpus
-  status               show install + runtime info
-  diagnostics-export   bundle harness state into a redacted, shareable archive (--dry-run)
+  uninstall            remove the harness from the current project
+  overlay              scaffold/manage overlay packs (overlay new, overlay docs)
+  self-update          download + install the latest binary (verified by checksums.txt)
+
+Orientation
+  guide                detect harness state + the exact next steps (run this first in any repo)
   example              print a config file's doc/template (no *.example scaffolds shipped)
   docs                 print a generic agent-workflow doc (memory model, session workflow, …)
   sys-prompt           print a named system prompt (binary default, overridable via overlay)
+  help [command]       help for a command; also help migrate [vX.Y.Z] for release notes
+
+Health & diagnostics
+  preflight            verify environment + install integrity before install/upgrade
+  doctor               verify install health
+  proposals            list recorded armed-file conflicts (the proposal ledger)
+  diff                 inspect drift vs. the embedded corpus
+  diagnostics-export   bundle harness state into a redacted, shareable archive (--dry-run)
+  status               show install + runtime info
+  version              print the vh-agent-harness version and build label
+
+Runtime
+  exec                 run a command inside the harness runtime (mutations allowed; gated)
+  exec-ro              run a command as read-only intent (host-side classifier, no prompt)
+  exec-sandbox         run a command under a HOST-LOCAL sandbox (Landlock + seccomp when active; --sandbox=off|best-effort|strict)
+  shell                open an interactive shell inside the harness runtime
+  up / down            start / stop the harness runtime backend
+  logs / ps            show runtime logs / runtime service status
+
+The exec family (exec, exec-ro, exec-sandbox, shell) is intentionally kept as
+DISTINCT verbs — do not unify them. exec and shell dispatch through the runtime
+backend; exec-ro is a host-side read-only classifier; exec-sandbox is a
+host-local Landlock+seccomp trampoline that never reaches the backend. See
+README.agent.md (the exec-family / "two execution planes" section) for the full
+model and when to reach for each.
 
 Upgrade loop (after a new binary or config change):
   vh-agent-harness self-update
@@ -57,9 +95,13 @@ Inspect migration notes for a release:
   vh-agent-harness help migrate            # the note for the locally adopted version
   vh-agent-harness help migrate vX.Y.Z     # a specific release's note
 
-Runtime verbs (exec, shell, up, down, logs, ps) resolve the backend by reading
-the S4 run-shape (.vh-agent-harness/run-shape.yml) first, falling back to the
-legacy manifest (.opencode/harness-manifest.json). See the config-authority model.
+Runtime verbs (exec, exec-ro, exec-sandbox, shell, up, down, logs, ps) resolve
+the backend by reading the S4 run-shape (.vh-agent-harness/run-shape.yml) first,
+falling back to the legacy manifest (.opencode/harness-manifest.json), EXCEPT
+exec-sandbox which is always host-local. See the config-authority model.
+
+Glossary: in this help and the docs, "seam" means the internal render/apply
+pipeline (classify → plan → per-class apply → lineage) — it is NOT a command.
 
 Run 'vh-agent-harness guide' for dynamic, repo-aware next steps.`,
 	// No-args prints the root help and exits 0. An unexpected token (a typo'd
@@ -74,7 +116,18 @@ Run 'vh-agent-harness guide' for dynamic, repo-aware next steps.`,
 }
 
 func init() {
-	// Registration order controls `--help` listing order.
+	// Command groups render the command surface under titled sections in
+	// `--help`. AddGroup order is the display order; within a group cobra
+	// sorts commands alphabetically.
+	rootCmd.AddGroup(
+		&cobra.Group{ID: groupLifecycle, Title: "Lifecycle:"},
+		&cobra.Group{ID: groupOrientation, Title: "Orientation:"},
+		&cobra.Group{ID: groupHealth, Title: "Health & Diagnostics:"},
+		&cobra.Group{ID: groupRuntime, Title: "Runtime:"},
+	)
+
+	// Registration order is the single source of WHICH commands exist; grouping
+	// (assigned below) controls the `--help` listing LAYOUT.
 	rootCmd.AddCommand(
 		// installation lifecycle
 		installCmd,
@@ -119,6 +172,28 @@ func init() {
 
 	// Hidden internal trampoline subcommand (not user-facing).
 	rootCmd.AddCommand(execSandboxChildCmd)
+
+	// Group membership. Each non-hidden command is assigned to exactly one
+	// titled group so the help surface reads as Lifecycle / Orientation /
+	// Health & Diagnostics / Runtime instead of one alphabetical flat list.
+	assignGroup(groupLifecycle,
+		installCmd, updateCmd, uninstallCmd, selfUpdateCmd, overlayCmd)
+	assignGroup(groupOrientation,
+		guideCmd, exampleCmd, docsCmd, sysPromptCmd, helpCmd)
+	assignGroup(groupHealth,
+		preflightCmd, doctorCmd, proposalsCmd, diffCmd,
+		diagnosticsExportCmd, statusCmd, versionCmd)
+	assignGroup(groupRuntime,
+		execCmd, execRoCmd, execSandboxCmd, shellCmd,
+		upCmd, downCmd, logsCmd, psCmd)
+}
+
+// assignGroup sets the same GroupID on every supplied command. It is a
+// readability helper only — it performs no validation beyond assignment.
+func assignGroup(id string, cmds ...*cobra.Command) {
+	for _, c := range cmds {
+		c.GroupID = id
+	}
 }
 
 // Execute runs the root command and exits the process on error.

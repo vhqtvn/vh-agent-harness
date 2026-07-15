@@ -104,16 +104,23 @@ a static command-surface map, the agent orientation block, the upgrade loop, and
 a pointer to `guide`. Run `vh-agent-harness guide` for dynamic, repo-aware next
 steps.
 
+The command table mirrors the four `--help` groups (Lifecycle, Orientation,
+Health & diagnostics, Runtime). Every command listed below is a registered
+top-level command; run `vh-agent-harness <command> --help` for per-command
+detail.
+
 | Group | Commands |
 | --- | --- |
-| Orientation | `guide` (state + next steps; `--json`) |
-| Install lifecycle | `install`, `update`, `uninstall` (`install`/`update` take `--dry-run`; `update` also takes `-f`/`--force`) |
-| Health | `preflight`, `doctor`, `proposals` |
-| Render inspection | `diff` |
-| Runtime | `exec`, `shell`, `up`, `down`, `logs`, `ps` |
-| Status | `status` |
-| Binary | `version`, `self-update` |
-| Help | `help [command]`, `help migrate [version]` (read-only migration notes) |
+| Lifecycle | `install`, `update`, `uninstall` (`install`/`update` take `--dry-run`; `update` also takes `-f`/`--force`), `overlay` (`overlay new` scaffolds a pack; `overlay docs` prints a pack doc), `self-update` (upgrade the binary in place, distinct from `update`) |
+| Orientation | `guide` (state + next steps; `--json`), `example` (print a config file's doc/template), `docs` (print a generic agent-workflow doc), `sys-prompt` (print a named system prompt), `help [command]` / `help migrate [version]` (read-only migration notes) |
+| Health & diagnostics | `preflight`, `doctor`, `proposals` (armed-conflict ledger), `diff` (drift vs. the embedded corpus), `diagnostics-export` (`--dry-run`; redacted, shareable bundle), `status`, `version` |
+| Runtime | `exec`, `exec-ro` (read-only intent; host-side classifier; no prompt), `exec-sandbox` (host-local Landlock + seccomp; never reaches the backend), `shell`, `up`, `down`, `logs`, `ps` |
+
+The exec family — `exec`, `exec-ro`, `exec-sandbox`, `shell` — is intentionally
+kept as **distinct verbs** (do not unify them): `exec`/`shell` dispatch through
+the runtime backend, `exec-ro` is a host-side read-only classifier, and
+`exec-sandbox` is a host-local trampoline. See `README.agent.md` (the exec-family
+/ "two execution planes" section) for when to reach for each.
 
 `help migrate [version]` prints the per-release migration note. With no version
 it shows the note for the locally adopted harness version (detected from
