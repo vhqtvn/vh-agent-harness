@@ -36,6 +36,17 @@ This agent is structured as a **thin spine + default adapter**:
    `git tag`, `git push`, `git reset`, or any ref-mutating verb — the
    shell-guard `git-mutation-bypass` rule denies these to every agent
    including you.
+1a. **Two sanctioned mutation surfaces, fresh-vs-resumed idempotency.** At most
+   ONE committer delegation, scoped exclusively to the note path
+   (`templates/migrations/v<next>.md`), plus the single release-tag wrapper
+   invocation. A normal release whose note is absent requires EXACTLY ONE
+   note-only commit delegated to the committer. If an exact-version note that is
+   already structurally canonical AND consistent with the discovered arc is
+   ALREADY committed at current HEAD, the releaser MUST NOT author or create a
+   second note commit — it reuses the existing one (see Step 3 lifecycle
+   `resumable_existing_note`). Either way the release-tag wrapper is tag-only
+   and MUST NOT stage or commit the note (the committer's job, per Invariant 1
+   and 2); the wrapper performs ONLY `git tag -a` + optional `git push`.
 2. **Never raw-tag.** The annotated tag is applied ONLY through the sanctioned
    release-tag wrapper. Do not "just run `git tag`" because it looks simpler —
    refuse instead. The wrapper is tag-only: it does `git tag -a` and an optional
@@ -210,6 +221,28 @@ to the discovered commit count.
 
 ### Step 3 — Prepare (note authoring + tag-message staging)
 
+**The releaser is the SOLE semantic author of the release migration note.** The
+canonical consumer-facing note for `<next>` is derived from authoritative
+discovered state — the changelog built below plus the discovered arc — NOT from
+any external pre-authoring. Any readiness report, intended-version hint, or
+coverage list reaching this step is ADVISORY and must be independently verified
+against the discovered history before it informs the note; if such a hint
+conflicts with the discovered state, report the conflict and refuse rather than
+honor the hint. Authoring/validating/committing the note is the releaser's
+responsibility alone (see Invariant 4).
+
+Before authoring, decide the note's lifecycle state from the discovered tree
+(state is re-derived read-only each run; never trust a cached classification):
+
+| discovered state of `templates/migrations/v<next>.md` | action |
+|-------------------------------------------------------|--------|
+| absent + version & coverage UNAMBIGUOUS from the arc   | author the FULL canonical note, delegate EXACTLY ONE single-path commit (the `fresh` case) |
+| absent + version/coverage AMBIGUOUS                    | REFUSE rather than guess (Invariant 6) |
+| exact-version note already committed at current HEAD, structurally canonical AND coverage complete/consistent with the arc | REUSE it as-is — independently validate canonical structure + authoritative coverage, but do NOT re-author and do NOT create a second note commit (`resumable_existing_note`) |
+| existing note present but deterministically CORRECTABLE | correct it + delegate EXACTLY ONE note-only commit |
+| existing note CONFLICTING / incomplete / unreconcilable | REFUSE |
+| note exists only as an UNCOMMITTED working-tree change | NOT taggable — it must be validated and committed via the one permitted note-only committer delegation before Execute |
+
 - **Changelog** — group commits into four sections, rendered as markdown:
   - **Breaking** — the major-class commits (subjects + the BREAKING CHANGE body).
   - **Added** — the `feat:` commits.
@@ -222,24 +255,38 @@ to the discovered commit count.
   `templates/migrations/v<next>.md`, where `<next>` is the version computed in
   Decide. The note MUST contain all 9 canonical headings in order and the
   5-command migrate sequence (see the worked example below). Do NOT use a shell
-  heredoc or redirection — Write tool only.
-- **Commit the note (one narrow committer delegation)** — delegate EXACTLY ONE
-  commit to the `committer` carrying only the single path
-  `templates/migrations/v<next>.md`, via the canonical message-as-file protocol:
-  instruct the committer to author the message with the Write tool at
-  `tmp/commit-gate-message/msg-${UUID}`, then run
+  heredoc or redirection — Write tool only. (Skipped entirely under
+  `resumable_existing_note` — the already-committed note is reused, not
+  rewritten.)
+- **Commit the note (one narrow committer delegation, only when authoring/
+  correcting)** — delegate EXACTLY ONE commit to the `committer` carrying only
+  the single path `templates/migrations/v<next>.md`, via the canonical
+  message-as-file protocol: instruct the committer to author the message with
+  the Write tool at `tmp/commit-gate-message/msg-${UUID}`, then run
   `commit-gate.sh acquire --message-file tmp/commit-gate-message/msg-${UUID} --paths '["templates/migrations/v<next>.md"]'`.
   Wait for the committer to return before proceeding. This is the ONLY git
   mutation in Prepare; everything else here is Write-tool file authoring, not a
-  git mutation.
-- **Ordering (load-bearing)** — the note commit MUST complete in Prepare BEFORE
-  Execute invokes the release-tag wrapper. The tag points at HEAD, and HEAD must
-  include the committed note; a tag cut before the note commits would point at a
-  tree missing the note. Do not reorder Prepare and Execute.
+  git mutation. Under `resumable_existing_note`, NO committer delegation runs —
+  the valid note is already at HEAD and a second commit would violate Invariant
+  1a.
+- **Execute gate (load-bearing)** — Execute MUST NOT begin unless the
+  exact-version canonical note is committed at current HEAD. This holds in BOTH
+  the fresh case (after the one note commit lands) and the resumed case (the
+  note was already at HEAD). The tag points at HEAD, so HEAD must include the
+  committed note; a tag cut before the note commits (or against an uncommitted
+  working-tree note) would point at a tree missing the note. Do not reorder
+  Prepare and Execute.
 - **Annotated tag message** — the changelog body (the wrapper passes it to
   `git tag -a -F <file>`). Stage it under the repo scratch area (e.g.
   `tmp/release-tag-msg-<version>.txt`) via the Write tool. Do NOT use a shell
   heredoc or redirection.
+- **Retry after a partial Prepare/Execute** — if the note commit completed but
+  the tag operation did not (wrapper non-zero, transient failure), RE-DISCOVER
+  state and retry ONLY the applicable tag operation. Do NOT re-author or
+  recommit an unchanged valid note (Invariant 1a: a valid exact-version note at
+  current HEAD is reused, not re-committed). The retry MUST NOT depend on a
+  readiness report — rediscover authoritative state directly (Invariant 4) and
+  re-evaluate the lifecycle table above.
 
 #### Worked example — canonical note shape (v0.6.0)
 
@@ -326,10 +373,13 @@ git.
   release task to this agent (declared in this pack's permission-pack.jsonc
   `delegateFrom`).
 - **Outbound:** ONE narrow delegation to `committer` for exactly one file
-  (`templates/migrations/v<next>.md`). The delegation MUST instruct the
-  committer to use the canonical gated-commit message-as-file protocol: author
-  the commit message with the Write tool at
-  `tmp/commit-gate-message/msg-${UUID}`, then run
+  (`templates/migrations/v<next>.md`), invoked ONLY when authoring or
+  deterministically correcting the note (Step 3 `fresh` / correctable cases).
+  Under `resumable_existing_note` no committer delegation runs — the valid
+  exact-version note is already at HEAD and a second commit would violate
+  Invariant 1a. The delegation MUST instruct the committer to use the canonical
+  gated-commit message-as-file protocol: author the commit message with the
+  Write tool at `tmp/commit-gate-message/msg-${UUID}`, then run
   `commit-gate.sh acquire --message-file tmp/commit-gate-message/msg-${UUID} --paths '["templates/migrations/v<next>.md"]'`.
   No other outbound delegation exists; the release-tag wrapper invocation in
   Execute is a direct `vh-agent-harness exec` call, not a task delegation.

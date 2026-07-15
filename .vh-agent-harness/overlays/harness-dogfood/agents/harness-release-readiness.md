@@ -182,14 +182,21 @@ uncommitted edits exist that the tag would not capture (consistent with how G3
 and G4 warnings surface). Record the dirty-tree signal in `warnings` with
 `id: "G0b"` and the `--short` output as the `note`.
 
-### G1 — migration note
+### G1 — migration note (lifecycle / authorability gate)
 
-For the unreleased arc, is `templates/migrations/vX.Y.Z.md` present (where
-`vX.Y.Z` is the intended next version), and does it cover the consumer-facing
-changes in the arc?
+G1 is a READ-ONLY authorability gate over `templates/migrations/vX.Y.Z.md`
+(where `vX.Y.Z` is the intended next version, derived in G2 when a human has
+not supplied one). It does NOT author, edit, or commit the note, and it does NOT
+require `docs-steward` to author the canonical note — canonical migration-note
+authorship belongs to the `releaser` at cut time (the shipped release pack
+makes the releaser the sole semantic author). G1 evaluates whether the note is
+in a state the `releaser` can act on, and emits its version/coverage findings as
+ADVISORY handoff evidence (non-binding hints the releaser independently
+re-derives).
 
 The six consumer-facing changes this repo's recent arcs have carried (use as the
-coverage reference; confirm against the actual arc commits):
+ADVISORY coverage reference; confirm against the actual arc commits — the
+releaser re-discovers authoritative coverage independently):
 
 1. **Phase-5 roster flip** — `profile: minimal` now resolves to the 8-agent
    baseline only (was the full 20 under the Phase-3 backward-compat bridge). See
@@ -208,9 +215,34 @@ coverage reference; confirm against the actual arc commits):
 6. **embedded-default modules removal** — `templates/core/.vh-agent-harness/vh-harness-profile.yml`
    no longer ships a `modules:` block.
 
-**BLOCKER** if the next-version note is absent OR present but missing any of the
-arc's actual consumer-facing changes. Remediation: delegate migration-note
-authorship to `docs-steward`.
+G1 lifecycle states (record the state in `migration_note_coverage.state`):
+
+- **`expected_at_cut` → PASS.** The note is ABSENT but the intended version AND
+  the required consumer-facing coverage can both be stated WITHOUT guessing, and
+  the report RECORDS that coverage as advisory handoff evidence. The note is
+  expected to be authored by the `releaser` during Step 3 Prepare; its absence
+  here is NOT a blocker.
+- **`resumable_existing_note` → PASS.** An exact-version note is ALREADY
+  committed at current HEAD, satisfies the canonical structural requirements
+  (9 headings + 5-command sequence, per `TestMigrationNotes_Canonical`), AND its
+  coverage is complete and consistent with the discovered arc. The same
+  validated note satisfies the releaser's `resumable_existing_note` lifecycle
+  case (no second note commit). An `expected_path` note that is canonical but
+  whose coverage the read-only reporter cannot confirm complete/consistent stays
+  a WARNING, not a blocker — the releaser independently re-validates coverage.
+- **`blocked` → BLOCKER.** When ANY of: version/coverage is AMBIGUOUS (cannot be
+  stated without guessing); a pre-existing note has the WRONG version, is
+  structurally INVALID, INCOMPLETE, CONFLICTING, or otherwise UNRECONCILABLE
+  with the discovered arc; OR the note exists ONLY as an uncommitted
+  working-tree change (not taggable until committed).
+
+**Remediation (NEVER delegates canonical note authorship to `docs-steward`):**
+when the state is `expected_at_cut`, hand off to the `releaser` for cut-time
+authorship — the advisory coverage recorded here is non-binding evidence the
+releaser independently re-derives. When the state is `blocked`, resolve the
+NAMED ambiguity/conflict first (re-derive the version, reconcile the
+conflicting artifact, or commit/discard the working-tree note) and re-run G1
+before invoking the releaser. `docs-steward` is NOT an owner for G1.
 
 **`intended_version` null → do not deadlock G1.** If `intended_version` is null
 in the report (G2 below derives the highest-plausible name when it is), assess
@@ -286,13 +318,26 @@ annotated tag message the `releaser` stages.)
   prepare a curated note for the `releaser` to fold into the tag message.
 - If the arc is small and well-described by its commit subjects, PASS.
 
-**G5/G1 same-artifact rule.** WHERE the G1 migration note (`templates/migrations/
-vX.Y.Z.md`) IS the curated consumer-facing change description for this repo —
-i.e. that single artifact already serves as the consumer note for the arc's
-user-visible changes — **G5 is SATISFIED by closing G1**. The same artifact
-covers both: the migration note is the curated consumer note. Do NOT double-flag
-G5 (WARNING) when G1 already carries the curated content; mark G5 PASS with a
-`note` cross-referencing G1's artifact.
+**G5/G1 same-artifact rule.** WHERE the canonical migration note
+(`templates/migrations/vX.Y.Z.md`) IS the curated consumer-facing release
+artifact required for this arc — i.e. that single artifact is the consumer note
+the release must ship — G1 and G5 refer to that SAME artifact:
+
+- If G1 is `expected_at_cut` (note absent but determinable), G5 RECORDS that the
+  requirement must be closed by the `releaser`-authored note during Step 3
+  Prepare BEFORE tagging. G5 does NOT raise a SECOND missing-note blocker —
+  G1's `expected_at_cut` is a PASS, and the note's absence is expected to be
+  resolved by the releaser, not pre-authored externally.
+- If G1 is `resumable_existing_note`, the SAME validated note at HEAD satisfies
+  G5 (no separate curated artifact is needed).
+- If G1 BLOCKS on ambiguity/conflict/uncommitted-state, G5 cross-references the
+  G1 blocker (`blockers` id `G1`) rather than duplicating it.
+
+G5 may report a SEPARATE blocker ONLY when a DISTINCT curated artifact is
+required that the canonical migration note cannot satisfy (e.g. a separate
+hand-written release-notes source the release must fold into the tag message).
+When the migration note is the sole curated artifact, G5 follows G1's state and
+does not double-flag.
 
 ### G6 — Skill pilot evidence (S2 holds)
 
@@ -364,6 +409,17 @@ ordinary G6 clearance, and would leave the S2 verdict visibly `PENDING`.)
   "head_sha": "<40-char sha | null>",
   "commit_range": "<last-tag>..HEAD | <root>..HEAD | null",
   "intended_version": "vX.Y.Z | null",
+  "migration_note_coverage": {
+    "state": "expected_at_cut | resumable_existing_note | blocked",
+    "expected_path": "templates/migrations/vX.Y.Z.md",
+    "intended_version": "vX.Y.Z | null",
+    "shape_status": "not_yet_authored | canonical | invalid | unknown",
+    "coverage_status": "enumerated | complete | ambiguous | conflicting",
+    "required_consumer_changes": ["<advisory topic>"],
+    "evidence": ["<discovered fact/path>"],
+    "handoff_to": "releaser | null",
+    "blockers": ["<specific ambiguity/conflict>"]
+  },
   "blockers": [
     {
       "id": "G0 | G1 | G2 | G3 | G4 | G5 | G6_Skill_Pilot_Evidence",
@@ -372,14 +428,14 @@ ordinary G6 clearance, and would leave the S2 verdict visibly `PENDING`.)
     }
   ],
   "warnings": [
-    { "id": "G0b | G3 | G4 | G5 | G6_Skill_Pilot_Evidence", "note": "<description>" }
+    { "id": "G0b | G1 | G3 | G4 | G5 | G6_Skill_Pilot_Evidence", "note": "<description>" }
   ],
   "human_decisions": [
     "<e.g. 'choose version class — Phase-5 roster shrink is BREAKING, suggests v0.2.0 not a patch'>"
   ],
   "delegated_owners": [
     { "for": "G0", "to": "build", "reason": "confirm green Go gate (test/vet/build/gofmt) at the assessed HEAD" },
-    { "for": "G1", "to": "docs-steward", "reason": "author the migration note" },
+    { "for": "G1", "to": "releaser", "reason": "cut-time authoring/validation of the canonical migration note at HEAD; readiness reports coverage as advisory evidence only, never authoritative" },
     { "for": "G3", "to": "docs-steward", "reason": "update guide.go / README.agent.md / skill" },
     { "for": "G6_Skill_Pilot_Evidence", "to": "build", "reason": "land the S2 pilot evidence (researches/sources/) + resolve the matching backlog row (docs/planning/backlog.md); readiness edits neither" },
     { "for": "code-change", "to": "build", "reason": "<if any code fix is required>" }
@@ -388,6 +444,35 @@ ordinary G6 clearance, and would leave the S2 verdict visibly `PENDING`.)
   "note": "<free-form string or null>"
 }
 ```
+
+**`migration_note_coverage` field (advisory handoff evidence, NOT authoritative
+content).** This structured field carries G1's lifecycle/authorability verdict
+plus the advisory coverage findings the `releaser` consumes as non-binding hints:
+
+- `state` — one of `expected_at_cut` / `resumable_existing_note` / `blocked`
+  (the G1 lifecycle state; see G1 above).
+- `expected_path` — the note path this repo would expect, e.g.
+  `templates/migrations/v0.7.0.md` (derived from `intended_version`).
+- `intended_version` — echoes the report's `intended_version` (may be null when
+  G2 could not derive a name; G1 still stays evaluable against the G2-derived
+  name).
+- `shape_status` — `not_yet_authored` (absent), `canonical` (9 headings +
+  5-command sequence pass), `invalid` (structurally broken), or `unknown`
+  (uncommitted working-tree note the read-only reporter does not fully parse).
+- `coverage_status` — `enumerated` (the arc's consumer-facing changes could be
+  listed but completeness unconfirmed), `complete` (note present and consistent
+  with the arc), `ambiguous` (version/coverage cannot be stated without
+  guessing → blocker), or `conflicting` (note present but contradicts the arc
+  → blocker).
+- `required_consumer_changes` — ADVISORY topics only; never authoritative note
+  content. The `releaser` independently re-derives authoritative coverage.
+- `evidence` — discovered facts/paths grounding the verdict (file paths, shas,
+  heading counts).
+- `handoff_to` — `releaser` when state is `expected_at_cut` or
+  `resumable_existing_note`; `null` when blocked (resolve first).
+- `blockers` — specific named ambiguities/conflicts to resolve (only populated
+  when `state` is `blocked`); remediation names the ambiguity to resolve, NEVER
+  delegates canonical note authorship to `docs-steward`.
 
 When `ready: yes` AND a human has explicitly approved the handoff, populate
 `handoff_to_releaser` with the hint the `releaser` consumes (it is advisory per
