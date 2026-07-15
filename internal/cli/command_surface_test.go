@@ -75,6 +75,72 @@ func TestCommandSurface_HelpListsAllRegisteredCommands(t *testing.T) {
 	}
 }
 
+// TestCommandSurface_EveryCommandIsGrouped asserts that every non-hidden,
+// non-completion registered command carries a non-empty GroupID drawn from the
+// four harness group constants (lifecycle/orientation/health/runtime). This
+// closes the regression gap the prior Slice-2 review flagged as DEFER candidate
+// cF3: a future `rootCmd.AddCommand(...)` that forgets `assignGroup(...)`
+// would silently render the command under cobra's catch-all "Additional
+// Commands:" bucket (alongside the auto-added `completion`) instead of a titled
+// group — escaping TestCommandSurface_HelpListsAllRegisteredCommands, which
+// only checks that the name appears in help, not that it is grouped.
+//
+// The ONE allowed ungrouped visible command is cobra's auto-added `completion`
+// (it is not harness-registered and has no GroupID by design). `help` IS
+// harness-registered and grouped under orientation, so it is deliberately NOT
+// exempted — losing its group would be a real regression this test must catch.
+//
+// NOTE: executeCapture drives the shared global rootCmd, so this test MUST NOT
+// use t.Parallel().
+func TestCommandSurface_EveryCommandIsGrouped(t *testing.T) {
+	// Drive rootCmd once so cobra's auto-added `completion` is registered,
+	// making the iterated tree identical to what `--help` renders.
+	if _, err := executeCapture(t, []string{}); err != nil {
+		t.Fatalf("no-args help: want nil error (exit 0), got %v", err)
+	}
+
+	validGroups := map[string]bool{
+		groupLifecycle:   true,
+		groupOrientation: true,
+		groupHealth:      true,
+		groupRuntime:     true,
+	}
+
+	// completion is the one allowed ungrouped visible command (cobra auto-adds
+	// it; not harness-registered, no GroupID by design).
+	allowedUngrouped := map[string]bool{"completion": true}
+
+	// Build a table of every candidate command (non-hidden, non-exempt), then
+	// range over it so failures name the offending command clearly.
+	type groupRow struct {
+		name    string
+		groupID string
+	}
+	var rows []groupRow
+	for _, c := range rootCmd.Commands() {
+		if c.Hidden {
+			continue
+		}
+		if allowedUngrouped[c.Name()] {
+			continue
+		}
+		rows = append(rows, groupRow{name: c.Name(), groupID: c.GroupID})
+	}
+	if len(rows) == 0 {
+		t.Fatal("rootCmd has no non-hidden, non-completion commands; the command tree is empty")
+	}
+
+	for _, r := range rows {
+		if r.groupID == "" {
+			t.Errorf("registered command %q has empty GroupID (would render under \"Additional Commands:\" instead of a titled group)", r.name)
+			continue
+		}
+		if !validGroups[r.groupID] {
+			t.Errorf("registered command %q carries unknown GroupID %q (not one of lifecycle/orientation/health/runtime)", r.name, r.groupID)
+		}
+	}
+}
+
 // readmeTableTokens extracts the first word of every backtick-quoted command
 // token found inside the README.md "## Command surface" table rows, skipping
 // flags (tokens whose first word starts with '-'). The surviving first word is
