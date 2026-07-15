@@ -1,0 +1,7 @@
+# vh-solara local files — not committed (local preferences + runtime data).
+*.local
+*.local.jsonc
+# Runtime data vh-solara writes for any project (attachments, queue,
+# adopter-declared sockets/logs):
+/sessions/
+/run/
