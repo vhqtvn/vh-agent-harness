@@ -22,6 +22,9 @@ doctor           → verify health
 Everything is idempotent and fail-closed: a re-run does not double-apply, and an
 ambiguous/unsafe plan aborts before writing.
 
+`vh-agent-harness <cmd>` is a binary subcommand (runs anywhere, in any shell);
+`/<cmd>` is an agent slash-command (only inside an OpenCode session).
+
 ## Phases `guide` reports
 
 - **greenfield** — no harness here. → `install --name <Name> --slug <slug>`.
@@ -309,6 +312,8 @@ export default function transform({ context }) {
 
 ## Common tasks
 
+### Setup & configuration
+
 - **Install / adopt:** `vh-agent-harness install --name <Name> --slug <slug>`
   (run with `--dry-run` first). Then `vh-agent-harness guide` for config steps.
 - **Add domain agents/commands/skills:** `vh-agent-harness overlay new <pack>
@@ -322,6 +327,9 @@ export default function transform({ context }) {
   > .vh-agent-harness/AGENTS.mission.md`, fill it in, `update` (composes `AGENTS.md`).
 - **Configure any file:** `vh-agent-harness example <path>` prints its doc/template
   (no `*.example` files are shipped into the repo). `vh-agent-harness example` lists all.
+
+### Execution
+
 - **Run a command in the runtime:** `vh-agent-harness exec -- <cmd>` (the `--` is
   optional — the command's own flags pass through, e.g. `exec bash -c '…'`,
   `exec pytest -k x`; put any harness flags BEFORE the command). Mutating
@@ -506,6 +514,9 @@ export default function transform({ context }) {
   host-local execution. Under proxy/docker_compose, exec-ro's classified command
   runs in-container and exec-sandbox cannot follow it; use backend-native
   container security for in-container containment.
+
+### Work tracking
+
 - **Track work:** `docs/planning/backlog.md` is the canonical task-status source
   of truth (seeded on install, `project_owned`). Agents edit it **freely** under
   the hybrid split-commit discipline: re-read from disk before editing, edit
@@ -533,6 +544,9 @@ export default function transform({ context }) {
   against backlog rows, and lands backlog changes as a backlog-only commit; and
   (c) the **`backlog` skill** as the agent's procedure reference. Code commits
   never wait on a backlog blob.
+
+### Refresh & migration
+
 - **Refresh after a new binary or config change:** `vh-agent-harness update`
   (preview with `--dry-run`). Armed-file conflicts are recorded — list them with
   `vh-agent-harness proposals`.
@@ -541,6 +555,9 @@ export default function transform({ context }) {
   `vh-agent-harness help migrate vX.Y.Z` (a specific release). With no version
   and no local install, it prints the latest bundled note. It is **documentation
   only** — it never modifies files.
+
+### Docs & prompts
+
 - **Print a generic agent-workflow doc:** `vh-agent-harness docs [key]`. With no
   argument, lists every available doc key; with a KEY, prints that doc to stdout.
   These docs describe harness machinery identical for every adopter (the session,
@@ -558,6 +575,9 @@ export default function transform({ context }) {
   overlay pack or operator can override one by rendering
   `.opencode/sys-prompts/<name>.md` (the live tree takes precedence over the
   embed). It is **read-only**: it only writes to stdout and never modifies files.
+
+### Diagnostics & verification
+
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   overlay-perm, environment, config-refs, gitignore, auto-classifier, skills). The
   `auto-classifier` check lints the shape (field set + types + enums) of the

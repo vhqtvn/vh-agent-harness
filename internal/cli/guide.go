@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -224,6 +225,23 @@ func writeGuide(out io.Writer, st harnessState, steps []string) {
 	}
 	fmt.Fprintln(out)
 
+	// Progressive disclosure (Slice 3): for an installed harness, summarize what
+	// the consumer actually received (live counts of the rendered agent/skill/
+	// command trees) and — when the mission is not yet written — point at the
+	// single highest-leverage first task. Counts come from os.ReadDir on what is
+	// currently on disk under .opencode/; this deliberately avoids seamInventory()
+	// (which would force a costly render). Missing dirs (os.ErrNotExist) count 0.
+	if st.Phase == phaseInstalled {
+		fmt.Fprintf(out, "You have: agents %d · skills %d · commands %d\n",
+			countDirEntries(filepath.Join(st.ProjectRoot, ".opencode", "agents")),
+			countDirEntries(filepath.Join(st.ProjectRoot, ".opencode", "skills")),
+			countDirEntries(filepath.Join(st.ProjectRoot, ".opencode", "commands")))
+		if !st.HasMission {
+			fmt.Fprintln(out, "First: write .vh-agent-harness/AGENTS.mission.md then vh-agent-harness update.")
+		}
+		fmt.Fprintln(out)
+	}
+
 	fmt.Fprintln(out, "Next steps:")
 	for i, s := range steps {
 		fmt.Fprintf(out, "  %d. %s\n", i+1, s)
@@ -231,7 +249,8 @@ func writeGuide(out io.Writer, st harnessState, steps []string) {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Extending the harness? `/harness` is the full add-an-agent / add-command /")
 	fmt.Fprintln(out, "add-skill recipe and overlay anatomy; `vh-agent-harness example` lists")
-	fmt.Fprintln(out, "configurable files plus a pack skeleton.")
+	fmt.Fprintln(out, "configurable files plus a pack skeleton. `vh-agent-harness overlay new <name>`")
+	fmt.Fprintln(out, "scaffolds a pack skeleton in one command (see README.agent.md → Scaffolding an overlay pack).")
 	// Skill-cache staleness (D1): after `update` adds/changes skills under
 	// .opencode/skills/, a running opencode session will not see them until it is
 	// restarted (opencode caches the skill list per-process). `vh-agent-harness
@@ -240,6 +259,13 @@ func writeGuide(out io.Writer, st harnessState, steps []string) {
 	fmt.Fprintln(out, "Added or changed skills? Restart opencode to pick them up — opencode caches the")
 	fmt.Fprintln(out, "skill list per-process, so only a restart sees new .opencode/skills/ entries.")
 	fmt.Fprintln(out, "Inspect rendered skills anytime with `vh-agent-harness skill list` / `skill validate`.")
+	// Binary subcommands vs OpenCode slash-commands (Slice 3): new consumers
+	// conflate `vh-agent-harness <cmd>` (a binary subcommand, runnable in any
+	// shell) with `/<cmd>` (an agent slash-command, only inside an OpenCode
+	// session). This 2-line note disambiguates so a first-run agent picks the
+	// right surface instead of guessing.
+	fmt.Fprintln(out, "vh-agent-harness <cmd> = binary subcommand (runs anywhere); /<cmd> = agent")
+	fmt.Fprintln(out, "slash-command (inside an OpenCode session only).")
 }
 
 func yesNo(b bool, yes, no string) string {
@@ -257,6 +283,25 @@ func isRegularFile(p string) bool {
 func isExistingDir(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && info.IsDir()
+}
+
+// countDirEntries counts the live entries in dir, returning 0 when the
+// directory does not exist or cannot be read. It is the cheap path for
+// summarizing what the harness has rendered on disk under .opencode/ without
+// forcing a costly seam render (seamInventory would walk every template).
+// os.ErrNotExist is the expected case for a fresh install with no overlay
+// content yet, so it (and any other read error) counts as 0 — the guide never
+// fails the whole output on the summary line.
+func countDirEntries(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			// Unreadable-but-present dir or permission error: count 0 rather
+			// than abort. os.ErrNotExist is the documented expected path above.
+		}
+		return 0
+	}
+	return len(entries)
 }
 
 // printDryRunPlan renders a --dry-run preview of an install/update: what WOULD
