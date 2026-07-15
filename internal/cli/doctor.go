@@ -1643,11 +1643,13 @@ func portableIgnoreSource(source string) bool {
 
 // autoGateLlmHasLiteralKey reports whether an auto-gate LLM config file carries a
 // non-empty literal apiKey (the literal-preferred form that puts the key VALUE on
-// disk). D6 SAFETY: this reads ONLY enough to distinguish a non-empty literal
-// apiKey from an apiKeyEnv-backed config. The boolean return is the ONLY thing
-// that escapes this function — the key value is never stored in a string that
-// reaches any output, never logged, never serialized, never interpolated into an
-// error or detail string. On ANY read/parse error it returns false (the
+// disk). It checks BOTH the top-level apiKey AND, for the live-tiered shape, each
+// leaf in leaves[] (each leaf is a full leaf-config object that may carry its own
+// literal apiKey). D6 SAFETY: this reads ONLY enough to distinguish a non-empty
+// literal apiKey from an apiKeyEnv-backed config. The boolean return is the ONLY
+// thing that escapes this function — the key value is never stored in a string
+// that reaches any output, never logged, never serialized, never interpolated into
+// an error or detail string. On ANY read/parse error it returns false (the
 // tracked-state FAIL under D4 still applies via the caller; only the rotate
 // guidance is dropped). If this guarantee could not be upheld, the correct action
 // would be to delete this helper and FAIL generically under D4 instead.
@@ -1660,7 +1662,31 @@ func autoGateLlmHasLiteralKey(path string) bool {
 	if json.Unmarshal(raw, &doc) != nil {
 		return false
 	}
-	v, ok := doc["apiKey"]
+	// Top-level literal apiKey (live mode, literal-preferred form).
+	if hasNonEmptyLiteralKey(doc) {
+		return true
+	}
+	// live-tiered: each leaf in leaves[] is a full leaf-config object that may
+	// itself carry a literal apiKey. A non-empty literal key on ANY leaf is a
+	// literal key on disk — the D6 rotate/revoke guidance applies to the file.
+	if leaves, ok := doc["leaves"].([]any); ok {
+		for _, leaf := range leaves {
+			if l, ok := leaf.(map[string]any); ok {
+				if hasNonEmptyLiteralKey(l) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// hasNonEmptyLiteralKey reports whether node carries a non-empty literal apiKey
+// string. D6 SAFETY: the value is bound to the local s and used ONLY in the != ""
+// boolean comparison — it never escapes, is never logged, serialized, or
+// interpolated. A missing or non-string apiKey yields false.
+func hasNonEmptyLiteralKey(node map[string]any) bool {
+	v, ok := node["apiKey"]
 	if !ok {
 		return false
 	}

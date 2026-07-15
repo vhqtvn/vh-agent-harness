@@ -54,6 +54,21 @@ func gitSetGlobalExclude(t *testing.T, dir, body string) string {
 	return exc
 }
 
+// gitSetInfoExclude writes body into dir's per-clone .git/info/exclude, so a match
+// is attributed to the non-portable source ".git/info/exclude" (local to this
+// clone, not shared via checkout). Used by the D5 info-exclude variant. Unlike
+// core.excludesFile this needs no config — git reads info/exclude by default.
+func gitSetInfoExclude(t *testing.T, dir, body string) {
+	t.Helper()
+	exc := filepath.Join(dir, ".git", "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(exc), 0o755); err != nil {
+		t.Fatalf("mkdir info dir: %v", err)
+	}
+	if err := os.WriteFile(exc, []byte(body), 0o644); err != nil {
+		t.Fatalf("write info/exclude: %v", err)
+	}
+}
+
 // TestAutoGateIgnore_SkipWhenUnselectedAndNoFiles: overlay unselected + no config
 // files present + not a protected scenario → clean no-op (tierSkip). D1 inertness.
 func TestAutoGateIgnore_SkipWhenUnselectedAndNoFiles(t *testing.T) {
@@ -184,6 +199,32 @@ func TestAutoGateIgnore_WarnNonPortableGlobalExclude(t *testing.T) {
 	}
 }
 
+// TestAutoGateIgnore_WarnNonPortableInfoExclude: overlay selected, auto-gate-llm.json
+// present (untracked), protection ONLY via the per-clone .git/info/exclude (local to
+// this clone, NOT shared via checkout), NO repo .gitignore rule → WARN (D5:
+// non-portable source). Exercises the portableIgnoreSource ".git/info/exclude"
+// branch that the core.excludesFile variant above does not cover.
+func TestAutoGateIgnore_WarnNonPortableInfoExclude(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	gitInit(t, dir)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "llm", `{"model": "m"}`)
+	// No repo .gitignore rule; instead the per-clone info/exclude matches the basename.
+	gitSetInfoExclude(t, dir, "auto-gate-llm.json\n")
+
+	r := checkAutoGateGitignored(dir)
+	if r.tier == tierSkip {
+		t.Skipf("check unavailable in env: %s", r.detail)
+	}
+	if r.tier != tierWarn {
+		t.Fatalf("want WARN (D5 non-portable info/exclude), got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "D5") || !strings.Contains(r.detail, "non-portable") {
+		t.Errorf("WARN should cite D5 + non-portable; got %q", r.detail)
+	}
+}
+
 // TestAutoGateIgnore_FailTrackedLiteralKeyRotate: overlay selected, auto-gate-llm.json
 // tracked by git (staged) AND carrying a non-empty literal apiKey, .gitignore WITH the
 // llm rule → FAIL (D6 credential incident: rotate/revoke guidance). Also asserts the
@@ -211,5 +252,77 @@ func TestAutoGateIgnore_FailTrackedLiteralKeyRotate(t *testing.T) {
 	// D6 safety: the literal key value MUST NOT appear anywhere in the output.
 	if strings.Contains(r.detail, "sk-live-secret-xyz") {
 		t.Fatalf("D6 VIOLATION: literal apiKey value leaked into detail: %q", r.detail)
+	}
+}
+
+// TestAutoGateLlmHasLiteralKey: D6 literal-key detector truth table, exercised
+// directly. Covers the top-level apiKey AND the live-tiered leaves[].apiKey shape
+// (each leaf is a full leaf-config object that may carry its own literal key). The
+// function returns a bare bool; the key value never escapes (structural guarantee
+// of the bool-only signature, reinforced by the end-to-end leaves D6 test below).
+func TestAutoGateLlmHasLiteralKey(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"top-level literal apiKey", `{"apiKey":"sk-x","model":"m"}`, true},
+		{"empty top-level apiKey falls to env", `{"apiKey":"","apiKeyEnv":"K","model":"m"}`, false},
+		{"apiKeyEnv-only top-level", `{"apiKeyEnv":"K","model":"m"}`, false},
+		{"non-string top-level apiKey", `{"apiKey":123,"model":"m"}`, false},
+		{"leaf with literal apiKey (live-tiered)", `{"mode":"live-tiered","leaves":[{"apiKey":"sk-leaf","model":"m"}]}`, true},
+		{"leaf apiKeyEnv-only (no literal)", `{"mode":"live-tiered","leaves":[{"apiKeyEnv":"K","model":"m"}]}`, false},
+		{"one env leaf + one literal leaf", `{"mode":"live-tiered","leaves":[{"apiKeyEnv":"K","model":"m"},{"apiKey":"sk-leaf","model":"m"}]}`, true},
+		{"leaves present but no apiKey anywhere", `{"mode":"live-tiered","leaves":[{"model":"m","apiKeyEnv":"K"}]}`, false},
+		{"leaves not an array", `{"mode":"live-tiered","leaves":"nope"}`, false},
+		{"leaf not an object", `{"mode":"live-tiered","leaves":["nope"]}`, false},
+		{"no apiKey, no leaves", `{"mode":"audit"}`, false},
+		{"malformed JSON", `{not json`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := filepath.Join(t.TempDir(), "auto-gate-llm.json")
+			if err := os.WriteFile(f, []byte(tc.body), 0o644); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			if got := autoGateLlmHasLiteralKey(f); got != tc.want {
+				t.Fatalf("autoGateLlmHasLiteralKey = %v, want %v (body=%s)", got, tc.want, tc.body)
+			}
+		})
+	}
+	// Missing file → false (read-error path returns false; D4 tracked-FAIL still applies).
+	if autoGateLlmHasLiteralKey(filepath.Join(t.TempDir(), "does-not-exist.json")) {
+		t.Fatal("missing file should report false")
+	}
+}
+
+// TestAutoGateIgnore_FailTrackedLiteralKeyInLeaves: overlay selected, a live-tiered
+// auto-gate-llm.json tracked by git AND carrying a literal apiKey INSIDE leaves[],
+// .gitignore WITH the llm rule → FAIL (D6: leaves[].apiKey is a literal key on disk
+// too, not just the top-level field). Also asserts the literal value never reaches
+// the detail (D6 never-emits invariant), mirroring the top-level rotate test.
+func TestAutoGateIgnore_FailTrackedLiteralKeyInLeaves(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	gitInit(t, dir)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "llm", `{"mode":"live-tiered","leaves":[{"apiKey":"sk-leaf-secret-xyz","model":"m"}]}`)
+	writeGitignore(t, dir, ".opencode/repo-configs/auto-gate-llm.json\n")
+	rel := filepath.ToSlash(filepath.Join(".opencode", "repo-configs", "auto-gate-llm.json"))
+	gitAddForce(t, dir, rel)
+
+	r := checkAutoGateGitignored(dir)
+	if r.tier == tierSkip {
+		t.Skipf("check unavailable in env: %s", r.detail)
+	}
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL (D6 tracked literal key in leaves), got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "D6") || !strings.Contains(r.detail, "rotate") {
+		t.Errorf("FAIL should cite D6 + rotate guidance; got %q", r.detail)
+	}
+	// D6 safety: the literal key value MUST NOT appear anywhere in the output.
+	if strings.Contains(r.detail, "sk-leaf-secret-xyz") {
+		t.Fatalf("D6 VIOLATION: literal leaf apiKey value leaked into detail: %q", r.detail)
 	}
 }
