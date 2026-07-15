@@ -362,8 +362,7 @@ found within or between the papers themselves beyond what the synthesis recorded
 - **Type:** `decision` (option resolution / verdict memo), since this pass
   sharpens verdicts for downstream coordinator curation rather than gathering
   new sources.
-- **Intended durable path:** `researches/decisions/2026-07-15-memory-cluster-candidates-resolution.md`
-  (coordinator to relocate from this `tmp/` path). The two underlying source
+- **Intended durable path:** `researches/decisions/2026-07-15-memory-cluster-candidates-resolution.md`. The two underlying source
   packets already live in `researches/sources/`.
 
 ## Promotion targets (flagged, NOT executed)
@@ -393,7 +392,7 @@ warranted by this cluster.
 ## Closeout (verification)
 
 This is a read-only study pass; the only side effect is this memo file under
-`tmp/`. No claim below requires a runtime command to verify — each is grounded in
+`researches/sources/`. No claim below requires a runtime command to verify — each is grounded in
 a static file:line citation above.
 
 ## Verification

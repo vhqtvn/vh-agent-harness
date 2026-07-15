@@ -159,7 +159,7 @@ The pattern is real and structurally invisible to path-triggers, **but it is alr
 
 ## Memo path
 
-`tmp/2026-07-16-c10-event-surface-study.md` (this file; coordinator to relocate or fold into the C10 card).
+`researches/sources/2026-07-16-c10-event-surface-study.md` (this file; may fold into the C10 card).
 
 ## Recommended next specialist / command
 
