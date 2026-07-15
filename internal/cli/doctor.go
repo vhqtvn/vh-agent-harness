@@ -742,19 +742,21 @@ func checkConfigRefs(target string) checkResult {
 // vh-harness-profile.yml to opt into the pilot.
 const autoGateOverlayName = "auto-classifier-pilot"
 
-// autoGateFile names one of the up-to-4 config files the auto-classifier check
-// inspects. level is "project" or "user"; kind is "plugin" (auto-gate-config.json)
-// or "llm" (auto-gate-llm.json).
+// autoGateFile names one of the up-to-6 config files the auto-classifier check
+// inspects. level is "project-local", "project", or "user"; kind is "plugin"
+// (auto-gate-config.json) or "llm" (auto-gate-llm.json). The "project-local"
+// level names the gitignored `.local.json` shallow-override companion to each
+// committed project file (defaults < user < committed-project < project-local).
 type autoGateFile struct {
-	level string // "project" | "user"
+	level string // "project-local" | "project" | "user"
 	kind  string // "plugin" | "llm"
 	path  string // absolute path to the file
 }
 
 // label renders a stable, human-readable identifier for a finding: it names the
-// level + kind + basename so an operator knows exactly which of the 4 files to
+// level + kind + basename so an operator knows exactly which of the 6 files to
 // fix. Project and user files share basenames, so the level prefix is what
-// disambiguates them.
+// disambiguates them (the project-local level carries the `.local` basename).
 func (f autoGateFile) label() string {
 	return fmt.Sprintf("%s %s (%s)", f.level, f.kind, filepath.Base(f.path))
 }
@@ -769,14 +771,15 @@ func (f autoGateFile) label() string {
 // normally absent (live mode only) and plugin config defaults apply on absence
 // — but a PRESENT-but-invalid file (corrupt JSON, wrong type, bad enum) FAILs.
 //
-// After the shape pass, step 4b applies a two-level (project overrides user)
-// merge to compute the effective mode + effective LLM fields and FAILs when the
-// selected mode's runtime requirements are unmet (e.g. mode=live with no
-// top-level model, mode=live-tiered with no/empty leaves[]). This is a SEMANTIC
-// check, not a shape check: it mirrors what the JS plugin requires at runtime
-// (see the runtime authority below) so doctor catches mode↔LLM mismatches
-// BEFORE the runtime fail-close. It does NOT resolve env vars (an env-var NAME
-// counts as present); audit/enforce are exempt (they make no LLM call).
+// After the shape pass, step 4b applies a four-level (project-local overrides
+// committed-project overrides user) merge to compute the effective mode +
+// effective LLM fields and FAILs when the selected mode's runtime requirements
+// are unmet (e.g. mode=live with no top-level model, mode=live-tiered with
+// no/empty leaves[]). This is a SEMANTIC check, not a shape check: it mirrors
+// what the JS plugin requires at runtime (see the runtime authority below) so
+// doctor catches mode↔LLM mismatches BEFORE the runtime fail-close. It does NOT
+// resolve env vars (an env-var NAME counts as present); audit/enforce are
+// exempt (they make no LLM call).
 //
 // Dual trigger: overlay-unselected + no-files → SKIP (clean no-op);
 // overlay-unselected + corrupt-file-present → FAIL (safety net so a stale file
@@ -832,13 +835,18 @@ func (f autoGateFile) label() string {
 func checkAutoGateConfig(target string) checkResult {
 	const name = "auto-classifier"
 
-	// 1. Resolve candidate files (up to 4: project plugin/llm + user plugin/llm).
-	//    User-level resolution via os.UserConfigDir(); on error, skip user-level
-	//    rather than failing the whole check on an XDG resolution problem.
+	// 1. Resolve candidate files (up to 6: project-local plugin/llm + committed
+	//    project plugin/llm + user plugin/llm). User-level resolution via
+	//    os.UserConfigDir(); on error, skip user-level rather than failing the
+	//    whole check on an XDG resolution problem. The project-local candidates
+	//    name the gitignored `.local.json` override companions (absent by
+	//    default → valid/silent → legacy three-level behavior).
 	var candidates []autoGateFile
 	candidates = append(candidates,
 		autoGateFile{level: "project", kind: "plugin", path: filepath.Join(target, ".opencode", "repo-configs", "auto-gate-config.json")},
 		autoGateFile{level: "project", kind: "llm", path: filepath.Join(target, ".opencode", "repo-configs", "auto-gate-llm.json")},
+		autoGateFile{level: "project-local", kind: "plugin", path: filepath.Join(target, ".opencode", "repo-configs", "auto-gate-config.local.json")},
+		autoGateFile{level: "project-local", kind: "llm", path: filepath.Join(target, ".opencode", "repo-configs", "auto-gate-llm.local.json")},
 	)
 	if userDir, err := os.UserConfigDir(); err == nil {
 		candidates = append(candidates,
@@ -866,14 +874,14 @@ func checkAutoGateConfig(target string) checkResult {
 	// 4. Validate each present file standalone (each file must be independently
 	//    well-formed). Accumulate FAIL-level and WARN-level findings across all
 	//    present files. Successfully-parsed docs are also retained, keyed by
-	//    level, so step 4b can resolve EFFECTIVE (two-level-merged) values for
+	//    level, so step 4b can resolve EFFECTIVE (four-level-merged) values for
 	//    the mode↔LLM cross-validation. A file that fails to parse is NOT
 	//    retained — its shape FAIL already covers it, and there is no doc to
 	//    merge.
 	var fails, warns []string
 	validated := 0
-	pluginDocs := map[string]map[string]any{} // level ("project"/"user") -> parsed plugin doc
-	llmDocs := map[string]map[string]any{}    // level ("project"/"user") -> parsed llm doc
+	pluginDocs := map[string]map[string]any{} // level ("project-local"/"project"/"user") -> parsed plugin doc
+	llmDocs := map[string]map[string]any{}    // level ("project-local"/"project"/"user") -> parsed llm doc
 	for _, c := range candidates {
 		if !isRegularFile(c.path) {
 			continue // absent optional file — not a failure
@@ -920,8 +928,9 @@ func checkAutoGateConfig(target string) checkResult {
 	//     make no LLM call. The endpoint helpers apply the same default so
 	//     doctor does not false-FAIL a model-only config the runtime accepts
 	//     (the env VALUE is resolved at call time, not by doctor). This step
-	//     catches the mismatch BEFORE runtime, using the same two-level
-	//     (project overrides user) layering the plugin applies. It runs only
+	//     catches the mismatch BEFORE runtime, using the same four-level
+	//     (project-local overrides project overrides user) layering the plugin
+	//     applies. It runs only
 	//     when at least one plugin config was successfully parsed — no plugin
 	//     doc means there is no mode to cross-check (the short-circuit at step
 	//     3 already handled the no-files case).
@@ -1148,15 +1157,15 @@ func numberDisplay(v any) any {
 
 // --- auto-gate mode↔LLM cross-validation helpers (checkAutoGateConfig step 4b) ---
 //
-// These resolve EFFECTIVE values across the two-level (project overrides user)
-// config layering the JS plugin applies at runtime. "Present" means the level's
-// doc was successfully parsed AND the field key exists in it. The endpoint
-// helpers apply the DEFAULT_LLM_CONFIG default for modelEndpointEnv
-// (autoGateDefaultModelEndpointEnv = "AUTO_GATE_MODEL_ENDPOINT") when no level
-// contributes an explicit endpoint form — this mirrors the runtime's
-// normalizeLlmConfig (auto-tool-gate.js ~L541-585), which supplies that default
-// so the live preflight's "no modelEndpoint" check (~L1048) never fires on a
-// config that omits an explicit endpoint. They do NOT resolve env vars (an
+// These resolve EFFECTIVE values across the four-level (project-local overrides
+// committed-project overrides user) config layering the JS plugin applies at
+// runtime. "Present" means the level's doc was successfully parsed AND the field
+// key exists in it. The endpoint helpers apply the DEFAULT_LLM_CONFIG default
+// for modelEndpointEnv (autoGateDefaultModelEndpointEnv = "AUTO_GATE_MODEL_ENDPOINT")
+// when no level contributes an explicit endpoint form — this mirrors the
+// runtime's normalizeLlmConfig (auto-tool-gate.js ~L541-585), which supplies that
+// default so the live preflight's "no modelEndpoint" check (~L1048) never fires
+// on a config that omits an explicit endpoint. They do NOT resolve env vars (an
 // env-var NAME counts as present): doctor lints config FILES, so a config that
 // passes may still fail-close at runtime if the named env var is unset — that
 // is an environment concern, not a config-shape concern. See the DRIFT CONTRACT
@@ -1186,15 +1195,16 @@ func autoGateNonEmptyString(doc map[string]any, field string) string {
 	return ""
 }
 
-// autoGateEffectiveString resolves a string field across the two-level (project
-// overrides user) layering. A level contributes its value when its doc was
-// parsed AND the field key exists AND the value is a string; a present-but-empty
-// string IS returned (it is a present override, even if empty), and a present-
-// but-wrong-type value stops the walk and returns def (the shape validator
-// already FAILs on the wrong type — do not silently fall through to a user
-// value that the wrong-typed project field was meant to override).
+// autoGateEffectiveString resolves a string field across the four-level
+// (project-local overrides committed-project overrides user) layering. A level
+// contributes its value when its doc was parsed AND the field key exists AND the
+// value is a string; a present-but-empty string IS returned (it is a present
+// override, even if empty), and a present-but-wrong-type value stops the walk
+// and returns def (the shape validator already FAILs on the wrong type — do not
+// silently fall through to a lower level's value that the wrong-typed higher
+// field was meant to override).
 func autoGateEffectiveString(docs map[string]map[string]any, field, def string) string {
-	for _, lvl := range []string{"project", "user"} {
+	for _, lvl := range []string{"project-local", "project", "user"} {
 		d, ok := docs[lvl]
 		if !ok {
 			continue
@@ -1212,7 +1222,7 @@ func autoGateEffectiveString(docs map[string]map[string]any, field, def string) 
 }
 
 // autoGateEffectiveEndpoint resolves the effective model endpoint across the
-// two-level layering, honoring the dual-form fields modelEndpoint (literal URL)
+// four-level layering, honoring the dual-form fields modelEndpoint (literal URL)
 // / modelEndpointEnv (env-var NAME) where the literal wins over the env-var name
 // within a level. When no level contributes a non-empty literal or env-var name,
 // it returns the DEFAULT_LLM_CONFIG default modelEndpointEnv
@@ -1222,7 +1232,7 @@ func autoGateEffectiveString(docs map[string]map[string]any, field, def string) 
 // applies); the env VALUE is resolved at call time inside classifyLive, so a
 // passing config may still fail-close at runtime if the named env var is unset.
 func autoGateEffectiveEndpoint(docs map[string]map[string]any) string {
-	for _, lvl := range []string{"project", "user"} {
+	for _, lvl := range []string{"project-local", "project", "user"} {
 		d, ok := docs[lvl]
 		if !ok {
 			continue
@@ -1238,11 +1248,12 @@ func autoGateEffectiveEndpoint(docs map[string]map[string]any) string {
 }
 
 // autoGateEffectiveLeaves resolves the effective leaves array across the
-// two-level layering. Returns the project-level leaves when present (an explicit
-// [] is a present override, even when empty), else the user-level leaves, else
-// nil. A present-but-wrong-type value returns nil (the shape validator owns it).
+// four-level layering. Returns the highest-level leaves when present (an explicit
+// [] is a present override, even when empty), else the next lower level's leaves,
+// else nil. A present-but-wrong-type value returns nil (the shape validator owns
+// it).
 func autoGateEffectiveLeaves(docs map[string]map[string]any) []any {
-	for _, lvl := range []string{"project", "user"} {
+	for _, lvl := range []string{"project-local", "project", "user"} {
 		d, ok := docs[lvl]
 		if !ok {
 			continue

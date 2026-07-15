@@ -31,9 +31,20 @@ node_modules/
 # Local-only notes (sensitive; never commit)
 *.local.md
 
-# auto-classifier-pilot: LLM config is NEVER committed (secrets-adjacent).
-# The plugin config (auto-gate-config.json) is NOT ignored — it is the
-# optionally-committable one. Only the LLM file is gitignored here.
+# auto-classifier-pilot config files live under .opencode/repo-configs/.
+# Three kinds, two ignore rules:
+#   1. CONVENTION local-companions (gitignored): the optional `.local.json`
+#      shallow field-override beside each committed base file. auto-gate is the
+#      first consumer (auto-gate-config.local.json / auto-gate-llm.local.json).
+#      The scoped wildcard keeps these per-developer and out of history without
+#      over-matching files outside repo-configs/.
+#   2. The SECRETS LLM file (gitignored): auto-gate-llm.json is NEVER committed
+#      (secrets-adjacent — model endpoint/key). Only the LLM file is ignored by
+#      its bare name; the behavior-config base (auto-gate-config.json) is NOT
+#      ignored — it is the optionally-committable shared base.
+#   3. COMMITTED base files (NOT gitignored): X.json files under repo-configs/
+#      are intended to be committed when they encode shared project policy.
+.opencode/repo-configs/*.local.json
 .opencode/repo-configs/auto-gate-llm.json
 
 # Editor / OS

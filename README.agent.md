@@ -188,6 +188,29 @@ For the complete reference (all modes, fail-closed behavior, prompt
 composition, per-call gate flow), run
 `vh-agent-harness overlay docs auto-classifier-pilot`.
 
+#### `.local.json` repo-config override convention
+
+Layered config consumers under `.opencode/repo-configs/` follow a shared
+override convention: a committed `X.json` is the optionally-committed **base**
+(per family policy), and a gitignored `X.local.json` is an OPTIONAL
+**field-override** companion. The local file is never committed (the scoped
+wildcard `.opencode/repo-configs/*.local.json` is gitignored) and is absent by
+default — its absence reproduces the legacy single-file behavior with zero
+change. When present, local fields **shallowly overwrite** matching base fields
+(a present key with a falsy value like `false` or `""` is a real override, not
+absence); fields the local file omits inherit from the lower layers. The local
+file is the **final project layer** (project-local > committed-project > user >
+defaults). The secrets-adjacent files (`*-llm.json`) are always gitignored by
+their own bare-name rule and are unrelated to this convention wildcard.
+
+Auto-gate is the **first consumer** of this convention: each committed behavior
+base (`auto-gate-config.json`) / secrets LLM file (`auto-gate-llm.json`) may
+have an optional `auto-gate-config.local.json` / `auto-gate-llm.local.json`
+override — e.g. a developer can flip just `{"mode":"live-tiered"}` locally
+without touching the committed base. `vh-agent-harness doctor` lints the local
+file when present (absent = valid/silent; present-but-invalid = FAIL identifying
+the local layer) and includes it in effective-value resolution.
+
 ## Permission transform (F-intent)
 
 The canonical permission emitter (`permconfig.Emit`) is the SOLE writer of

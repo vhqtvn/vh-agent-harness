@@ -893,3 +893,197 @@ func TestAutoGateConfig_LiveTieredMixedLeaves(t *testing.T) {
 		t.Fatalf("want PASS for live-tiered with mixed leaves (one well-formed), got %s: %s", r.tier, r.detail)
 	}
 }
+
+// --- auto-gate project-local override (.local.json) — four-level precedence ---
+//
+// These exercise the OPTIONAL gitignored project-local `.local.json` companion
+// files (auto-gate-config.local.json / auto-gate-llm.local.json) which are the
+// HIGHEST layer (project-local > committed-project > user > defaults). They
+// MIRROR the JS embedded test fixtures (local-* tests in auto-tool-gate.js) so
+// JS and Go precedence are proven against IDENTICAL discriminating shapes.
+//
+// Backward-compat guarantee: a local file is OPTIONAL and absent by default;
+// its absence reproduces legacy three-level behavior exactly.
+
+// writeLocalAutoGateConfig writes a project-local `.local.json` override under
+// the project-level repo-configs/ dir. kind selects plugin
+// (auto-gate-config.local.json) or llm (auto-gate-llm.local.json). body is
+// written verbatim so tests can exercise corrupt JSON shapes.
+func writeLocalAutoGateConfig(t *testing.T, target, kind, body string) {
+	t.Helper()
+	dir := filepath.Join(target, ".opencode", "repo-configs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	name := "auto-gate-config.local.json"
+	if kind == "llm" {
+		name = "auto-gate-llm.local.json"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+// TestAutoGateConfig_LocalMissingHealthy: a project-local `.local.json` is
+// OPTIONAL — its absence is valid/silent and does not change the result. A
+// selected overlay with a valid committed-project config and NO local file →
+// PASS (legacy three-level behavior). This is the backward-compat anchor.
+func TestAutoGateConfig_LocalMissingHealthy(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"audit"}`)
+	// No project-local file.
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS when local absent (legacy behavior), got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_LocalValidAccepted: a valid project-local plugin config is
+// independently accepted (its shape lints like any other level) → PASS.
+func TestAutoGateConfig_LocalValidAccepted(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"audit"}`)
+	writeLocalAutoGateConfig(t, dir, "plugin", `{"mode":"enforce"}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for valid local plugin config, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_LocalMalformedJsonFail: a present-but-malformed (invalid
+// JSON) project-local plugin config → FAIL, and the detail identifies the
+// project-local layer (so the operator knows which of the 6 files to fix).
+func TestAutoGateConfig_LocalMalformedJsonFail(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"audit"}`)
+	writeLocalAutoGateConfig(t, dir, "plugin", `{ not valid json`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for malformed local JSON, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "project-local") {
+		t.Errorf("FAIL detail should label the project-local layer; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_LocalInvalidShapeFail: a present-but-bad-shape (valid JSON,
+// invalid enum) project-local plugin config → FAIL. The local file is linted
+// standalone like every other level.
+func TestAutoGateConfig_LocalInvalidShapeFail(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"audit"}`)
+	writeLocalAutoGateConfig(t, dir, "plugin", `{"mode":"bogus-mode"}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for invalid-shape local config, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "project-local") {
+		t.Errorf("FAIL detail should label the project-local layer; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "mode") {
+		t.Errorf("FAIL detail should name the bad field; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_LocalOverridesCommittedAndUser: project-local is the
+// HIGHEST layer — local mode wins over BOTH committed-project and user.
+// DISCRIMINATING fixture (IDENTICAL to the JS "local HIGHEST precedence" test):
+// user=audit, committed-project=enforce, local=live-tiered. With NO leaves
+// anywhere, effective mode=live-tiered must FAIL with the "mode=live-tiered"
+// message — which PROVES the effective mode came from local (audit/enforce
+// would PASS without LLM config). Fails if any lower layer wins or local is
+// ignored.
+func TestAutoGateConfig_LocalOverridesCommittedAndUser(t *testing.T) {
+	dir := t.TempDir()
+	xdg := isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeUserAutoGateConfig(t, xdg, "plugin", `{"mode":"audit"}`)
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"enforce"}`)
+	writeLocalAutoGateConfig(t, dir, "plugin", `{"mode":"live-tiered"}`)
+	// No leaves anywhere → live-tiered must FAIL (proves effective mode=live-tiered from local).
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL proving local mode=live-tiered won (no leaves), got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "mode=live-tiered") {
+		t.Errorf("FAIL detail should prove effective mode=live-tiered (from local); got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_LocalPartialMergeInheritsLower: a local file specifying
+// only SOME fields lets the lower layers' fields survive (shallow per-field
+// merge). DISCRIMINATING fixture: mode=live at committed-project; local LLM
+// contributes ONLY `model`, committed-project LLM contributes ONLY
+// `modelEndpoint` — if the merge is correct, both survive → PASS. If the local
+// layer were all-or-nothing, modelEndpoint would be lost → FAIL.
+func TestAutoGateConfig_LocalPartialMergeInheritsLower(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"live"}`)
+	// Committed-project LLM: only the endpoint.
+	writeAutoGateConfig(t, dir, "llm", `{"modelEndpoint":"https://x"}`)
+	// Project-local LLM: only the model.
+	writeLocalAutoGateConfig(t, dir, "llm", `{"model":"m"}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for partial local merge (local model + project endpoint), got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestAutoGateConfig_LocalModeParticipatesInSemantic: a project-local plugin
+// config setting mode=live feeds the effective-mode semantic cross-check. With
+// no model anywhere, the effective mode=live must FAIL with the
+// "mode=live requires" message — proving the local layer's mode participates in
+// the cross-validation (not just the committed-project level).
+func TestAutoGateConfig_LocalModeParticipatesInSemantic(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"audit"}`)
+	writeLocalAutoGateConfig(t, dir, "plugin", `{"mode":"live"}`)
+	// No LLM config anywhere → live must FAIL for missing model/endpoint.
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL proving local mode=live participates in semantic check, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "mode=live") {
+		t.Errorf("FAIL detail should prove effective mode=live (from local); got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_RemovingLocalRestoresProjectOverUser: with NO project-local
+// file, the legacy three-level precedence is restored (committed-project
+// overrides user). DISCRIMINATING fixture: committed-project mode=audit,
+// user mode=live-tiered (would FAIL with no leaves if user won). No local →
+// effective mode=audit → PASS. This complements
+// LocalOverridesCommittedAndUser (where local IS present and wins) to prove the
+// full precedence chain.
+func TestAutoGateConfig_RemovingLocalRestoresProjectOverUser(t *testing.T) {
+	dir := t.TempDir()
+	xdg := isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	writeAutoGateConfig(t, dir, "plugin", `{"mode":"audit"}`)
+	writeUserAutoGateConfig(t, xdg, "plugin", `{"mode":"live-tiered"}`) // would FAIL if user won
+	// No project-local file → committed-project audit must win.
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS proving committed-project mode=audit wins (local absent), got %s: %s", r.tier, r.detail)
+	}
+}

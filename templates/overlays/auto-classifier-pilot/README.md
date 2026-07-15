@@ -294,8 +294,9 @@ To disable, remove the pack from the `overlays:` list and re-run
 Auto-mode behavior is configurable **without restarting OpenCode**. The plugin
 reads operator-owned JSON config files from disk on **every hook invocation** —
 editing a file takes effect on the **next tool call**, with no server restart
-and no corpus re-render. Config is loaded from a **three-level layered model**
-(user-level base, project-level override; see below).
+and no corpus re-render. Config is loaded from a **four-level layered model**
+(user-level base, committed-project override, optional project-local `.local.json`
+override; see below).
 
 This works because the plugin does runtime file I/O inside each hook (mirroring
 how `shell-guard.js` imports `node:fs` + `node:path`). The OpenCode plugin SDK
@@ -304,6 +305,13 @@ are load-time (set at server start) and env vars are frozen at process start —
 so a per-call disk read gated by an **mtime cache** is the reload-free
 mechanism: in steady state an unchanged file costs only a single `statSync` per
 call, and a changed file is re-read + re-parsed only when its mtime changes.
+
+> **`.local.json` override convention:** each committed base file may have an
+> OPTIONAL gitignored `.local.json` shallow field-override companion (the first
+> auto-gate consumer of the repo-wide `.opencode/repo-configs/*.local.json`
+> convention). The local file is the FINAL project layer and is absent by
+> default — its absence is the legacy three-level behavior with zero change. See
+> "Four-level layered loading" below.
 
 ### Two-file model (config split)
 
@@ -315,7 +323,7 @@ path). The split exists so that **LLM settings can NEVER be committed** while
 
 | File | Fields | Committability |
 |------|--------|----------------|
-| `auto-gate-config.json` | `enabled`, `mode`, `stubVerdict`, `promptFile` | **Adopter's choice** — a team may commit a shared default (e.g. `{"mode":"enforce"}`). NOT gitignored. |
+| `auto-gate-config.json` | `enabled`, `mode`, `stubVerdict`, `promptFile`, `replyMode`, `onUncertain`, `harnessContext`, `guides` | **Adopter's choice** — a team may commit a shared default (e.g. `{"mode":"enforce"}`). NOT gitignored. |
 | `auto-gate-llm.json` | `modelEndpoint`, `modelEndpointEnv`, `model`, `apiKey`, `apiKeyEnv`, `timeoutMs`, `maxRetries`, `retryDelayMs` | **NEVER** — gitignored in this dogfood repo. Adopters using live mode create it locally and add the pattern to their own `.gitignore`. |
 
 Neither file is rendered or seeded by the overlay. Leaving a file absent is the
@@ -328,44 +336,65 @@ defaults.
 > while still letting a team share a plugin-behavior default like
 > `{"mode":"enforce"}`.
 
-### Three-level layered loading (user-level base, project-level override)
+### Four-level layered loading (user-level base, committed-project override, project-local `.local.json` override)
 
-Each config type (plugin-behavior and LLM) is loaded from **up to two locations**
-and merged **field-by-field** with this precedence:
+Each config type (plugin-behavior and LLM) is loaded from **up to three
+locations** and merged **field-by-field** with this precedence:
 
 ```
-defaults  ←  user-level  ←  project-level    (project wins per field)
+defaults  ←  user-level  ←  committed-project  ←  project-local    (project-local wins per field)
 ```
 
-| Level | Plugin config path | LLM config path |
-|-------|-------------------|-----------------|
-| **User** (shared across all projects) | `<XDG_CONFIG_HOME>/vh-agent-harness/auto-gate-config.json` | `<XDG_CONFIG_HOME>/vh-agent-harness/auto-gate-llm.json` |
-| **Project** (per-repo, unchanged) | `.opencode/repo-configs/auto-gate-config.json` | `.opencode/repo-configs/auto-gate-llm.json` |
+| Level | Plugin config path | LLM config path | Committed? |
+|-------|-------------------|-----------------|------------|
+| **User** (shared across all projects) | `<XDG_CONFIG_HOME>/vh-agent-harness/auto-gate-config.json` | `<XDG_CONFIG_HOME>/vh-agent-harness/auto-gate-llm.json` | operator's choice |
+| **Committed project** (per-repo, shared) | `.opencode/repo-configs/auto-gate-config.json` | `.opencode/repo-configs/auto-gate-llm.json` | adopter's choice (plugin) / NEVER (llm) |
+| **Project-local** (per-repo, per-developer override) | `.opencode/repo-configs/auto-gate-config.local.json` | `.opencode/repo-configs/auto-gate-llm.local.json` | **NEVER** — gitignored by `.opencode/repo-configs/*.local.json` |
 
 `XDG_CONFIG_HOME` resolves as `process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config")`
 (typically `~/.config`). The user-level directory is `vh-agent-harness/` — **not**
 `opencode/` — because vh-agent-harness ships the plugin and defines the schema.
-The filenames mirror the project-level names so the override relationship is
-obvious: "same file, user-level base, project-level override."
+The filenames mirror the committed-project names so the override relationship is
+obvious: "same file, user-level base, committed-project override, project-local
+final override."
+
+The **project-local** `.local.json` layer realizes the repo-wide override
+convention: it is OPTIONAL and absent by default (absent = legacy three-level
+behavior, zero change), and when present it shallowly overrides matching base
+fields (a present key with a falsy value like `false` or `""` is a real
+override, not absence). A minimal local override — e.g. to flip just the mode
+for one developer without touching the committed base:
+
+```json
+{"mode": "live-tiered"}
+```
 
 **Merge rules:**
 
-- A **missing** file at either level is silently skipped (its absence is normal).
-  Both-missing → fail-safe defaults (exactly the pre-layering behavior).
+- A **missing** file at any level is silently skipped (its absence is normal).
+  All-missing → fail-safe defaults (exactly the pre-layering behavior). The
+  project-local file is OPTIONAL and absent by default.
 - A **present-but-invalid** file (bad JSON, non-object shape) is also skipped —
-  the other layer applies, and a deduped audit line is emitted with the level
-  in the label (e.g. `plugin/user`, `plugin/project`, `llm/user`, `llm/project`).
-- When a project-level file is **present and valid**, it overrides the
-  user-level **field-by-field** — only the fields it explicitly sets win;
-  fields it omits fall through to the user-level, then to defaults. So a
-  project `{"model": "x"}` keeps the user-level endpoint/key and changes only
-  the model. (This is the common case for specializing one field per repo.)
-- The mtime cache tracks **both** files; changing **either** one invalidates
-  the cache and triggers a re-read + re-merge on the next hook call.
+  the lower layers apply, and a deduped audit line is emitted with the level in
+  the label (e.g. `plugin/user`, `plugin/project`, `plugin/local`, `llm/user`,
+  `llm/project`, `llm/local`).
+- When a higher-level file is **present and valid**, it overrides the lower
+  levels **field-by-field** — only the fields it explicitly sets win; fields it
+  omits fall through to the lower levels, then to defaults. So a project-local
+  `{"mode": "live-tiered"}` keeps the committed-project/user endpoint+key and
+  changes only the mode; a committed-project `{"model": "x"}` keeps the
+  user-level endpoint/key and changes only the model. (This is the common case
+  for specializing one field per repo or per developer.)
+- The mtime cache tracks **all** files in play (up to three per type); changing
+  **any** one invalidates the cache and triggers a re-read + re-merge on the
+  next hook call. Creating or deleting a `.local.json` transitions its mtime
+  (number↔null) and likewise invalidates the cache.
 
 **Typical use:** put a shared endpoint/model/key-env in the user-level
 `auto-gate-llm.json` once, and it applies to every project. A project that needs
-its own override drops a project-level file — that file is then authoritative.
+its own override drops a committed-project file. A single developer who needs a
+temporary local override (e.g. flip `mode` for an experiment) drops a
+`.local.json` — it never reaches git and never affects teammates.
 
 Example — user-level LLM config (applies to all projects without one).
 Both the literal and env-var forms are shown; in practice you pick ONE per
@@ -592,13 +621,16 @@ Or the env-var-name form for the endpoint (URL via env var) and a literal key:
 ### Fail-safe behavior
 
 > **Layered note:** the fail-safe rules below apply at EACH level independently
-> (user-level and project-level). A missing/invalid file at one level is
-> silently skipped and the other level applies. Both-missing → defaults.
+> (user-level, committed-project-level, and project-local `.local.json`). A
+> missing/invalid file at one level is silently skipped and the lower levels
+> apply. The project-local `.local.json` is OPTIONAL and absent by default
+> (absent = legacy three-level behavior). All-missing → defaults.
 
 **Plugin config** (`auto-gate-config.json`): if the file is **missing,
 unreadable, or invalid JSON**, the plugin falls back to the hardcoded defaults
 (`{enabled: true, mode: "audit", stubVerdict: "block", promptFile: "",
-replyMode: "once", onUncertain: "reject"}`) and
+replyMode: "once", onUncertain: "reject", harnessContext: true, guides: true}`)
+and
 emits **one** `console.error` audit line noting the fallback — so the operator
 learns their config isn't loading without the log being spammed every call. The
 plugin **never** throws on a config error; it keeps working with defaults. The
