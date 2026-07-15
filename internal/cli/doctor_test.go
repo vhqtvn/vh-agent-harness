@@ -1087,3 +1087,131 @@ func TestAutoGateConfig_RemovingLocalRestoresProjectOverUser(t *testing.T) {
 		t.Fatalf("want PASS proving committed-project mode=audit wins (local absent), got %s: %s", r.tier, r.detail)
 	}
 }
+
+// --- skill validity (checkSkillValidity) ---
+//
+// These pin the doctor skills check (Slice 1, 9th check). The check enumerates
+// skill DIRECTORY names under .opencode/skills/ INDEPENDENTLY of
+// renderedSkillNames (which filters by SKILL.md presence for `skill list`'s
+// RENDERED column), so a half-deleted skill — directory present, SKILL.md
+// deleted — is a FAIL, not silently invisible. The contract is doctor.go's own
+// comment: "A skill whose SKILL.md is missing or has invalid frontmatter is a
+// FAIL."
+
+// writeSkillMD writes a SKILL.md with the given body under
+// .opencode/skills/<name>/. An empty body writes nothing (the half-deleted
+// case: directory present, SKILL.md absent).
+func writeSkillMD(t *testing.T, target, name, body string) {
+	t.Helper()
+	dir := filepath.Join(target, ".opencode", "skills", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir skill dir %s: %v", name, err)
+	}
+	if body == "" {
+		return // half-deleted: directory exists, no SKILL.md
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write .opencode/skills/%s/SKILL.md: %v", name, err)
+	}
+}
+
+// validSkillFM is a known-good frontmatter block whose `name` matches its
+// directory. Tests reuse it for the happy-path PASS case.
+const validSkillFM = `---
+name: happy-skill
+description: A valid skill used by the doctor skills-check tests.
+compatibility: opencode
+---
+body
+`
+
+// TestSkillValidity_FailWhenSkillMdMissing: the F2 regression — a skill
+// directory whose SKILL.md was deleted (half-deleted skill) must FAIL the doctor
+// skills check, naming the skill. Before the fix, checkSkillValidity reused
+// renderedSkillNames (which filters out dirs lacking SKILL.md), so the broken
+// skill was silently invisible to the health gate — contradicting the doctor
+// comment that "missing SKILL.md is a FAIL".
+func TestSkillValidity_FailWhenSkillMdMissing(t *testing.T) {
+	dir := t.TempDir()
+	// Skill directory present, but NO SKILL.md (the half-deleted case).
+	writeSkillMD(t, dir, "ghost-skill", "")
+
+	r := checkSkillValidity(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL when a skill dir has no SKILL.md, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "ghost-skill") {
+		t.Errorf("FAIL detail should name the skill; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "SKILL.md missing") {
+		t.Errorf("FAIL detail should state SKILL.md missing; got %q", r.detail)
+	}
+}
+
+// TestSkillValidity_PassWhenValid: a single rendered skill with valid
+// frontmatter must PASS. Locks in the happy path so the directory-enumeration
+// rewrite does not regress a clean install.
+func TestSkillValidity_PassWhenValid(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillMD(t, dir, "happy-skill", validSkillFM)
+
+	r := checkSkillValidity(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for a valid rendered skill, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestSkillValidity_FailMixedValidAndMissing: a directory tree with one valid
+// skill and one half-deleted skill must FAIL (not PASS) and name the missing
+// one. Guards against a future change that short-circuits on the first valid
+// skill.
+func TestSkillValidity_FailMixedValidAndMissing(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillMD(t, dir, "happy-skill", validSkillFM)
+	writeSkillMD(t, dir, "ghost-skill", "")
+
+	r := checkSkillValidity(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL when any skill dir lacks SKILL.md, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "ghost-skill") {
+		t.Errorf("FAIL detail should name the missing-SKILL.md skill; got %q", r.detail)
+	}
+	if strings.Contains(r.detail, "happy-skill") {
+		t.Errorf("FAIL detail should NOT list the valid skill as a failure; got %q", r.detail)
+	}
+}
+
+// TestSkillValidity_SkipWhenNoSkillsDir: a target with no .opencode/skills/
+// directory at all must SKIP (core-only / not-yet-installed), not FAIL. This is
+// the unchanged behavior for an empty target.
+func TestSkillValidity_SkipWhenNoSkillsDir(t *testing.T) {
+	dir := t.TempDir()
+	// No .opencode/skills/ directory written.
+
+	r := checkSkillValidity(dir)
+	if r.tier != tierSkip {
+		t.Fatalf("want SKIP when no skills directory exists, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestRenderedSkillNamesUnchangedForMissing: a non-regression guard for `skill
+// list` — renderedSkillNames (the shared helper backing `skill list`'s RENDERED
+// column and `validateSkills`) must STILL filter out a directory lacking
+// SKILL.md. The F2 fix deliberately left renderedSkillNames untouched (doctor
+// enumerates directories independently); this pins that decision so a future
+// refactor does not accidentally make `skill list` surface half-deleted skills.
+func TestRenderedSkillNamesUnchangedForMissing(t *testing.T) {
+	dir := t.TempDir()
+	// A valid skill dir (has SKILL.md) and a half-deleted one (no SKILL.md).
+	writeSkillMD(t, dir, "happy-skill", validSkillFM)
+	writeSkillMD(t, dir, "ghost-skill", "")
+
+	got := renderedSkillNames(dir)
+	if !got["happy-skill"] {
+		t.Errorf("renderedSkillNames should include happy-skill (has SKILL.md); got %v", got)
+	}
+	if got["ghost-skill"] {
+		t.Errorf("renderedSkillNames must NOT include ghost-skill (no SKILL.md) — skill list behavior is intentionally unchanged; got %v", got)
+	}
+}

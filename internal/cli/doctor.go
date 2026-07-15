@@ -44,7 +44,7 @@ import (
 // manifest path (preflight) is unchanged; manifest convergence is a later slice.
 var doctorCmd = &cobra.Command{
 	Use:           "doctor",
-	Short:         "Diagnose seam-installed harness health (lineage + armed + drift + env)",
+	Short:         "Diagnose seam-installed harness health (lineage + armed + drift + env + skills)",
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Long: `Detailed seam health diagnosis (read-only). Reports:
@@ -57,6 +57,7 @@ var doctorCmd = &cobra.Command{
   config-refs     {file:...} refs resolve; empty agent-model files       FAIL if missing ref / WARN if empty
   gitignore       harness-written dirs (.opencode/state…, __pycache__) ignored WARN if not ignored
   auto-classifier auto-classifier-pilot overlay config shapes valid      FAIL if present-but-invalid
+  skills          every rendered skill's SKILL.md frontmatter valid       FAIL if invalid
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -166,6 +167,15 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	fmt.Fprintln(out, "    "+ar2.String())
 	applyTier(ar2.tier, &problems, &warns)
 
+	// 9. Skill validity (Slice 1): every rendered skill's SKILL.md frontmatter
+	//    is well-formed (Go-native validator, no python/JS shell-out). A broken
+	//    skill definition breaks opencode's skill discovery, so it is a FAIL.
+	//    No skills directory at all is SKIP (core-only or not installed).
+	fmt.Fprintln(out, "  skills:")
+	sr := checkSkillValidity(abs)
+	fmt.Fprintln(out, "    "+sr.String())
+	applyTier(sr.tier, &problems, &warns)
+
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)
 	if problems > 0 {
@@ -183,6 +193,56 @@ func applyTier(tier string, problems, warns *int) {
 	case tierWarn:
 		*warns++
 	}
+}
+
+// checkSkillValidity is the 9th doctor check (Slice 1). It validates the
+// frontmatter of every rendered skill under <target>/.opencode/skills/ using the
+// Go-native schema.ValidateSkillFrontmatter (no python/JS shell-out). A skill
+// whose SKILL.md is missing or has invalid frontmatter is a FAIL — a broken
+// skill definition breaks opencode's skill discovery. No skills directory at all
+// is SKIP (core-only or not-yet-installed). This makes skill health a first-class
+// doctor signal alongside managed-drift and armed-schema.
+//
+// DIRECTORY ENUMERATION: this check derives its skill set INDEPENDENTLY via
+// renderedSkillDirNames (every directory under .opencode/skills/), NOT via
+// renderedSkillNames. renderedSkillNames filters a directory OUT when its
+// SKILL.md is absent (it backs `skill list`'s RENDERED column and
+// `validateSkills`, which must stay unchanged); reusing it here would make a
+// half-deleted skill (directory present, SKILL.md deleted) silently invisible to
+// the health gate, contradicting the "missing SKILL.md is a FAIL" contract above.
+// Enumerating directories directly and treating os.IsNotExist on SKILL.md as a
+// FAIL closes that gap without touching `skill list`.
+func checkSkillValidity(target string) checkResult {
+	const name = "skills"
+	names := renderedSkillDirNames(target)
+	if len(names) == 0 {
+		return checkResult{name: name, tier: tierSkip,
+			detail: "no rendered skills under .opencode/skills/ (core-only or not installed)"}
+	}
+	sort.Strings(names)
+	var fails []string
+	for _, n := range names {
+		content, err := os.ReadFile(filepath.Join(target, ".opencode", "skills", n, "SKILL.md"))
+		if err != nil {
+			// A skill directory with no SKILL.md is a half-deleted skill: FAIL
+			// (reuse the unreadable formatting for the non-NotExist case).
+			if os.IsNotExist(err) {
+				fails = append(fails, fmt.Sprintf("%s: SKILL.md missing", n))
+			} else {
+				fails = append(fails, fmt.Sprintf("%s: SKILL.md unreadable: %v", n, err))
+			}
+			continue
+		}
+		if verr := schema.ValidateSkillFrontmatter(content, n); verr != nil {
+			fails = append(fails, fmt.Sprintf("%s: %s", n, oneLine(verr.Error())))
+		}
+	}
+	if len(fails) > 0 {
+		return checkResult{name: name, tier: tierFail,
+			detail: fmt.Sprintf("%d of %d skill(s) invalid: %s", len(fails), len(names), strings.Join(fails, "; "))}
+	}
+	return checkResult{name: name, tier: tierPass,
+		detail: fmt.Sprintf("%d rendered skill(s) valid", len(names))}
 }
 
 // checkSeamLineage reads the S1 lineage record. Absent => WARN (not seam-

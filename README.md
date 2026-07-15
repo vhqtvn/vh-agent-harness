@@ -113,7 +113,7 @@ detail.
 | --- | --- |
 | Lifecycle | `install`, `update`, `uninstall` (`install`/`update` take `--dry-run`; `update` also takes `-f`/`--force`), `overlay` (`overlay new` scaffolds a pack; `overlay docs` prints a pack doc), `self-update` (upgrade the binary in place, distinct from `update`) |
 | Orientation | `guide` (state + next steps; `--json`), `example` (print a config file's doc/template), `docs` (print a generic agent-workflow doc), `sys-prompt` (print a named system prompt), `help [command]` / `help migrate [version]` (read-only migration notes) |
-| Health & diagnostics | `preflight`, `doctor`, `proposals` (armed-conflict ledger), `diff` (drift vs. the embedded corpus), `diagnostics-export` (`--dry-run`; redacted, shareable bundle), `status`, `version` |
+| Health & diagnostics | `preflight`, `doctor`, `skill` (`skill list` / `skill validate`; OpenCode skill visibility + frontmatter health), `proposals` (armed-conflict ledger), `diff` (drift vs. the embedded corpus), `diagnostics-export` (`--dry-run`; redacted, shareable bundle), `status`, `version` |
 | Runtime | `exec`, `exec-ro` (read-only intent; host-side classifier; no prompt), `exec-sandbox` (host-local Landlock + seccomp; never reaches the backend), `shell`, `up`, `down`, `logs`, `ps` |
 
 The exec family — `exec`, `exec-ro`, `exec-sandbox`, `shell` — is intentionally

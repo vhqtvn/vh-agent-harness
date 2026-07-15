@@ -65,6 +65,7 @@ Health & diagnostics
   preflight            verify environment + install integrity before install/upgrade
   doctor               verify install health
   proposals            list recorded armed-file conflicts (the proposal ledger)
+  skill                list and validate OpenCode skills (frontmatter health)
   diff                 inspect drift vs. the embedded corpus
   diagnostics-export   bundle harness state into a redacted, shareable archive (--dry-run)
   status               show install + runtime info
@@ -147,6 +148,8 @@ func init() {
 		preflightCmd,
 		doctorCmd,
 		proposalsCmd,
+		// skill visibility + validity (Slice 1)
+		skillCmd,
 		// rendering inspection
 		diffCmd,
 		// diagnostics (operator debug-bundle tooling)
@@ -182,7 +185,7 @@ func init() {
 		guideCmd, exampleCmd, docsCmd, sysPromptCmd, helpCmd)
 	assignGroup(groupHealth,
 		preflightCmd, doctorCmd, proposalsCmd, diffCmd,
-		diagnosticsExportCmd, statusCmd, versionCmd)
+		diagnosticsExportCmd, statusCmd, versionCmd, skillCmd)
 	assignGroup(groupRuntime,
 		execCmd, execRoCmd, execSandboxCmd, shellCmd,
 		upCmd, downCmd, logsCmd, psCmd)

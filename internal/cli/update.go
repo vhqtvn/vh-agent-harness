@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
+	"github.com/vhqtvn/vh-agent-harness/internal/substrate"
 )
 
 // updateCmd is the SEAM update path (Slice 2). It re-renders the embedded core
@@ -192,8 +193,32 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 		}
 		fmt.Fprintln(out, "Remove the file listed above if you no longer want it; remove the whole skill directory only after verifying EVERY file in it is orphaned. Or restore the overlay source to clear this notice.")
 	}
+	// Skill-cache staleness (D1): opencode caches the discovered skill list in a
+	// module-closure Map that is cleared ONLY by process death. A running
+	// opencode session will therefore NOT see skills this update added or
+	// changed under .opencode/skills/ until the operator restarts it. The
+	// harness cannot fix that upstream cache; the durable mitigation is to hint
+	// at the exact moment the staleness was caused. Gate on an actually-written
+	// skill path (WriteSucceeded) so a pure reconcile that touched no skill bytes
+	// stays quiet.
+	if updateTouchedSkills(report.Outcomes) {
+		fmt.Fprintln(out, "\nrestart opencode to see newly added/changed skills (opencode caches the skill list per-process; only a restart picks up .opencode/skills/ changes).")
+	}
 	printNextStepsFooter(out, abs)
 	return nil
+}
+
+// updateTouchedSkills reports whether the apply actually wrote a file under
+// .opencode/skills/ (D1 restart-hint trigger). It gates on WriteSucceeded so a
+// pure managed-noop reconcile (byte-identical, no write) stays quiet — the
+// skill cache staleness only matters when skill bytes materially changed.
+func updateTouchedSkills(outcomes []substrate.FileOutcome) bool {
+	for _, o := range outcomes {
+		if o.WriteState == substrate.WriteSucceeded && strings.HasPrefix(o.Path, ".opencode/skills/") {
+			return true
+		}
+	}
+	return false
 }
 
 // defaultAnswers returns the project_name/project_slug derived from the target

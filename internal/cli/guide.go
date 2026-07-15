@@ -232,6 +232,14 @@ func writeGuide(out io.Writer, st harnessState, steps []string) {
 	fmt.Fprintln(out, "Extending the harness? `/harness` is the full add-an-agent / add-command /")
 	fmt.Fprintln(out, "add-skill recipe and overlay anatomy; `vh-agent-harness example` lists")
 	fmt.Fprintln(out, "configurable files plus a pack skeleton.")
+	// Skill-cache staleness (D1): after `update` adds/changes skills under
+	// .opencode/skills/, a running opencode session will not see them until it is
+	// restarted (opencode caches the skill list per-process). `vh-agent-harness
+	// skill list` / `skill validate` inspect the rendered skills on disk; that
+	// read is always fresh, but opencode's own in-process cache is not.
+	fmt.Fprintln(out, "Added or changed skills? Restart opencode to pick them up — opencode caches the")
+	fmt.Fprintln(out, "skill list per-process, so only a restart sees new .opencode/skills/ entries.")
+	fmt.Fprintln(out, "Inspect rendered skills anytime with `vh-agent-harness skill list` / `skill validate`.")
 }
 
 func yesNo(b bool, yes, no string) string {

@@ -559,11 +559,23 @@ export default function transform({ context }) {
   `.opencode/sys-prompts/<name>.md` (the live tree takes precedence over the
   embed). It is **read-only**: it only writes to stdout and never modifies files.
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
-  overlay-perm, environment, config-refs, gitignore, auto-classifier). The
+  overlay-perm, environment, config-refs, gitignore, auto-classifier, skills). The
   `auto-classifier` check lints the shape (field set + types + enums) of the
   auto-classifier-pilot overlay's config files when present — a present-but-invalid
   `auto-gate-config.json` / `auto-gate-llm.json` FAILs; absent configs are never
-  failures (defaults apply). `vh-agent-harness diff` shows drift vs. the corpus.
+  failures (defaults apply). The `skills` check validates every rendered skill's
+  SKILL.md frontmatter (Go-native; no python). `vh-agent-harness diff` shows drift vs. the corpus.
+- **Inspect / validate skills:** `vh-agent-harness skill list` prints every skill
+  (core, overlay-pack, and rendered) with its source, whether it is rendered to
+  `.opencode/skills/`, and whether its SKILL.md frontmatter is valid.
+  `vh-agent-harness skill validate [dir...]` validates one or more skill
+  directories' frontmatter (with no args, validates every rendered skill). Both
+  read the trees directly, so their view is always fresh.
+  **Restart opencode after `update` touches skills:** opencode caches the
+  discovered skill list per-process (a module-closure Map cleared only on
+  process death), so a running session will NOT see newly added/changed skills
+  under `.opencode/skills/` until you restart it. `update` prints a one-line hint
+  when it writes skill files.
 - **Package a bug bundle:** `vh-agent-harness diagnostics-export [--dry-run]
   [--output <path>]` bundles selected harness state (`.opencode/state/`,
   `.local/coordinator/`, `.local/config/`, `docs/checkpoints/`) into a
