@@ -10,6 +10,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
+	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
+	"github.com/vhqtvn/vh-agent-harness/internal/renderstate"
 	"github.com/vhqtvn/vh-agent-harness/internal/substrate"
 )
 
@@ -65,6 +67,7 @@ update' in a terminal still has a TTY and still prompts. --dry-run never prompts
 var updateTargetFlag string
 var updateDryRun bool
 var updateForce bool
+var updatePruneOrphans bool
 
 // The uninitialized-target confirmation guard (interactive-only pre-flight gate)
 // is wired through two injectable seams so unit tests can drive both the
@@ -99,6 +102,8 @@ func init() {
 		"preview the per-file plan without writing anything")
 	updateCmd.Flags().BoolVarP(&updateForce, "force", "f", false,
 		"bypass the uninitialized-target confirmation prompt")
+	updateCmd.Flags().BoolVar(&updatePruneOrphans, "prune-orphans", false,
+		"delete byte-identical orphan rendered files whose overlay source was removed (refuses hand-edited or project-owned ones; composes with --dry-run)")
 }
 
 func runUpdate(cmd *cobra.Command, _ []string) (err error) {
@@ -167,6 +172,15 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 
 	if updateDryRun {
 		printDryRunPlan(out, "update", abs, report)
+		// --prune-orphans composes with --dry-run: print what the prune WOULD do
+		// without deleting anything. Emitted here (not inside the shared
+		// printDryRunPlan in guide.go, which a parallel slice owns) so this
+		// feature stays contained to update.go. printDryRunPlan's own
+		// preserved-orphan block already lists the orphans; this block states
+		// the per-file prune verdict (would-delete vs refuse) for clarity.
+		if updatePruneOrphans {
+			applyPruneOrphans(out, abs, report.Orphans, true)
+		}
 		return nil
 	}
 
@@ -182,16 +196,22 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 	if report.LineagePath != "" {
 		fmt.Fprintf(out, "lineage: %s\n", report.LineagePath)
 	}
-	// Preserved orphan overlay skills (P1-LINEAGE-002, report-only v1). A
-	// non-empty report.Orphans means previously-rendered skill files whose
-	// overlay source was removed are still sitting on disk; the renderer does
-	// not delete them, so surface them here. Report-only — nothing is deleted.
-	if n := len(report.Orphans); n > 0 {
+	// Preserved orphan overlay skills (P1-LINEAGE-002). A non-empty
+	// report.Orphans means previously-rendered skill files whose overlay source
+	// was removed are still sitting on disk. Two modes:
+	//   - default (report-only): list them, leave them in place (nothing deleted);
+	//   - --prune-orphans: delete the byte-identical (DestUnchanged) ones and
+	//     refuse the hand-edited (DestModified) ones for manual `rm`. A
+	//     project-owned orphan is NEVER deleted even with the flag (safety floor
+	//     mirroring uninstall --force). See applyPruneOrphans for the contract.
+	if updatePruneOrphans {
+		applyPruneOrphans(out, abs, report.Orphans, false)
+	} else if n := len(report.Orphans); n > 0 {
 		fmt.Fprintf(out, "\nPreserved orphan skill file(s) — %d previously-rendered overlay skill file(s) whose source was removed; left in place (report-only, NOT deleted):\n", n)
 		for _, o := range report.Orphans {
 			fmt.Fprintf(out, "  %s  [%s, from pack %q, source %q]\n", o.DestinationPath, o.DestinationState, o.OverlayPack, o.SourceRelativePath)
 		}
-		fmt.Fprintln(out, "Remove the file listed above if you no longer want it; remove the whole skill directory only after verifying EVERY file in it is orphaned. Or restore the overlay source to clear this notice.")
+		fmt.Fprintln(out, "Remove the file listed above if you no longer want it; remove the whole skill directory only after verifying EVERY file in it is orphaned. Or restore the overlay source to clear this notice. Pass --prune-orphans to auto-delete the byte-identical ones (hand-edited or project-owned files are always refused).")
 	}
 	// Skill-cache staleness (D1): opencode caches the discovered skill list in a
 	// module-closure Map that is cleared ONLY by process death. A running
@@ -219,6 +239,173 @@ func updateTouchedSkills(outcomes []substrate.FileOutcome) bool {
 		}
 	}
 	return false
+}
+
+// pruneCounts tallies a --prune-orphans pass for the closing summary.
+type pruneCounts struct {
+	pruned  int // deleted (live) or would-be-deleted (dry-run) DestUnchanged files
+	refused int // DestModified, project-owned, classifier-unavailable, or delete-failed → manual rm
+	skipped int // DestMissing (already gone)
+}
+
+// pruneClassifier builds a read-only ownership classifier for the prune safety
+// floor: the core ownership defaults resolved against the project's raise-only
+// overrides, with NO overlay-extension rules (the orphan's source was removed,
+// so it is not part of this run's rendered overlayFiles anyway). It is used ONLY
+// to refuse a project-owned orphan defensively — it never authorizes a delete
+// on its own. By construction every orphan is platform-controlled (the
+// rendered-outputs manifest records only harness-rendered overlay skill files,
+// never project-owned paths, and ownership.Resolve rejects an override that
+// targets an unknown path, so an override claiming the now-sourceless orphan
+// path would have aborted the apply before prune ran). This classifier is the
+// belt-and-suspenders guard that makes that guarantee explicit at the delete
+// site, mirroring uninstall --force's project-owned retention. A build/resolve
+// error makes the whole prune refuse-safe (see applyPruneOrphans).
+func pruneClassifier(target string) (*substrate.Classifier, error) {
+	overrides, err := readOwnershipOverrides(target)
+	if err != nil {
+		return nil, fmt.Errorf("read ownership overrides: %w", err)
+	}
+	cls, err := seamClassifierWithOverlays(nil, overrides)
+	if err != nil {
+		return nil, fmt.Errorf("ownership resolve: %w", err)
+	}
+	return cls, nil
+}
+
+// isProjectOwnedOrphan is the safety-floor predicate. It returns true ONLY when
+// the classifier positively resolves the orphan path to project_owned. An
+// unclassified path (ok=false, the normal case for a sourceless custom skill
+// path) is NOT project-owned and stays eligible for prune — consistent with the
+// structural guarantee that every orphan is platform-controlled.
+func isProjectOwnedOrphan(cls *substrate.Classifier, dest string) bool {
+	if cls == nil {
+		return false
+	}
+	if c, ok := cls.Classify(dest); ok && c.Class == ownership.ClassProjectOwned {
+		return true
+	}
+	return false
+}
+
+// orphanPathEscapesTarget reports whether destPath — a manifest record's
+// forward-slashed DestinationPath — resolves OUTSIDE target under the SAME
+// filepath.Join(target, filepath.FromSlash(destPath)) expression that
+// applyPruneOrphans uses to compute the os.Remove target. This is the
+// path-traversal safety guard for --prune-orphans (B1): a malicious or corrupt
+// manifest record carrying a traversal destination (e.g. "../../victim") whose
+// source is missing AND whose recorded digest matches an external file would
+// otherwise be classified DestUnchanged and os.Remove'd OUTSIDE the project.
+// The guard refuses such a path (report for manual review, delete nothing).
+//
+// Absolute destinations are rejected outright even though filepath.Join would
+// nest them under target (Join concatenates rather than resetting on an
+// absolute element): they are never legitimate repo-relative destinations, and
+// refusing them here keeps the guard honest instead of depending on Join's
+// concatenation quirk.
+//
+// The check is deliberately LEXICAL. We control the join — no symlink is
+// followed to resolve destPath — so the containment decision must rest on the
+// exact path string we will hand to os.Remove, not on whatever the filesystem
+// currently resolves it to. os.Stat / filepath.EvalSymlinks are intentionally
+// NOT used: they would introduce a TOCTOU window and could follow a planted
+// symlink, defeating a lexical guard. Both target and the resolved candidate
+// are filepath.Clean'd so the comparison is canonical.
+func orphanPathEscapesTarget(target, destPath string) bool {
+	if filepath.IsAbs(filepath.FromSlash(destPath)) {
+		return true
+	}
+	cleanTarget := filepath.Clean(target)
+	resolved := filepath.Clean(filepath.Join(target, filepath.FromSlash(destPath)))
+	rel, err := filepath.Rel(cleanTarget, resolved)
+	if err != nil {
+		return true // cannot relate — refuse-safe (treat as escape)
+	}
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// applyPruneOrphans consumes the report-only orphan findings under the
+// --prune-orphans flag and either deletes them (live) or previews the action
+// (dry-run). The safe-delete contract:
+//
+//   - DestUnchanged (rendered bytes byte-identical to the recorded render
+//     digest → genuinely dead, no operator content): DELETE in live,
+//     "would delete" in dry-run. Refused instead when the destination
+//     resolves OUTSIDE target (path-traversal safety guard, B1), the path
+//     resolves project-owned (safety floor), or the ownership classifier
+//     could not be built (refuse-safe).
+//   - DestModified (operator hand-edited the rendered file): ALWAYS refused and
+//     reported for manual `rm` — never auto-deleted.
+//   - DestMissing (already gone): skipped.
+//
+// Nothing outside report.Orphans is ever touched: non-orphan and project-owned
+// files never enter this set (the detection layer + ownership.Resolve guarantee
+// it), and this function additionally checks ownership before each delete.
+func applyPruneOrphans(out io.Writer, target string, findings []renderstate.OrphanFinding, dryRun bool) pruneCounts {
+	var counts pruneCounts
+	if len(findings) == 0 {
+		return counts
+	}
+	cls, clsErr := pruneClassifier(target)
+	classifierOK := clsErr == nil
+	if !classifierOK {
+		fmt.Fprintf(out, "\nprune-orphans: ownership classifier unavailable (%v); refusing all orphans for manual removal — nothing deleted.\n", clsErr)
+	}
+	verb := "would prune"
+	if !dryRun {
+		verb = "pruning"
+	}
+	fmt.Fprintf(out, "\n--prune-orphans %s %d orphan file(s):\n", verb, len(findings))
+	for _, o := range findings {
+		switch o.DestinationState {
+		case renderstate.DestMissing:
+			counts.skipped++
+			fmt.Fprintf(out, "  skip (already gone): %s\n", o.DestinationPath)
+		case renderstate.DestModified:
+			counts.refused++
+			fmt.Fprintf(out, "  refuse (hand-edited; remove manually): %s  [from pack %q]\n", o.DestinationPath, o.OverlayPack)
+		case renderstate.DestUnchanged:
+			// B1 path-containment guard (runs before the dry-run/live split so a
+			// traversal destination is refused in BOTH modes): a destination that
+			// resolves outside target must NEVER reach os.Remove, even when its
+			// recorded digest matches an external file. Refuse it for manual
+			// review like a DestModified finding — refuse-safe, deletes nothing.
+			if orphanPathEscapesTarget(target, o.DestinationPath) {
+				counts.refused++
+				fmt.Fprintf(out, "  refuse (destination escapes target — possible path traversal; remove manually): %s\n", o.DestinationPath)
+				continue
+			}
+			if !classifierOK || isProjectOwnedOrphan(cls, o.DestinationPath) {
+				counts.refused++
+				fmt.Fprintf(out, "  refuse (project-owned or classifier unavailable; remove manually): %s\n", o.DestinationPath)
+				continue
+			}
+			if dryRun {
+				fmt.Fprintf(out, "  would delete (byte-identical to recorded render): %s\n", o.DestinationPath)
+				counts.pruned++
+				continue
+			}
+			live := filepath.Join(target, filepath.FromSlash(o.DestinationPath))
+			if err := os.Remove(live); err != nil {
+				counts.refused++
+				fmt.Fprintf(out, "  refuse (delete failed: %v; remove manually): %s\n", err, o.DestinationPath)
+				continue
+			}
+			fmt.Fprintf(out, "  deleted (byte-identical to recorded render): %s\n", o.DestinationPath)
+			counts.pruned++
+		default:
+			// An unexpected/future DestinationState must never auto-delete.
+			counts.refused++
+			fmt.Fprintf(out, "  refuse (unknown on-disk state %q; remove manually): %s\n", o.DestinationState, o.DestinationPath)
+		}
+	}
+	deletedWord := "deleted"
+	if dryRun {
+		deletedWord = "would be deleted"
+	}
+	fmt.Fprintf(out, "prune-orphans summary: %d file(s) %s, %d refused for manual removal, %d skipped\n",
+		counts.pruned, deletedWord, counts.refused, counts.skipped)
+	return counts
 }
 
 // defaultAnswers returns the project_name/project_slug derived from the target

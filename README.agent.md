@@ -714,7 +714,7 @@ blocks + `delegateFrom` edges via the Go-native emitter — no separate step) �
   file taken to `project_owned` via `harness-ownership.yml`) as a non-failing
   `preserved` (INFO) signal — never a FAIL, never blocks install/update.
 
-## Preserved orphan overlay skills (report-only)
+## Preserved orphan overlay skills (report-only; `--prune-orphans` to auto-delete)
 
 When you remove an overlay skill source
 (`.vh-agent-harness/overlays/<pack>/skills/<name>/`) and re-run
@@ -730,12 +730,49 @@ report-only notice naming the orphaned **file** (its full destination path, e.g.
 (`unchanged`/`modified`), and the removed source. The notice is **file-accurate**:
 it lists each removed-source file individually, so a skill directory that still
 contains an actively-rendered file is never suggested for whole-directory removal.
-The notice is informational; **nothing is deleted.** To actually remove a
+The notice is informational; **by default nothing is deleted.** To actually remove a
 preserved orphan, delete the **file** named in the notice (e.g.
 `rm .opencode/skills/<name>/SKILL.md`). Remove the **whole** skill directory only
 after verifying that **every** file inside it is orphaned — a directory may mix
 orphaned files with files still being actively rendered. Or restore the overlay
-source to clear the notice on the next update.
+source to clear the notice on the next update. Or pass `--prune-orphans` (below)
+to auto-delete the byte-identical ones.
+
+### Pruning orphans automatically (`--prune-orphans`)
+
+`update --prune-orphans` deletes the preserved-orphan files for you, but only
+the ones that are safe to delete:
+
+- **`unchanged`** (byte-identical to the last recorded render) → **deleted
+  automatically.** The file is genuinely dead (it carries no operator content),
+  so `--prune-orphans` removes it.
+- **`modified`** (you hand-edited the rendered file after it was rendered) →
+  **refused and reported for manual `rm`.** The harness never auto-deletes a
+  file whose bytes differ from what it rendered, because that diff is operator
+  content. Remove it by hand (`rm .opencode/skills/<name>/SKILL.md`) if you no
+  longer want it.
+- **`missing`** (already gone) → nothing to do.
+
+A closing summary prints how many were deleted, how many were refused for manual
+removal, and how many were skipped.
+
+**Safety floor.** `--prune-orphans` only ever touches files in the preserved-
+orphan set — it never deletes a non-orphan or a project-owned file. The
+rendered-outputs manifest records only harness-rendered overlay skill files
+(never project-owned paths), and a project ownership override
+(`harness-ownership.yml`) that targets a now-sourceless path is rejected before
+the apply runs, so a project-owned orphan cannot reach the prune. As
+defense-in-depth the prune path also re-checks ownership before each delete and
+refuses a project-owned path (mirroring `uninstall --force`'s never-touch-
+project-owned guarantee). `--force` does **not** weaken this floor.
+
+**Compose with `--dry-run`.** `update --prune-orphans --dry-run` previews which
+orphans *would* be deleted vs refused and deletes nothing. Run it first to
+preview before a real prune.
+
+The pruned file's record is retired on the **next** `update` (the prune happens
+after the apply, so the manifest written during this run still lists it); a
+subsequent plain `update` reports no orphan for a pruned file.
 
 How a **definite orphan** is told apart from benign cases:
 
