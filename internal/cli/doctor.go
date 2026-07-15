@@ -57,6 +57,7 @@ var doctorCmd = &cobra.Command{
   config-refs     {file:...} refs resolve; empty agent-model files       FAIL if missing ref / WARN if empty
   gitignore       harness-written dirs (.opencode/state…, __pycache__) ignored WARN if not ignored
   auto-classifier auto-classifier-pilot overlay config shapes valid      FAIL if present-but-invalid
+  auto-gate-ignore never-commit auto-gate paths tracked/ignored properly  FAIL if tracked/exposed/literal-key; WARN if missing/non-portable
   skills          every rendered skill's SKILL.md frontmatter valid       FAIL if invalid
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
@@ -167,10 +168,22 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	fmt.Fprintln(out, "    "+ar2.String())
 	applyTier(ar2.tier, &problems, &warns)
 
-	// 9. Skill validity (Slice 1): every rendered skill's SKILL.md frontmatter
-	//    is well-formed (Go-native validator, no python/JS shell-out). A broken
-	//    skill definition breaks opencode's skill discovery, so it is a FAIL.
-	//    No skills directory at all is SKIP (core-only or not installed).
+	// 9. Auto-gate never-commit paths (auto-gate-llm.json + *.local.json) must
+	//    be gitignored, NOT tracked, and protected portably. Detects an exposed
+	//    secrets-adjacent LLM file or a tracked never-commit file (FAIL), warns
+	//    when protection is missing or only via a non-portable global exclude,
+	//    and flags a tracked literal apiKey as a credential incident (FAIL +
+	//    rotate guidance). Clean no-op (SKIP) when the overlay is unselected AND
+	//    no relevant config files exist (mirrors checkAutoGateConfig's inertness).
+	fmt.Fprintln(out, "  auto-gate-ignore:")
+	agr := checkAutoGateGitignored(abs)
+	fmt.Fprintln(out, "    "+agr.String())
+	applyTier(agr.tier, &problems, &warns)
+
+	// 10. Skill validity (Slice 1): every rendered skill's SKILL.md frontmatter
+	//     is well-formed (Go-native validator, no python/JS shell-out). A broken
+	//     skill definition breaks opencode's skill discovery, so it is a FAIL.
+	//     No skills directory at all is SKIP (core-only or not installed).
 	fmt.Fprintln(out, "  skills:")
 	sr := checkSkillValidity(abs)
 	fmt.Fprintln(out, "    "+sr.String())
@@ -195,7 +208,7 @@ func applyTier(tier string, problems, warns *int) {
 	}
 }
 
-// checkSkillValidity is the 9th doctor check (Slice 1). It validates the
+// checkSkillValidity is the 10th doctor check (Slice 1). It validates the
 // frontmatter of every rendered skill under <target>/.opencode/skills/ using the
 // Go-native schema.ValidateSkillFrontmatter (no python/JS shell-out). A skill
 // whose SKILL.md is missing or has invalid frontmatter is a FAIL — a broken
@@ -1369,4 +1382,288 @@ func autoGateLeafHasModelAndEndpoint(leaves []any) bool {
 		return true
 	}
 	return false
+}
+
+// autoGateProtectedFile names one of the NEVER-COMMIT auto-gate config paths the
+// gitignore doctor check probes. class is "llm" (secrets-adjacent — may carry a
+// literal apiKey, eligible for the D6 credential-incident path) or "local" (the
+// gitignored `.local.json` override companion convention — never secrets-adjacent).
+// The COMMITTABLE base auto-gate-config.json is intentionally NOT a protected
+// path: it is the optionally-committable shared base (v0.10.0 rationale + the
+// seed .gitignore comment), so its presence counts toward applicability (see
+// autoGateApplicabilityFiles) but it is exempt from breach detection.
+type autoGateProtectedFile struct {
+	rel   string // repo-relative, forward-slash path
+	class string // "llm" | "local"
+}
+
+// autoGateProtectedFiles is the exhaustive set the check probes for tracked /
+// un-ignored / non-portably-protected state. It is the union of the two
+// gitignore-rule concerns in the seed: the secrets-adjacent LLM file (bare-name
+// rule) and the local-companion convention (scoped wildcard rule). auto-gate is
+// the first consumer of both, so the set is named for it; future secrets-adjacent
+// repo-configs files should be added here.
+var autoGateProtectedFiles = []autoGateProtectedFile{
+	{rel: ".opencode/repo-configs/auto-gate-llm.json", class: "llm"},
+	{rel: ".opencode/repo-configs/auto-gate-config.local.json", class: "local"},
+	{rel: ".opencode/repo-configs/auto-gate-llm.local.json", class: "llm"},
+}
+
+// autoGateApplicabilityFiles is the broader set whose PRESENCE triggers the
+// check even when the overlay is unselected (mirrors checkAutoGateConfig's
+// anyPresent trigger). It includes the COMMITTABLE base auto-gate-config.json
+// (which is NOT a protected path — its presence flips the check on, but it is
+// never itself a breach). User-level configs under <userConfigDir>/vh-agent-harness/
+// are deliberately out of scope: they are not in the repo and cannot be staged.
+var autoGateApplicabilityFiles = []string{
+	".opencode/repo-configs/auto-gate-config.json",
+	".opencode/repo-configs/auto-gate-config.local.json",
+	".opencode/repo-configs/auto-gate-llm.json",
+	".opencode/repo-configs/auto-gate-llm.local.json",
+}
+
+// checkAutoGateGitignored is the 9th doctor check. It closes the adopter
+// `.gitignore`/doctor gap around the two auto-gate file classes the dogfood repo
+// carries but no adopter gets automatically: the secrets-adjacent LLM config
+// (auto-gate-llm.json, which can hold a literal apiKey) and the per-developer
+// local-companion convention (*.local.json). The seed .gitignore covers them, but
+// .gitignore is project_owned (seeded on greenfield, PRESERVED on update), so an
+// adopter that installed before the seed fix — or hand-edited .gitignore — can
+// silently commit a never-commit file or, worse, a tracked LLM credential.
+//
+// APPLICABILITY (D1): non-SKIP when (overlay selected) OR (any relevant config
+// file exists). Otherwise SKIP — the same inert-unless-present discipline as
+// checkAutoGateConfig (v0.7.0), so core-only and non-overlay repos are silent.
+// Overlay-presence is detected via activeOverlays(target) — the same signal the
+// shape check uses (there is no separate plugin-presence probe), which is the
+// most consistent choice and avoids a second detection path.
+//
+// THREE STATE CLASSES:
+//   - readiness / portability → WARN (D2 overlay-in-use + no rule yet;
+//     D5 protected only via a non-portable global core.excludesFile);
+//   - active never-commit breach → FAIL (D3 file present + NOT ignored;
+//     D4 file TRACKED by git even though an ignore rule now matches);
+//   - credential incident → FAIL + rotate (D6 tracked llm file with a non-empty
+//     literal apiKey).
+//
+// Effective git behavior (not textual line presence) determines protection, so
+// the check shells to `git check-ignore -v` (authoritative resolver). Tracked
+// state is tested SEPARATELY via `git ls-files --error-unmatch` because an ignore
+// rule does NOT untrack an already-added file. SKIP mirrors checkRuntimeStateGitignored
+// when git is absent, the target is not a work tree, or an exit code is
+// indeterminate (never guess). WARN never blocks; FAIL can.
+//
+// D5 provenance: `git check-ignore -v` names the source file that contributed the
+// match. A repo-relative .gitignore is portable (shared via checkout); an absolute
+// path (global core.excludesFile) or .git/info/exclude (per-repo, not shared) is
+// non-portable. When attribution is empty/unrecognized the source is treated as
+// portable to avoid mislabeling (D5: SKIP-that-sub-classification over a false
+// claim).
+//
+// D6 SAFETY: the literal-key detector reads ONLY enough to distinguish a
+// non-empty literal apiKey from an apiKeyEnv-backed config. It returns a BOOLEAN
+// ONLY — the key value is never stored in a string that reaches any output, never
+// logged, never serialized, never interpolated into an error/detail string. If
+// reading fails the detector returns false (the tracked-state FAIL under D4 still
+// applies; only the rotate guidance is dropped). Output is restricted to the
+// finding + remediation text.
+//
+// RESIDUALS the harness CANNOT autonomously close (stated honestly in docs):
+//   - P10: external CI artifact collectors may ignore .gitignore (require a
+//     `vh-agent-harness doctor` pre-stage/pre-package CI gate — D7);
+//   - P12: an already-disclosed credential cannot be un-leaked by any ignore rule
+//     (rotation + possible history rewrite is an owner incident action).
+func checkAutoGateGitignored(target string) checkResult {
+	const name = "auto-gate-ignore"
+
+	// 1. Applicability (D1).
+	selected := slices.Contains(activeOverlays(target), autoGateOverlayName)
+	anyPresent := false
+	for _, rel := range autoGateApplicabilityFiles {
+		if isRegularFile(filepath.Join(target, filepath.FromSlash(rel))) {
+			anyPresent = true
+			break
+		}
+	}
+	if !selected && !anyPresent {
+		return checkResult{name: name, tier: tierSkip,
+			detail: "overlay not selected; no auto-gate config files present"}
+	}
+
+	// 2. Git availability + work-tree (mirror checkRuntimeStateGitignored).
+	if _, err := exec.LookPath("git"); err != nil {
+		return checkResult{name: name, tier: tierSkip, detail: "git not on PATH"}
+	}
+	wt, err := exec.Command("git", "-C", target, "rev-parse", "--is-inside-work-tree").Output()
+	if err != nil || strings.TrimSpace(string(wt)) != "true" {
+		return checkResult{name: name, tier: tierSkip, detail: "not a git work tree"}
+	}
+
+	// 3. Probe each never-commit protected path.
+	var fails, warns []string
+	for _, pf := range autoGateProtectedFiles {
+		abs := filepath.Join(target, filepath.FromSlash(pf.rel))
+		exists := isRegularFile(abs)
+
+		// 3a. Tracked state (D4/D6): a separate test because an ignore rule does
+		//     NOT untrack an already-added file.
+		tracked, indet := gitTracked(target, pf.rel)
+		if indet {
+			return checkResult{name: name, tier: tierSkip,
+				detail: fmt.Sprintf("git ls-files indeterminate for %s", pf.rel)}
+		}
+		if tracked {
+			if pf.class == "llm" && autoGateLlmHasLiteralKey(abs) {
+				// D6 credential incident: tracked llm file carrying a non-empty
+				// literal apiKey. The detector returned a boolean only; the key
+				// value is not in this message and is never emitted anywhere.
+				fails = append(fails, fmt.Sprintf(
+					"%s: TRACKED and carries a non-empty literal apiKey — rotate/revoke the credential now; adding a .gitignore rule does NOT fix prior exposure (D6)", pf.rel))
+			} else {
+				// D4: tracked but no literal key (or a non-llm local file). An
+				// ignore rule does NOT untrack; the file must leave the index.
+				fails = append(fails, fmt.Sprintf(
+					"%s: TRACKED by git — a .gitignore rule does NOT untrack an already-added file; remove from the index (git rm --cached %s) and commit (D4)", pf.rel, pf.rel))
+			}
+			continue
+		}
+
+		// 3b. Ignore state (D3/D2/D5): effective git behavior + source attribution.
+		ignored, src, indet := gitCheckIgnoreVerbose(target, pf.rel)
+		if indet {
+			return checkResult{name: name, tier: tierSkip,
+				detail: fmt.Sprintf("git check-ignore indeterminate for %s", pf.rel)}
+		}
+		if !ignored {
+			if exists {
+				// D3 active never-commit breach: on disk and would be staged.
+				fails = append(fails, fmt.Sprintf(
+					"%s: present and NOT gitignored — would be staged on the next git add; add a .gitignore rule (D3)", pf.rel))
+			} else {
+				// D2 readiness nudge: overlay in use, no file yet, but no rule.
+				// Not a secret incident — nothing is on disk to expose.
+				warns = append(warns, fmt.Sprintf(
+					"%s: no .gitignore rule yet (auto-gate in use) — add protection before creating the file (D2)", pf.rel))
+			}
+			continue
+		}
+		// Ignored — but is the protection portable (shared via checkout)?
+		if !portableIgnoreSource(src) {
+			warns = append(warns, fmt.Sprintf(
+				"%s: ignored only via non-portable source (%s) — not shared with teammates/CI; add a repo .gitignore rule (D5)", pf.rel, src))
+		}
+	}
+
+	// 4. Aggregate: any FAIL → tierFail; else any WARN → tierWarn; else PASS.
+	sort.Strings(fails)
+	sort.Strings(warns)
+	switch {
+	case len(fails) > 0:
+		return checkResult{name: name, tier: tierFail, detail: strings.Join(fails, "; ")}
+	case len(warns) > 0:
+		return checkResult{name: name, tier: tierWarn, detail: strings.Join(warns, "; ")}
+	default:
+		return checkResult{name: name, tier: tierPass,
+			detail: fmt.Sprintf("%d never-commit auto-gate path(s) portably protected", len(autoGateProtectedFiles))}
+	}
+}
+
+// gitTracked reports whether rel is tracked by git (present in the index).
+// Uses `git ls-files --error-unmatch`, which exits 0 when the path is tracked
+// and 1 when it is not. Any other exit code is indeterminate → the caller SKIPs
+// rather than guessing (an ignore rule does NOT untrack, so this is tested
+// separately from ignore state — D4).
+func gitTracked(target, rel string) (tracked, indeterminate bool) {
+	err := exec.Command("git", "-C", target, "ls-files", "--error-unmatch", rel).Run()
+	if err == nil {
+		return true, false
+	}
+	if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+		return false, false
+	}
+	return false, true
+}
+
+// gitCheckIgnoreVerbose reports whether rel is effectively ignored by git and,
+// when it is, the source file that contributed the match (for D5 portability
+// attribution). Uses `git check-ignore -v`, which exits 0 + prints
+// "<source>:<linenum>:<pattern>\t<path>" when ignored, and 1 when not. Any other
+// exit code is indeterminate → the caller SKIPs. Mirrors checkRuntimeStateGitignored's
+// exit-code discipline but with -v (verbose source) instead of -q (quiet).
+func gitCheckIgnoreVerbose(target, rel string) (ignored bool, source string, indeterminate bool) {
+	out, err := exec.Command("git", "-C", target, "check-ignore", "-v", rel).Output()
+	if err == nil {
+		return true, parseIgnoreSource(string(out)), false
+	}
+	if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+		return false, "", false
+	}
+	return false, "", true
+}
+
+// parseIgnoreSource extracts the ignore-source file path from the first line of
+// `git check-ignore -v` output. The verbose line format is
+//
+//	"<source>:<linenum>:<pattern>\t<path>"
+//
+// where <source> is the file that contributed the match: a repo-relative path
+// (.gitignore), the per-repo ".git/info/exclude", or an absolute path (a global
+// core.excludesFile). Returns "" when the format is unrecognized (the caller
+// treats that as portable to avoid mislabeling — D5).
+func parseIgnoreSource(s string) string {
+	line := s
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		line = s[:i]
+	}
+	if i := strings.IndexByte(line, ':'); i >= 0 {
+		return line[:i]
+	}
+	return ""
+}
+
+// portableIgnoreSource reports whether an ignore match from `source` is PORTABLE
+// (shared with teammates/CI via checkout). Non-portable sources are an absolute
+// path (a global core.excludesFile, possibly tilde-expanded) or the per-repo
+// ".git/info/exclude" (local to this clone, not shared). A repo-relative
+// .gitignore is portable. An empty/unrecognized source is treated as portable to
+// avoid mislabeling a real repo rule as non-portable (D5: SKIP-that-sub-class
+// over a false claim).
+func portableIgnoreSource(source string) bool {
+	if source == "" {
+		return true
+	}
+	if source == ".git/info/exclude" {
+		return false
+	}
+	if strings.HasPrefix(source, "/") || strings.HasPrefix(source, "~") {
+		return false // absolute / global core.excludesFile
+	}
+	return true // repo-relative .gitignore or similar
+}
+
+// autoGateLlmHasLiteralKey reports whether an auto-gate LLM config file carries a
+// non-empty literal apiKey (the literal-preferred form that puts the key VALUE on
+// disk). D6 SAFETY: this reads ONLY enough to distinguish a non-empty literal
+// apiKey from an apiKeyEnv-backed config. The boolean return is the ONLY thing
+// that escapes this function — the key value is never stored in a string that
+// reaches any output, never logged, never serialized, never interpolated into an
+// error or detail string. On ANY read/parse error it returns false (the
+// tracked-state FAIL under D4 still applies via the caller; only the rotate
+// guidance is dropped). If this guarantee could not be upheld, the correct action
+// would be to delete this helper and FAIL generically under D4 instead.
+func autoGateLlmHasLiteralKey(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var doc map[string]any
+	if json.Unmarshal(raw, &doc) != nil {
+		return false
+	}
+	v, ok := doc["apiKey"]
+	if !ok {
+		return false
+	}
+	s, ok := v.(string) // value bound only to this local; discarded with the bool
+	return ok && s != ""
 }

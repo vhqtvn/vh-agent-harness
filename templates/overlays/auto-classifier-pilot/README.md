@@ -452,6 +452,55 @@ Or using the env-var-name form for the endpoint (operator sets the URL via the
 > CI/containers, `apiKeyEnv` remains recommended — the key stays in the
 > environment only and never touches disk config.
 
+### Never-commit paths & CI gate
+
+Two auto-gate config file classes are **never committed** and the seed
+`.gitignore` ignores them, but `.gitignore` is `project_owned` (seeded on
+greenfield, preserved on update), so a repo that installed before the seed fix —
+or hand-edited `.gitignore` — can silently commit one:
+
+- `auto-gate-llm.json` — the secrets-adjacent LLM file (may hold a literal
+  `apiKey`);
+- `.opencode/repo-configs/*.local.json` — the per-developer local-companion
+  override convention (auto-gate is the first consumer).
+
+The `auto-gate-ignore` `vh-agent-harness doctor` check detects a tracked or
+un-ignored never-commit file (FAIL), flags a tracked `auto-gate-llm.json` with a
+non-empty literal `apiKey` as a credential incident (FAIL + rotate guidance — the
+key value is never emitted), and WARNs when protection is missing or only via a
+non-portable global `core.excludesFile`. It SKIPs when the overlay is unselected
+and no config files exist.
+
+**For existing repos — add these two lines to your root `.gitignore` if missing**
+(the seed carries them; this is the manual reconciliation path — there is
+intentionally no command that auto-edits your `.gitignore`, since that would
+violate the ownership contract):
+
+```gitignore
+.opencode/repo-configs/*.local.json
+.opencode/repo-configs/auto-gate-llm.json
+```
+
+If a never-commit file is already **tracked** by git, a `.gitignore` rule does NOT
+untrack it — remove it from the index first:
+
+```sh
+git rm --cached .opencode/repo-configs/auto-gate-llm.json
+git commit -m "chore: stop tracking secrets-adjacent auto-gate-llm.json"
+```
+
+**CI gate (required for overlay users).** Run `vh-agent-harness doctor` as a
+**pre-stage / pre-package CI gate** so a tracked or un-ignored never-commit file
+FAILs the pipeline before it lands. `.gitignore` alone is not a sufficient guard:
+
+- **External CI artifact collectors may ignore `.gitignore`** (e.g. publish the
+  whole work tree or copy ignored files into a release tarball). The doctor gate
+  is the harness-side guard; review your collector/export steps separately.
+- **A disclosed credential cannot be un-leaked by any ignore rule.** If a literal
+  `apiKey` was ever committed, tracked, or collected, rotate/revoke it at the
+  provider and consider history rewrite if it reached a shared ref. This is an
+  owner-driven incident action, not something the harness performs.
+
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
 | `modelEndpoint` | string | `""` | **Literal endpoint URL** for `live` mode (literal-preferred form). The FULL OpenAI-compatible chat-completions URL (e.g. `https://api.provider.example/v1/chat/completions`). Empty (the default) → falls through to `modelEndpointEnv`. If neither yields a value when `mode: "live"` → fail-closed deny. Ignored in other modes. |

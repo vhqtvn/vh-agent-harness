@@ -191,6 +191,35 @@ For the complete reference (all modes, fail-closed behavior, prompt
 composition, per-call gate flow), run
 `vh-agent-harness overlay docs auto-classifier-pilot`.
 
+#### CI gate & credential hygiene (never-commit paths)
+
+The auto-gate config surface has two never-commit file classes the seed
+`.gitignore` ignores: the secrets-adjacent LLM file (`auto-gate-llm.json`, which
+may hold a literal `apiKey`) and the per-developer local-companion convention
+(`.opencode/repo-configs/*.local.json`). `.gitignore` is `project_owned` (seeded
+on greenfield, preserved on update), so an adopter that installed before the seed
+fix — or hand-edited `.gitignore` — can silently commit one of these.
+
+The `auto-gate-ignore` doctor check detects that state (see Diagnostics &
+verification above), but two residuals the harness CANNOT autonomously close
+remain, and are stated honestly here:
+
+- **CI gate (required for overlay users).** Run `vh-agent-harness doctor` as a
+  **pre-stage / pre-package CI gate** so a tracked or un-ignored never-commit
+  auto-gate file FAILs the pipeline before it lands. External CI artifact
+  collectors may ignore `.gitignore` entirely (e.g. publish the whole work tree),
+  so `.gitignore` alone is not a sufficient guard — the doctor gate is.
+- **Disclosed credentials cannot be un-leaked.** If a literal `apiKey` was ever
+  committed, tracked, or collected, adding a `.gitignore` rule does NOT revoke or
+  erase prior exposure. Rotate/revoke the credential at the provider, then
+  consider history rewrite if the key reached a shared ref. This is an
+  owner-driven incident action, not something the harness performs.
+- **No reconciliation command.** There is intentionally no command that auto-edits
+  your `.gitignore`. If the `auto-gate-ignore` check reports a missing rule, the
+  owner-authorized path is a manual edit (or `git rm --cached <path>` for a tracked
+  file) — a silent rewrite of an operator-owned file would violate the ownership
+  contract. The two seed lines are documented in the overlay README for paste.
+
 #### `.local.json` repo-config override convention
 
 Layered config consumers under `.opencode/repo-configs/` follow a shared
@@ -579,12 +608,20 @@ export default function transform({ context }) {
 ### Diagnostics & verification
 
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
-  overlay-perm, environment, config-refs, gitignore, auto-classifier, skills). The
-  `auto-classifier` check lints the shape (field set + types + enums) of the
-  auto-classifier-pilot overlay's config files when present — a present-but-invalid
-  `auto-gate-config.json` / `auto-gate-llm.json` FAILs; absent configs are never
-  failures (defaults apply). The `skills` check validates every rendered skill's
-  SKILL.md frontmatter (Go-native; no python). `vh-agent-harness diff` shows drift vs. the corpus.
+  overlay-perm, environment, config-refs, gitignore, auto-classifier,
+  auto-gate-ignore, skills). The `auto-classifier` check lints the shape (field
+  set + types + enums) of the auto-classifier-pilot overlay's config files when
+  present — a present-but-invalid `auto-gate-config.json` / `auto-gate-llm.json`
+  FAILs; absent configs are never failures (defaults apply). The `auto-gate-ignore`
+  check FAILs when a never-commit auto-gate file (`auto-gate-llm.json`,
+  `*.local.json`) is tracked by git (an ignore rule does NOT untrack) or present
+  but not gitignored (would be staged on the next `git add`); FAILs with rotate
+  guidance when a tracked `auto-gate-llm.json` carries a non-empty literal
+  `apiKey` (a credential incident — the key value is never emitted, only the
+  finding); WARNs when protection is missing (overlay in use, no rule yet) or
+  only via a non-portable global `core.excludesFile`; and SKIPs when the overlay
+  is unselected and no config files exist. The `skills` check validates every
+  rendered skill's SKILL.md frontmatter (Go-native; no python). `vh-agent-harness diff` shows drift vs. the corpus.
 - **Inspect / validate skills:** `vh-agent-harness skill list` prints every skill
   (core, overlay-pack, and rendered) with its source, whether it is rendered to
   `.opencode/skills/`, and whether its SKILL.md frontmatter is valid.
