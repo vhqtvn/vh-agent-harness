@@ -6,6 +6,7 @@ import {
     buildRepetitionHint,
     normalizeCommandIdentity,
 } from "./coordination-hints-lib.js";
+import { server } from "../plugins/coordination-hints.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -125,8 +126,80 @@ function verifyRepetitionHints() {
     console.log("repetition verification: ok");
 }
 
-function main() {
+// Mechanical proof of the publish-before-await Anti-spam discipline (the F1
+// fix from commit 73cdd89). verifyRepetitionHints() above mirrors the plugin's
+// counting + dedup logic but is structurally blind to the TEMPORAL ordering of
+// `seen.add()` vs `await showHintToast()`: a refactor that moves the
+// reservation after the await would reintroduce the duplicate-toast race and
+// still pass the pure-predicate coverage. This case instantiates the real
+// plugin with a mock client whose `showToast` suspends on a manually-resolved
+// deferred, so two `command.executed` events interleave deterministically
+// across the await point with no timers.
+async function verifyAsyncReentrancy() {
+    // Counting mock: every `showToast` call records its payload, then suspends
+    // on a shared manual deferred until `release()` resolves it. This pins the
+    // first threshold-crossing event at the await point so the re-entrant rival
+    // re-enters a handler that — under the regression — has NOT yet published
+    // its reservation, and so fires a second toast.
+    const makeCountingClient = () => {
+        const calls = [];
+        let releaseToast;
+        const pending = new Promise((resolve) => {
+            releaseToast = resolve;
+        });
+        const client = {
+            tui: {
+                showToast: async (payload) => {
+                    calls.push(payload);
+                    await pending;
+                },
+            },
+        };
+        return { client, calls, release: () => releaseToast() };
+    };
+
+    const { client, calls, release } = makeCountingClient();
+    const handler = (await server({ client, directory: "/sandbox" })).event;
+
+    // Distinct sessionID isolates this case from the module-global maps.
+    const SID = "async-race-cmd";
+    // Four file paths that all normalize to ONE identity ("pytest <path>"), so
+    // counts accumulate across them: events 1..2 stay under the threshold
+    // (sync early return), event 3 crosses it and suspends at the toast await,
+    // and event 4 is the re-entrant rival that must hit the dedup short-circuit.
+    const ev = (args) => ({
+        event: {
+            type: "command.executed",
+            properties: { sessionID: SID, name: "pytest", arguments: args },
+        },
+    });
+
+    await handler(ev("tests/unit/a.py")); // count 1 -> no hint, sync return
+    await handler(ev("tests/unit/b.py")); // count 2 -> no hint, sync return
+    const p3 = handler(ev("tests/unit/c.py")); // count 3 -> hint -> SUSPENDS at await
+    const p4 = handler(ev("tests/unit/d.py")); // count 4 -> must dedup (key reserved by p3)
+    release(); // resolve the suspended toast RPC
+    await Promise.all([p3, p4]);
+
+    assert(
+        calls.length === 1,
+        `command.executed re-entrancy must fire exactly one toast; got ${calls.length}`,
+    );
+
+    // Hygiene: clear this session's entries from the module-global maps.
+    await handler({
+        event: {
+            type: "session.deleted",
+            properties: { info: { id: SID } },
+        },
+    });
+
+    console.log("async re-entrancy verification: ok");
+}
+
+async function main() {
     verifyRepetitionHints();
+    await verifyAsyncReentrancy();
     ensureDir(TMP_ROOT);
     const sandbox = fs.mkdtempSync(
         path.join(TMP_ROOT, "verify-coordination-hints-"),
@@ -217,7 +290,7 @@ function main() {
 }
 
 try {
-    main();
+    await main();
 } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
