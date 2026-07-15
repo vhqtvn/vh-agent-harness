@@ -145,6 +145,8 @@ Do not promote a note just because it was useful once.
 
 A memory file should enter context only if it changes the next action or prevents a repeated mistake.
 
+This mitigates **behavioral state decay** — decision-relevant state that is still technically in context but has drifted out of the agent's effective attention (compaction and context growth let it stop influencing the next decision). Keeping `brief.md` / `next-slice.md` eligible and requiring explicit invocation are the response; the term names the failure mode the discipline already defends against. No new mechanism is added.
+
 If it is merely useful background, keep it retrievable instead of auto-loaded.
 
 ## Typed records and budgeted injection
@@ -184,5 +186,6 @@ Injection rules — memory is a nicety, not a dependency:
 - Never insert between a `tool_use` and its `tool_result`.
 - Carry each record's `source_ref`; provenance must stay traceable.
 - Read misses and store failures are "no memory this turn," never fatal.
+- Silence is the default outcome, not a failure: a selection that surfaces nothing worth injecting is the expected case (the write path and the read/injection path are already separate), not an error — inject only when a recalled item would change the next action (Anti-spam rule above).
 - Inject by explicit invocation at session-start, handoff, or checkpoint — not
   always-on. This re-affirms the Anti-spam rule above.
