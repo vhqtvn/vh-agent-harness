@@ -11,9 +11,6 @@ It exists to answer a narrow question:
 
 It does not replace the repo's existing state systems.
 
-> **Reading order for new readers:** Canonical State Map (where each kind of
-> state lives) → Task Modes (short/medium/long routing) → Default Flow.
-
 For durable option comparison and background design rationale, see
 [`researches/decisions/2026-04-29-coordination-control-plane-options.md`](../../researches/decisions/2026-04-29-coordination-control-plane-options.md).
 
