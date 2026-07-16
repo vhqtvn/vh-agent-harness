@@ -609,7 +609,7 @@ export default function transform({ context }) {
 
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   overlay-perm, environment, config-refs, gitignore, auto-classifier,
-  auto-gate-ignore, skills). The `auto-classifier` check lints the shape (field
+  auto-gate-ignore, skills, subagent-depth). The `auto-classifier` check lints the shape (field
   set + types + enums) of the auto-classifier-pilot overlay's config files when
   present — a present-but-invalid `auto-gate-config.json` / `auto-gate-llm.json`
   FAILs; absent configs are never failures (defaults apply). The `auto-gate-ignore`
@@ -621,7 +621,13 @@ export default function transform({ context }) {
   finding); WARNs when protection is missing (overlay in use, no rule yet) or
   only via a non-portable global `core.excludesFile`; and SKIPs when the overlay
   is unselected and no config files exist. The `skills` check validates every
-  rendered skill's SKILL.md frontmatter (Go-native; no python). `vh-agent-harness diff` shows drift vs. the corpus.
+  rendered skill's SKILL.md frontmatter (Go-native; no python). The
+  `subagent-depth` check resolves the EFFECTIVE merged OpenCode `subagent_depth`
+  across project + user/global configs (OpenCode precedence: project overrides
+  global) and WARNs when it is unset or below the minimum this harness's
+  multi-level delegation needs (`subagent_depth` defaults to 1, which breaks
+  coordination→build→committer and the solution-brief chain); a user-level
+  override is honored and never false-flagged missing. `vh-agent-harness diff` shows drift vs. the corpus.
 - **Inspect / validate skills:** `vh-agent-harness skill list` prints every skill
   (core, overlay-pack, and rendered) with its source, whether it is rendered to
   `.opencode/skills/`, and whether its SKILL.md frontmatter is valid.

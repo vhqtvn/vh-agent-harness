@@ -1215,3 +1215,311 @@ func TestRenderedSkillNamesUnchangedForMissing(t *testing.T) {
 		t.Errorf("renderedSkillNames must NOT include ghost-skill (no SKILL.md) — skill list behavior is intentionally unchanged; got %v", got)
 	}
 }
+
+// --- subagent-depth effective-value check (checkSubagentDepth) ---
+//
+// These pin the doctor subagent-depth check (11th check). The check resolves the
+// EFFECTIVE merged OpenCode `subagent_depth` across project + user/global configs
+// so a user-level override (the operator's documented workaround for the new
+// OpenCode subagent_depth default of 1) is HONORED and never false-flagged
+// missing/wrong. OpenCode precedence is project overrides global, so the check
+// reads the project file first and falls back to user/global only when the
+// project file is absent or lacks the key. The required minimum
+// (requiredSubagentDepth) is derived from the harness's deepest delegation chain
+// (coordination -> researcher -> debate -> planner -> build -> committer).
+
+// writeUserOpencodeConfig writes a user-level opencode config file under an XDG
+// root (isolateXDG's return value). basename selects opencode.json / .jsonc,
+// resolved by os.UserConfigDir() as <xdg>/opencode/<basename>.
+func writeUserOpencodeConfig(t *testing.T, xdgRoot, basename, body string) {
+	t.Helper()
+	dir := filepath.Join(xdgRoot, "opencode")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, basename), []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", basename, err)
+	}
+}
+
+// TestSubagentDepth_PassProjectSufficient: a project opencode.jsonc setting a
+// sufficient subagent_depth -> PASS naming the project source.
+func TestSubagentDepth_PassProjectSufficient(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeOpencodeJSONC(t, dir, `{"subagent_depth": 10}`)
+
+	r := checkSubagentDepth(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS when project sets a sufficient depth, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "project opencode.jsonc") {
+		t.Errorf("PASS detail should name the project source; got %q", r.detail)
+	}
+}
+
+// TestSubagentDepth_PassUserLevelOnlyProjectKeyAbsent: the OPERATOR'S EXACT
+// SCENARIO and the core acceptance test. The project opencode.jsonc is PRESENT
+// but does NOT carry subagent_depth (this is what the harness-managed
+// opencode.jsonc looks like — the key is deliberately kept out of the managed
+// template so a user-level choice is not overridden). The user-level opencode.json
+// carries subagent_depth: 10. Must PASS naming the USER-level source — never a
+// missing/wrong warning. This is the property the operator named: "the doctor
+// should check all sources, so don't report wrong/missing value when it's
+// already in user config."
+func TestSubagentDepth_PassUserLevelOnlyProjectKeyAbsent(t *testing.T) {
+	dir := t.TempDir()
+	xdg := isolateXDG(t)
+	// Project opencode.jsonc present but WITHOUT the key (the managed shape).
+	writeOpencodeJSONC(t, dir, `{"$schema":"https://opencode.ai/config.json","agent":{}}`)
+	writeUserOpencodeConfig(t, xdg, "opencode.json", `{"subagent_depth": 10}`)
+
+	r := checkSubagentDepth(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS when ONLY user-level sets a sufficient depth (project key absent), got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "user") {
+		t.Errorf("PASS detail should name the user-level source; got %q", r.detail)
+	}
+}
+
+// TestSubagentDepth_PassUserLevelOnlyProjectAbsent: a variant of the operator's
+// scenario where the project opencode.jsonc is ENTIRELY ABSENT (not just key
+// absent). An absent project file is NOT a skip — the check keeps walking
+// user/global candidates so a user-level override still resolves and PASSES.
+func TestSubagentDepth_PassUserLevelOnlyProjectAbsent(t *testing.T) {
+	dir := t.TempDir()
+	xdg := isolateXDG(t)
+	// No project opencode.jsonc written at all.
+	writeUserOpencodeConfig(t, xdg, "opencode.json", `{"subagent_depth": 10}`)
+
+	r := checkSubagentDepth(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS when ONLY user-level sets a sufficient depth (project absent), got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "user") {
+		t.Errorf("PASS detail should name the user-level source; got %q", r.detail)
+	}
+}
+
+// TestSubagentDepth_PassProjectOverridesUser: OpenCode precedence is project
+// overrides global. A project setting a sufficient value must win over a LOWER
+// user value and PASS naming the PROJECT source (not the user source).
+func TestSubagentDepth_PassProjectOverridesUser(t *testing.T) {
+	dir := t.TempDir()
+	xdg := isolateXDG(t)
+	writeOpencodeJSONC(t, dir, `{"subagent_depth": 10}`)
+	writeUserOpencodeConfig(t, xdg, "opencode.json", `{"subagent_depth": 1}`)
+
+	r := checkSubagentDepth(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS when project overrides a lower user value, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "project opencode.jsonc") {
+		t.Errorf("PASS detail should name the PROJECT source (project wins); got %q", r.detail)
+	}
+}
+
+// TestSubagentDepth_WarnNothingSet: subagent_depth not set in ANY config ->
+// OpenCode defaults to 1 -> WARN (1 breaks multi-level delegation). This is the
+// fresh-checkout state, which must WARN (not FAIL) so doctor stays HEALTHY.
+func TestSubagentDepth_WarnNothingSet(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	// No project file, no user file — nothing anywhere.
+
+	r := checkSubagentDepth(dir)
+	if r.tier != tierWarn {
+		t.Fatalf("want WARN when nothing is set anywhere (effective default 1), got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "not set") {
+		t.Errorf("WARN detail should state the value is not set; got %q", r.detail)
+	}
+}
+
+// TestSubagentDepth_WarnBelowMinimum: a present value below the required minimum
+// -> WARN naming the source + the required depth. (Below-minimum is WARN, not
+// FAIL, so a brand-new clone with a deliberately low value does not go UNHEALTHY.)
+func TestSubagentDepth_WarnBelowMinimum(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeOpencodeJSONC(t, dir, `{"subagent_depth": 2}`)
+
+	r := checkSubagentDepth(dir)
+	if r.tier != tierWarn {
+		t.Fatalf("want WARN when effective depth < required minimum, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "below") {
+		t.Errorf("WARN detail should state the value is below the minimum; got %q", r.detail)
+	}
+}
+
+// TestSubagentDepth_WarnWrongType: a present `subagent_depth` of the wrong type
+// (a string instead of a number) -> WARN naming the file + field. The value is
+// unreadable so OpenCode falls back to its default, which is insufficient.
+func TestSubagentDepth_WarnWrongType(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeOpencodeJSONC(t, dir, `{"subagent_depth": "10"}`) // string, not number
+
+	r := checkSubagentDepth(dir)
+	if r.tier != tierWarn {
+		t.Fatalf("want WARN when subagent_depth is the wrong type, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "subagent_depth") {
+		t.Errorf("WARN detail should name the field; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "want number") {
+		t.Errorf("WARN detail should state the expected type; got %q", r.detail)
+	}
+}
+
+// TestSubagentDepth_SkipProjectUnparseable: a present-but-unparseable project
+// opencode.jsonc -> SKIP. config-refs and managed-drift already own that
+// surface, so this check must not double-report a content problem it does not
+// own. (An unparseable NON-project file is silently continued past, not SKIPped.)
+func TestSubagentDepth_SkipProjectUnparseable(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	writeOpencodeJSONC(t, dir, `{ not valid json`) // corrupt
+
+	r := checkSubagentDepth(dir)
+	if r.tier != tierSkip {
+		t.Fatalf("want SKIP when project opencode.jsonc unparseable, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestSubagentDepth_PassHomeRootAlternate: the alternate global location
+// ~/<.opencode.json> (probed after the XDG opencode/opencode.json variants)
+// contributes the effective value when no higher-precedence file carries the
+// key. Overrides HOME so os.UserHomeDir() resolves to a temp; isolates XDG so
+// no XDG file interferes. Must PASS naming the user-level source.
+func TestSubagentDepth_PassHomeRootAlternate(t *testing.T) {
+	dir := t.TempDir()
+	xdg := isolateXDG(t) // XDG dir exists but holds NO opencode file.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// No project file; no XDG opencode file; home-root .opencode.json carries the key.
+	homeFile := filepath.Join(home, ".opencode.json")
+	if err := os.WriteFile(homeFile, []byte(`{"subagent_depth": 10}`), 0o644); err != nil {
+		t.Fatalf("write %s: %v", homeFile, err)
+	}
+	// Touch the XDG root so the unused-variable lint on xdg does not trip in any
+	// future toolchain; isolateXDG already pointed UserConfigDir() here.
+	_ = xdg
+
+	r := checkSubagentDepth(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS when ~/<.opencode.json> carries a sufficient depth, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "user") {
+		t.Errorf("PASS detail should name the user-level source; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, ".opencode.json") {
+		t.Errorf("PASS detail should name the home-root file; got %q", r.detail)
+	}
+}
+
+// TestSubagentDepth_GlobalJSONCBeatsJSON: F1 — OpenCode merges config at each
+// precedence level with later-merge-wins (config.json -> opencode.json ->
+// opencode.jsonc), so when a level's .json AND .jsonc BOTH carry subagent_depth
+// the .jsonc value is effective. Here BOTH global (XDG) opencode.json
+// (subagent_depth=10) and opencode.jsonc (subagent_depth=1) exist; doctor must
+// report effective=1 (the .jsonc value), sourced from the .jsonc path, and tier
+// accordingly (1 < requiredSubagentDepth -> WARN). Before the F1 fix the flat
+// first-present-wins candidate list tried .json before .jsonc at the global
+// level and wrongly returned 10.
+func TestSubagentDepth_GlobalJSONCBeatsJSON(t *testing.T) {
+	dir := t.TempDir()
+	xdg := isolateXDG(t)
+	writeUserOpencodeConfig(t, xdg, "opencode.json", `{"subagent_depth": 10}`)
+	writeUserOpencodeConfig(t, xdg, "opencode.jsonc", `{"subagent_depth": 1}`)
+
+	r := checkSubagentDepth(dir)
+	if r.tier != tierWarn {
+		t.Fatalf("want WARN when effective (jsonc) value 1 is below the minimum, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "subagent_depth=1") {
+		t.Errorf("effective value should be the .jsonc value 1 (.jsonc beats .json within a level); got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "opencode.jsonc") {
+		t.Errorf("source should name the .jsonc path (.jsonc wins within the level); got %q", r.detail)
+	}
+}
+
+// TestSubagentDepth_GlobalJSONCBeatsJSON_Symmetric: F1 symmetric direction —
+// .jsonc carries the sufficient value (10) and .json carries the low value (1).
+// Effective must be 10 (the .jsonc value) -> PASS naming the .jsonc source.
+func TestSubagentDepth_GlobalJSONCBeatsJSON_Symmetric(t *testing.T) {
+	dir := t.TempDir()
+	xdg := isolateXDG(t)
+	writeUserOpencodeConfig(t, xdg, "opencode.json", `{"subagent_depth": 1}`)
+	writeUserOpencodeConfig(t, xdg, "opencode.jsonc", `{"subagent_depth": 10}`)
+
+	r := checkSubagentDepth(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS when effective (jsonc) value 10 is sufficient, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "subagent_depth=10") {
+		t.Errorf("effective value should be the .jsonc value 10; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "opencode.jsonc") {
+		t.Errorf("source should name the .jsonc path; got %q", r.detail)
+	}
+}
+
+// TestSubagentDepth_JSONCFallbackPreservesSchemaURL_Project: F2 — the JSONC
+// fallback in parseOpencodeConfigDoc must be STRING-AWARE so the `//` inside the
+// standard "$schema": "https://opencode.ai/config.json" URL is NOT stripped as a
+// line comment. The fixture combines (a) the real $schema URL, (b) a genuine //
+// line comment elsewhere, and (c) a trailing comma — strict JSON fails, so the
+// fallback runs. doctor must read subagent_depth (PASS), not SKIP. Before the F2
+// fix the non-string-aware regex strip corrupted the URL and the check wrongly
+// SKIPped (config-refs/managed-drift own that surface).
+func TestSubagentDepth_JSONCFallbackPreservesSchemaURL_Project(t *testing.T) {
+	dir := t.TempDir()
+	isolateXDG(t)
+	body := `{
+  "$schema": "https://opencode.ai/config.json",
+  // a genuine line comment elsewhere
+  "subagent_depth": 10,
+  "agent": {},
+}`
+	writeOpencodeJSONC(t, dir, body)
+
+	r := checkSubagentDepth(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS when a JSONC project config with the $schema URL sets a sufficient depth, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "subagent_depth=10") {
+		t.Errorf("effective value should be 10 (fallback must parse past URL + comment + trailing comma); got %q", r.detail)
+	}
+}
+
+// TestSubagentDepth_JSONCFallbackPreservesSchemaURL_Global: F2 — the same
+// string-aware JSONC fallback must also work on the GLOBAL (user-level) path.
+// The fixture (real $schema URL + a // line comment + a trailing comma) lives in
+// the XDG user config; doctor must read subagent_depth (PASS naming the user
+// source), not SKIP.
+func TestSubagentDepth_JSONCFallbackPreservesSchemaURL_Global(t *testing.T) {
+	dir := t.TempDir()
+	xdg := isolateXDG(t)
+	body := `{
+  "$schema": "https://opencode.ai/config.json",
+  // a genuine line comment elsewhere
+  "subagent_depth": 10,
+  "agent": {},
+}`
+	writeUserOpencodeConfig(t, xdg, "opencode.jsonc", body)
+
+	r := checkSubagentDepth(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS when a JSONC user config with the $schema URL sets a sufficient depth, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "subagent_depth=10") {
+		t.Errorf("effective value should be 10; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "user") {
+		t.Errorf("PASS detail should name the user-level source; got %q", r.detail)
+	}
+}

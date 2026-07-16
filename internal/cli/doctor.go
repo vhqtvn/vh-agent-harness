@@ -59,6 +59,7 @@ var doctorCmd = &cobra.Command{
   auto-classifier auto-classifier-pilot overlay config shapes valid      FAIL if present-but-invalid
   auto-gate-ignore never-commit auto-gate paths tracked/ignored properly  FAIL if tracked/exposed/literal-key; WARN if missing/non-portable
   skills          every rendered skill's SKILL.md frontmatter valid       FAIL if invalid
+  subagent-depth  effective merged subagent_depth >= delegation minimum  WARN if unset/too low
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -189,6 +190,21 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	fmt.Fprintln(out, "    "+sr.String())
 	applyTier(sr.tier, &problems, &warns)
 
+	// 11. Subagent-depth (OpenCode's subagent nesting cap). OpenCode's new
+	//     `subagent_depth` config defaults to 1, which breaks this harness's
+	//     multi-level delegation (coordination -> build -> committer; the
+	//     solution-brief chain coordination -> researcher -> debate -> planner
+	//     -> build -> committer). This read-only check resolves the EFFECTIVE
+	//     merged value across project + user/global configs so a user-level
+	//     override is honored and never false-flagged missing. WARNs (not
+	//     FAILs) when unset/below the required minimum — consistent with the
+	//     empty-agent-model WARN, since this is an opt-in environment concern
+	//     and FAIL would mark every fresh checkout UNHEALTHY.
+	fmt.Fprintln(out, "  subagent-depth:")
+	sdr := checkSubagentDepth(abs)
+	fmt.Fprintln(out, "    "+sdr.String())
+	applyTier(sdr.tier, &problems, &warns)
+
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)
 	if problems > 0 {
@@ -256,6 +272,310 @@ func checkSkillValidity(target string) checkResult {
 	}
 	return checkResult{name: name, tier: tierPass,
 		detail: fmt.Sprintf("%d rendered skill(s) valid", len(names))}
+}
+
+// requiredSubagentDepth is the minimum OpenCode `subagent_depth` this harness's
+// delegation model needs to function. OpenCode's `subagent_depth` config caps
+// how deeply a primary agent may nest subagents and defaults to 1 — at depth 1
+// a primary can launch ONE subagent, but that subagent cannot launch another,
+// which breaks every multi-level delegation path this harness relies on.
+//
+// The value is derived from the DEEPEST realistic delegation chain documented
+// in AGENTS.md ("OpenCode operating model") plus the solution-brief command
+// (`.opencode/commands/solution-brief.md`, which `agent: build` chains as
+// `researcher -> debate -> planner`):
+//
+//	coordination -> researcher -> debate -> planner -> build -> committer
+//
+// Counting every delegation edge in that end-to-end path (coordination spawns
+// the read-only researchers/debaters/planners, build runs the implementation,
+// build delegates the git mutation to committer) yields 6 levels. The shorter
+// everyday chain coordination -> build -> committer needs only 3, but doctor
+// checks harness-READINESS (not current usage), so the threshold must cover the
+// deepest documented chain the operator might invoke at any time. An operator
+// who sets `subagent_depth: 10` (the documented workaround) passes with 4
+// levels of headroom; a fresh checkout (default 1) or a too-low value is WARNed
+// — not FAILed — so doctor stays HEALTHY on a brand-new clone and merely nudges
+// the operator toward the documented fix.
+const requiredSubagentDepth = 6
+
+// parseOpencodeConfigDoc parses an opencode config body (opencode.json or
+// opencode.jsonc) into a generic map. It tries strict JSON FIRST (the common
+// shape for rendered opencode configs, which carry no comments) and only falls
+// back to the string-aware JSONC strip helper (stripJSONCNoise) when strict
+// parsing fails.
+//
+// The strict-first path is an optimization for the common strict-JSON opencode
+// config (the real harness opencode.jsonc is strict JSON with no comments); it
+// skips the scanner entirely on the happy path. The string-aware fallback
+// handles genuinely-JSONC opencode configs that carry real // line comments,
+// /* */ block comments, or trailing commas — WITHOUT corrupting string literals
+// such as the standard "$schema": "https://opencode.ai/config.json" URL (the
+// `//` inside the URL is preserved, not stripped as a line comment). The earlier
+// regex-based fallback (jsoncCommentRe + jsoncTrailingCommaRe) was not
+// string-aware and corrupted that URL, so it is no longer used here; those
+// regexes remain for the machine-generated permission-pack bodies parsed by
+// permissionPackAgentKeys (which carry no URL string literals). Returns the
+// parsed doc and true on success, nil and false on failure (the caller decides
+// SKIP-vs-continue per its contract).
+func parseOpencodeConfigDoc(raw []byte) (map[string]any, bool) {
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err == nil {
+		return doc, true
+	}
+	cleaned := stripJSONCNoise(raw)
+	if err := json.Unmarshal(cleaned, &doc); err == nil {
+		return doc, true
+	}
+	return nil, false
+}
+
+// stripJSONCNoise removes JSONC line (//…) and block (/*…*/) comments and
+// trailing commas from raw while PRESERVING the contents of JSON string
+// literals. It is the string-aware replacement for the naive regex strip
+// (jsoncCommentRe + jsoncTrailingCommaRe): those regexes are not string-aware,
+// so they strip the `//` inside a URL literal such as
+//
+//	"$schema": "https://opencode.ai/config.json"
+//
+// corrupting an otherwise-valid JSONC opencode config and making it look
+// unparseable (the caller then wrongly reports SKIP). This scanner walks the
+// bytes tracking in-string vs not, respecting escaped quotes (\"), and only
+// strips // line comments, /* */ block comments, and trailing commas (a ','
+// whose next non-whitespace structural char is '}' or ']') that appear OUTSIDE
+// string literals. Comment bytes become spaces and newlines are preserved so
+// json error line/column numbers stay faithful. Stdlib only.
+func stripJSONCNoise(raw []byte) []byte {
+	out := make([]byte, 0, len(raw))
+	inString := false
+	i := 0
+	n := len(raw)
+	for i < n {
+		c := raw[i]
+		if inString {
+			out = append(out, c)
+			if c == '\\' && i+1 < n {
+				// Copy the escaped char verbatim so \" \\ \/ \n … stay literal.
+				out = append(out, raw[i+1])
+				i += 2
+				continue
+			}
+			if c == '"' {
+				inString = false
+			}
+			i++
+			continue
+		}
+		// Outside a string literal.
+		switch {
+		case c == '"':
+			inString = true
+			out = append(out, c)
+			i++
+		case c == '/' && i+1 < n && raw[i+1] == '/':
+			// Line comment: blank until end of line (preserve the newline).
+			for i < n && raw[i] != '\n' {
+				out = append(out, ' ')
+				i++
+			}
+		case c == '/' && i+1 < n && raw[i+1] == '*':
+			// Block comment: blank through the closing */ (preserve newlines).
+			out = append(out, ' ', ' ')
+			i += 2
+			for i < n {
+				if raw[i] == '*' && i+1 < n && raw[i+1] == '/' {
+					out = append(out, ' ', ' ')
+					i += 2
+					break
+				}
+				if raw[i] == '\n' {
+					out = append(out, '\n')
+				} else {
+					out = append(out, ' ')
+				}
+				i++
+			}
+		case c == ',':
+			// Trailing comma only when the next non-whitespace structural char is
+			// '}' or ']' (a JSONC trailing comma); a real value separator is kept.
+			j := i + 1
+			for j < n && (raw[j] == ' ' || raw[j] == '\t' || raw[j] == '\n' || raw[j] == '\r') {
+				j++
+			}
+			if j < n && (raw[j] == '}' || raw[j] == ']') {
+				i++ // drop the comma; interstitial whitespace is emitted below
+			} else {
+				out = append(out, c)
+				i++
+			}
+		default:
+			out = append(out, c)
+			i++
+		}
+	}
+	return out
+}
+
+// checkSubagentDepth is the 11th doctor check. It validates that the EFFECTIVE
+// merged OpenCode `subagent_depth` is sufficient for this harness's multi-level
+// delegation model (see requiredSubagentDepth). OpenCode precedence is
+// global/user -> project (project overrides global), so the check reads the
+// PROJECT config first and falls back to USER/GLOBAL configs only when the
+// project file is absent or lacks the key — this is the critical correctness
+// property: a user-level override (the operator's documented workaround) is
+// HONORED and never false-flagged as missing/wrong.
+//
+// CONFIG SOURCES by level (each level's files listed in OpenCode merge order —
+// .json first, then .jsonc, so a later-merge-wins walk within the level yields
+// the .jsonc value when both carry the key):
+//   - project:   <target>/opencode.json, <target>/opencode.jsonc
+//     (the repo-root opencode.jsonc is this harness's managed project file)
+//   - global:    <userConfigDir>/opencode/opencode.json,
+//     <userConfigDir>/opencode/opencode.jsonc   ($XDG_CONFIG_HOME or ~/.config)
+//   - home-root: <userHomeDir>/.opencode.json   (single-file alternate global location)
+//
+// RESOLUTION MODEL: config files are grouped into PRECEDENCE LEVELS (project >
+// global > home-root). The FIRST level that contributes a top-level
+// `subagent_depth` wins; lower levels are reached only when every higher level
+// lacks the key. WITHIN a level, OpenCode merges the files it accepts with
+// later-merge-wins (config.json -> opencode.json -> opencode.jsonc), so when a
+// level's .json AND .jsonc BOTH carry the key the .jsonc value is effective
+// (not the .json value). This within-level .jsonc-beats-.json rule is the F1
+// fix; the cross-level project > global > home-root order matches OpenCode
+// (project files are read after global, so project wins) and is unchanged.
+//
+// User/global resolution mirrors checkAutoGateConfig: os.UserConfigDir() returns
+// $XDG_CONFIG_HOME (if non-empty) else $HOME/.config on Unix. All candidates go
+// through parseOpencodeConfigDoc (strict-JSON first, then a string-aware JSONC
+// strip so the standard "$schema": "https://opencode.ai/config.json" URL is not
+// corrupted), so a pure-JSON file is handled identically. `subagent_depth` is
+// read as a TOP-LEVEL number.
+//
+// TIERING (WARN, never FAIL — see requiredSubagentDepth rationale):
+//   - effective >= requiredSubagentDepth -> PASS, naming the effective value +
+//     which source (project/user) contributed it.
+//   - effective is the OpenCode default 1 (key absent everywhere) OR effective <
+//     requiredSubagentDepth -> WARN with the required depth + the exact key/file
+//     to set. WARN-not-FAIL mirrors checkConfigRefs's empty-model WARN: this is
+//     an opt-in environment concern, and FAIL would mark every fresh checkout
+//     UNHEALTHY.
+//   - project opencode.jsonc present but UNPARSEABLE -> SKIP (config-refs and
+//     managed-drift already own that surface; do not double-report). An ABSENT
+//     project file is NOT a skip — the check keeps walking user/global candidates
+//     so a user-level override still resolves.
+//   - a present file carrying `subagent_depth` of the wrong type (not a number)
+//     -> WARN naming the file + field.
+//
+// The check is READ-ONLY: it never mutates a config file and never shells out.
+func checkSubagentDepth(target string) checkResult {
+	const name = "subagent-depth"
+
+	// 1. Build the precedence LEVELS (project > global > home-root). Each level
+	//    lists its files in OpenCode's merge order — .json FIRST, .jsonc LAST —
+	//    so a later-merge-wins walk within the level yields the .jsonc value
+	//    when both carry the key (the F1 fix: within a level .jsonc beats .json).
+	//    isProjectJSONC marks the repo-root opencode.jsonc so an unparseable
+	//    instance SKIPs (config-refs/managed-drift own that surface) instead of
+	//    being silently skipped-and-continued like a broken user file.
+	type sdFile struct {
+		label          string // human-readable, names the path
+		path           string
+		isProjectJSONC bool
+	}
+	type sdLevel struct {
+		files []sdFile
+	}
+	var levels []sdLevel
+	levels = append(levels, sdLevel{
+		files: []sdFile{
+			{label: "project opencode.json", path: filepath.Join(target, "opencode.json")},
+			{label: "project opencode.jsonc", path: filepath.Join(target, "opencode.jsonc"), isProjectJSONC: true},
+		},
+	})
+	if userDir, err := os.UserConfigDir(); err == nil {
+		gDir := filepath.Join(userDir, "opencode")
+		levels = append(levels, sdLevel{
+			files: []sdFile{
+				{label: fmt.Sprintf("user config (%s)", filepath.Join(gDir, "opencode.json")), path: filepath.Join(gDir, "opencode.json")},
+				{label: fmt.Sprintf("user config (%s)", filepath.Join(gDir, "opencode.jsonc")), path: filepath.Join(gDir, "opencode.jsonc")},
+			},
+		})
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		hFile := filepath.Join(home, ".opencode.json")
+		levels = append(levels, sdLevel{
+			files: []sdFile{
+				{label: fmt.Sprintf("user config (%s)", hFile), path: hFile},
+			},
+		})
+	}
+
+	// 2. Walk levels in precedence order. For each level, merge its files per
+	//    OpenCode's later-merge-wins (.jsonc beats .json) and capture the LAST
+	//    file in merge order that carries a top-level `subagent_depth`. The
+	//    FIRST level that contributes the key wins; a lower level is reached
+	//    only when every higher level lacks it.
+	for _, lvl := range levels {
+		var haveKey bool
+		var value any
+		var source sdFile
+		anyPresent := false
+		for _, f := range lvl.files {
+			raw, rerr := os.ReadFile(f.path)
+			if rerr != nil {
+				continue // absent file at this level — does not contribute
+			}
+			anyPresent = true
+			doc, parsed := parseOpencodeConfigDoc(raw)
+			if !parsed {
+				if f.isProjectJSONC {
+					// The repo-root managed file is owned by config-refs +
+					// managed-drift; surface SKIP rather than double-reporting a
+					// content problem this check does not own.
+					return checkResult{name: name, tier: tierSkip,
+						detail: "project opencode.jsonc unparseable (config-refs/managed-drift own that surface)"}
+				}
+				// An unparseable non-project file is ignored by OpenCode too, so
+				// it cannot contribute an effective value — keep walking this
+				// level's remaining files.
+				continue
+			}
+			if v, ok := doc["subagent_depth"]; ok {
+				// Later merge wins: overwrite with each successive file that has
+				// the key, so a level's .jsonc beats its .json.
+				haveKey = true
+				value = v
+				source = f
+			}
+		}
+		if !anyPresent || !haveKey {
+			continue // level absent or key not contributed here — fall through
+		}
+		// Effective value resolved from this level; source names the winning file.
+		n, isNum := value.(float64)
+		if !isNum {
+			return checkResult{name: name, tier: tierWarn,
+				detail: fmt.Sprintf(
+					"subagent_depth in %s is %s (want number); set a whole number >= %d (e.g. \"subagent_depth\": %d)",
+					source.label, jsonTypeName(value), requiredSubagentDepth, requiredSubagentDepth)}
+		}
+		if n >= float64(requiredSubagentDepth) {
+			return checkResult{name: name, tier: tierPass,
+				detail: fmt.Sprintf(
+					"effective subagent_depth=%v from %s; sufficient for this harness's delegation model (>= %d)",
+					numberDisplay(value), source.label, requiredSubagentDepth)}
+		}
+		return checkResult{name: name, tier: tierWarn,
+			detail: fmt.Sprintf(
+				"effective subagent_depth=%v from %s is below %d — this harness needs >= %d nesting levels for multi-level delegation (coordination→build→committer; the solution-brief chain coordination→researcher→debate→planner→build→committer); set \"subagent_depth\": %d (or higher) in your opencode config",
+				numberDisplay(value), source.label, requiredSubagentDepth, requiredSubagentDepth, requiredSubagentDepth)}
+	}
+
+	// 3. Nothing set anywhere — effective is the OpenCode default 1.
+	return checkResult{name: name, tier: tierWarn,
+		detail: fmt.Sprintf(
+			"subagent_depth not set in any opencode config; OpenCode defaults to 1, which breaks this harness's multi-level delegation (needs >= %d) — set \"subagent_depth\": %d in your opencode config",
+			requiredSubagentDepth, requiredSubagentDepth)}
 }
 
 // checkSeamLineage reads the S1 lineage record. Absent => WARN (not seam-
