@@ -1596,3 +1596,92 @@ func TestSubagentDepth_JSONCFallbackPreservesSchemaURL_Global(t *testing.T) {
 		t.Errorf("PASS detail should name the user-level source; got %q", r.detail)
 	}
 }
+
+// TestParseOpencodeConfigDoc_JSONCFallback is a DIRECT table test for
+// parseOpencodeConfigDoc. The function is the JSON/JSONC parser behind
+// checkSubagentDepth; until now it was only exercised indirectly through that
+// check. These cases pin the four behaviors of the contract directly:
+//
+//   - strict-JSON happy path skips normalization entirely (the optimization for
+//     the common strict-JSON opencode.jsonc, which carries no comments);
+//   - JSONC with a // line comment, a /* */ block comment, and a trailing
+//     comma engages the string-aware fallback (internal/jsonc.Normalize) and
+//     still parses to the same logical document;
+//   - malformed input yields (nil, false): the function swallows its own parse
+//     error by design (the caller decides SKIP-vs-continue per its contract);
+//   - the // inside the standard "$schema" URL is preserved (not stripped as a
+//     line comment) when the fallback runs — direct coverage of the F2 property
+//     also pinned indirectly by TestSubagentDepth_JSONCFallbackPreservesSchemaURL_*.
+//
+// Mirrors the fixture discipline of TestPermissionPackAgentKeys_JSONCShapes:
+// each case is minimal and single-purpose.
+func TestParseOpencodeConfigDoc_JSONCFallback(t *testing.T) {
+	cases := []struct {
+		name      string
+		raw       string // written verbatim; no implicit trailing newline
+		wantOK    bool
+		wantKey   string // when wantOK, the key to assert in the parsed doc
+		wantValue any    // the expected value at wantKey
+	}{
+		{
+			name:      "strict JSON happy path skips normalization",
+			raw:       `{"subagent_depth": 7}`,
+			wantOK:    true,
+			wantKey:   "subagent_depth",
+			wantValue: float64(7),
+		},
+		{
+			name: "JSONC line and block comments and trailing comma",
+			raw: `{
+  /* block comment */
+  // line comment
+  "subagent_depth": 7,
+}`,
+			wantOK:    true,
+			wantKey:   "subagent_depth",
+			wantValue: float64(7),
+		},
+		{
+			name:   "malformed input returns nil false",
+			raw:    `{ not valid json`,
+			wantOK: false,
+		},
+		{
+			name: "JSONC fallback preserves schema URL",
+			// A // line comment forces the JSONC fallback; the // inside the
+			// standard "$schema" URL must survive the string-aware normalize.
+			raw: `{
+  "$schema": "https://opencode.ai/config.json",
+  // a genuine line comment elsewhere forces the fallback
+  "agent": {},
+}`,
+			wantOK:    true,
+			wantKey:   "$schema",
+			wantValue: "https://opencode.ai/config.json",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, ok := parseOpencodeConfigDoc([]byte(tc.raw))
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !tc.wantOK {
+				if doc != nil {
+					t.Errorf("doc = %v, want nil on parse failure", doc)
+				}
+				return
+			}
+			if doc == nil {
+				t.Fatalf("doc is nil despite ok=true")
+			}
+			got, present := doc[tc.wantKey]
+			if !present {
+				t.Fatalf("doc is missing expected key %q", tc.wantKey)
+			}
+			if got != tc.wantValue {
+				t.Errorf("doc[%q] = %v, want %v", tc.wantKey, got, tc.wantValue)
+			}
+		})
+	}
+}
