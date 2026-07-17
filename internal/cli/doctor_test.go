@@ -214,6 +214,79 @@ func TestOverlayPermissionState_SkipWhenNoOpencodeJSONC(t *testing.T) {
 	}
 }
 
+// TestPermissionPackAgentKeys_JSONCShapes exercises the JSONC parsing path of
+// permissionPackAgentKeys directly (independent of the full overlay-perm check).
+// It confirms the canonical internal/jsonc.Parse delegation handles every JSONC
+// shape a machine-generated pack may carry: // line comments, trailing commas, a
+// // comment at EOF with NO trailing newline (the one behavior improvement over
+// the old regex, which required \n to terminate a line comment and so corrupted
+// this shape), and a // inside a string value (a URL literal) which must be
+// preserved, not stripped. Each fixture declares exactly one agent so the
+// first-seen-order assertion is deterministic.
+func TestPermissionPackAgentKeys_JSONCShapes(t *testing.T) {
+	const pack = "myoverlay"
+	cases := []struct {
+		name string
+		body string // written verbatim; no implicit trailing newline
+	}{
+		{
+			name: "line comment",
+			body: `{
+  // a top-level line comment
+  "agents": {
+    "alpha": {}
+  }
+}`,
+		},
+		{
+			name: "trailing comma",
+			body: `{
+  "agents": {
+    "alpha": {},
+  }
+}`,
+		},
+		{
+			name: "line comment at EOF without newline",
+			// The pack body ends with a // comment and NO trailing newline. The old
+			// regex ((?s)//.*?\n) required a \n to terminate a line comment, so it
+			// left this comment in place and corrupted the parse. jsonc.Parse is
+			// string-aware and strips to EOF, so this now parses.
+			body: "{\n  \"agents\": {\n    \"alpha\": {}\n  }\n} // eof comment, no newline",
+		},
+		{
+			name: "double slash inside string value preserved",
+			// A // inside a string value (here a URL literal) is NOT a comment and
+			// must survive the strip; the pack parses and the agent key is returned.
+			// The old non-string-aware regex would truncate the URL mid-string and
+			// fail the parse.
+			body: `{
+  "agents": {
+    "alpha": { "url": "https://example.com/config.json" }
+  }
+}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writePermissionPack(t, dir, pack, tc.body)
+			packs := []overlayPackRef{{
+				name: pack,
+				path: filepath.Join(dir, ".vh-agent-harness", "overlays", pack, "permission-pack.jsonc"),
+			}}
+			keys, err := permissionPackAgentKeys(packs)
+			if err != nil {
+				t.Fatalf("permissionPackAgentKeys: unexpected error: %v", err)
+			}
+			want := []string{"alpha"}
+			if len(keys) != 1 || keys[0] != "alpha" {
+				t.Errorf("keys = %v, want %v", keys, want)
+			}
+		})
+	}
+}
+
 // --- auto-classifier config shape check (checkAutoGateConfig) ---
 //
 // These cases pin the SCHEMA ENVELOPE of the auto-classifier-pilot overlay's

@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	corpus "github.com/vhqtvn/vh-agent-harness"
+	"github.com/vhqtvn/vh-agent-harness/internal/jsonc"
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 	"github.com/vhqtvn/vh-agent-harness/internal/schema"
@@ -302,20 +303,16 @@ const requiredSubagentDepth = 6
 // parseOpencodeConfigDoc parses an opencode config body (opencode.json or
 // opencode.jsonc) into a generic map. It tries strict JSON FIRST (the common
 // shape for rendered opencode configs, which carry no comments) and only falls
-// back to the string-aware JSONC strip helper (stripJSONCNoise) when strict
-// parsing fails.
+// back to the canonical string-aware JSONC normalizer (internal/jsonc.Normalize)
+// when strict parsing fails.
 //
 // The strict-first path is an optimization for the common strict-JSON opencode
 // config (the real harness opencode.jsonc is strict JSON with no comments); it
-// skips the scanner entirely on the happy path. The string-aware fallback
+// skips normalization entirely on the happy path. The string-aware fallback
 // handles genuinely-JSONC opencode configs that carry real // line comments,
 // /* */ block comments, or trailing commas — WITHOUT corrupting string literals
 // such as the standard "$schema": "https://opencode.ai/config.json" URL (the
-// `//` inside the URL is preserved, not stripped as a line comment). The earlier
-// regex-based fallback (jsoncCommentRe + jsoncTrailingCommaRe) was not
-// string-aware and corrupted that URL, so it is no longer used here; those
-// regexes remain for the machine-generated permission-pack bodies parsed by
-// permissionPackAgentKeys (which carry no URL string literals). Returns the
+// `//` inside the URL is preserved, not stripped as a line comment). Returns the
 // parsed doc and true on success, nil and false on failure (the caller decides
 // SKIP-vs-continue per its contract).
 func parseOpencodeConfigDoc(raw []byte) (map[string]any, bool) {
@@ -323,97 +320,11 @@ func parseOpencodeConfigDoc(raw []byte) (map[string]any, bool) {
 	if err := json.Unmarshal(raw, &doc); err == nil {
 		return doc, true
 	}
-	cleaned := stripJSONCNoise(raw)
+	cleaned := jsonc.Normalize(raw)
 	if err := json.Unmarshal(cleaned, &doc); err == nil {
 		return doc, true
 	}
 	return nil, false
-}
-
-// stripJSONCNoise removes JSONC line (//…) and block (/*…*/) comments and
-// trailing commas from raw while PRESERVING the contents of JSON string
-// literals. It is the string-aware replacement for the naive regex strip
-// (jsoncCommentRe + jsoncTrailingCommaRe): those regexes are not string-aware,
-// so they strip the `//` inside a URL literal such as
-//
-//	"$schema": "https://opencode.ai/config.json"
-//
-// corrupting an otherwise-valid JSONC opencode config and making it look
-// unparseable (the caller then wrongly reports SKIP). This scanner walks the
-// bytes tracking in-string vs not, respecting escaped quotes (\"), and only
-// strips // line comments, /* */ block comments, and trailing commas (a ','
-// whose next non-whitespace structural char is '}' or ']') that appear OUTSIDE
-// string literals. Comment bytes become spaces and newlines are preserved so
-// json error line/column numbers stay faithful. Stdlib only.
-func stripJSONCNoise(raw []byte) []byte {
-	out := make([]byte, 0, len(raw))
-	inString := false
-	i := 0
-	n := len(raw)
-	for i < n {
-		c := raw[i]
-		if inString {
-			out = append(out, c)
-			if c == '\\' && i+1 < n {
-				// Copy the escaped char verbatim so \" \\ \/ \n … stay literal.
-				out = append(out, raw[i+1])
-				i += 2
-				continue
-			}
-			if c == '"' {
-				inString = false
-			}
-			i++
-			continue
-		}
-		// Outside a string literal.
-		switch {
-		case c == '"':
-			inString = true
-			out = append(out, c)
-			i++
-		case c == '/' && i+1 < n && raw[i+1] == '/':
-			// Line comment: blank until end of line (preserve the newline).
-			for i < n && raw[i] != '\n' {
-				out = append(out, ' ')
-				i++
-			}
-		case c == '/' && i+1 < n && raw[i+1] == '*':
-			// Block comment: blank through the closing */ (preserve newlines).
-			out = append(out, ' ', ' ')
-			i += 2
-			for i < n {
-				if raw[i] == '*' && i+1 < n && raw[i+1] == '/' {
-					out = append(out, ' ', ' ')
-					i += 2
-					break
-				}
-				if raw[i] == '\n' {
-					out = append(out, '\n')
-				} else {
-					out = append(out, ' ')
-				}
-				i++
-			}
-		case c == ',':
-			// Trailing comma only when the next non-whitespace structural char is
-			// '}' or ']' (a JSONC trailing comma); a real value separator is kept.
-			j := i + 1
-			for j < n && (raw[j] == ' ' || raw[j] == '\t' || raw[j] == '\n' || raw[j] == '\r') {
-				j++
-			}
-			if j < n && (raw[j] == '}' || raw[j] == ']') {
-				i++ // drop the comma; interstitial whitespace is emitted below
-			} else {
-				out = append(out, c)
-				i++
-			}
-		default:
-			out = append(out, c)
-			i++
-		}
-	}
-	return out
 }
 
 // checkSubagentDepth is the 11th doctor check. It validates that the EFFECTIVE
@@ -850,15 +761,6 @@ func checkManagedDrift(target string) checkResult {
 // re-run update.
 const overlayPermRecoveryCmd = "vh-agent-harness update"
 
-// jsoncCommentRe strips JSONC line (//…) and block (/*…*/) comments so a
-// permission-pack body can be parsed by encoding/json. It is sufficient for the
-// well-formed, machine-generated packs the seam ships; not a general JSONC parser.
-var jsoncCommentRe = regexp.MustCompile(`(?s)//.*?\n|/\*.*?\*/`)
-
-// jsoncTrailingCommaRe strips trailing commas before } and ] so a JSONC pack body
-// (which commonly ends list/map entries with a comma) parses as strict JSON.
-var jsoncTrailingCommaRe = regexp.MustCompile(`,\s*([}\]])`)
-
 // overlayPackRef names one active overlay pack that ships a permission-pack.jsonc.
 type overlayPackRef struct {
 	name string // overlay pack name (for human-readable errors)
@@ -962,8 +864,9 @@ func unresolvedOverlayPermDetail(reason string) string {
 
 // permissionPackAgentKeys reads each active pack's permission-pack.jsonc and
 // returns the distinct agent keys declared under the top-level "agents" object,
-// in first-seen order. Packs are JSONC (comments + trailing commas); this strips
-// that noise then unmarshals into a generic map and walks ["agents"]. A pack that
+// in first-seen order. Packs are JSONC (comments + trailing commas); parsing goes
+// through the canonical string-aware internal/jsonc.Parse, which normalizes that
+// noise without corrupting URL string literals, then walks ["agents"]. A pack that
 // declares no "agents" object contributes nothing. A read/parse error short-circuits.
 func permissionPackAgentKeys(packs []overlayPackRef) ([]string, error) {
 	seen := map[string]bool{}
@@ -973,10 +876,8 @@ func permissionPackAgentKeys(packs []overlayPackRef) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read %s/permission-pack.jsonc: %w", pk.name, err)
 		}
-		cleaned := jsoncCommentRe.ReplaceAllString(string(raw), "")
-		cleaned = jsoncTrailingCommaRe.ReplaceAllString(cleaned, "$1")
-		var doc map[string]any
-		if err := json.Unmarshal([]byte(cleaned), &doc); err != nil {
+		doc, err := jsonc.Parse(raw)
+		if err != nil {
 			return nil, fmt.Errorf("parse %s/permission-pack.jsonc: %w", pk.name, err)
 		}
 		agentsNode, ok := doc["agents"].(map[string]any)
