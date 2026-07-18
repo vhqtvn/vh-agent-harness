@@ -922,6 +922,7 @@ func TestEmit_PresentAgentFilterNoopWhenAllPresent(t *testing.T) {
 			`"docs-steward": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
 			`"debate": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
 			`"solution-brief": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+			`"media-perception": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
 		}, ",\n    "), 1)
 	out := mustEmit(t, full, nil, Features{})
 	var root map[string]any
@@ -1175,5 +1176,134 @@ func TestEmitWithExtra_InvalidDecisionFails(t *testing.T) {
 	_, err := EmitWithExtra([]byte(miniConfig), nil, Features{}, extra)
 	if err == nil {
 		t.Fatal("EmitWithExtra invalid decision: expected error, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// core/media-perception capability: present-agent filter contract.
+// ---------------------------------------------------------------------------
+//
+// media-perception is an opt-in read-only leaf. The four baseline callers
+// (build, coordination, project-coordinator, researcher) carry a
+// media-perception: allow task edge in CoreTaskRules. When the agent block
+// renders (capability selected), the edges must survive; when it does NOT
+// render (capability unselected), Emit's present-agent filter drops them so
+// no caller carries a dangling allow entry. media-perception itself is a
+// deny-all leaf with no outbound task edges.
+
+// mediaPerceptionCallers is the canonical inbound caller set for the
+// core/media-perception capability (mirrors CoreTaskRules).
+var mediaPerceptionCallers = []string{"build", "coordination", "project-coordinator", "researcher"}
+
+// mediaPerceptionConfig is the minimal agent roster exercising the
+// media-perception filter: the 4 callers + the media-perception leaf. All
+// other gated agents are omitted so the test isolates the
+// media-perception-specific filter behavior.
+const mediaPerceptionConfig = `{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": { "bash": { "__placeholder__": "deny" } },
+  "agent": {
+    "build":              { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "coordination":       { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "project-coordinator":{ "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "researcher":         { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "media-perception":   { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }
+  }
+}`
+
+// Test 28 (media-perception): when the media-perception agent block is
+// PRESENT (capability selected), all four inbound caller edges render as
+// allow, and media-perception's own task block is the deny-all wildcard
+// only (no outbound edges — it is a read-only leaf).
+func TestEmit_MediaPerceptionPresentKeepsInboundEdges(t *testing.T) {
+	out := mustEmit(t, mediaPerceptionConfig, nil, Features{})
+	var root map[string]any
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	agents := root["agent"].(map[string]any)
+	// Sanity: media-perception rendered.
+	if _, ok := agents["media-perception"]; !ok {
+		t.Fatalf("media-perception agent block missing from output")
+	}
+	// Each caller carries media-perception: allow.
+	for _, caller := range mediaPerceptionCallers {
+		blk, ok := agents[caller]
+		if !ok {
+			t.Fatalf("caller %q missing from output", caller)
+		}
+		task := blk.(map[string]any)["permission"].(map[string]any)["task"].(map[string]any)
+		if task["media-perception"] != "allow" {
+			t.Fatalf(`%s.task["media-perception"] = %v, want "allow" (agent present)`, caller, task["media-perception"])
+		}
+	}
+	// media-perception itself: deny-all only, no outbound edges.
+	mpTask := agents["media-perception"].(map[string]any)["permission"].(map[string]any)["task"].(map[string]any)
+	if mpTask["*"] != "deny" {
+		t.Fatalf(`media-perception.task["*"] = %v, want "deny"`, mpTask["*"])
+	}
+	for target := range mpTask {
+		if target != "*" {
+			t.Fatalf(`media-perception.task[%q] must NOT exist (read-only leaf, deny-all only); got: %v`, target, mpTask[target])
+		}
+	}
+}
+
+// Test 29 (media-perception): when the media-perception agent block is
+// ABSENT (capability unselected), all four inbound caller edges are dropped
+// by the present-agent filter so no caller carries a dangling allow entry.
+// Other task edges (e.g. orchestrator -> repo-explorer) must survive — the
+// filter is media-perception-specific, not a blanket wipe.
+func TestEmit_MediaPerceptionAbsentDropsInboundEdges(t *testing.T) {
+	// mediaPerceptionConfigStripped is mediaPerceptionConfig with the
+	// media-perception agent entry removed (inline literal to avoid
+	// strings.Replace newline-escaping pitfalls).
+	const mediaPerceptionConfigStripped = `{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": { "bash": { "__placeholder__": "deny" } },
+  "agent": {
+    "build":              { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "coordination":       { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "project-coordinator":{ "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "researcher":         { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }
+  }
+}`
+	out := mustEmit(t, mediaPerceptionConfigStripped, nil, Features{})
+	var root map[string]any
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	agents := root["agent"].(map[string]any)
+	// Sanity: media-perception is absent.
+	if _, ok := agents["media-perception"]; ok {
+		t.Fatalf("media-perception agent block must NOT render in the absent fixture")
+	}
+	// Each caller drops its media-perception edge.
+	for _, caller := range mediaPerceptionCallers {
+		blk, ok := agents[caller]
+		if !ok {
+			t.Fatalf("caller %q missing from output", caller)
+		}
+		task := blk.(map[string]any)["permission"].(map[string]any)["task"].(map[string]any)
+		if v, ok := task["media-perception"]; ok {
+			t.Fatalf(`%s.task["media-perception"] = %v, want ABSENT (agent gated out → graceful degradation)`, caller, v)
+		}
+	}
+}
+
+// Test 30 (media-perception): the deny-all wildcard on media-perception is
+// ALWAYS preserved even when the agent block renders. This pins the leaf
+// contract (no outbound task delegation) independent of the present-agent
+// filter, which only ever prunes edges to OTHER (absent) agents.
+func TestEmit_MediaPerceptionLeafWildcardAlwaysPreserved(t *testing.T) {
+	out := mustEmit(t, mediaPerceptionConfig, nil, Features{})
+	var root map[string]any
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	agents := root["agent"].(map[string]any)
+	mpTask := agents["media-perception"].(map[string]any)["permission"].(map[string]any)["task"].(map[string]any)
+	if mpTask["*"] != "deny" {
+		t.Fatalf(`media-perception.task["*"] = %v, want "deny" (always preserved)`, mpTask["*"])
 	}
 }

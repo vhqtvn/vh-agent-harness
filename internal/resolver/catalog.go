@@ -212,6 +212,14 @@ func (c *Catalog) Validate() []error {
 //     not modeled here.
 //   - core/debate owns the debate pipeline agents (debate and its roles plus
 //     solution-brief). Also self-contained: no capability-level hard_deps.
+//   - core/media-perception owns a single read-only perception specialist
+//     (media-perception) plus its caller-facing skill. Opt-in: not in any
+//     profile preset, so it renders only when a project explicitly selects it.
+//     Self-contained: no capability-level hard_deps. The four inbound caller
+//     edges (build, coordination, project-coordinator, researcher →
+//     media-perception) live in permconfig.CoreTaskRules and are dropped at
+//     emit time by the present-agent filter when the capability is not
+//     selected (so an unselected capability leaves no dangling task edge).
 //   - The 8 universal agents are the always-on baseline (see the Catalog
 //     baseline-representation note).
 //
@@ -261,6 +269,14 @@ func CoreCatalog() *Catalog {
 				"solution-brief",
 			},
 			// Self-contained; no capability-level hard_deps.
+		},
+		CapabilityManifest{
+			ID:       "core/media-perception",
+			Provides: []string{"media-perception"},
+			// Self-contained; no capability-level hard_deps. Opt-in: not in
+			// any profile preset. Inbound caller edges from baseline agents
+			// live in permconfig.CoreTaskRules and are dropped by Emit's
+			// present-agent filter when this capability is unselected.
 		},
 	)
 }

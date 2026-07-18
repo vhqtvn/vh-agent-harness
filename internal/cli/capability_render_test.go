@@ -336,3 +336,111 @@ func TestSeamRender_CapabilitySelectionGracefulDegradation(t *testing.T) {
 		t.Errorf("docs-steward -> committer task edge must NOT render when core/gated-commit is unselected (graceful degradation)")
 	}
 }
+
+// mediaPerceptionAgents is the singleton set owned by the core/media-perception
+// capability.
+var mediaPerceptionAgents = []string{"media-perception"}
+
+// mediaPerceptionCallers is the canonical inbound caller set for the
+// core/media-perception capability (mirrors permconfig.CoreTaskRules).
+var mediaPerceptionCallers = []string{"build", "coordination", "project-coordinator", "researcher"}
+
+// TestSeamRender_MediaPerceptionOptInCapabilityRenders is the opt-in proof for
+// the core/media-perception capability: a profile declaring `profile: minimal`
+// (empty preset) plus `capabilities: [core/media-perception]` must render the
+// 9 ungated baseline + the single media-perception leaf (10 agents total), and
+// each of the four baseline callers must carry the media-perception: allow task
+// edge. media-perception itself is a deny-all read-only leaf (no outbound edges).
+//
+// This is the unit-level end-to-end pin for the capability; the present-agent
+// filter behavior is also pinned at the unit level in internal/permconfig
+// (TestEmit_MediaPerception*).
+func TestSeamRender_MediaPerceptionOptInCapabilityRenders(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	writeProfile(t, root, "profile: minimal\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\ncapabilities:\n  - core/media-perception\n")
+	if _, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("update with capabilities:[core/media-perception]: %v", err)
+	}
+	rendered := parseRenderedAgents(t, root)
+
+	// 9 ungated + 1 media-perception = 10; no other cluster resolves.
+	assertAgentsPresent(t, rendered, ungatedAgents)
+	assertAgentsPresent(t, rendered, mediaPerceptionAgents)
+	assertAgentsAbsent(t, rendered, gatedCommitAgents)
+	assertAgentsAbsent(t, rendered, debateAgents)
+	if got, want := len(rendered), len(ungatedAgents)+len(mediaPerceptionAgents); got != want {
+		t.Errorf("agent count: got %d, want %d (ungated + media-perception; rendered=%v)", got, want, capRenderSortedKeys(rendered))
+	}
+
+	// All four callers carry the media-perception: allow edge.
+	edges := parseRenderedTaskEdges(t, root)
+	for _, caller := range mediaPerceptionCallers {
+		if !edges[caller]["media-perception"] {
+			t.Errorf("%s -> media-perception task edge must render when core/media-perception is selected", caller)
+		}
+	}
+
+	// media-perception itself is a deny-all leaf: only "*" (deny) is present
+	// in its task block (no outbound delegation). parseRenderedTaskEdges
+	// filters to allow-only decisions, so re-read the raw task block to
+	// verify the deny wildcard landed and no outbound edge sneaked in.
+	cfg, err := os.ReadFile(filepath.Join(root, "opencode.jsonc"))
+	if err != nil {
+		t.Fatalf("read opencode.jsonc: %v", err)
+	}
+	var doc struct {
+		Agent map[string]struct {
+			Permission struct {
+				Task map[string]string `json:"task"`
+			} `json:"permission"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(cfg, &doc); err != nil {
+		t.Fatalf("unmarshal opencode.jsonc: %v", err)
+	}
+	mpRaw := doc.Agent["media-perception"].Permission.Task
+	if mpRaw["*"] != "deny" {
+		t.Errorf(`media-perception.task["*"] = %q, want "deny"`, mpRaw["*"])
+	}
+	for target := range mpRaw {
+		if target != "*" {
+			t.Errorf(`media-perception.task[%q] must NOT exist (read-only leaf, deny-all only)`, target)
+		}
+	}
+}
+
+// TestSeamRender_MediaPerceptionUnselectedDropsEdges proves the graceful-
+// degradation contract for the opt-in capability: the supervised preset (which
+// does NOT include core/media-perception) must render the standard 21 agents
+// WITHOUT the media-perception block, and no baseline caller may carry a
+// dangling media-perception: allow edge. This mirrors the headline
+// graceful-degradation test for the existing clusters.
+func TestSeamRender_MediaPerceptionUnselectedDropsEdges(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	// supervised preset selects {core/gated-commit, core/debate} only —
+	// core/media-perception is NOT in any preset, so it stays unselected.
+	writeProfile(t, root, "profile: supervised\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\n")
+	if _, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("update with profile:supervised: %v", err)
+	}
+	rendered := parseRenderedAgents(t, root)
+
+	// Standard supervised roster (21); media-perception is absent.
+	assertAgentsPresent(t, rendered, ungatedAgents)
+	assertAgentsPresent(t, rendered, gatedCommitAgents)
+	assertAgentsPresent(t, rendered, debateAgents)
+	assertAgentsAbsent(t, rendered, mediaPerceptionAgents)
+	if got, want := len(rendered), len(ungatedAgents)+len(gatedCommitAgents)+len(debateAgents); got != want {
+		t.Errorf("agent count: got %d, want %d (supervised baseline; rendered=%v)", got, want, capRenderSortedKeys(rendered))
+	}
+
+	// No caller carries a dangling media-perception edge.
+	edges := parseRenderedTaskEdges(t, root)
+	for _, caller := range mediaPerceptionCallers {
+		if edges[caller]["media-perception"] {
+			t.Errorf("%s -> media-perception task edge must NOT render when core/media-perception is unselected", caller)
+		}
+	}
+}

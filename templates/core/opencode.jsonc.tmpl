@@ -225,6 +225,9 @@
                     "debate": "allow",
                     "solution-brief": "allow",
                     {{- end }}
+                    {{- if .capabilities.media_perception }}
+                    "media-perception": "allow",
+                    {{- end }}
                 },
             },
             "description": "Default primary agent for day-to-day work. Asks before edits and editable specialist handoffs.",
@@ -260,6 +263,9 @@
                     {{- if .capabilities.debate }}
                     "debate": "allow",
                     "solution-brief": "allow",
+                    {{- end }}
+                    {{- if .capabilities.media_perception }}
+                    "media-perception": "allow",
                     {{- end }}
                 },
                 "bash": {
@@ -369,6 +375,9 @@
                 "webfetch": "allow",
                 "task": {
                     "*": "deny",
+                    {{- if .capabilities.media_perception }}
+                    "media-perception": "allow",
+                    {{- end }}
                 },
                 "bash": {
                     "*": "deny",
@@ -443,6 +452,9 @@
                     {{- if .capabilities.debate }}
                     "debate": "allow",
                     "solution-brief": "allow",
+                    {{- end }}
+                    {{- if .capabilities.media_perception }}
+                    "media-perception": "allow",
                     {{- end }}
                 },
                 "bash": {
@@ -1354,5 +1366,65 @@
                 },
             },
         },
+        {{- if .capabilities.media_perception }}
+        "media-perception": {
+            "description": "Read-only perception specialist that inspects media via whatever capability-class tools the session exposes",
+            "mode": "subagent",
+            "color": "secondary",
+            "prompt": "{file:.opencode/agents/media-perception.md}",
+            "model": "{file:./.local/config/agent-model/media-perception}",
+            "temperature": 0.1,
+            "steps": 30,
+            "permission": {
+                "edit": "deny",
+                "webfetch": "deny",
+                "task": {
+                    "*": "deny",
+                },
+                "bash": {
+                    "*": "deny",
+                    "jq *": "allow",
+                    "ls *": "allow",
+                    "rg *": "allow",
+                    "wc *": "allow",
+                    "cat *": "allow",
+                    "cut *": "allow",
+                    "date *": "allow",
+                    "echo *": "allow",
+                    "find *": "allow",
+                    "grep *": "allow",
+                    "head *": "allow",
+                    "sort *": "allow",
+                    "tail *": "allow",
+                    "true *": "allow",
+                    "uniq *": "allow",
+                    "sleep *": "allow",
+                    "uuidgen": "deny",
+                    "sed -n *": "allow",
+                    "git log *": "allow",
+                    "git diff *": "allow",
+                    "git grep *": "allow",
+                    "git show *": "allow",
+                    "git blame *": "allow",
+                    "git status *": "allow",
+                    "git ls-tree *": "allow",
+                    "git cat-file *": "allow",
+                    "git ls-files *": "allow",
+                    "git show-ref *": "allow",
+                    "git rev-parse *": "allow",
+                    "git check-ignore *": "allow",
+                    ".opencode/scripts/commit-gate.sh status": "deny",
+                    ".opencode/scripts/readonly-scripts.sh *": "allow",
+                    ".opencode/scripts/commit-gate.sh commit *": "deny",
+                    ".opencode/scripts/commit-gate.sh revert *": "deny",
+                    ".opencode/scripts/commit-gate.sh acquire *": "deny",
+                    ".opencode/scripts/commit-gate.sh release *": "deny",
+                    ".opencode/scripts/commit-gate.sh heartbeat *": "deny",
+                    ".opencode/scripts/commit-gate.sh stage-message *": "deny",
+                    "vh-agent-harness *": "allow",
+                },
+            },
+        },
+        {{- end }}
     },
 }

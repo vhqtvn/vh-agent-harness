@@ -109,6 +109,105 @@ The four selection fields and what they mean (implemented in
 cluster without switching preset; reach for `overlays:` only as an expert
 override to force-render a pack regardless of capability resolution.
 
+### Opt-in core capabilities
+
+The catalog ships three capabilities today. Two are pulled in by the
+`supervised` preset (`core/gated-commit`, `core/debate`); the third is opt-in
+only:
+
+| Capability ID | Provides | In preset? | What it does |
+| --- | --- | --- | --- |
+| `core/gated-commit` | `commit-message`, `commit-reviewer`, `commit-reviewer-a..d`, `committer` | `supervised` | The gated-commit protocol (commit-message drafting, tiered cascade review, committer-exclusive git mutations). |
+| `core/debate` | `debate`, `debate-proposer`, `debate-critic`, `debate-synth`, `solution-brief` | `supervised` | The multi-model debate pipeline plus the solution-brief wrapper. |
+| `core/media-perception` | `media-perception` (agent + caller-facing skill) | none (opt-in) | A single read-only perception specialist that inspects media (image, diagram, chart, video, document/PDF, audio) handed over as a `path:` or `url:` locator, using whatever capability-class tool the session exposes. |
+
+Select `core/media-perception` by adding it to `capabilities:`:
+
+```yaml
+profile: minimal         # or supervised
+capabilities:
+  - core/media-perception
+```
+
+When unselected, the agent block is absent from `opencode.jsonc` and the four
+inbound caller edges (`build`, `coordination`, `project-coordinator`,
+`researcher` → `media-perception`) are dropped by the permission emitter's
+present-agent filter — so an unselected capability leaves zero dangling
+edges.
+
+#### Media-perception model seed
+
+Like every agent, `media-perception` resolves its model via
+`{file:./.local/config/agent-model/media-perception}`. The seed mechanism
+(`seedAgentModelDefaults` in `internal/cli/seam.go`) creates that file EMPTY
+on the first `vh-agent-harness update` after the capability is selected, so
+OpenCode's config load never breaks on a missing ref. The operator then
+writes the chosen model id into the file:
+
+```
+.local/config/agent-model/media-perception
+```
+
+While empty, `doctor` reports a WARN (`config-refs` check) — agents fall back
+to OpenCode's default model until a real id is set.
+
+#### Media-perception: missing-tool vs broken-model-reference
+
+Two distinct absence modes have different surfaces:
+
+- **No compatible perception capability in the session** — the agent runs and
+  returns `capability_status: unavailable` in its consolidated report. This
+  is the agent-level path; the harness does not intercept it. Callers should
+  expect `unavailable` is possible and surface it honestly (do not fabricate
+  observations).
+- **Broken or missing `.local/config/agent-model/media-perception` reference**
+  — this is a pre-agent config-layer failure. `doctor` FAILs the
+  `config-refs` check (`N {file:} ref(s) point to missing files … run
+  \`vh-agent-harness update\``) when the file is missing, and WARNs when it
+  exists but is empty. Running `vh-agent-harness update` re-seeds the file.
+
+The agent CANNOT catch a pre-invocation config failure (OpenCode may reject
+the config before the agent runs), so the second mode is owned by the harness
+seed + doctor diagnostics, not by the agent prompt.
+
+#### Media-perception integration recipe (overlay / operator)
+
+To wire a perception capability into a consuming project:
+
+1. **Select the capability** in `.vh-agent-harness/vh-harness-profile.yml`
+   (`capabilities: [core/media-perception]`).
+2. **Populate the model file** `.local/config/agent-model/media-perception`
+   with the chosen opencode-managed provider model id (operator step; the
+   file is gitignored).
+3. **Expose a compatible perception capability** via overlay or operator
+   config (e.g. an MCP server, a project-local tool) that the runtime makes
+   discoverable to agent sessions. The core capability is provider-neutral;
+   the actual tooling lives in the project, not in core.
+4. **Run validation**: `vh-agent-harness update` (renders the agent + skill +
+   4 caller edges); `vh-agent-harness doctor` (confirms no FAIL, only the
+   empty-model WARN until a model id is set).
+
+#### Media-perception no-refusal acceptance procedure
+
+The behavioral signal that the prompt works: given a perception task in a
+session with a compatible capability exposed, `media-perception` MUST
+inspect/invoke the capability rather than refuse with “I have no vision.”
+Refusal = prompt failure = revise.
+
+To verify live:
+
+1. Ensure a perception-capable tool is exposed to the session (overlay or
+   operator config).
+2. Delegate a perception task to `media-perception` with `path: <an
+   accessible image/diagram/chart path>` and a real question.
+3. Confirm the agent returns `capability_status: available` with grounded
+   observations, NOT a refusal and NOT `unavailable` (when a capability was
+   in fact available).
+
+If no perception backend is available in the build environment, this
+acceptance item is **UNVERIFIED (pending operator-backed validation)** — do
+not claim it passed from prompt inspection alone.
+
 ### Shipped overlay packs
 
 Besides project packs you author under `.vh-agent-harness/overlays/`, two

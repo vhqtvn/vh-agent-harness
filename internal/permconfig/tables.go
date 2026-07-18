@@ -279,6 +279,12 @@ var CoreLocationRules = map[string]LocationRule{
 		EditOverrides: []EditRule{{Pattern: CommitGateMessageGlob, Decision: Allow}},
 	},
 	"ship-review": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	// media-perception: opt-in read-only perception specialist
+	// (core/media-perception). Rendered only when the capability is selected;
+	// the four inbound caller edges below are dropped by Emit's present-agent
+	// filter when this agent is absent from the rendered roster. NOT
+	// gate-exempt — gate-exempt is reserved for the four orchestrators above.
+	"media-perception": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
 	// Cluster leaves (commit-reviewer-a..d) — the corpus ships these as full
 	// agent blocks. They carry the leafBaseRule (deny wildcard, allow
 	// readonly/git_readonly, deny gate, allow devSh) and a deny-all task rule.
@@ -324,6 +330,9 @@ var CoreTaskRules = map[string][]TaskEntry{
 		{"docs-steward", Allow},
 		{"debate", Allow},
 		{"solution-brief", Allow},
+		// media-perception: dropped by Emit's present-agent filter when the
+		// capability is unselected (the agent block is not rendered).
+		{"media-perception", Allow},
 	},
 	"coordination": {
 		{"*", Deny},
@@ -338,12 +347,20 @@ var CoreTaskRules = map[string][]TaskEntry{
 		{"committer", Allow},
 		{"debate", Allow},
 		{"solution-brief", Allow},
+		// media-perception: dropped by Emit's present-agent filter when the
+		// capability is unselected.
+		{"media-perception", Allow},
 	},
 	"planner": {
 		{"*", Deny},
 	},
 	"researcher": {
 		{"*", Deny},
+		// media-perception: single outbound edge for an otherwise-read-only
+		// leaf, so a researcher holding a media locator can delegate
+		// perception to the specialist. Dropped by Emit's present-agent
+		// filter when the capability is unselected.
+		{"media-perception", Allow},
 	},
 	"repo-explorer": {
 		{"*", Deny},
@@ -359,6 +376,12 @@ var CoreTaskRules = map[string][]TaskEntry{
 	"ship-review": {
 		{"*", Deny},
 	},
+	// media-perception: read-only perception leaf. Deny-all task; no
+	// outbound delegation. Rendered only when core/media-perception is
+	// selected (present-agent filter drops the inbound edges otherwise).
+	"media-perception": {
+		{"*", Deny},
+	},
 	"project-coordinator": {
 		{"*", Deny},
 		{"build", Allow},
@@ -371,6 +394,9 @@ var CoreTaskRules = map[string][]TaskEntry{
 		{"committer", Allow},
 		{"debate", Allow},
 		{"solution-brief", Allow},
+		// media-perception: dropped by Emit's present-agent filter when the
+		// capability is unselected.
+		{"media-perception", Allow},
 	},
 	"debate": {
 		{"*", Deny},

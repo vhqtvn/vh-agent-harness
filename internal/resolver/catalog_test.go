@@ -14,8 +14,8 @@ func TestCoreCatalog_ValidatesClean(t *testing.T) {
 func TestCoreCatalog_SeedCapabilities(t *testing.T) {
 	c := CoreCatalog()
 	got := c.IDs()
-	want := []string{"core/debate", "core/gated-commit"} // sorted
-	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+	want := []string{"core/debate", "core/gated-commit", "core/media-perception"} // sorted
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Fatalf("IDs: expected %v, got %v", want, got)
 	}
 	for _, id := range want {
@@ -68,6 +68,31 @@ func TestCoreCatalog_DebateProvides(t *testing.T) {
 	}
 	if len(m.HardDeps) != 0 {
 		t.Fatalf("core/debate should have no capability-level hard_deps, got %v", m.HardDeps)
+	}
+}
+
+func TestCoreCatalog_MediaPerceptionProvides(t *testing.T) {
+	c := CoreCatalog()
+	// core/media-perception owns a single read-only perception specialist.
+	for _, agent := range []string{"media-perception"} {
+		owner, owned := c.CapabilityForAgent(agent)
+		if !owned || owner != "core/media-perception" {
+			t.Fatalf("agent %q should be owned by core/media-perception (got owner=%q owned=%v)", agent, owner, owned)
+		}
+	}
+	m, ok := c.Get("core/media-perception")
+	if !ok {
+		t.Fatalf("missing core/media-perception")
+	}
+	if len(m.HardDeps) != 0 {
+		t.Fatalf("core/media-perception should have no capability-level hard_deps, got %v", m.HardDeps)
+	}
+	// Opt-in: media-perception must NOT be a baseline agent (it is a
+	// capability-provided agent, not a universal one).
+	for _, b := range c.BaselineAgents() {
+		if b == "media-perception" {
+			t.Fatalf("media-perception must not be a baseline agent; baseline=%v", c.BaselineAgents())
+		}
 	}
 }
 
