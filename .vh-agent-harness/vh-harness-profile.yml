@@ -4,3 +4,5 @@ features:
 overlays:
     - auto-classifier-pilot
     - harness-dogfood
+capabilities:
+    - core/media-perception
