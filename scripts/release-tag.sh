@@ -109,6 +109,63 @@ HEAD_SHA="$(git rev-parse HEAD 2>/dev/null)" || {
   exit 1
 }
 
+# --- release DEFER gate (authoritative hard enforcement) ---
+#
+# The deterministic evaluator at .opencode/scripts/check-defer-triggers.js is
+# the SINGLE source of DEFER classification truth. G7 in harness-release-
+# readiness consumes the same evaluator ADVISORY-only; THIS gate is
+# AUTHORITATIVE: a blocker or evaluator-error classification REFUSES the
+# release before any `git tag` mutation. DEFERs stay non-blocking at COMMIT
+# time (hard non-goal) — this gate fires only at release-tag time.
+#
+# Fail-closed policy (OPERATOR-CONFIRMED):
+#   tasks dir absent/empty      → pass (absence is not a mandatory surface)
+#   tasks dir present + clear   → pass
+#   blocker / evaluator-error   → REFUSE before mutation, never reach push path
+#   unreadable dir / bad card   → REFUSE (evaluator-error)
+#
+# See AGENTS.md "DEFER / follow-up curation" for the candidate contract and the
+# v1 trigger grammar (path_touched(<exact-file>) and after_tag(<tag>) only).
+
+PRIOR_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+DEFER_ARGS=(--mode=release)
+if [ -n "$PRIOR_TAG" ]; then
+  DEFER_ARGS+=(--since "$PRIOR_TAG")
+fi
+
+DEFER_OUTPUT=""
+DEFER_EXIT=0
+DEFER_OUTPUT=$(node .opencode/scripts/check-defer-triggers.js "${DEFER_ARGS[@]}" 2>/dev/null) || DEFER_EXIT=$?
+
+if [ "$DEFER_EXIT" -ne 0 ]; then
+  # Extract classification + sorted IDs from the evaluator JSON for a concise,
+  # deterministic refusal reason. Best-effort: if the output is unparseable,
+  # fall back to a generic evaluator-error reason (still fail-closed).
+  DEFER_REASON="release-defer-gate: evaluator-error (exit=${DEFER_EXIT})"
+  if [ -n "$DEFER_OUTPUT" ]; then
+    PARSED=$(printf '%s' "$DEFER_OUTPUT" | node -e '
+      let data = "";
+      process.stdin.on("data", (c) => (data += c));
+      process.stdin.on("end", () => {
+        try {
+          const o = JSON.parse(data);
+          const cls = o.classification || "evaluator-error";
+          const ids = [].concat(o.blocking_ids || [], o.evaluator_error_ids || []).sort();
+          const idPart = ids.length ? (" ids=[" + ids.join(",") + "]") : "";
+          process.stdout.write("release-defer-gate: " + cls + idPart);
+        } catch (e) {
+          process.stdout.write("release-defer-gate: evaluator-error (unparseable output)");
+        }
+      });
+    ' 2>/dev/null) || true
+    if [ -n "$PARSED" ]; then
+      DEFER_REASON="$PARSED"
+    fi
+  fi
+  emit false "$VERSION" "" false "$DEFER_REASON"
+  exit "$DEFER_EXIT"
+fi
+
 # --- mutation: create the annotated tag from the message file ---
 
 TAG_ERR=""

@@ -354,3 +354,63 @@ func assertG6GateContent(t *testing.T, label, got string) {
 		}
 	}
 }
+
+// TestHarnessDogfood_ReleaseReadinessCarriesG7Gate is the deterministic content
+// contract for the G7 release gate (release-time DEFER enforcement, advisory
+// surface). Like G6, the G7 section is deterministic prose a regression can
+// silently delete — so this test pins its presence in BOTH the AUTHORITATIVE
+// overlay source AND its 1:1 RENDERED MIRROR. It also re-asserts that G6 was
+// NOT weakened when G7 was added (the two gates are independent and both must
+// survive). If G7 drifts out of either surface, OR G6 drifts out as a side
+// effect of a G7 edit, this test fails before a release can ship with an
+// unaddressed DEFER.
+func TestHarnessDogfood_ReleaseReadinessCarriesG7Gate(t *testing.T) {
+	root := findModuleRoot(t)
+	relPaths := []string{
+		filepath.Join(".vh-agent-harness", "overlays", "harness-dogfood", "agents", "harness-release-readiness.md"),
+		filepath.Join(".opencode", "agents", "harness-release-readiness.md"),
+	}
+	for _, rel := range relPaths {
+		body, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("read readiness agent %s: %v", rel, err)
+		}
+		got := string(body)
+		t.Run(rel, func(t *testing.T) {
+			assertG7GateContent(t, rel, got)
+			// G6 must NOT be weakened by the G7 addition — re-run the G6 contract
+			// in the same body so a regression that swapped G6 for G7 fails here.
+			assertG6GateContent(t, rel+" (G6-not-weakened)", got)
+		})
+	}
+}
+
+// assertG7GateContent asserts the distinctive G7 tokens are present in one
+// readiness agent body. Each needle is content the pre-G7 readiness agent did
+// NOT carry, so a regression that drops the G7 section (or weakens it to
+// advisory-only without the authoritative-wrapper pairing) fails here.
+func assertG7GateContent(t *testing.T, label, got string) {
+	t.Helper()
+	checks := []struct{ name, needle string }{
+		{"G7 section header", "### G7 — release-time DEFER enforcement gate (advisory)"},
+		{"G7 blocker id G7_ReleaseDeferGate", "G7_ReleaseDeferGate"},
+		{"checklist header bumped to G0–G7", "G0–G7"},
+		{"source:review-defer candidate selection", "source:review-defer"},
+		{"source:p2-followup exclusion", "source:p2-followup"},
+		{"deterministic evaluator invocation", "check-defer-triggers.js --mode=release"},
+		{"wrapper authority wording (scripts/release-tag.sh)", "scripts/release-tag.sh"},
+		{"advisory scope fence (G7 is ADVISORY)", "G7 itself is ADVISORY"},
+		{"wrapper-authoritative restatement", "AUTHORITATIVE"},
+		{"ready:no + null-handoff behavior (scoped to G7)", "G7 blocker forces"},
+		{"evaluator-error blocker class", "evaluator-error class"},
+		{"absent/empty tasks-dir pass policy", "Absence policy"},
+		{"delegated owner entry for G7", `"for": "G7_ReleaseDeferGate"`},
+		{"blockers id enum includes G7", "G6_Skill_Pilot_Evidence | G7_ReleaseDeferGate"},
+		{"self-check reminder for G7", "G7 ran the deterministic release-DEFER evaluator"},
+	}
+	for _, c := range checks {
+		if !strings.Contains(got, c.needle) {
+			t.Errorf("%s: missing %s — %q (G7 gate content drifted out of the readiness agent)", label, c.name, c.needle)
+		}
+	}
+}
