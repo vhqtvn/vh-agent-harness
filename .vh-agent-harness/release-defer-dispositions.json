@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "release_base": { "kind": "tag", "value": "v0.12.0" },
-  "evaluated_commit": "c78282a26e9ecfe6a72f12b040316791d9f6258e",
-  "evaluated_tree": "9e01d59ac49f03db22d20904dc0b0af53aecd298",
-  "manifest_parent_commit": "c78282a26e9ecfe6a72f12b040316791d9f6258e",
+  "release_base": { "kind": "tag", "value": "v0.13.0" },
+  "evaluated_commit": "45895b6079bc1733aec33e18b1843705358df6f5",
+  "evaluated_tree": "79d74bc8a078736524cf8dd04e86234525160d91",
+  "manifest_parent_commit": "45895b6079bc1733aec33e18b1843705358df6f5",
   "reconciliation": {
     "status": "confirmed",
-    "scope": "SEED MANIFEST. Release arc: v0.12.0 through evaluated_commit. The handshake SHAs (evaluated_commit / evaluated_tree / manifest_parent_commit) reflect HEAD at seed-commit time and are PLACEHOLDERS. At release-prep the operator MUST recompute them against the actual release-prep HEAD^, then commit ONLY this manifest file as an immediate-child commit M (so HEAD^ == evaluated_commit == manifest_parent_commit and HEAD^^{tree} == evaluated_tree). Release mode is manifest-authority-only (the RELEASE_DEFER_MANIFEST_AUTHORITY env switch has been retired); the wrapper and CI recheck always read this committed manifest. Until the ceremony completes the manifest MUST NOT be treated as releasable: handshake evaluation will refuse because the SHAs will not match the eventual release-prep HEAD^.",
+    "scope": "Release arc: v0.13.0 through evaluated_commit. The handshake SHAs (evaluated_commit / evaluated_tree / manifest_parent_commit) bind to N (the release-note commit), NOT to the assessed release-prep HEAD P. The release ceremony is forced into two commits because the migration note (templates/migrations/vX.Y.Z.md) must also land at HEAD: first note commit N (child of P), then this manifest-only commit M (child of N). At HEAD=M the handshake invariant requires HEAD^ == N == evaluated_commit == manifest_parent_commit AND HEAD^^{tree} == evaluated_tree == tree(N). Release mode is manifest-authority-only; the wrapper and CI recheck always read this committed manifest. records[] dispositions are operator-attested and unchanged by the releaser's SHA recompute. (v0.13.0 wording bug corrected: do NOT write evaluated_commit = P.)",
     "zero_records_confirmed": false
   },
   "records": [
