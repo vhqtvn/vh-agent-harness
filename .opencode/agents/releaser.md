@@ -560,7 +560,7 @@ When an `override_required` record exists AND the operator has explicitly
 confirmed an override for this release, pass BOTH override flags together.
 The releaser NEVER invents an override; both flags must be operator-confirmed.
 `--override-manifest-sha` is the git blob SHA of the committed manifest
-(`git hash-object .vh-agent-harness/release-defer-dispositions.json`):
+(`git rev-parse HEAD:.vh-agent-harness/release-defer-dispositions.json`):
 
 ```sh
 vh-agent-harness exec bash -c 'RELEASE_TAG_MESSAGE_FILE=tmp/release-tag-msg-<version>.txt \

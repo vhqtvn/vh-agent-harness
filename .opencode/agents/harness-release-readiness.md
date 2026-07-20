@@ -581,10 +581,10 @@ confirmation:
    a non-empty `reason`.
 2. The operator invokes the wrapper with BOTH
    `--override-release-version <intended>` AND `--override-manifest-sha <blob>`
-   (the manifest's `git hash-object` SHA). Both flags are required together;
+   (the manifest's `git rev-parse HEAD:<path>` SHA). Both flags are required together;
    one without the other refuses.
 3. The wrapper requires exact agreement: `--override-release-version == $VERSION`
-   (the version being tagged); `--override-manifest-sha == git hash-object
+   (the version being tagged); `--override-manifest-sha == git rev-parse HEAD:
    .vh-agent-harness/release-defer-dispositions.json` (the actual blob at
    HEAD); `override.release_version` (in the manifest record) ==
    `--release-version` passed to the evaluator. All three must agree AND the

@@ -116,7 +116,8 @@ func setupReleaseTagManifestRepo(t *testing.T, spec manifestSpec) (scratch, wrap
 	parentCommit = gitRevParseVerify(t, scratch, "HEAD")
 	manifestBytes := buildManifestBytes(t, scratch, spec)
 	manifestPath = commitReleaseManifest(t, scratch, manifestBytes, "")
-	// Compute manifest blob SHA via the same git hash-object the wrapper uses.
+	// Compute manifest blob SHA via git hash-object; on a clean post-commit
+	// tree this equals the wrapper's git rev-parse HEAD:<path>.
 	out, err := exec.Command("git", "-C", scratch, "hash-object", ".vh-agent-harness/release-defer-dispositions.json").Output()
 	if err != nil {
 		t.Fatalf("hash-object manifest: %v", err)
