@@ -57,15 +57,16 @@ jobs:
       - name: Re-release DEFER manifest recompute
         run: |
           set -euo pipefail
+          mkdir -p tmp
           node .opencode/scripts/check-defer-triggers.js \
             --mode=release \
             --release-version "${GITHUB_REF_NAME}" \
-            | tee release-defer-evaluator.json
+            | tee tmp/release-defer-evaluator.json
           # Surface disclosures + accepted overrides as a visible summary so
           # they are not buried inside the full JSON envelope on the log.
           node -e '
             const fs = require("fs");
-            const env = JSON.parse(fs.readFileSync("release-defer-evaluator.json", "utf8"));
+            const env = JSON.parse(fs.readFileSync("tmp/release-defer-evaluator.json", "utf8"));
             const lines = [];
             if (Array.isArray(env.disclosures) && env.disclosures.length) {
               lines.push("disclosures:");

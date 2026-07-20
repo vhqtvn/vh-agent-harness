@@ -1184,8 +1184,32 @@ vh-agent-harness exec bash -c 'RELEASE_TAG_MESSAGE_FILE=tmp/release-tag-msg-<ver
 ```
 
 - **`RELEASE_TAG_MESSAGE_FILE=<path>`** (env) — annotated-tag message file
-  (required).
+  (required for the create flow; not required for `--push-only`).
 - **`RELEASE_TAG_PUSH=1`** (env, optional) — push the tag after creating it.
+- **`--push-only`** (positional flag, optional) — push an already-cut local
+  tag to origin through the sanctioned wrapper, removing the need for agents
+  to fall back to raw `git push` (forbidden by the `git-mutation-bypass`
+  rule). Invocation: `scripts/release-tag.sh <version> --push-only`. The tag
+  MUST already exist locally (cut by a prior create-only invocation) AND must
+  be an annotated tag object; if missing, the wrapper refuses with `"tag <v>
+  does not exist; cannot push-only"` (prefix of the full stderr line, which
+  also names the remedy — operators grepping logs should prefix-match). If the
+  tag exists but is a lightweight tag (`git tag <v>` with no `-a`), the
+  wrapper refuses with `"... is not an annotated tag object; push-only
+  requires an annotated tag ..."` — a lightweight tag never passed the full
+  ceremony and would defeat the annotated-tag invariant. In push-only mode
+  the wrapper inverts the tag-existence check (requires the tag to already
+  exist), skips `RELEASE_TAG_MESSAGE_FILE` validation, the override ceremony,
+  the DEFER gate, and the `git tag -a` mutation — it goes straight to
+  `git push origin <version>` and emits the same JSON contract with
+  `disclosures:null` and `accepted_overrides:null` (the DEFER gate already
+  passed at tag-creation time; push-only trusts the existing annotated tag
+  object). The JSON `commit` field carries the tag's dereferenced target
+  commit, which may differ from the caller's current HEAD (the create flow
+  emits HEAD; push-only emits what the tag points at). Cannot be combined
+  with `--override-*` flags (the DEFER gate is skipped, so there is nothing
+  to override). Use this for a push-only slice after a tag was cut by an
+  earlier create-only run.
 - **`--override-release-version <vX.Y.Z>` + `--override-manifest-sha <blob-sha>`**
   (both required together) — explicit noninteractive override confirmation.
   The operator is the ONLY transition authority for an override; the releaser
@@ -1198,8 +1222,10 @@ vh-agent-harness exec bash -c 'RELEASE_TAG_MESSAGE_FILE=tmp/release-tag-msg-<ver
   malformed failures.
 
 On any refusal (blocker, evaluator-error, override-ceremony mismatch,
-handshake mismatch) the wrapper emits a structured JSON refusal and exits
-NON-zero BEFORE any `git tag` invocation. There is no fallback to raw git.
+handshake mismatch, `--push-only` against a missing tag, `--push-only` against
+a lightweight (non-annotated) tag, or `--push-only` combined with
+`--override-*`) the wrapper emits a structured JSON refusal and exits NON-zero
+BEFORE any `git tag` or `git push` invocation. There is no fallback to raw git.
 
 When a command prints a "Next steps" footer, follow it. When unsure, re-run
 `vh-agent-harness guide`.

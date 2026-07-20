@@ -17,6 +17,19 @@
 # Usage (opt-in push of the new tag to origin after creating it):
 #   RELEASE_TAG_PUSH=1 RELEASE_TAG_MESSAGE_FILE=tmp/release-tag-msg-v0.2.0.txt scripts/release-tag.sh v0.2.0
 #
+# Usage (push-only — push an already-cut local tag through the sanctioned wrapper):
+#   scripts/release-tag.sh v0.2.0 --push-only
+#   Inverts the tag-existence check (the tag MUST already exist locally and
+#   MUST be an annotated tag object), skips the DEFER gate, and skips the
+#   `git tag -a` mutation. If the tag is missing, the wrapper refuses with
+#   `"tag <v> does not exist; cannot push-only"` (prefix of the full stderr
+#   line, which also names the remedy). If the tag exists but is a lightweight
+#   tag, the wrapper refuses with `"... is not an annotated tag object;
+#   push-only requires an annotated tag ..."`. Use this to push a tag that
+#   was cut by a prior create-only invocation so a push-only slice never
+#   needs raw `git push` (forbidden by the git-mutation-bypass rule). Cannot
+#   be combined with --override-* flags.
+#
 # Usage (release with explicit operator override ceremony):
 #   RELEASE_TAG_MESSAGE_FILE=tmp/release-tag-msg-v0.13.0.txt \
 #   scripts/release-tag.sh v0.13.0 \
@@ -37,16 +50,24 @@
 #   $RELEASE_TAG_MESSAGE_FILE   -> path to the annotated tag message file (must
 #                                  exist and be non-empty); passed to `git tag -a -F`
 #   $RELEASE_TAG_PUSH           -> optional; set to "1" to also `git push origin <version>`
+#   --push-only                 -> optional POSITIONAL FLAG (after <version>); push an
+#                                  already-cut local tag to origin WITHOUT re-running
+#                                  the DEFER gate or the `git tag -a` mutation.
+#                                  Requires the tag to exist locally. Cannot be
+#                                  combined with --override-* (the DEFER gate is
+#                                  skipped in push-only mode).
 #
 # Output: exactly ONE valid JSON object on stdout, nothing else.
 #   success: {"ok":true,"tag":"vX.Y.Z","commit":"<HEAD-sha>","pushed":false,
 #             "error":null,"disclosures":[...],"accepted_overrides":[...]}
 #   refusal: {"ok":false,"tag":"vX.Y.Z|null","commit":"<sha>|null","pushed":false,
 #             "error":"<reason>","disclosures":[...],"accepted_overrides":[...]}
-# `disclosures` and `accepted_overrides` are ALWAYS present, carrying the
-# evaluator's disclosures and any operator-approved overrides.
+# `disclosures` and `accepted_overrides` are ALWAYS present (both `null` in
+# --push-only mode, which skips the DEFER gate; otherwise they carry the
+# evaluator's disclosures and any operator-approved overrides).
 # On any validation failure the script prints the refusal JSON and exits non-zero.
-# Refuses (non-zero) if the tag already exists, so re-running after a failure is safe.
+# Refuses (non-zero) if the tag already exists (create flow only; push-only
+# INVERTS this check), so re-running after a failure is safe.
 #
 # Disclosures and accepted overrides are also printed to stderr BEFORE the
 # `git tag -a` mutation so the operator can observe exactly what will be
@@ -111,7 +132,33 @@ OVERRIDE_RELEASE_VERSION=""
 OVERRIDE_MANIFEST_SHA=""
 MANIFEST_REL=".vh-agent-harness/release-defer-dispositions.json"
 
-# --- version + message-file validation (unchanged) ---
+# --- pre-scan for --push-only ---
+#
+# --push-only is the explicit operator intent for pushing an already-cut
+# local annotated tag through the sanctioned wrapper, removing the need
+# for agents to fall back to raw `git push` (which is forbidden by the
+# git-mutation-bypass rule). When set, the wrapper:
+#   - skips RELEASE_TAG_MESSAGE_FILE validation (it is not creating a tag)
+#   - INVERTS the tag-existence check: the tag MUST already exist locally
+#     (cut by a prior create-only invocation); refuse if missing
+#   - skips the override ceremony, the DEFER gate, and the `git tag -a`
+#     mutation, going straight to `git push origin <version>`
+#   - emits the same JSON contract with disclosures=null and
+#     accepted_overrides=null
+# The DEFER gate is skipped because the tag already passed it at creation
+# time — push-only trusts the existing annotated tag object. Explicit flag
+# (not implicit RELEASE_TAG_PUSH + existing-tag) because accidental pushes
+# are a real risk and explicit intent is safer than magic.
+PUSH_ONLY=0
+for _a in "$@"; do
+  if [ "$_a" = "--push-only" ]; then
+    PUSH_ONLY=1
+    break
+  fi
+done
+unset _a
+
+# --- version + message-file validation ---
 
 if [ -z "$VERSION" ]; then
   emit false "" "" false "missing version argument (usage: scripts/release-tag.sh <vX.Y.Z>)" null null
@@ -123,26 +170,71 @@ if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
-if [ -z "$MSG_FILE" ]; then
-  emit false "$VERSION" "" false "RELEASE_TAG_MESSAGE_FILE is not set" null null
-  exit 1
+# MSG_FILE is required only for the create flow (it backs `git tag -a -F`).
+# Push-only does not create a tag, so the message file is irrelevant.
+if [ "$PUSH_ONLY" != "1" ]; then
+  if [ -z "$MSG_FILE" ]; then
+    emit false "$VERSION" "" false "RELEASE_TAG_MESSAGE_FILE is not set" null null
+    exit 1
+  fi
+
+  if [ ! -s "$MSG_FILE" ]; then
+    emit false "$VERSION" "" false "RELEASE_TAG_MESSAGE_FILE ('$MSG_FILE') is missing or empty" null null
+    exit 1
+  fi
 fi
 
-if [ ! -s "$MSG_FILE" ]; then
-  emit false "$VERSION" "" false "RELEASE_TAG_MESSAGE_FILE ('$MSG_FILE') is missing or empty" null null
-  exit 1
+# --- tag existence ---
+#
+# Default (create) flow: refuse if the tag already exists (idempotent-safe
+# re-runs). Push-only flow: refuse if the tag does NOT exist locally —
+# push-only is not a creation path, and the tag must have been cut by a
+# prior create-only invocation that already passed the DEFER gate. Capture
+# the tag's target commit SHA here for the push-only JSON output (the
+# create flow uses HEAD below).
+#
+# Push-only additionally refuses if the existing tag is NOT an annotated
+# tag object: `git rev-parse --verify refs/tags/<v>^{commit}` resolves for
+# BOTH annotated and lightweight tags, so the existence check alone would
+# let a lightweight tag (`git tag <v>` with no `-a`) reach `git push` and
+# defeat the annotated-tag invariant the wrapper exists to enforce. The
+# `git cat-file -t` assertion below closes that gap.
+TAG_TARGET_SHA=""
+if [ "$PUSH_ONLY" = "1" ]; then
+  if ! TAG_TARGET_SHA="$(git rev-parse -q --verify "refs/tags/${VERSION}^{commit}" 2>/dev/null)"; then
+    emit false "$VERSION" "" false "tag ${VERSION} does not exist; cannot push-only (cut it first without --push-only)" null null
+    exit 1
+  fi
+  # The tag exists, but push-only trusts the existing ANNOTATED tag object
+  # (created by the full ceremony, which already passed the DEFER gate).
+  # `git cat-file -t` distinguishes tag objects ("tag") from lightweight
+  # refs that point straight at a commit ("commit"). `|| true` defends the
+  # command substitution under `set -e` (the ref exists by the check above,
+  # so this branch is unreachable in practice, but the guard is cheap).
+  TAG_TYPE="$(git cat-file -t "refs/tags/${VERSION}" 2>/dev/null || true)"
+  if [ "$TAG_TYPE" != "tag" ]; then
+    emit false "$VERSION" "" false \
+      "refs/tags/${VERSION} is not an annotated tag object; push-only requires an annotated tag created by the full ceremony (got lightweight tag)" \
+      null null
+    exit 1
+  fi
+else
+  # refuse if the tag already exists (idempotent-safe re-runs)
+  if git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null 2>&1; then
+    emit false "$VERSION" "" false "tag ${VERSION} already exists" null null
+    exit 1
+  fi
 fi
 
-# refuse if the tag already exists (idempotent-safe re-runs)
-if git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null 2>&1; then
-  emit false "$VERSION" "" false "tag ${VERSION} already exists" null null
-  exit 1
+# HEAD_SHA backs the create-flow JSON `commit` field. Push-only emits the
+# tag's target commit (captured above as TAG_TARGET_SHA) instead.
+HEAD_SHA=""
+if [ "$PUSH_ONLY" != "1" ]; then
+  HEAD_SHA="$(git rev-parse HEAD 2>/dev/null)" || {
+    emit false "$VERSION" "" false "git rev-parse HEAD failed (not a git repository?)" null null
+    exit 1
+  }
 fi
-
-HEAD_SHA="$(git rev-parse HEAD 2>/dev/null)" || {
-  emit false "$VERSION" "" false "git rev-parse HEAD failed (not a git repository?)" null null
-  exit 1
-}
 
 # --- optional flag parsing (--override-release-version / --override-manifest-sha) ---
 #
@@ -176,12 +268,41 @@ while [ $# -gt 0 ]; do
       shift
       break
       ;;
+    --push-only)
+      # Pre-scanned above; consume and continue. The push-only short-circuit
+      # after this loop takes the actual branch.
+      shift
+      ;;
     *)
       emit false "$VERSION" "" false "unknown argument: $1" null null
       exit 1
       ;;
   esac
 done
+
+# --- push-only short-circuit ---
+#
+# When --push-only is set, the tag already exists locally (verified above)
+# and already passed the DEFER gate at creation time. Skip the override
+# ceremony, DEFER gate, pre-tag disclosure print, and `git tag -a` mutation;
+# go straight to `git push origin <version>`. The override ceremony is
+# meaningless in push-only mode (the DEFER gate is skipped entirely), so
+# combining --push-only with --override-* refuses.
+if [ "$PUSH_ONLY" = "1" ]; then
+  if [ -n "$OVERRIDE_RELEASE_VERSION" ] || [ -n "$OVERRIDE_MANIFEST_SHA" ]; then
+    emit false "$VERSION" "" false \
+      "--push-only cannot be combined with --override-release-version / --override-manifest-sha (the DEFER gate is skipped in push-only mode)" \
+      null null
+    exit 1
+  fi
+  PUSH_ERR=""
+  if ! PUSH_ERR=$(git push origin "$VERSION" 2>&1 1>/dev/null); then
+    emit false "$VERSION" "$TAG_TARGET_SHA" false "git push failed: ${PUSH_ERR}" null null
+    exit 1
+  fi
+  emit true "$VERSION" "$TAG_TARGET_SHA" true "" null null
+  exit 0
+fi
 
 # --- override ceremony ---
 #
