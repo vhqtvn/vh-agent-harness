@@ -418,12 +418,12 @@ func assertG7GateContent(t *testing.T, label, got string) {
 // TestHarnessDogfood_ReleaseReadinessCarriesManifestAuthority is the deterministic
 // content contract for the manifest-authority reframing of G7. The committed
 // disposition manifest at .vh-agent-harness/release-defer-dispositions.json is
-// the SOLE release authority when RELEASE_DEFER_MANIFEST_AUTHORITY=1|true;
-// .local/ becomes provenance transport only. This test pins the new framing in
-// BOTH the AUTHORITATIVE overlay source AND its 1:1 RENDERED MIRROR so a
-// regression that re-introduces the old "local candidate cards are authoritative"
-// overclaim (or drops the manifest ceremony / override ceremony / absence-policy
-// reframing) fails before a release can ship with a weakened release gate.
+// the SOLE release authority; .local/ is provenance transport for promoter mode
+// only. This test pins the new framing in BOTH the AUTHORITATIVE overlay
+// source AND its 1:1 RENDERED MIRROR so a regression that re-introduces the
+// old "local candidate cards are authoritative" overclaim (or drops the
+// manifest ceremony / override ceremony / absence-policy reframing) fails
+// before a release can ship with a weakened release gate.
 func TestHarnessDogfood_ReleaseReadinessCarriesManifestAuthority(t *testing.T) {
 	root := findModuleRoot(t)
 	relPaths := []string{
@@ -450,7 +450,6 @@ func assertManifestAuthorityContent(t *testing.T, label, got string) {
 	t.Helper()
 	checks := []struct{ name, needle string }{
 		{"committed disposition manifest path", ".vh-agent-harness/release-defer-dispositions.json"},
-		{"manifest authority env switch", "RELEASE_DEFER_MANIFEST_AUTHORITY"},
 		{"manifest authority framing (Release authority)", "Release authority"},
 		{"local reframed as provenance transport", "provenance transport"},
 		{"absence policy reframed manifest-authoritative", "manifest-authoritative"},

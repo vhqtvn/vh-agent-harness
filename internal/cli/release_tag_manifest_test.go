@@ -1,18 +1,17 @@
 package cli
 
-// Phase 2 manifest-authority wrapper tests for scripts/release-tag.sh.
+// Manifest-authority wrapper tests for scripts/release-tag.sh.
 //
-// When RELEASE_DEFER_MANIFEST_AUTHORITY=1 the wrapper activates manifest-
-// authority release mode: it forwards the env to the evaluator, passes
-// --release-version $VERSION, performs the operator-side override ceremony
-// against the actual manifest blob SHA (--override-release-version +
-// --override-manifest-sha), and forwards --override-confirmed-version only
-// when the ceremony succeeds. Disclosures and accepted overrides are
-// embedded in the wrapper's JSON output and printed to stderr before any
-// `git tag` mutation.
+// Release mode is manifest-authority ONLY (the legacy .local/-scan release
+// path has been RETIRED; manifest authority is the sole release-authority
+// model). The wrapper passes --release-version $VERSION to the evaluator,
+// performs the operator-side override ceremony against the actual manifest
+// blob SHA (--override-release-version + --override-manifest-sha), and
+// forwards --override-confirmed-version only when the ceremony succeeds.
+// Disclosures and accepted overrides are embedded in the wrapper's JSON
+// output and printed to stderr before any `git tag` mutation.
 //
-// The legacy tests in release_tag_test.go do NOT set the env and stay
-// byte-identical. This file pins the matrix cases 21–26 from the mission.
+// This file pins the matrix cases 21–26 from the mission.
 
 import (
 	"encoding/json"
@@ -25,9 +24,9 @@ import (
 	"time"
 )
 
-// releaseTagManifestResult extends releaseTagResult with the Phase 2 fields.
-// The legacy struct stays 5-field; this struct deserializes the same JSON with
-// the new optional arrays.
+// releaseTagManifestResult deserializes the manifest-authority wrapper's JSON
+// output. It carries the base wrapper fields plus the optional disclosure and
+// accepted-override arrays emitted by manifest-mode releases.
 type releaseTagManifestResult struct {
 	OK                bool                     `json:"ok"`
 	Tag               *string                  `json:"tag"`
@@ -126,13 +125,14 @@ func setupReleaseTagManifestRepo(t *testing.T, spec manifestSpec) (scratch, wrap
 	return scratch, wrapper, manifestPath, manifestSHA, parentCommit
 }
 
-// runReleaseTagManifest invokes the wrapper with manifest-authority env active.
-// Optional extra args are appended after $1 (for --override-* flags).
+// runReleaseTagManifest invokes the wrapper in manifest-authority mode
+// (always-on post-retirement; no env switch required). Optional extra args
+// are appended after $1 (for --override-* flags).
 //
-// cwd is <scratch> (the repo root), matching runReleaseTag's convention: the
-// wrapper internally references .opencode/scripts/check-defer-triggers.js and
-// .vh-agent-harness/release-defer-dispositions.json relative to the repo
-// root, so it MUST be launched from there.
+// cwd is <scratch> so the wrapper resolves .opencode/scripts/check-defer-triggers.js
+// and the manifest under .vh-agent-harness/release-defer-dispositions.json
+// relative to the scratch repo root — the wrapper references them by relative
+// path, so it MUST be launched from there.
 func runReleaseTagManifest(t *testing.T, wrapper, msgFile, version string, extraArgs []string) (int, releaseTagManifestResult, string, string, string) {
 	t.Helper()
 	args := []string{wrapper, version}
@@ -141,7 +141,6 @@ func runReleaseTagManifest(t *testing.T, wrapper, msgFile, version string, extra
 	cmd.Dir = filepath.Dir(filepath.Dir(wrapper)) // <scratch>
 	cmd.Env = append(os.Environ(),
 		"RELEASE_TAG_MESSAGE_FILE="+msgFile,
-		"RELEASE_DEFER_MANIFEST_AUTHORITY=1",
 	)
 	var outb, errb strings.Builder
 	cmd.Stdout = &outb
@@ -492,7 +491,6 @@ func TestReleaseTag_Manifest_RefusalsOccurBeforeTagMutation(t *testing.T) {
 			cmd.Dir = filepath.Dir(filepath.Dir(wrapper))
 			cmd.Env = append(os.Environ(),
 				"RELEASE_TAG_MESSAGE_FILE="+msgFile,
-				"RELEASE_DEFER_MANIFEST_AUTHORITY=1",
 				"RELEASE_TAG_PUSH=1",
 			)
 			out, err := cmd.CombinedOutput()
@@ -535,7 +533,6 @@ func TestReleaseTag_Manifest_MissingManifestRefusesAfterActivation(t *testing.T)
 	cmd.Dir = filepath.Dir(filepath.Dir(wrapper))
 	cmd.Env = append(os.Environ(),
 		"RELEASE_TAG_MESSAGE_FILE="+msgFile,
-		"RELEASE_DEFER_MANIFEST_AUTHORITY=1",
 	)
 	out, err := cmd.CombinedOutput()
 	exitCode := 0
@@ -554,50 +551,6 @@ func TestReleaseTag_Manifest_MissingManifestRefusesAfterActivation(t *testing.T)
 		t.Errorf("tag must NOT exist when manifest is missing")
 	}
 }
-
-// TestReleaseTag_LegacyDefaultUnchanged — the wrapper stays on legacy release
-// mode when RELEASE_DEFER_MANIFEST_AUTHORITY is unset, even if the manifest
-// happens to be present. This pins the phased-activation contract: the
-// manifest path is opt-in via the env.
-func TestReleaseTag_LegacyDefaultUnchanged(t *testing.T) {
-	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpec{
-		ReleaseBaseKind:     "tag",
-		ReleaseBaseValue:    "v0.1.0",
-		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
-		Records:             []manifestRecordSpec{seededNoDiscloseInvalid("defer-seed")},
-	})
-	msgFile := filepath.Join(scratch, "msg.txt")
-	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
-		t.Fatalf("write msg: %v", err)
-	}
-	// Do NOT set RELEASE_DEFER_MANIFEST_AUTHORITY. The wrapper runs legacy
-	// release mode (scans .local/, which is absent here → clear) and creates
-	// the tag. Disclosures stay empty (legacy mode emits no disclosures array
-	// in the parsed fields — but the wrapper still emits disclosures=[]).
-	cmd := exec.Command("bash", wrapper, "v0.2.0")
-	cmd.Dir = filepath.Dir(filepath.Dir(wrapper))
-	cmd.Env = append(os.Environ(), "RELEASE_TAG_MESSAGE_FILE="+msgFile)
-	out, err := cmd.CombinedOutput()
-	exitCode := 0
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		} else {
-			t.Fatalf("bash spawn error: %v\n%s", err, out)
-		}
-	}
-	if exitCode != 0 {
-		t.Fatalf("legacy default must ALLOW (exit 0); got %d\n%s", exitCode, out)
-	}
-	if !tagExists(t, scratch, "v0.2.0") {
-		t.Errorf("tag v0.2.0 must exist in legacy mode")
-	}
-}
-
-// =============================================================================
-// DIRTY WORKTREE BYPASS — committed-blob authority (the F1 fix)
-// =============================================================================
 
 // TestReleaseTag_Manifest_DirtyWorktreeManifestRefusesTag — pins the
 // committed-blob authority contract at the wrapper level. A committed `block`

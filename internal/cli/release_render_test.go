@@ -699,16 +699,17 @@ func bytesEqual(a, b []byte) bool {
 // manifest-authority build pass added the ceremony to the releaser as OPTIONAL
 // trailing guidance only ("operator release-prep, optional"); the spine and
 // 4-step flow were untouched, so a release-agent-only operator got no benefit
-// (the releaser used legacy mode locally, pushed a tag, and CI — hardcoded
-// manifest mode — blocked publication). This test pins the post-fix state in
-// BOTH the AUTHORITATIVE embedded overlay source AND its 1:1 RENDERED MIRROR:
-// the ceremony is now OWNED by the releaser end-to-end (Discover manifest
-// state, Decide release-prep path, Prepare manifest ceremony, Execute wrapper
-// with manifest authority active + override-flag forwarding).
+// (the releaser used the now-retired legacy mode locally, pushed a tag, and
+// CI — manifest mode always-on — blocked publication). This test pins the
+// post-fix state in BOTH the AUTHORITATIVE embedded overlay source AND its
+// 1:1 RENDERED MIRROR: the ceremony is now OWNED by the releaser end-to-end
+// (Discover manifest state, Decide release-prep path, Prepare manifest
+// ceremony, Execute wrapper with manifest authority + override-flag
+// forwarding).
 //
 // A regression that drops the ceremony out of the spine (or relegates it back
 // to trailing optional docs) fails here before a release can ship with a
-// releaser that silently uses legacy mode while CI expects manifest mode.
+// releaser that silently bypasses the manifest ceremony.
 func TestReleaser_SourceAndMirrorCarryManifestCeremony(t *testing.T) {
 	root := findModuleRoot(t)
 	relPaths := []string{
@@ -744,14 +745,11 @@ func TestReleaser_SourceAndMirrorCarryManifestCeremony(t *testing.T) {
 func assertReleaserManifestCeremonyContent(t *testing.T, label, got string) {
 	t.Helper()
 	checks := []struct{ name, needle string }{
-		{"canonical-mode env activation (Execute)", "RELEASE_DEFER_MANIFEST_AUTHORITY=1"},
 		{"override flag release-version forwarded", "--override-release-version"},
 		{"override flag manifest-sha forwarded", "--override-manifest-sha"},
 		{"release-prep path enum ceremony_required", "ceremony_required"},
 		{"release-prep path enum resumable_existing_manifest", "resumable_existing_manifest"},
-		{"release-prep path enum legacy_fallback", "legacy_fallback"},
 		{"JSON schema field release_prep_path", "\"release_prep_path\""},
-		{"JSON schema field manifest_authority_active", "\"manifest_authority_active\""},
 		{"JSON schema field manifest_ceremony_performed", "\"manifest_ceremony_performed\""},
 		{"JSON schema field manifest_handshake_verified", "\"manifest_handshake_verified\""},
 		{"JSON schema field manifest_commit", "\"manifest_commit\""},

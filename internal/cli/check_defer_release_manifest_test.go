@@ -2,19 +2,15 @@ package cli
 
 // MANIFEST-AUTHORITY release-mode tests for check-defer-triggers.js.
 //
-// When RELEASE_DEFER_MANIFEST_AUTHORITY=1, release mode reads the committed
-// manifest at .vh-agent-harness/release-defer-dispositions.json ONLY (no
-// .local/ access). This file pins the schema-v1, handshake, disposition
-// matrix, and freshness contract of the manifest-authority path.
+// Release mode reads the committed manifest at
+// .vh-agent-harness/release-defer-dispositions.json ONLY (no .local/ access).
+// This file pins the schema-v1, handshake, disposition matrix, and freshness
+// contract of the manifest-authority path.
 //
-// The legacy release mode (env unset, reads .local/) is covered by the
-// TestCheckDefer_ReleaseMode_* tests in check_defer_release_test.go and MUST
-// stay byte-identical. Promoter mode (TestCheckDefer_PromoterModeUnchanged)
-// is also unchanged.
-//
-// Phased activation: the env var is the activation switch. Phase 1 lands the
-// parser + these tests; the wrapper/G7/CI set the env to flip the gate to
-// mandatory (closeout item 4).
+// The legacy .local/-scan release path has been RETIRED; manifest authority is
+// the sole release-authority model. Promoter mode
+// (TestCheckDefer_PromoterModeUnchanged in check_defer_release_test.go) is the
+// separate commit-time DEFER check and stays unchanged.
 
 import (
 	"encoding/json"
@@ -218,10 +214,11 @@ type manifestResult struct {
 	Error             *string                  `json:"error"`
 }
 
-// runReleaseEvalManifest runs the evaluator in release mode with
-// RELEASE_DEFER_MANIFEST_AUTHORITY=1. Returns (exitCode, parsedResult,
-// stdout, stderr). cwd is set to the scratch repo root derived from the
-// script path so repoRoot() resolves correctly.
+// runReleaseEvalManifest runs the evaluator in release (manifest-authority)
+// mode. Returns (exitCode, parsedResult, stdout, stderr). cwd is set to the
+// scratch repo root derived from the script path so repoRoot() resolves
+// correctly. Manifest authority is always-on post-retirement; no env switch
+// is required.
 func runReleaseEvalManifest(t *testing.T, script string, extraArgs ...string) (int, manifestResult, string, string) {
 	t.Helper()
 	nodeBin, err := exec.LookPath("node")
@@ -231,7 +228,7 @@ func runReleaseEvalManifest(t *testing.T, script string, extraArgs ...string) (i
 	args := []string{script, "--mode=release"}
 	args = append(args, extraArgs...)
 	cmd := exec.Command(nodeBin, args...)
-	cmd.Env = append(os.Environ(), "RELEASE_DEFER_MANIFEST_AUTHORITY=1")
+	cmd.Env = os.Environ()
 	cmd.Dir = filepath.Dir(filepath.Dir(filepath.Dir(script))) // <scratch>
 	var outb, errb strings.Builder
 	cmd.Stdout = &outb
@@ -350,10 +347,10 @@ func TestCheckDefer_Manifest_MalformedLocalCardIgnored(t *testing.T) {
 // Test 3: missing committed manifest refuses after activation
 // =============================================================================
 
-// TestCheckDefer_Manifest_MissingRefusesAfterActivation — with
-// RELEASE_DEFER_MANIFEST_AUTHORITY=1 active and no committed manifest, the
-// evaluator MUST refuse. This is the core fix: absent transport can no longer
-// masquerade as "clear" in release mode. (Matrix case 3.)
+// TestCheckDefer_Manifest_MissingRefusesAfterActivation — in manifest-authority
+// mode (always-on post-retirement) with no committed manifest, the evaluator
+// MUST refuse. This is the core fix: absent transport can no longer masquerade
+// as "clear" in release mode. (Matrix case 3.)
 func TestCheckDefer_Manifest_MissingRefusesAfterActivation(t *testing.T) {
 	_, script, _ := setupReleaseEvalRepo(t)
 	// No manifest written. Manifest authority is active → must refuse.

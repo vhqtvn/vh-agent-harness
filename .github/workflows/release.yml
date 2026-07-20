@@ -55,8 +55,6 @@ jobs:
       # Disclosures and accepted overrides are emitted in the evaluator's
       # JSON stdout and appear in the run log for the release audit trail.
       - name: Re-release DEFER manifest recompute
-        env:
-          RELEASE_DEFER_MANIFEST_AUTHORITY: "1"
         run: |
           set -euo pipefail
           node .opencode/scripts/check-defer-triggers.js \
