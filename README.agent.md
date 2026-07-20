@@ -1091,5 +1091,117 @@ There is **no top-level `migrate` command** — the surface is `help migrate
 [version]` only (intercepted inside the help command), keeping the command list
 free of a `migrate` verb.
 
+## Release ceremony (release-tag wrapper + DEFER manifest)
+
+This section documents the project's release-time DEFER safety gate. The
+**sanctioned tag mutation surface** is `scripts/release-tag.sh`; raw `git tag`
+and `git push` of release tags are forbidden to every agent (shell-guard's
+`git-mutation-bypass` rule). The wrapper invokes the DEFER evaluator before any
+tag mutation and refuses on any blocker / evaluator-error.
+
+### Two release-authority modes
+
+The release DEFER gate has TWO input modes selected by the env var
+`RELEASE_DEFER_MANIFEST_AUTHORITY`:
+
+- **Manifest-authority mode (`RELEASE_DEFER_MANIFEST_AUTHORITY=1|true`, the
+  canonical flow).** The evaluator reads the **committed disposition
+  manifest** at `.vh-agent-harness/release-defer-dispositions.json` ONLY and
+  performs NO `.local/` access. A missing committed manifest is a hard
+  `evaluator-error` (NOT `clear`), so the gate protects fresh checkouts. This
+  is the canonical release authority. The `releaser` agent activates manifest
+  authority end-to-end: it recomputes the manifest's handshake SHAs against
+  the release-prep HEAD, delegates the manifest-only commit M to the
+  committer, re-verifies the handshake, and invokes the wrapper with
+  `RELEASE_DEFER_MANIFEST_AUTHORITY=1`. A release-agent-only operator gets
+  manifest authority by default — no out-of-band operator release-prep.
+- **Transitional legacy mode (env UNSET).** The evaluator scans
+  `.local/coordinator/tasks/` for unresolved release-relevant DEFER candidates.
+  Absent or empty `.local/` is treated as `clear`. This is the original
+  evaluator behavior shipped in `3a7cd50` and is preserved byte-identically
+  (the evaluator's release-mode logic is unchanged when the env is unset). The
+  WRAPPER output is additive over the original 5-field shape — legacy mode
+  still emits `disclosures` and `accepted_overrides` fields, but as empty
+  arrays `[]`. Legacy mode is a documented emergency-hotfix fallback the
+  operator explicitly opts into; it is NOT the default.
+
+### The manifest (project-owned, committed, fresh-checkout-visible)
+
+`.vh-agent-harness/release-defer-dispositions.json` is a schema-v1 JSON file
+attesting that the promoter/operator confirmed release relevance and disposition
+for the declared release arc. The full schema, disposition matrix, freshness
+handshake, and override semantics live in
+`.vh-agent-harness/overlays/harness-dogfood/agents/harness-release-readiness.md`
+(G7 section) and in the evaluator source at
+`templates/core/.opencode/scripts/check-defer-triggers.js`. Highlights:
+
+- `release_base: {kind:"tag"|"root", value:<tag>|null}` — the start of the
+  release arc. `kind:"root"` (whole history) is used for the very first release;
+  there is NO `HEAD~32` fallback in manifest-authority mode.
+- `evaluated_commit`, `evaluated_tree`, `manifest_parent_commit` — a freshness
+  handshake. All three must equal `HEAD^` and `tree(HEAD^)` at evaluation time.
+  The only changed path in `HEAD^..HEAD` must be the manifest itself. This
+  prevents weakening the manifest after its claimed evaluation.
+- `records[]` — one entry per DEFER finding, with `release_relevance ∈
+  {yes,no,unknown}`, `disposition ∈ {block,disclose,override_required}`,
+  `metadata_state ∈ {valid,stale,invalid}`, summary/reason/source_ref, and an
+  optional `override` object.
+
+### Manifest-only reconciliation commit ceremony (releaser-owned)
+
+The releaser agent owns this ceremony end-to-end in manifest-authority mode.
+There is NO out-of-band operator release-prep. When invoked, the releaser:
+
+1. Recomputes the release arc at commit P (the release-prep HEAD, after the
+   migration-note commit lands).
+2. Rewrites `.vh-agent-harness/release-defer-dispositions.json`'s three
+   handshake SHA fields — `evaluated_commit` AND `manifest_parent_commit`
+   (both = full SHA of P), and `evaluated_tree` = `tree(P)`. The releaser does
+   NOT touch `release_base`, `records[]` dispositions, or any other
+   operator-attested field.
+3. Delegates a manifest-only immediate-child commit M of P to the committer
+   (single-path scope = the manifest file), so `M^ == P` and
+   `git diff --name-only P..M` is exactly the manifest path.
+4. Re-runs the evaluator against M to confirm the handshake passes.
+5. Invokes the wrapper with `RELEASE_DEFER_MANIFEST_AUTHORITY=1` to tag M as
+   the release.
+
+The operator's release-time role is reduced to: confirming an override when an
+`override_required` record exists (see Wrapper flags below). The first release
+after the seed manifest lands is the canonical case — the seed manifest's SHAs
+are placeholders that the releaser recomputes against the actual release-prep
+HEAD on its first run.
+
+### Wrapper flags
+
+```sh
+vh-agent-harness exec bash -c 'RELEASE_TAG_MESSAGE_FILE=tmp/release-tag-msg-<version>.txt \
+  RELEASE_DEFER_MANIFEST_AUTHORITY=1 \
+  scripts/release-tag.sh <version>'
+```
+
+- **`RELEASE_DEFER_MANIFEST_AUTHORITY=1|true`** (env) — select
+  manifest-authority mode. The releaser sets this by default in its canonical
+  flow; omit it only for the documented `legacy_fallback` emergency-hotfix
+  path.
+- **`RELEASE_TAG_MESSAGE_FILE=<path>`** (env) — annotated-tag message file
+  (required).
+- **`RELEASE_TAG_PUSH=1`** (env, optional) — push the tag after creating it.
+- **`--override-release-version <vX.Y.Z>` + `--override-manifest-sha <blob-sha>`**
+  (both required together, manifest-authority mode only) — explicit
+  noninteractive override confirmation. The operator is the ONLY transition
+  authority for an override; the releaser forwards operator-confirmed values
+  only and never invents them. Exact 3-way agreement is required:
+  `--override-release-version` == the version being tagged == the
+  `override.release_version` recorded in the manifest, AND
+  `--override-manifest-sha` == the actual git blob SHA of the committed
+  manifest. Overridden findings DO appear in release notes, wrapper output, and
+  CI (default adopted). An override CANNOT cure schema/staleness/ancestry/
+  malformed failures.
+
+On any refusal (blocker, evaluator-error, override-ceremony mismatch,
+handshake mismatch) the wrapper emits a structured JSON refusal and exits
+NON-zero BEFORE any `git tag` invocation. There is no fallback to raw git.
+
 When a command prints a "Next steps" footer, follow it. When unsure, re-run
 `vh-agent-harness guide`.

@@ -429,35 +429,99 @@ the sanctioned release-tag wrapper (`scripts/release-tag.sh`), which
 independently re-invokes the SAME deterministic evaluator and refuses to tag.
 G7 itself is ADVISORY: it does NOT physically prevent a tag.
 
+**Release authority — committed disposition manifest.** Release mode reads
+`.vh-agent-harness/release-defer-dispositions.json` (a committed, fresh-checkout-
+visible, project-owned file) as the SOLE release authority when
+`RELEASE_DEFER_MANIFEST_AUTHORITY=1|true` is set. The manifest attests:
+"promoter/operator confirmed release relevance and disposition for the declared
+release arc." `.local/coordinator/tasks/` is **provenance transport only** in
+release mode — release mode NEVER dereferences it; the manifest's `source_ref`
+field is provenance text, not a path release mode opens. The legacy
+`.local/`-scanning release mode (env unset) remains available as a transitional
+fallback during the phased activation; once `RELEASE_DEFER_MANIFEST_AUTHORITY=1`
+is the live configuration, the committed manifest is authoritative and
+`.local/` is no longer release-relevant.
+
 **Two-surface cross-check, joined by the release arc — never prose matching:**
 
-- **Candidate cards** (`.local/coordinator/tasks/*.json`) — authoritative for
-  "a DEFER finding exists." ONLY cards whose `owner_notes[]` carries the exact
-  line `source:review-defer` AND has usable `trigger:` + `studied:` provenance
-  count. `source:p2-followup` cards are EXCLUDED from v1 release scope.
-- **Release arc** (`<last-tag>..HEAD`, the SAME `last_tag` the rest of the
-  report uses) — authoritative for "the trigger fired." Joined to each
-  candidate by the deterministic evaluator
-  (`.opencode/scripts/check-defer-triggers.js --mode=release`), which emits one
-  structured classification per candidate.
+- **Committed disposition manifest** (`.vh-agent-harness/release-defer-dispositions.json`)
+  — AUTHORITATIVE for "the operator/promoter reconciled this DEFER for the
+  declared release arc." Each record carries `defer_id`, the three-axis
+  classification (`release_relevance: yes|no|unknown`, `disposition:
+  block|disclose|override_required`, `metadata_state: valid|stale|invalid`),
+  `summary`, `reason`, provenance (`source_ref`, `studied_at`, `reviewed_at`),
+  and an optional `override` object bound to a specific `release_version`.
+  Release mode reads this file ONLY — it does not scan `.local/` — and never
+  dereferences `source_ref`.
+- **Release arc** (`<last-tag>..HEAD` for prior-tag releases, or `<root>..HEAD`
+  when `release_base.kind=root` for the first tag, the SAME `last_tag` the rest
+  of the report uses) — authoritative for "the manifest handshake matches the
+  commit being tagged." Joined to the manifest by the deterministic evaluator
+  (`.opencode/scripts/check-defer-triggers.js --mode=release` under
+  `RELEASE_DEFER_MANIFEST_AUTHORITY=1`), which emits one structured
+  classification that pins `evaluated_commit` / `evaluated_tree` /
+  `manifest_parent_commit` to `HEAD^` (the manifest-only child commit's parent)
+  and refuses on any drift.
 
-G7 cross-checks BOTH surfaces via the evaluator. Do NOT hand-classify triggers
-— only the deterministic evaluator's output counts. Hand-classification would
-reintroduce the model-output-as-authority anti-pattern this gate exists to
-close.
+G7 cross-checks BOTH surfaces via the evaluator. Do NOT hand-classify
+dispositions or triggers — only the deterministic evaluator's output counts.
+Hand-classification would reintroduce the model-output-as-authority
+anti-pattern this gate exists to close.
+
+**Manifest ceremony (sacred — do not weaken).** The manifest embeds its own
+parent commit and tree to prevent weakening after evaluation. The release-prep
+sequence is:
+
+1. Reconcile the release arc at commit P (the release-prep HEAD).
+2. Write `.vh-agent-harness/release-defer-dispositions.json` with P as
+   `evaluated_commit` AND `manifest_parent_commit`, and `tree(P)` as
+   `evaluated_tree`. Records are sorted lexically by `defer_id`. Schema is v1.
+3. Commit ONLY the manifest file as an immediate-child commit M (so `HEAD^`
+   when tagging == P, and `git diff --name-only P..M` is exactly the manifest
+   path). No other file may ride along — the manifest-only diff requirement is
+   what prevents a post-evaluation weakening.
+4. Set `release_base` to either `{kind: "tag", value: "<last-tag>"}` for a
+   prior-tag release, OR `{kind: "root", value: null}` for the first tag in the
+   repo's history (whole-history evaluation; the `HEAD~32` fallback is NOT
+   used in release mode).
+5. Before tagging, verify (the wrapper and CI recheck both re-run this): working
+   tree clean; manifest exists in HEAD; `HEAD^` exists; `evaluated_commit ==
+   manifest_parent_commit == HEAD^`; `evaluated_tree == tree(HEAD^)`; the
+   `HEAD^..HEAD` diff is exactly the manifest path; `release_base` matches the
+   discovered prior tag (or `root`); schema + disposition checks pass.
 
 **Evidence collection (read-only):**
 
-1. Run the strict evaluator with the SAME `last_tag` the report carries:
-   `node .opencode/scripts/check-defer-triggers.js --mode=release --since <last-tag>`
-   (omit `--since` when `last_tag` is null). The script is read-only (see
-   INVARIANTS #2 and the EVIDENCE COMMANDS note above).
+1. Run the strict evaluator with the SAME `last_tag` the report carries. The
+   canonical release-time invocation activates manifest authority and binds the
+   release version:
+   `RELEASE_DEFER_MANIFEST_AUTHORITY=1 node .opencode/scripts/check-defer-triggers.js --mode=release --since <last-tag> --release-version <intended>`
+   (omit `--since` when `last_tag` is null; pass `--override-confirmed-version
+   <intended>` ONLY when the wrapper ceremony has confirmed an override for a
+   record with `disposition: override_required`). The transitional legacy
+   invocation omits the env var: `node .opencode/scripts/check-defer-triggers.js
+   --mode=release --since <last-tag>` (still reads `.local/`; selection rules
+   `source:review-defer` count, `source:p2-followup` excluded, exactly as in
+   v1). The script is read-only in BOTH modes (see INVARIANTS #2 and the
+   EVIDENCE COMMANDS note above).
 2. Parse the JSON envelope. The top-level `classification` is one of
-   `clear | advisory | blocker | evaluator-error`. `tasks_dir_state` is one of
-   `absent | empty | present | unreadable`.
-3. Map each finding to its G7 disposition per the matrix below.
+   `clear | advisory | blocker | evaluator-error` (legacy) or
+   `clear | disclose | blocker | evaluator-error` (manifest mode, where
+   `disclose` is exit 0 with disclosure output). Legacy envelope carries
+   `tasks_dir_state: absent | empty | present | unreadable` and `findings[]`.
+   Manifest envelope carries `manifest_authority: true`, `manifest_path`,
+   `manifest_sha`, `release_base`, `evaluated_commit`, `evaluated_tree`,
+   `manifest_parent_commit`, `head_parent`, `head_parent_tree`,
+   `reconciliation` (with `scope` and `zero_records_confirmed`), `records[]`,
+   `disclosures[]`, `accepted_overrides[]`, `refusals[]`, `blocking_ids[]`,
+   `disclose_ids[]`, and `evaluator_error_ids[]`.
+3. Map each finding (legacy) or each record's disposition outcome (manifest)
+   to its G7 disposition per the matrix below.
 
 **Classification matrix (G7 advisory surface):**
+
+Legacy-mode rows (`.local/` scan, env unset — still available during the
+phased activation):
 
 | Evaluator finding | G7 disposition |
 |---|---|
@@ -472,53 +536,133 @@ close.
 | Malformed card JSON | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
 | `source:p2-followup` | outside G7 v1 scope; omit |
 
-**Absence policy (OPERATOR-CONFIRMED):** when `.local/coordinator/tasks/` does
-NOT exist, the evaluator returns `clear` and G7 is omitted. Absence is not a
-mandatory surface — local candidates are transport, not truth. The same applies
-to an empty directory.
+Manifest-mode rows (`.vh-agent-harness/release-defer-dispositions.json`,
+`RELEASE_DEFER_MANIFEST_AUTHORITY=1` — the canonical release authority):
+
+| Evaluator finding | G7 disposition |
+|---|---|
+| Missing committed manifest (after activation) | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
+| Unsupported schema / malformed manifest / unknown enum | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
+| Duplicate `defer_id` / unsorted records | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
+| Handshake mismatch (`evaluated_commit` / `evaluated_tree` / `manifest_parent_commit` ≠ `HEAD^` / `tree(HEAD^)`) | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
+| `HEAD^..HEAD` diff is not manifest-only | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
+| `release_base.kind=tag` does not match discovered prior tag | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
+| Empty `records[]` without `reconciliation.zero_records_confirmed: true` | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
+| Record `release_relevance: yes` + `disposition: block` | BLOCKER (`G7_ReleaseDeferGate`) |
+| Record `release_relevance: yes` + `disposition: disclose` + `metadata_state: stale\|invalid` | BLOCKER (`G7_ReleaseDeferGate`) |
+| Record `release_relevance: yes` + `disposition: override_required` (no / mismatched override) | BLOCKER (`G7_ReleaseDeferGate`) |
+| Record `release_relevance: no` + `disposition: block\|override_required` (policy error) | BLOCKER (`G7_ReleaseDeferGate`) |
+| Record `release_relevance: unknown` | BLOCKER (`G7_ReleaseDeferGate`) |
+| Record `release_relevance: yes` + `disposition: disclose` + `metadata_state: valid` | WARNING (`G7_ReleaseDeferGate`, disclose) |
+| Record `release_relevance: no` + `disposition: disclose` (any metadata) | WARNING (`G7_ReleaseDeferGate`, disclose) |
+| Record with valid `override` (release-version-scoped + manifest-SHA-bound + wrapper-confirmed) | WARNING (`G7_ReleaseDeferGate`, disclose with accepted_override) |
+
+**Absence policy (manifest-authoritative, OPERATOR-CONFIRMED):** when
+`RELEASE_DEFER_MANIFEST_AUTHORITY=1` is the live configuration, a MISSING
+committed manifest is a hard evaluator-error — the manifest is the release
+authority, so its absence is NOT clear. (The legacy `.local/`-scan mode still
+treats an absent or empty `.local/coordinator/tasks/` as `clear` and omits G7;
+that behavior is the transitional fallback, not the canonical release policy,
+and disappears once the manifest authority is the live configuration.) The
+completeness claim does NOT overclaim: the manifest attests reconciliation of
+the declared release arc only; it does not claim every historical local card
+was captured (impossible while canon permits `.local` loss). An empty
+`records[]` requires `reconciliation.zero_records_confirmed: true` to refuse
+the silent masquerade.
+
+**Override ceremony (manifest mode, operator transition authority):** an
+operator MAY override a single record's release refusal; the model/reviewer
+MAY NOT (safety invariant). The override is `release_version`-scoped, bound to
+the manifest blob SHA, and requires explicit noninteractive wrapper
+confirmation:
+
+1. The record carries `disposition: override_required` AND a populated
+   `override` object with `release_version`, `approved_by`, `approved_at`, and
+   a non-empty `reason`.
+2. The operator invokes the wrapper with BOTH
+   `--override-release-version <intended>` AND `--override-manifest-sha <blob>`
+   (the manifest's `git hash-object` SHA). Both flags are required together;
+   one without the other refuses.
+3. The wrapper requires exact agreement: `--override-release-version == $VERSION`
+   (the version being tagged); `--override-manifest-sha == git hash-object
+   .vh-agent-harness/release-defer-dispositions.json` (the actual blob at
+   HEAD); `override.release_version` (in the manifest record) ==
+   `--release-version` passed to the evaluator. All three must agree AND the
+   wrapper confirmation must match the manifest blob SHA.
+4. The override CANNOT cure schema/staleness/ancestry/malformed failures — it
+   only authorizes a record-level release-relevant refusal. A schema-invalid
+   manifest, a stale handshake, or a duplicate ID refuses regardless of any
+   override.
+5. Overridden findings DO appear in release notes, wrapper output, and CI
+   (default adopted): always disclose override ID, approver, and rationale.
 
 **Evaluation:**
 
 - **BLOCKER** (`id: "G7_ReleaseDeferGate"`) when the evaluator's top-level
   `classification` is `blocker` OR `evaluator-error`. Surface the sorted
-  `blocking_ids` (or `evaluator_error_ids`) verbatim in `what_is_missing`, and
-  the evaluator's `error` summary as the remediation hint. Distinguish the two
-  classes in `what_is_missing` (e.g. "fired, unresolved, release-relevant" vs
-  "evaluator-error — unsupported trigger grammar / malformed card / unknown
-  status / unreadable tasks dir").
+  `blocking_ids` / `refusals[]` (or `evaluator_error_ids`) verbatim in
+  `what_is_missing`, and the evaluator's `error` summary as the remediation
+  hint. Distinguish the two classes in `what_is_missing` (e.g. "fired,
+  unresolved, release-relevant" / "record release_relevance=yes,
+  disposition=block" vs "evaluator-error — unsupported trigger grammar /
+  malformed card / unknown status / unreadable tasks dir / missing or
+  malformed committed manifest / handshake mismatch / manifest-not-only diff").
 - **WARNING** (`id: "G7_ReleaseDeferGate"`) when the evaluator's classification
-  is `advisory` (unfired or out-of-scope findings present, none blocking).
-  Surface the sorted `advisory_ids`.
+  is `advisory` (legacy) or `disclose` (manifest mode). Surface the sorted
+  `advisory_ids` (legacy) or the `disclosures[]` + `accepted_overrides[]`
+  arrays (manifest) so the operator sees them before tagging.
 - **PASS** when the evaluator's classification is `clear` (no candidates, or
-  all candidates resolved). Omit G7 from the report on PASS.
+  all candidates resolved in legacy mode; or — manifest mode — only
+  disclosure-class records with no blockers and the handshake is clean). Omit
+  G7 from the report on PASS.
 
 **A G7 blocker forces `ready: no` with `handoff_to_releaser: null`; it is never
 demoted to a soft warning.** An unresolved, release-relevant DEFER — or any
 evaluator-error — is a hard stop on the handoff.
 
-**Remediation:** delegate to the DEFER card owner (typically `build`) — they
-either land the deferred change so the trigger fires for a benign reason, mark
-the card `completed`/`cancelled` with the resolution provenance, or re-phrase
-the trigger to a supported predicate (`path_touched(<repo-relative-file>)` or
-`after_tag(<tag>)`). The readiness agent edits NEITHER the cards NOR the
-evaluator. The agent does NOT normalize existing unsupported cards to make
-them pass — that is a separate operator-bearing follow-up, deliberately out of
-this slice's scope. Existing cards with unsupported grammar (e.g. `||`-chains,
-directory operands, non-predicate terms) WILL surface as evaluator-error and
-WILL block the next release; the operator decides whether to normalize them.
+**Remediation:** delegate to the DEFER authority the gate names. In legacy mode,
+that is the DEFER card owner (typically `build`) — they either land the
+deferred change so the trigger fires for a benign reason, mark the card
+`completed`/`cancelled` with the resolution provenance, or re-phrase the
+trigger to a supported predicate (`path_touched(<repo-relative-file>)` or
+`after_tag(<tag>)`). In manifest mode, that is the operator/promoter
+responsible for `.vh-agent-harness/release-defer-dispositions.json` — they
+update the record's `release_relevance` / `disposition` / `metadata_state`,
+attach an `override` object (with operator approval) when the refusal is
+release-relevant and intended to ship, then re-run the manifest-only
+child-commit ceremony (re-commit only the manifest as an immediate child of the
+release-prep HEAD; recompute `evaluated_commit` / `evaluated_tree` /
+`manifest_parent_commit`). The readiness agent edits NEITHER the cards NOR the
+manifest NOR the evaluator. The agent does NOT normalize existing unsupported
+cards (legacy mode) or alter manifest records (manifest mode) to make them pass
+— that is a separate operator-bearing step, deliberately out of this slice's
+scope. Existing cards with unsupported grammar (e.g. `||`-chains, directory
+operands, non-predicate terms) WILL surface as evaluator-error in legacy mode
+and WILL block the next release unless the operator either normalizes the
+trigger grammar OR classifies the record in the manifest as
+`release_relevance: no` (the canonical unblock for `defer-p1-lineage-002-001`,
+which is seeded as `no + disclose + invalid` precisely because its source card
+carries an unsupported `||`-chain trigger).
 
 **Advisory scope fence (honest framing):** G7 is the ADVISORY surface. It
 blocks the readiness HANDOFF (the `handoff_to_releaser` field) but does NOT
 physically prevent a tag. The sanctioned release-tag wrapper
 (`scripts/release-tag.sh`) independently re-invokes the SAME deterministic
 evaluator and is AUTHORITATIVE — it refuses to call `git tag -a` on a blocking
-or evaluator-error classification and never reaches the push path. There is NO
-bypass in either surface: no env var, no operator-directive override clears a
-G7 block in this report, and the wrapper has no skip flag. (A future emergency
-exception would be a SEPARATE policy mechanism, not ordinary G7 clearance, and
-would leave the finding visibly blocking.) The two-surface design — advisory
-readiness + authoritative wrapper — is intentional: it keeps model output as a
-candidate while guaranteeing that no release ships with an unaddressed DEFER.
+or evaluator-error classification and never reaches the push path. The
+post-tag CI recheck (`.github/workflows/release.yml`) re-runs the committed
+manifest evaluator against the tagged commit and refuses publication on any
+refusal — bypass detection, not pre-tag authority (a tag already pushed cannot
+be un-created; CI can only refuse to publish). The override ceremony (above)
+is the ONLY operator-side transition authority; the model and the reviewer
+cannot override. There is NO silent bypass in any surface: no env var clears a
+G7 block in this report, and the wrapper has no skip flag. (The
+`RELEASE_DEFER_MANIFEST_AUTHORITY` env var only selects the authority SOURCE —
+manifest vs legacy `.local/` — it does not weaken any refusal.) The
+multi-surface design — advisory readiness + authoritative wrapper +
+publication-refusing CI recheck — is intentional: it keeps model output as a
+candidate while guaranteeing that no release ships with an unaddressed,
+release-relevant DEFER.
 
 ---
 

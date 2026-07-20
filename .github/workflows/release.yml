@@ -28,6 +28,58 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Defense-in-depth publication gate: re-run the committed DEFER
+      # disposition manifest evaluator against the tagged commit and refuse
+      # publication on any refusal. The tag has already been pushed by the
+      # time this step runs, so CI cannot un-create the tag — it can only
+      # refuse to publish artifacts (binary release, changelog) until the
+      # tagged state is corrected.
+      #
+      # Pre-tag authority remains scripts/release-tag.sh (the wrapper runs
+      # the same evaluator before any `git tag`). This CI step is the
+      # bypass-detection + publication-protection layer; it is NOT the
+      # primary release authority.
+      #
+      # Failure modes that refuse publication (evaluator exits nonzero):
+      #   - missing or unsupported manifest at the tagged commit
+      #   - freshness-handshake mismatch (evaluated_commit / evaluated_tree /
+      #     manifest_parent_commit vs HEAD^ / tree(HEAD^))
+      #   - HEAD^..HEAD diff contains anything other than the manifest path
+      #   - wrong release_base (tag mismatch with the reachable-tag lookup
+      #     `git tag --merged HEAD --sort=-v:refname`, excluding the
+      #     under-evaluation version supplied via --release-version)
+      #   - schema/staleness/malformed-record errors
+      #   - any record classified as a blocker
+      #   - unsatisfied override_required record
+      #
+      # Disclosures and accepted overrides are emitted in the evaluator's
+      # JSON stdout and appear in the run log for the release audit trail.
+      - name: Re-release DEFER manifest recompute
+        env:
+          RELEASE_DEFER_MANIFEST_AUTHORITY: "1"
+        run: |
+          set -euo pipefail
+          node .opencode/scripts/check-defer-triggers.js \
+            --mode=release \
+            --release-version "${GITHUB_REF_NAME}" \
+            | tee release-defer-evaluator.json
+          # Surface disclosures + accepted overrides as a visible summary so
+          # they are not buried inside the full JSON envelope on the log.
+          node -e '
+            const fs = require("fs");
+            const env = JSON.parse(fs.readFileSync("release-defer-evaluator.json", "utf8"));
+            const lines = [];
+            if (Array.isArray(env.disclosures) && env.disclosures.length) {
+              lines.push("disclosures:");
+              for (const d of env.disclosures) lines.push("  - " + JSON.stringify(d));
+            }
+            if (Array.isArray(env.accepted_overrides) && env.accepted_overrides.length) {
+              lines.push("accepted_overrides:");
+              for (const o of env.accepted_overrides) lines.push("  - " + JSON.stringify(o));
+            }
+            if (lines.length) console.log(lines.join("\n"));
+          '
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:

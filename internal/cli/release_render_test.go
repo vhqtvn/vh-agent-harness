@@ -693,3 +693,85 @@ func bytesEqual(a, b []byte) bool {
 	}
 	return true
 }
+
+// TestReleaser_SourceAndMirrorCarryManifestCeremony is the deterministic
+// content contract for the releaser's manifest-authority flow. The prior
+// manifest-authority build pass added the ceremony to the releaser as OPTIONAL
+// trailing guidance only ("operator release-prep, optional"); the spine and
+// 4-step flow were untouched, so a release-agent-only operator got no benefit
+// (the releaser used legacy mode locally, pushed a tag, and CI — hardcoded
+// manifest mode — blocked publication). This test pins the post-fix state in
+// BOTH the AUTHORITATIVE embedded overlay source AND its 1:1 RENDERED MIRROR:
+// the ceremony is now OWNED by the releaser end-to-end (Discover manifest
+// state, Decide release-prep path, Prepare manifest ceremony, Execute wrapper
+// with manifest authority active + override-flag forwarding).
+//
+// A regression that drops the ceremony out of the spine (or relegates it back
+// to trailing optional docs) fails here before a release can ship with a
+// releaser that silently uses legacy mode while CI expects manifest mode.
+func TestReleaser_SourceAndMirrorCarryManifestCeremony(t *testing.T) {
+	root := findModuleRoot(t)
+	relPaths := []string{
+		filepath.Join("templates", "overlays", "release", "agents", "releaser.md"),
+		filepath.Join(".opencode", "agents", "releaser.md"),
+	}
+	for _, rel := range relPaths {
+		body, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("read releaser agent %s: %v", rel, err)
+		}
+		got := string(body)
+		t.Run(rel, func(t *testing.T) {
+			assertReleaserManifestCeremonyContent(t, rel, got)
+		})
+	}
+	// Re-assert the gateExempt shape is intact in the rendered mirror: the
+	// ceremony addition added a SECOND committer delegation, which MUST NOT
+	// have re-introduced any gate-group command into the releaser's bash block
+	// (the gateExempt rationale — parent-deny cannot bleed into the delegated
+	// committer session — still holds; the committer independently holds the
+	// gate for BOTH the note commit and the manifest commit).
+	assertReleaserGateExemptShape(t, root)
+}
+
+// assertReleaserManifestCeremonyContent asserts the distinctive manifest-
+// authority tokens are present in one releaser agent body. Each needle is
+// content the pre-fix releaser did NOT carry (the prior pass shipped the
+// ceremony only as a trailing "operator release-prep, optional" section with
+// the spine/flow untouched), so a regression that drops the ceremony out of
+// the spine — or weakens it back to optional operator-side guidance — fails
+// here.
+func assertReleaserManifestCeremonyContent(t *testing.T, label, got string) {
+	t.Helper()
+	checks := []struct{ name, needle string }{
+		{"canonical-mode env activation (Execute)", "RELEASE_DEFER_MANIFEST_AUTHORITY=1"},
+		{"override flag release-version forwarded", "--override-release-version"},
+		{"override flag manifest-sha forwarded", "--override-manifest-sha"},
+		{"release-prep path enum ceremony_required", "ceremony_required"},
+		{"release-prep path enum resumable_existing_manifest", "resumable_existing_manifest"},
+		{"release-prep path enum legacy_fallback", "legacy_fallback"},
+		{"JSON schema field release_prep_path", "\"release_prep_path\""},
+		{"JSON schema field manifest_authority_active", "\"manifest_authority_active\""},
+		{"JSON schema field manifest_ceremony_performed", "\"manifest_ceremony_performed\""},
+		{"JSON schema field manifest_handshake_verified", "\"manifest_handshake_verified\""},
+		{"JSON schema field manifest_commit", "\"manifest_commit\""},
+		{"JSON schema field wrapper_result.disclosures", "\"disclosures\""},
+		{"JSON schema field wrapper_result.accepted_overrides", "\"accepted_overrides\""},
+		{"Invariant 1b header (handshake sacred)", "Manifest handshake is sacred"},
+		{"Invariant 7 header (operator override authority)", "Operator is the sole override transition authority"},
+		{"Discover step manifest-authority state", "Manifest-authority state"},
+		{"Decide step release-prep path decision", "release-prep path"},
+		{"Prepare split substep 3.1 (note)", "Step 3.1"},
+		{"Prepare split substep 3.2 (manifest ceremony)", "Step 3.2"},
+		{"Prepare split substep 3.3 (tag-message staging)", "Step 3.3"},
+		{"first-run-from-seed transition framing", "first run after the seed manifest lands"},
+		{"trailing section reframed as canonical-flow reference", "Manifest ceremony reference (canonical flow)"},
+		{"releaser-owns-ceremony framing (description)", "owns the manifest-authority ceremony end-to-end"},
+		{"releaser-owns-ceremony framing (trailing section body)", "releaser owns the ceremony end-to-end"},
+	}
+	for _, c := range checks {
+		if !strings.Contains(got, c.needle) {
+			t.Errorf("%s: missing %s — %q (manifest-authority ceremony drifted out of the releaser spine)", label, c.name, c.needle)
+		}
+	}
+}

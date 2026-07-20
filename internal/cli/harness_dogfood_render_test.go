@@ -414,3 +414,57 @@ func assertG7GateContent(t *testing.T, label, got string) {
 		}
 	}
 }
+
+// TestHarnessDogfood_ReleaseReadinessCarriesManifestAuthority is the deterministic
+// content contract for the manifest-authority reframing of G7. The committed
+// disposition manifest at .vh-agent-harness/release-defer-dispositions.json is
+// the SOLE release authority when RELEASE_DEFER_MANIFEST_AUTHORITY=1|true;
+// .local/ becomes provenance transport only. This test pins the new framing in
+// BOTH the AUTHORITATIVE overlay source AND its 1:1 RENDERED MIRROR so a
+// regression that re-introduces the old "local candidate cards are authoritative"
+// overclaim (or drops the manifest ceremony / override ceremony / absence-policy
+// reframing) fails before a release can ship with a weakened release gate.
+func TestHarnessDogfood_ReleaseReadinessCarriesManifestAuthority(t *testing.T) {
+	root := findModuleRoot(t)
+	relPaths := []string{
+		filepath.Join(".vh-agent-harness", "overlays", "harness-dogfood", "agents", "harness-release-readiness.md"),
+		filepath.Join(".opencode", "agents", "harness-release-readiness.md"),
+	}
+	for _, rel := range relPaths {
+		body, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("read readiness agent %s: %v", rel, err)
+		}
+		t.Run(rel, func(t *testing.T) {
+			assertManifestAuthorityContent(t, rel, string(body))
+		})
+	}
+}
+
+// assertManifestAuthorityContent asserts the distinctive manifest-authority
+// tokens are present in one readiness agent body. Each needle is content the
+// pre-manifest G7 framing did NOT carry, so a regression that re-introduces the
+// "local cards authoritative" overclaim (or drops the operator-side ceremony
+// docs) fails here.
+func assertManifestAuthorityContent(t *testing.T, label, got string) {
+	t.Helper()
+	checks := []struct{ name, needle string }{
+		{"committed disposition manifest path", ".vh-agent-harness/release-defer-dispositions.json"},
+		{"manifest authority env switch", "RELEASE_DEFER_MANIFEST_AUTHORITY"},
+		{"manifest authority framing (Release authority)", "Release authority"},
+		{"local reframed as provenance transport", "provenance transport"},
+		{"absence policy reframed manifest-authoritative", "manifest-authoritative"},
+		{"manifest ceremony subsection", "Manifest ceremony"},
+		{"override ceremony subsection", "Override ceremony"},
+		{"wrapper override flag release-version", "--override-release-version"},
+		{"wrapper override flag manifest-sha", "--override-manifest-sha"},
+		{"release-version evaluator flag", "--release-version"},
+		{"accepted_overrides envelope field", "accepted_overrides"},
+		{"disclose_ids envelope field", "disclose_ids"},
+	}
+	for _, c := range checks {
+		if !strings.Contains(got, c.needle) {
+			t.Errorf("%s: missing %s — %q (manifest-authority framing drifted out of the readiness agent)", label, c.name, c.needle)
+		}
+	}
+}

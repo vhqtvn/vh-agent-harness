@@ -22,24 +22,38 @@
 //       trigger grammar predates the strict release contract.
 //
 //   RELEASE MODE (--mode=release)
-//     - Strict release-time evaluator. Consumed by the authorized release
+//     - Strict releasetime evaluator. Consumed by the authorized release
 //       wrapper (hard refusal) AND by the advisory readiness surface. ONE
 //       evaluator so the two surfaces cannot drift.
 //     - Emits STRUCTURED JSON (single object) and returns NONZERO for blocker
 //       or evaluator-error classifications.
-//     - Selects ONLY source:review-defer candidates; source:p2-followup is
-//       EXCLUDED from v1 release scope.
-//     - REJECTS unsupported trigger grammar (|| separators, directory
-//       operands, non-predicate terms, empty args) as evaluator-error — NEVER
-//       silently "unfired." Silently treating broken grammar as not-met would
-//       be a release bypass.
-//     - Fail-closed: malformed JSON, unknown lifecycle status, unreadable
-//       tasks dir, missing trigger:/studied: provenance, AND null/indeterminate
-//       release arc (unresolvable --since, the HEAD~N fallback when no tag
-//       exists, git unusable, bad ref, empty/shallow repo) all produce
-//       evaluator-error. Absent or empty tasks dir → clear (pass). An
-//       empty-but-deterministic arc (zero changed paths) is NOT null and
+//     - TWO input modes, selected by the RELEASE_DEFER_MANIFEST_AUTHORITY env:
+//       LEGACY (env unset): reads .local/{{COORDINATOR_DIR}}/tasks/ as before.
+//         Kept byte-identical for backward compatibility during the rollout.
+//       MANIFEST AUTHORITY (env=1|true): reads the committed manifest at
+//         .vh-agent-harness/release-defer-dispositions.json ONLY. Performs NO
+//         .local/ access whatsoever. The committed manifest is the release
+//         truth; .local/ stays promoter/provenance transport.
+//     - LEGACY selects ONLY source:review-defer candidates; source:p2-followup
+//       is EXCLUDED from v1 release scope. LEGACY REJECTS unsupported trigger
+//       grammar (|| separators, directory operands, non-predicate terms, empty
+//       args) as evaluator-error — NEVER silently "unfired." Silently treating
+//       broken grammar as not-met would be a release bypass.
+//     - LEGACY fail-closed: malformed JSON, unknown lifecycle status,
+//       unreadable tasks dir, missing trigger:/studied: provenance, AND
+//       null/indeterminate release arc (unresolvable --since, the HEAD~N
+//       fallback when no tag exists, git unusable, bad ref, empty/shallow repo)
+//       all produce evaluator-error. Absent or empty tasks dir → clear (pass).
+//       An empty-but-deterministic arc (zero changed paths) is NOT null and
 //       evaluates normally (no files in scope → no path_touched can fire).
+//     - MANIFEST AUTHORITY fail-closed: missing/malformed manifest, unsupported
+//       schema_version, unknown enum values, duplicate IDs, unsorted records,
+//       handshake mismatch (evaluated_commit/manifest_parent_commit/HEAD^,
+//       evaluated_tree/HEAD^{tree}, diff != [manifest path only]), wrong
+//       release_base, empty records without reconciliation.zero_records_confirmed,
+//       and any disposition-matrix refusal ALL produce blocker or
+//       evaluator-error. The handshake (sacred — do not weaken) prevents the
+//       manifest from being weakened after its claimed evaluation.
 //
 // This is a deliberately tiny predicate engine, not a full rules system:
 //   path_touched(<path>)   true if <path> appears in `git diff --name-only`
@@ -67,8 +81,27 @@
 //   # Promoter mode (human-readable, always exit 0)
 //   node .opencode/scripts/check-defer-triggers.js [--since <ref>] [--tasks <dir>]
 //
-//   # Release mode (JSON, nonzero on blocker/evaluator-error)
+//   # Release mode — LEGACY (reads .local/; backward compat)
 //   node .opencode/scripts/check-defer-triggers.js --mode=release [--since <ref>] [--tasks <dir>]
+//
+//   # Release mode — MANIFEST AUTHORITY (reads committed manifest ONLY)
+//   RELEASE_DEFER_MANIFEST_AUTHORITY=1 \
+//   node .opencode/scripts/check-defer-triggers.js --mode=release \
+//       [--release-version <vX.Y.Z>] [--override-confirmed-version <vX.Y.Z>]
+//
+//   --override-confirmed-version is supplied by the authorized release wrapper
+//   ONLY after the operator-side override ceremony succeeds
+//   (--override-release-version + --override-manifest-sha agree with the
+//   requested version and the actual manifest blob SHA). It is the
+//   transition-authority signal for Layer B (operator live intent). Layer A
+//   (object validity + version match) is verifiable from the committed manifest
+//   alone and is enforced with or without the flag; the wrapper adds a post-
+//   evaluator gate so an override accepted by Layer A still refuses at tag
+//   time when the operator did not supply the ceremony flags. CI verifies
+//   Layer A from the committed manifest and accepts a well-formed override
+//   without the flag (CI is defense-in-depth, not operator-intent re-enforcement).
+//   Model/reviewer surfaces (the advisory readiness surface) cannot supply
+//   this flag.
 //
 // Promoter-mode failures (missing git, unreadable dir) print a warning line
 // and degrade to "no candidates". Release-mode failures fail closed.
@@ -116,6 +149,8 @@ function parseArgs(argv) {
         since: null, // ref/tag to diff against; null = auto (latest tag or HEAD~32)
         tasksDir: null, // override the tasks dir; null = defaultTasksDir()
         mode: null, // null|'promoter' = human-readable (default); 'release' = JSON + strict
+        releaseVersion: null, // release version being tagged (manifest authority: override binding)
+        overrideConfirmedVersion: null, // operator-confirmed version (wrapper ceremony); honors override_required
     };
     for (let i = 2; i < argv.length; i++) {
         const raw = argv[i];
@@ -135,14 +170,28 @@ function parseArgs(argv) {
         } else if (a === "--mode") {
             const v = takeValue(true);
             if (v !== null) options.mode = v;
+        } else if (a === "--release-version") {
+            const v = takeValue(true);
+            if (v !== null) options.releaseVersion = v;
+        } else if (a === "--override-confirmed-version") {
+            const v = takeValue(true);
+            if (v !== null) options.overrideConfirmedVersion = v;
         } else if (a === "--help" || a === "-h") {
             process.stdout.write(
                 "usage: check-defer-triggers.js [--mode promoter|release] [--since <ref>] [--tasks <dir>]\n" +
+                "                                  [--release-version <vX.Y.Z>]\n" +
+                "                                  [--override-confirmed-version <vX.Y.Z>]\n" +
                 "  Predicate evaluator for DEFER/p2/follow-up candidates.\n" +
                 "  Default (promoter) mode: human-readable report, never blocking, exit 0.\n" +
                 "  --mode=release: strict JSON release evaluation; nonzero on blocker or\n" +
                 "    evaluator-error. Fail-closed on malformed cards / unknown status /\n" +
-                "    unsupported trigger grammar. Absent/empty tasks dir → clear (pass).\n",
+                "    unsupported trigger grammar. Absent/empty tasks dir → clear (pass).\n" +
+                "  RELEASE_DEFER_MANIFEST_AUTHORITY=1: release mode reads the committed\n" +
+                "    manifest at .vh-agent-harness/release-defer-dispositions.json ONLY\n" +
+                "    (no .local/ access); --release-version binds the release being tagged.\n" +
+                "    --override-confirmed-version is the operator-side wrapper confirmation\n" +
+                "    signal: an override_required record is honored only when\n" +
+                "    override.release_version == --release-version == --override-confirmed-version.\n",
             );
             process.exit(0);
         }
@@ -530,8 +579,601 @@ function emitReleaseResult(payload) {
     process.exit(code);
 }
 
-// RELEASE-mode entrypoint. Builds the strict JSON envelope.
+// ---- Release-mode MANIFEST AUTHORITY primitives ----------------------------
+//
+// When RELEASE_DEFER_MANIFEST_AUTHORITY is set (1|true), release mode reads
+// the committed manifest at <repoRoot>/.vh-agent-harness/release-defer-
+// dispositions.json ONLY and performs NO .local/ access. The committed
+// manifest is the release truth. This eliminates the fail-open defect where
+// absent .local/ was treated as "clear" and could not protect fresh checkouts.
+//
+// The manifest carries the operator/promoter's attested disposition for each
+// DEFER finding in the declared release arc. The evaluator verifies the
+// freshness handshake (manifest commits only itself on top of the evaluated
+// commit), validates schema v1, and applies the disposition matrix.
+
+// Release manifest runtime path. This is the harness-conventional config dir
+// (stable across installs — not a project domain literal), so it is safe to
+// hardcode in templates/core/. The MANIFEST CONTENT is project-owned; the
+// PATH is harness convention. Forward-slash form matches git diff output.
+const RELEASE_MANIFEST_REL = ".vh-agent-harness/release-defer-dispositions.json";
+const RELEASE_MANIFEST_SCHEMA_VERSION = 1;
+const RELEASE_RELEVANCE_VALUES = new Set(["yes", "no", "unknown"]);
+const RELEASE_DISPOSITION_VALUES = new Set(["block", "disclose", "override_required"]);
+const RELEASE_METADATA_VALUES = new Set(["valid", "stale", "invalid"]);
+
+function releaseManifestAbsPath() {
+    return path.join(repoRoot(), RELEASE_MANIFEST_REL);
+}
+
+// True when release mode should read the committed manifest instead of .local/.
+function releaseManifestAuthorityActive() {
+    const v = process.env.RELEASE_DEFER_MANIFEST_AUTHORITY;
+    return v === "1" || v === "true";
+}
+
+// Full 40-char lowercase hex SHA validator.
+function isFullSha(s) {
+    return typeof s === "string" && /^[0-9a-f]{40}$/.test(s);
+}
+
+// Read the bytes of a path AS COMMITTED AT HEAD via `git show HEAD:<path>`.
+// This is the manifest-authority contract: the bytes evaluated equal the bytes
+// a fresh checkout (and CI) will see — NOT the worktree, which may carry
+// uncommitted edits that would otherwise let a dirty edit flip a `block`
+// record to `disclose+valid` while leaving the handshake SHAs intact. Returns
+// the file content as a UTF-8 string, or null if git fails (typically because
+// the path is not tracked at HEAD).
+function gitShowHeadBlob(relPath) {
+    try {
+        return execFileSync(
+            "git", ["show", `HEAD:${relPath}`],
+            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        );
+    } catch (_) {
+        return null;
+    }
+}
+
+// Compute the git blob SHA of `HEAD:<relPath>` via `git rev-parse`. Returns the
+// 40-char lowercase hex blob SHA the committed tree carries, or null on
+// failure. The SHA is the override-binding token: it MUST be derived from the
+// committed blob (what CI sees), NEVER from a `git hash-object` of the worktree
+// path (which a dirty edit could swap out from under the ceremony).
+function gitHeadBlobSha(relPath) {
+    try {
+        const sha = execFileSync(
+            "git", ["rev-parse", `HEAD:${relPath}`],
+            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        ).trim();
+        return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+// Resolve HEAD^ to a full commit SHA. Returns null if HEAD^ does not exist
+// (single-commit repo) or git is unusable.
+function gitHeadParent() {
+    try {
+        const sha = execFileSync(
+            "git", ["rev-parse", "--verify", "--quiet", "HEAD^"],
+            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        ).trim();
+        return isFullSha(sha) ? sha : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+// Resolve HEAD^^{tree} to the tree SHA of HEAD^ (the evaluated commit P).
+// NB: `HEAD^{tree}` would be the tree of HEAD itself (the manifest commit M);
+// we need the tree of HEAD^ (P), so the ref is `HEAD^^{tree}` (parent of HEAD,
+// peeled to its tree). Forward brace — argv form, no shell, so `^{}` is safe.
+function gitHeadParentTree() {
+    try {
+        const sha = execFileSync(
+            "git", ["rev-parse", "--verify", "--quiet", "HEAD^^{tree}"],
+            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        ).trim();
+        return isFullSha(sha) ? sha : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+// Sorted array of files changed in HEAD^..HEAD, or null on failure. Forward
+// slashes (git's output convention) for cross-platform comparability.
+function gitDiffHeadRange() {
+    try {
+        const out = execFileSync(
+            "git", ["diff", "--name-only", "HEAD^..HEAD"],
+            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        );
+        return out.split("\n").map((l) => l.trim()).filter(Boolean).sort(lexCompare);
+    } catch (_) {
+        return null;
+    }
+}
+
+// The most recent reachable tag, or null if none exists. Used to validate
+// release_base.kind=tag against the discovered prior tag.
+//
+// When `excludeVersion` is supplied (CI post-tag recheck forwards the just-cut
+// release tag via --release-version), that exact version is excluded from the
+// lookup so the function returns the PRIOR tag — the one the manifest's
+// release_base.value names. The wrapper's pre-tag invocation also forwards
+// --release-version, but the new tag does not exist yet at that point, so the
+// exclusion is a no-op there and the bare describe path remains equivalent.
+function gitLatestTag(excludeVersion) {
+    try {
+        if (excludeVersion) {
+            // List tags REACHABLE from HEAD in descending version order and
+            // return the first that is not the excluded version. The
+            // `--merged HEAD` filter is the reachability guarantee: only tags
+            // whose commits are ancestors of (or equal to) HEAD are listed.
+            // Without it, a maintenance-branch release (e.g. v1.0.2 declaring
+            // release_base v1.0.0) would incorrectly select an unrelated
+            // higher mainline tag (v1.1.0 on main, unreachable from the
+            // maintenance branch HEAD), emit release_base mismatch, and CI's
+            // set -e would block GoReleaser publication. `--sort=-v:refname`
+            // is version-aware so v0.10.0 > v0.9.0 as expected. This handles
+            // both the linear CI post-tag case (the just-cut release tag is
+            // now the most recent reachable tag and the manifest's
+            // release_base names the prior reachable release) and the branched
+            // maintenance-release case.
+            const out = execFileSync(
+                "git", ["tag", "--merged", "HEAD", "--sort=-v:refname"],
+                { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+            );
+            for (const line of out.split("\n")) {
+                const t = line.trim();
+                if (t && t !== excludeVersion) {
+                    return t;
+                }
+            }
+            return null;
+        }
+        const tag = execFileSync(
+            "git", ["describe", "--tags", "--abbrev=0"],
+            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        ).trim();
+        return tag || null;
+    } catch (_) {
+        return null;
+    }
+}
+
+// Validate a manifest override object. Returns {ok:true} or {ok:false,error}.
+function validateOverrideObject(o, idx) {
+    const where = `records[${idx}].override`;
+    if (!o || typeof o !== "object" || Array.isArray(o)) {
+        return { ok: false, error: `${where} must be an object` };
+    }
+    if (typeof o.release_version !== "string" || !o.release_version) {
+        return { ok: false, error: `${where}.release_version must be a non-empty string` };
+    }
+    if (typeof o.approved_by !== "string" || !o.approved_by) {
+        return { ok: false, error: `${where}.approved_by must be a non-empty string` };
+    }
+    if (typeof o.approved_at !== "string" || !o.approved_at) {
+        return { ok: false, error: `${where}.approved_at must be a non-empty string` };
+    }
+    if (typeof o.reason !== "string" || !o.reason) {
+        return { ok: false, error: `${where}.reason must be a non-empty string` };
+    }
+    return { ok: true };
+}
+
+// Validate the parsed manifest object against schema v1. Returns {ok:true} or
+// {ok:false,error:"..."}. Checks schema_version, release_base, evaluated_*,
+// manifest_parent_commit, reconciliation, per-record shape + enums + sort +
+// duplicate IDs + empty-records rule.
+function validateReleaseManifest(obj) {
+    if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+        return { ok: false, error: "manifest root must be a JSON object" };
+    }
+    if (obj.schema_version !== RELEASE_MANIFEST_SCHEMA_VERSION) {
+        return { ok: false, error: `unsupported schema_version: ${JSON.stringify(obj.schema_version)}` };
+    }
+    const rb = obj.release_base;
+    if (!rb || typeof rb !== "object" || Array.isArray(rb)) {
+        return { ok: false, error: "release_base must be an object" };
+    }
+    if (rb.kind !== "root" && rb.kind !== "tag") {
+        return { ok: false, error: `release_base.kind must be root|tag; got ${JSON.stringify(rb.kind)}` };
+    }
+    if (rb.kind === "root") {
+        if (rb.value !== null && rb.value !== undefined) {
+            return { ok: false, error: "release_base.kind=root requires value null" };
+        }
+    } else {
+        if (typeof rb.value !== "string" || !rb.value) {
+            return { ok: false, error: "release_base.kind=tag requires non-empty string value" };
+        }
+    }
+    if (!isFullSha(obj.evaluated_commit)) {
+        return { ok: false, error: "evaluated_commit must be a 40-char lowercase hex SHA" };
+    }
+    if (!isFullSha(obj.evaluated_tree)) {
+        return { ok: false, error: "evaluated_tree must be a 40-char lowercase hex SHA" };
+    }
+    if (!isFullSha(obj.manifest_parent_commit)) {
+        return { ok: false, error: "manifest_parent_commit must be a 40-char lowercase hex SHA" };
+    }
+    const rec = obj.reconciliation;
+    if (!rec || typeof rec !== "object" || Array.isArray(rec)) {
+        return { ok: false, error: "reconciliation must be an object" };
+    }
+    if (typeof rec.status !== "string" || !rec.status) {
+        return { ok: false, error: "reconciliation.status must be a non-empty string" };
+    }
+    if (typeof rec.scope !== "string" || !rec.scope) {
+        return { ok: false, error: "reconciliation.scope must be a non-empty string" };
+    }
+    if (typeof rec.zero_records_confirmed !== "boolean") {
+        return { ok: false, error: "reconciliation.zero_records_confirmed must be boolean" };
+    }
+    if (!Array.isArray(obj.records)) {
+        return { ok: false, error: "records must be an array" };
+    }
+    if (obj.records.length === 0 && !rec.zero_records_confirmed) {
+        return { ok: false, error: "empty records require reconciliation.zero_records_confirmed=true" };
+    }
+    const seenIds = new Set();
+    for (let i = 0; i < obj.records.length; i++) {
+        const r = obj.records[i];
+        const where = `records[${i}]`;
+        if (!r || typeof r !== "object" || Array.isArray(r)) {
+            return { ok: false, error: `${where} must be an object` };
+        }
+        if (typeof r.defer_id !== "string" || !r.defer_id) {
+            return { ok: false, error: `${where}.defer_id must be a non-empty string` };
+        }
+        if (seenIds.has(r.defer_id)) {
+            return { ok: false, error: `duplicate defer_id: ${r.defer_id}` };
+        }
+        seenIds.add(r.defer_id);
+        if (!RELEASE_RELEVANCE_VALUES.has(r.release_relevance)) {
+            return { ok: false, error: `${where}.release_relevance invalid: ${JSON.stringify(r.release_relevance)}` };
+        }
+        if (!RELEASE_DISPOSITION_VALUES.has(r.disposition)) {
+            return { ok: false, error: `${where}.disposition invalid: ${JSON.stringify(r.disposition)}` };
+        }
+        if (!RELEASE_METADATA_VALUES.has(r.metadata_state)) {
+            return { ok: false, error: `${where}.metadata_state invalid: ${JSON.stringify(r.metadata_state)}` };
+        }
+        if (typeof r.summary !== "string" || !r.summary) {
+            return { ok: false, error: `${where}.summary must be a non-empty string` };
+        }
+        if (typeof r.reason !== "string" || !r.reason) {
+            return { ok: false, error: `${where}.reason must be a non-empty string` };
+        }
+        if (typeof r.source_ref !== "string" || !r.source_ref) {
+            return { ok: false, error: `${where}.source_ref must be a non-empty string (provenance text; never dereferenced)` };
+        }
+        if (typeof r.studied_at !== "string" || !r.studied_at) {
+            return { ok: false, error: `${where}.studied_at must be a non-empty string` };
+        }
+        if (typeof r.reviewed_at !== "string" || !r.reviewed_at) {
+            return { ok: false, error: `${where}.reviewed_at must be a non-empty string` };
+        }
+        if (r.override !== null && r.override !== undefined) {
+            const ov = validateOverrideObject(r.override, i);
+            if (!ov.ok) return ov;
+        }
+    }
+    // Sort check: records must already be in lexical order by defer_id. This
+    // forces deterministic authoring and prevents reorderings from masking a
+    // duplicate or a sneaked-in record.
+    const ids = obj.records.map((r) => r.defer_id);
+    const sorted = ids.slice().sort(lexCompare);
+    for (let i = 0; i < ids.length; i++) {
+        if (ids[i] !== sorted[i]) {
+            return { ok: false, error: `records not sorted lexically by defer_id at index ${i}: ${ids[i]} before ${sorted[i]}` };
+        }
+    }
+    return { ok: true };
+}
+
+// Apply the disposition matrix to one record. Returns:
+//   { result: "allow", disclose: true, overrideAccepted?: true, why: "..." }
+//   { result: "refuse", why: "..." }
+// `releaseVersion` is the version being released (from --release-version).
+// `overrideConfirmedVersion` is the operator-side wrapper confirmation
+// (--override-confirmed-version). Override verification is split into two
+// layers so the SAME evaluator serves both the pre-tag wrapper invocation
+// and the post-tag CI recheck:
+//   - Layer A (object validity): override object is present and well-formed,
+//     override.release_version matches releaseVersion. Verifiable from the
+//     committed manifest alone. Both the wrapper and CI verify this layer.
+//   - Layer B (operator live intent): when --override-confirmed-version IS
+//     supplied (wrapper mode), it MUST equal releaseVersion exactly. When it
+//     is NOT supplied (CI defense-in-depth recheck), Layer A alone is
+//     sufficient — the committed override object IS the attestation at that
+//     point, and the wrapper already enforced Layer B before forwarding the
+//     flag. The wrapper adds a post-evaluator gate so that an override
+//     accepted by Layer A still refuses at tag time when the operator did not
+//     supply the ceremony flags (--override-release-version +
+//     --override-manifest-sha). This keeps wrapper enforcement whole without
+//     weakening CI's verification role.
+function applyDisposition(record, releaseVersion, overrideConfirmedVersion) {
+    const rel = record.release_relevance;
+    const disp = record.disposition;
+    const meta = record.metadata_state;
+    const override = record.override;
+    if (rel === "yes") {
+        if (disp === "block") {
+            return { result: "refuse", why: "release_relevance=yes disposition=block: hard block; override cannot cure" };
+        }
+        if (disp === "disclose") {
+            if (meta === "valid") {
+                return { result: "allow", disclose: true, why: "release_relevance=yes disposition=disclose metadata_state=valid: disclosed" };
+            }
+            return { result: "refuse", why: `release_relevance=yes disposition=disclose requires metadata_state=valid; got ${meta}` };
+        }
+        if (disp === "override_required") {
+            // Layer A (object validity) — both wrapper and CI verify.
+            if (!override) {
+                return { result: "refuse", why: "disposition=override_required but override object is absent" };
+            }
+            if (!releaseVersion) {
+                return { result: "refuse", why: `override_required record requires --release-version; override declares ${override.release_version}` };
+            }
+            if (override.release_version !== releaseVersion) {
+                return { result: "refuse", why: `override.release_version=${override.release_version} != release_version=${releaseVersion}` };
+            }
+            // Layer B (operator live intent) — wrapper mode only. When the
+            // flag is supplied, it must match exactly. When absent (CI mode),
+            // Layer A alone is sufficient; the wrapper's post-evaluator gate
+            // enforces ceremony at tag time.
+            if (overrideConfirmedVersion && overrideConfirmedVersion !== releaseVersion) {
+                return { result: "refuse", why: `override-confirmed-version=${overrideConfirmedVersion} != release_version=${releaseVersion}` };
+            }
+            return {
+                result: "allow", disclose: true, overrideAccepted: true,
+                why: `override accepted for release ${releaseVersion} (approved_by=${override.approved_by})`,
+            };
+        }
+        return { result: "refuse", why: `unhandled disposition for release_relevance=yes: ${disp}` };
+    }
+    if (rel === "no") {
+        if (disp === "disclose") {
+            return { result: "allow", disclose: true, why: `release_relevance=no disposition=disclose metadata_state=${meta}: disclosed as non-release-relevant` };
+        }
+        return { result: "refuse", why: `policy error: release_relevance=no is incompatible with disposition=${disp} (use disclose)` };
+    }
+    // rel === "unknown"
+    return { result: "refuse", why: "release_relevance=unknown must be resolved to yes|no before release" };
+}
+
+// Emit the manifest-authority release envelope and exit. clear|disclose → 0;
+// blocker → 1; evaluator-error → 2. Reuses emitReleaseResult (shared with
+// legacy release mode) which already maps disclose → 0.
+
+// MANIFEST-AUTHORITY release entrypoint. Strict schema-v1 + handshake + matrix.
+function mainReleaseManifest(options) {
+    const manifestPath = releaseManifestAbsPath();
+    const releaseVersion = options.releaseVersion || null;
+    const overrideConfirmedVersion = options.overrideConfirmedVersion || null;
+
+    const envelope = {
+        mode: "release",
+        manifest_authority: true,
+        manifest_path: manifestPath,
+        manifest_sha: null,
+        release_version: releaseVersion,
+        override_confirmed_version: overrideConfirmedVersion,
+        release_base: null,
+        evaluated_commit: null,
+        evaluated_tree: null,
+        manifest_parent_commit: null,
+        head_parent: null,
+        head_parent_tree: null,
+        reconciliation: null,
+        records: [],
+        disclosures: [],
+        accepted_overrides: [],
+        refusals: [],
+        blocking_ids: [],
+        disclose_ids: [],
+        evaluator_error_ids: [],
+        classification: "evaluator-error",
+        error: null,
+    };
+
+    // 1. Read manifest bytes FROM THE COMMITTED HEAD BLOB (never the worktree).
+    //
+    // This is the manifest-authority contract: the bytes evaluated MUST equal
+    // the bytes a fresh checkout (and CI) will see. Reading the worktree file
+    // would let a dirty edit flip a committed `block` record to
+    // `disclose+valid` while leaving the handshake SHAs intact — the wrapper's
+    // subsequent HEAD^..HEAD path-list check would still pass (the manifest
+    // path is unchanged), but the bytes evaluated would not be the bytes
+    // committed at HEAD. Reading from `HEAD:<path>` makes that bypass
+    // impossible: the evaluator and CI see the same bytes by construction.
+    //
+    // `manifestPath` is still computed (above) for the envelope's
+    // `manifest_path` field, but the bytes themselves come from git, not fs.
+    const raw = gitShowHeadBlob(RELEASE_MANIFEST_REL);
+    if (raw === null) {
+        envelope.error = `release manifest missing from HEAD: ${RELEASE_MANIFEST_REL} (must be committed, not just on worktree)`;
+        emitReleaseResult(envelope);
+        return;
+    }
+
+    // 2. Parse JSON.
+    let obj;
+    try {
+        obj = JSON.parse(raw);
+    } catch (e) {
+        envelope.error = `release manifest malformed JSON: ${(e && e.message) || "parse error"}`;
+        emitReleaseResult(envelope);
+        return;
+    }
+
+    // 3. Manifest blob SHA FROM THE SAME COMMITTED BLOB (override binding +
+    // echo). Computed via `git rev-parse HEAD:<path>` so it equals what CI
+    // will also see — a dirty worktree cannot swap this SHA under the
+    // override ceremony.
+    envelope.manifest_sha = gitHeadBlobSha(RELEASE_MANIFEST_REL);
+    if (!envelope.manifest_sha) {
+        envelope.error = `release manifest unreadable from HEAD: ${RELEASE_MANIFEST_REL} (git rev-parse HEAD:<path> failed)`;
+        emitReleaseResult(envelope);
+        return;
+    }
+
+    // 4. Schema validation (v1; enums; sort; duplicates; per-record shape).
+    const v = validateReleaseManifest(obj);
+    if (!v.ok) {
+        envelope.error = `manifest schema invalid: ${v.error}`;
+        emitReleaseResult(envelope);
+        return;
+    }
+    envelope.release_base = obj.release_base;
+    envelope.evaluated_commit = obj.evaluated_commit;
+    envelope.evaluated_tree = obj.evaluated_tree;
+    envelope.manifest_parent_commit = obj.manifest_parent_commit;
+    envelope.reconciliation = obj.reconciliation;
+    envelope.records = obj.records;
+
+    // 5. Freshness handshake (sacred — do not weaken).
+    const headParent = gitHeadParent();
+    const headParentTree = gitHeadParentTree();
+    envelope.head_parent = headParent;
+    envelope.head_parent_tree = headParentTree;
+    if (!headParent || !headParentTree) {
+        envelope.error = "handshake failed: HEAD^ does not exist (need at least 2 commits)";
+        emitReleaseResult(envelope);
+        return;
+    }
+    if (obj.evaluated_commit !== headParent) {
+        envelope.error = `handshake failed: evaluated_commit=${obj.evaluated_commit} != HEAD^=${headParent}`;
+        emitReleaseResult(envelope);
+        return;
+    }
+    if (obj.manifest_parent_commit !== headParent) {
+        envelope.error = `handshake failed: manifest_parent_commit=${obj.manifest_parent_commit} != HEAD^=${headParent}`;
+        emitReleaseResult(envelope);
+        return;
+    }
+    if (obj.evaluated_tree !== headParentTree) {
+        envelope.error = `handshake failed: evaluated_tree=${obj.evaluated_tree} != tree(HEAD^)=${headParentTree}`;
+        emitReleaseResult(envelope);
+        return;
+    }
+    const diff = gitDiffHeadRange();
+    if (diff === null) {
+        envelope.error = "handshake failed: cannot compute HEAD^..HEAD diff";
+        emitReleaseResult(envelope);
+        return;
+    }
+    if (diff.length !== 1 || diff[0] !== RELEASE_MANIFEST_REL) {
+        envelope.error = `handshake failed: HEAD^..HEAD must change only the manifest (${RELEASE_MANIFEST_REL}); got [${diff.join(", ")}]`;
+        emitReleaseResult(envelope);
+        return;
+    }
+
+    // 6. Release base validation.
+    if (obj.release_base.kind === "tag") {
+        // When --release-version is supplied (CI post-tag recheck), exclude
+        // the just-cut release tag from the lookup so release_base is
+        // validated against the PRIOR tag the manifest names. Pre-tag
+        // wrapper invocations also forward --release-version, but the new
+        // tag does not exist yet so the exclusion is a no-op there.
+        const latest = gitLatestTag(releaseVersion);
+        if (latest !== obj.release_base.value) {
+            envelope.error = `release_base mismatch: manifest declares tag=${obj.release_base.value}; prior-tag lookup yields ${latest || "<none>"}`;
+            emitReleaseResult(envelope);
+            return;
+        }
+    }
+    // kind=root: first release. Whole history is in scope; the manifest attests
+    // relevance for that whole-history arc. No HEAD~32 fallback in manifest mode.
+
+    // 7. Disposition matrix per record.
+    const disclosures = [];
+    const acceptedOverrides = [];
+    const refusals = [];
+    for (const record of obj.records) {
+        const r = applyDisposition(record, releaseVersion, overrideConfirmedVersion);
+        if (r.result === "allow" && r.disclose) {
+            disclosures.push({
+                defer_id: record.defer_id,
+                release_relevance: record.release_relevance,
+                disposition: record.disposition,
+                metadata_state: record.metadata_state,
+                summary: record.summary,
+                reason: record.reason,
+                source_ref: record.source_ref,
+                override: record.override || null,
+                why: r.why,
+            });
+            if (r.overrideAccepted) {
+                const o = record.override;
+                acceptedOverrides.push({
+                    defer_id: record.defer_id,
+                    release_version: o.release_version,
+                    approved_by: o.approved_by,
+                    approved_at: o.approved_at,
+                    reason: o.reason,
+                });
+            }
+        } else if (r.result === "refuse") {
+            refusals.push({ defer_id: record.defer_id, why: r.why });
+        }
+    }
+    envelope.disclosures = disclosures;
+    envelope.accepted_overrides = acceptedOverrides;
+    envelope.refusals = refusals;
+
+    // 8. Aggregate classification.
+    // Records-driven refusals → blocker (manifest is well-formed; release is
+    // blocked pending resolution or override). Schema/handshake problems were
+    // caught above and already returned as evaluator-error.
+    if (refusals.length > 0) {
+        envelope.classification = "blocker";
+        envelope.blocking_ids = refusals.map((r) => r.defer_id).sort(lexCompare);
+        envelope.disclose_ids = disclosures.map((d) => d.defer_id).sort(lexCompare);
+        // Include each refusal's `why` so the operator can see exactly which
+        // check failed (override confirmation missing, version mismatch, etc.)
+        // without having to drill into refusals[].
+        const detail = refusals
+            .slice()
+            .sort((a, b) => lexCompare(a.defer_id, b.defer_id))
+            .map((r) => `${r.defer_id}: ${r.why}`)
+            .join("; ");
+        envelope.error = `${refusals.length} blocking release-defer record(s): ${detail}`;
+    } else if (disclosures.length > 0) {
+        envelope.classification = "disclose";
+        envelope.disclose_ids = disclosures.map((d) => d.defer_id).sort(lexCompare);
+        envelope.error = null;
+    } else {
+        envelope.classification = "clear";
+        envelope.error = null;
+    }
+
+    emitReleaseResult(envelope);
+}
+
+// RELEASE-mode entrypoint. Routes between MANIFEST AUTHORITY (env active) and
+// LEGACY (.local/ scan, byte-identical to the pre-manifest behavior) based on
+// RELEASE_DEFER_MANIFEST_AUTHORITY. The split keeps the rollout staged: Phase
+// 1 lands manifest support without making it mandatory; the activation step
+// (operator-set env in the consuming release surfaces) flips the gate from advisory to enforced.
 function mainRelease(options) {
+    if (releaseManifestAuthorityActive()) {
+        mainReleaseManifest(options);
+        return;
+    }
+    mainReleaseLegacy(options);
+}
+
+// RELEASE-mode LEGACY entrypoint (reads .local/). Byte-identical to the
+// pre-manifest release behavior; preserved for backward compatibility during
+// the rollout. When RELEASE_DEFER_MANIFEST_AUTHORITY becomes the hardcoded
+// default, this function and its .local/ primitives can be retired.
+function mainReleaseLegacy(options) {
     const tasksDir = options.tasksDir ? path.resolve(options.tasksDir) : defaultTasksDir();
     const since = resolveSince(options);
 
