@@ -1244,6 +1244,42 @@ func TestReleaseTag_ReadinessArtifact_UnknownVerdictRefuses(t *testing.T) {
 	}
 }
 
+// Unknown gate KEY in model_gates → refuse. Closes the fail-open direction
+// where a new model-driven gate emitting "blocked" would be silently dropped
+// if the wrapper's GATES array hasn't been updated to include it yet.
+//
+// The dangerous case is an extra key whose verdict is "blocked": before the
+// fix the validator iterated only the known GATES array, so the extra blocked
+// verdict was never inspected and the tag landed. After the fix, ANY extra
+// key is rejected at schema validation — both directions are fail-closed.
+func TestReleaseTag_ReadinessArtifact_UnknownGateKeyRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+	// Carry an EXTRA gate key (G6_model_X = "blocked") beyond the 5 the
+	// wrapper knows about. buildReadinessArtifactBytes merges spec.Gates
+	// over the 5 default "ready" gates, so the artifact has all 5 known
+	// gates "ready" PLUS G6_model_X "blocked".
+	insertReadinessArtifactCommit(t, scratch, manifestSpecForReadiness(), readinessArtifactSpec{
+		Gates: map[string]string{"G6_model_X": "blocked"},
+	})
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
+	if exitCode == 0 {
+		t.Fatalf("unknown gate key must REFUSE (nonzero); got exit 0")
+	}
+	if result.OK {
+		t.Errorf("expected ok=false; got true")
+	}
+	if tagExists(t, scratch, "v0.2.0") {
+		t.Errorf("tag v0.2.0 must NOT exist after unknown-gate-key refusal")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "unknown gate key") {
+		t.Errorf("error must mention unknown gate key; got %v", result.Error)
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "G6_model_X") {
+		t.Errorf("error must name the extra gate G6_model_X (the blocked verdict must NOT be silently dropped); got %v", result.Error)
+	}
+}
+
 // Case 6: commit_sha ≠ HEAD^^ → refuse.
 func TestReleaseTag_ReadinessArtifact_CommitSHAMismatchRefuses(t *testing.T) {
 	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())

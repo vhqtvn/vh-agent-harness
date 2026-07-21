@@ -689,6 +689,15 @@ READINESS_VERDICT=$(printf '%s' "$READINESS_BYTES" | node -e '
         return;
       }
     }
+    // Reject unknown gate keys — prevents a new model-driven gate from being
+    // silently dropped if the GATES array has not been updated yet (fail-open
+    // closure). A new gate emitting "blocked" must surface here, not pass.
+    for (const k of Object.keys(o.model_gates)) {
+      if (!GATES.includes(k)) {
+        refuse("release-readiness-gate: G1-G5 artifact has unknown gate key " + JSON.stringify(k) + " (expected only: " + GATES.join(", ") + ")");
+        return;
+      }
+    }
     const gates = GATES.map((g) => g + "=" + o.model_gates[g]).join(",");
     process.stdout.write(JSON.stringify({ok: true, reason: "", commit_sha: o.commit_sha, gates: gates}));
   });
