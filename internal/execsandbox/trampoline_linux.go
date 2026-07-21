@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"github.com/elastic/go-seccomp-bpf"
@@ -329,13 +328,4 @@ func filterExistingFiles(files []string) []string {
 		}
 	}
 	return result
-}
-
-// resolveRepoRoot is a helper for callers that need to absolutize the repo root.
-func resolveRepoRoot(p string) (string, error) {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Clean(abs), nil
 }

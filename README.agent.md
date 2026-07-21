@@ -499,10 +499,20 @@ export default function transform({ context }) {
     (writes sorted output to a file), and requires `sed` to carry `--sandbox`
     (which disables its `e`/`r`/`w` commands) AND independently denies `sed`'s
     `-i`/`--in-place` (which `--sandbox` does NOT disable) — so under exec-ro
-    the only ALLOWED sed form is `sed -n --sandbox …`. (Binary-level heuristic
-    denylist of the known prompt-free non-git write/exec vectors; a per-binary
-    safe-flag allowlist is deferred and the OS-level exec-sandbox is the
-    authoritative layer for the long tail of unknown flags ON THE HOST-SHELL
+    the only ALLOWED sed form is `sed -n --sandbox …`. **Accepted heuristic
+    residual (F7):** the `-i` matcher only recognizes bare `-i`,
+    `--in-place`/`--in-place=`, and `-i<suffix>` forms where the suffix starts
+    with a NON-ALPHA character (`.`, digit, `_`, …). Alpha-leading suffixes
+    like `-ibak` or `-iX` are NOT matched (they look like a hypothetical
+    future `-iX` flag rather than `-i<backup-extension>`); a write-vector via
+    `sed -n --sandbox -ibak f` is accepted as a residual because exec-ro is
+    explicitly heuristic (exec-sandbox is authoritative) and the cost of
+    false-tripping on a future `-iX` was judged higher than the cost of
+    accepting this residual. See
+    `TestClassify_SedInPlaceAlphaSuffixIsAcceptedResidual`. (Binary-level
+    heuristic denylist of the known prompt-free non-git write/exec vectors; a
+    per-binary safe-flag allowlist is deferred and the OS-level exec-sandbox is
+    the authoritative layer for the long tail of unknown flags ON THE HOST-SHELL
     BACKEND — exec-sandbox is host-local-only and does not follow the payload
     into a proxy/docker_compose container. The `readonly`
     group entry itself is left as `find *` / `sort *` / `sed -n *` on purpose:
@@ -536,7 +546,18 @@ export default function transform({ context }) {
     (`-C /external`, `-C ../`, `--git-dir=/external`) → DENY+notice (exec-ro is
     allowlisted and cannot prompt, so it cannot reach external repos); an
     in-repo absolute `-C` (a subdir of the repo root) → ignored for
-    classification, ALLOW if the verb is read-only.
+    classification, ALLOW if the verb is read-only. **Accepted heuristic
+    residual (F6):** path classification applies to the SPACED form
+    `-C <path>` only; the ATTACHED short form `-C<path>` (e.g.
+    `git -C/tmp/out-of-repo diff`) is NOT path-classified — the verb is still
+    extracted past the unrecognized flag, so mutations (`git -C/tmp/x commit`)
+    are still caught, but a readonly verb against an external repo is allowed
+    through. This is accepted because exec-ro is explicitly heuristic (the
+    authoritative layer is the OS-level exec-sandbox) and a fix would require
+    maintaining equivalent semantics in both this Go classifier and the JS
+    shell-guard walker plus parity tests — not justified by the demonstrated
+    benefit (worst case is "readonly verb against an external repo", not a
+    mutation bypass). See `TestClassify_GitAttachedCIsAcceptedResidual`.
   - exec-ro **executes the command exactly as given or DENIES** — it never
     rewrites the command. On DENY it prints a human-readable notice to stderr and
     exits non-zero (no prompt, since the outer invocation is allowlisted).

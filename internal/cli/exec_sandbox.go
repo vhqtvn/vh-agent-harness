@@ -57,9 +57,11 @@ reaches the backend. Use exec-sandbox when you want kernel-enforced
 host-local write/network containment.
 
 HONESTY: exec-sandbox is an INTEGRITY + NETWORK boundary, NOT a
-confidentiality boundary. Denied paths remain VISIBLE (ls-able) but are
-unwritable (EACCES). The guarantee is "the command cannot WRITE or NETWORK
-outside the contract," NOT "the command cannot SEE anything."
+confidentiality boundary. Denied paths remain stat-able (metadata visible
+via stat/lstat) but are unwritable (EACCES on open-for-write). opendir is
+also gated, so listing a denied directory (e.g. "ls ~/.ssh") fails with
+EACCES. The guarantee is "the command cannot WRITE or NETWORK outside the
+contract," NOT "the command cannot SEE anything."
 
 Default profile (Profile B):
   Read:    repo root, /usr, /bin, /sbin, /lib, /lib64, /lib32, /etc

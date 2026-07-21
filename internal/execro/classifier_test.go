@@ -570,3 +570,141 @@ func TestClassifyArgs(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// D-3 characterization tests for ACCEPTED HEURISTIC RESIDUALS.
+//
+// exec-ro is explicitly a fast string-level heuristic — the OS-level
+// exec-sandbox is the authoritative layer. Some flag forms are intentionally
+// NOT classified because the cost of false-tripping (denying a legit future
+// flag) was judged higher than the cost of accepting the residual. These tests
+// PIN THE CURRENT BEHAVIOR so a future tightening of the matcher has to update
+// them DELIBERATELY. Each test is labeled "Accepted residual" so a future fix
+// can find them by name.
+//
+// If you are TIGHTENING the matcher (closing one of these residuals), update
+// the relevant test from ALLOW → DENY and document the rationale in the
+// commit message. Do NOT silently relax these tests — they exist precisely to
+// make a behavior change visible at review time.
+// ---------------------------------------------------------------------------
+
+// TestClassify_GitAttachedCIsAcceptedResidual (D-3 F6) characterizes the
+// accepted residual in lookupGitGlobalFlag: git's -C flag is path-classified
+// only in the SPACED form (`-C <path>`); the ATTACHED short form `-C<path>`
+// (e.g. `git -C/tmp/out-of-repo diff`) is NOT recognized by the registry's
+// `=`-split (which requires eqIdx > 2, i.e. `--long=val`), so it falls through
+// as an unknown flag and the path is NOT classified.
+//
+// This is accepted because:
+//  1. The verb is still extracted past the unrecognized flag — a mutation
+//     hidden behind attached `-C<path>` is STILL caught (the
+//     "attached -C/tmp/x commit DENY" sub-case locks this).
+//  2. exec-ro is explicitly heuristic; exec-sandbox is the authoritative layer.
+//  3. A fix would require maintaining equivalent attached-short-form semantics
+//     in BOTH this Go classifier AND the JS shell-guard walker, plus parity
+//     tests — not justified by the demonstrated benefit (the worst case is
+//     "readonly verb runs against an external repo", not a mutation bypass).
+//
+// Kernel-independent. Documentation + characterization only; no production
+// logic change.
+func TestClassify_GitAttachedCIsAcceptedResidual(t *testing.T) {
+	repoRoot := t.TempDir()
+	cases := []struct {
+		name string
+		cmd  string
+		want bool // true = ALLOW (residual accepted), false = DENY
+	}{
+		// ATTACHED -C<path>: NOT path-classified (the residual). Verb extraction
+		// proceeds past the unrecognized flag; readonly verbs ALLOW against an
+		// external path. This is the residual this test pins.
+		{"attached -C/tmp/out-of-repo status ALLOW (residual)", "git -C/tmp/out-of-repo status", true},
+		{"attached -C/tmp/out-of-repo log ALLOW (residual)", "git -C/tmp/out-of-repo log", true},
+		{"attached -C/tmp/out-of-repo diff ALLOW (residual)", "git -C/tmp/out-of-repo diff", true},
+
+		// SPACED -C <path>: IS path-classified (the contract). External paths
+		// DENY. These controls confirm the residual is scoped to the attached
+		// form, not a blanket misclassification of all -C.
+		{"spaced -C /tmp/out-of-repo status DENY (external, contract)", "git -C /tmp/out-of-repo status", false},
+		{"spaced -C /tmp/out-of-repo log DENY (external, contract)", "git -C /tmp/out-of-repo log", false},
+
+		// ATTACHED -C<path> does NOT conceal mutations: the verb is still
+		// extracted past it. This is the safety property that justifies
+		// accepting the residual.
+		{"attached -C/tmp/out-of-repo commit DENY (mutation still visible)", "git -C/tmp/out-of-repo commit", false},
+		{"attached -C/tmp/out-of-repo push DENY (mutation still visible)", "git -C/tmp/out-of-repo push", false},
+
+		// --git-dir=/external/path (long form, attached via '='): IS classified.
+		// Only the short attached -C<path> form is the residual.
+		{"--git-dir=/external/x status DENY (long attached, classified)", "git --git-dir=/external/x status", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Classify(tc.cmd, repoRoot)
+			if got.Allow != tc.want {
+				t.Errorf("Classify(%q) Allow = %v, want %v (residual characterization); notice=%q",
+					tc.cmd, got.Allow, tc.want, got.Notice)
+			}
+			// A DENY must still carry a notice (the operator's only feedback).
+			if !got.Allow && got.Notice == "" {
+				t.Errorf("Classify(%q) denied with EMPTY notice", tc.cmd)
+			}
+		})
+	}
+}
+
+// TestClassify_SedInPlaceAlphaSuffixIsAcceptedResidual (D-3 F7) characterizes
+// the accepted residual in isSedInPlaceFlag: alpha-leading suffixes like
+// `-ibak` or `-iX` are NOT matched (they look like an unknown `-iX` flag rather
+// than `-i<backup-extension>`), so `sed -n --sandbox -ibak f` is ALLOWED even
+// though `-ibak` is semantically a sed -i suffix with backup extension ".bak".
+//
+// This is accepted because:
+//  1. The matcher prefers false-ALLOW over false-DENY here — a hypothetical
+//     future `-iX` option in sed should not be over-denied as in-place edit.
+//  2. exec-ro is explicitly heuristic; exec-sandbox is the authoritative layer.
+//  3. sed under exec-ro STILL requires --sandbox (so the e/r/w commands are
+//     disabled) — the residual is narrow: only the alpha-suffix -i form.
+//
+// NOTE: comments in isSedInPlaceFlag previously said "every -i form is denied"
+// which CONTRADICTED the actual matcher. The comments are corrected; this test
+// pins the ACTUAL behavior so the contradiction cannot silently reappear.
+//
+// Kernel-independent. Documentation + characterization only; no production
+// logic change.
+func TestClassify_SedInPlaceAlphaSuffixIsAcceptedResidual(t *testing.T) {
+	repoRoot := t.TempDir()
+	cases := []struct {
+		name string
+		cmd  string
+		want bool // true = ALLOW (residual accepted), false = DENY
+	}{
+		// ALPHA-LEADING suffixes: NOT matched → accepted residual.
+		// (Sed's suffix is a backup extension; "bak" is the canonical example.)
+		{"sed -n --sandbox -ibak f ALLOW (residual, alpha suffix)", "sed -n --sandbox -ibak f", true},
+		{"sed -n --sandbox -iSUFFIX f ALLOW (residual, alpha suffix)", "sed -n --sandbox -iSUFFIX f", true},
+		{"sed -n --sandbox -iX f ALLOW (residual, single alpha)", "sed -n --sandbox -iX f", true},
+
+		// NON-ALPHA-LEADING suffixes: ARE matched → DENY (the contract).
+		// ".bak" starts with '.', '1' would start with a digit, '_' with underscore.
+		{"sed -n --sandbox -i.bak f DENY (dotted suffix matched)", "sed -n --sandbox -i.bak f", false},
+		{"sed -n --sandbox -i1 f DENY (digit suffix matched)", "sed -n --sandbox -i1 f", false},
+		{"sed -n --sandbox -i_ f DENY (underscore suffix matched)", "sed -n --sandbox -i_ f", false},
+
+		// BARE -i and --in-place: matched → DENY (the canonical in-place form).
+		{"sed -n --sandbox -i f DENY (bare -i)", "sed -n --sandbox -i f", false},
+		{"sed -n --sandbox --in-place f DENY (long form)", "sed -n --sandbox --in-place f", false},
+		{"sed -n --sandbox --in-place=.bak f DENY (long attached)", "sed -n --sandbox --in-place=.bak f", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Classify(tc.cmd, repoRoot)
+			if got.Allow != tc.want {
+				t.Errorf("Classify(%q) Allow = %v, want %v (residual characterization); notice=%q",
+					tc.cmd, got.Allow, tc.want, got.Notice)
+			}
+			if !got.Allow && got.Notice == "" {
+				t.Errorf("Classify(%q) denied with EMPTY notice", tc.cmd)
+			}
+		})
+	}
+}

@@ -28,15 +28,29 @@ const AskNonTTYNotice = "exec-sandbox: network requested (--net=ask) but session
 // Run executes the command according to the sandbox mode and profile.
 //
 // Decision tree:
-//  1. ModeOff → run directly (no sandbox, no GIT_OPTIONAL_LOCKS rewrite).
-//  2. Resolve --net=ask (TTY prompt or non-TTY hard-deny).
-//  3. Detect OS primitives. If both available → full trampoline sandbox.
-//  4. Primitives unavailable + strict → fail-closed (return error).
-//  5. Primitives unavailable + best-effort → loud warn + exec-ro classify +
+//  1. Reject incompatible flag combinations (ModeOff + NetAsk) up front.
+//  2. ModeOff → run directly (no sandbox, no GIT_OPTIONAL_LOCKS rewrite).
+//  3. Resolve --net=ask (TTY prompt or non-TTY hard-deny).
+//  4. Detect OS primitives. If both available → full trampoline sandbox.
+//  5. Primitives unavailable + strict → fail-closed (return error).
+//  6. Primitives unavailable + best-effort → loud warn + exec-ro classify +
 //     run if allowed, deny if not.
 //
 // Returns the child exit code and any setup/teardown error.
 func Run(ctx context.Context, mode SandboxMode, profile Profile, repoRoot, target string, args []string) (int, error) {
+	// D-7: --sandbox=off + --net=ask is an incompatible combination. The ask
+	// prompt cannot be honored when the sandbox is off — a "deny" answer has
+	// no seccomp filter to enforce (ModeOff skips the trampoline entirely),
+	// and silently dropping the ask to allow ordinary host networking is
+	// fail-open. Reject BEFORE payload execution. Do NOT prompt; the operator
+	// must pick --net=allow or --net=deny when running with --sandbox=off.
+	if mode == ModeOff && profile.Net == NetAsk {
+		return 1, fmt.Errorf("--sandbox=off and --net=ask are incompatible: " +
+			"--net=ask resolves via a TTY prompt whose deny/allow answer cannot " +
+			"be enforced when the sandbox is off (use --net=allow or --net=deny " +
+			"with --sandbox=off)")
+	}
+
 	// ModeOff: no sandbox at all.
 	if mode == ModeOff {
 		return runDirect(ctx, target, args, nil)
@@ -153,8 +167,23 @@ func profileToEnv(p Profile) []string {
 
 // profileFromEnv reconstructs the profile from VH_EXEC_SANDBOX_* env vars.
 func profileFromEnv() (Profile, error) {
+	return profileFromEnvFrom(os.Environ())
+}
+
+// profileFromEnvFrom is the testable form of profileFromEnv: it reconstructs
+// the profile from a supplied env slice (each entry is "KEY=VALUE"). Tests use
+// this to avoid mutating the process env.
+//
+// D-5 fail-closed: the child boundary independently decodes NET to a known
+// safe value. Missing or empty NET defaults to NetDeny (the documented safe
+// default); "deny"/"allow" are accepted; "ask" or any unknown nonempty value
+// returns an error rather than silently falling back to fail-open behavior.
+// Parent-side serialization (profileToEnv) is useful mitigation but is NOT
+// sufficient — the child boundary must independently fail-closed.
+func profileFromEnvFrom(env []string) (Profile, error) {
 	var p Profile
-	for _, kv := range os.Environ() {
+	p.Net = NetDeny // safe default; overwritten by VH_EXEC_SANDBOX_NET if present
+	for _, kv := range env {
 		if !strings.HasPrefix(kv, envPrefix) {
 			continue
 		}
@@ -177,13 +206,42 @@ func profileFromEnv() (Profile, error) {
 				p.RWFiles = strings.Split(val, string(os.PathListSeparator))
 			}
 		case envPrefix + "NET":
-			p.Net = NetPolicy(val)
+			net, err := decodeNetPolicy(val)
+			if err != nil {
+				return p, err
+			}
+			p.Net = net
 		}
 	}
 	if len(p.RODirs) == 0 && len(p.RWDirs) == 0 {
 		return p, fmt.Errorf("no sandbox profile found in environment (missing %s* vars)", envPrefix)
 	}
 	return p, nil
+}
+
+// decodeNetPolicy strictly decodes the VH_EXEC_SANDBOX_NET value at the child
+// trampoline boundary. The child MUST only ever see "deny" or "allow" — the
+// parent resolves "ask" (TTY prompt or non-TTY hard-deny) before serializing
+// NET to env. So "ask" or any unrecognized nonempty value at the child is an
+// internal contract violation: return an error rather than silently picking a
+// fallback (which would risk fail-open if the default were ever wrong).
+//
+// Empty/missing is the only value that gets an implicit default (NetDeny);
+// every other value MUST be on the explicit allowlist.
+func decodeNetPolicy(val string) (NetPolicy, error) {
+	switch val {
+	case "", "deny":
+		return NetDeny, nil
+	case "allow":
+		return NetAllow, nil
+	case "ask":
+		return "", fmt.Errorf("%sNET=ask is an internal contract violation: "+
+			"the parent must resolve --net=ask before serializing the profile "+
+			"(the child boundary only accepts deny|allow)", envPrefix)
+	default:
+		return "", fmt.Errorf("%sNET=%q is not a recognized network policy "+
+			"(expected deny|allow at the child boundary)", envPrefix, val)
+	}
 }
 
 // envForTarget strips internal VH_EXEC_SANDBOX_* vars from the environment,

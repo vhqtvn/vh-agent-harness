@@ -3,9 +3,12 @@
 // (network + syscall hardening).
 //
 // HONESTY FRAMING: exec-sandbox is an INTEGRITY + NETWORK boundary, NOT a
-// confidentiality/path-hiding boundary. Landlock is additive: denied paths stay
-// VISIBLE (ls-able) but unwritable (EACCES). The promise is "the agent cannot
-// WRITE or NETWORK outside the contract," NOT "the agent cannot SEE anything."
+// confidentiality/path-hiding boundary. Landlock is additive: denied paths
+// remain stat-able (metadata visible via stat/lstat) but unwritable
+// (EACCES on open-for-write). opendir is also gated, so listing a denied
+// directory (`ls <denied-dir>`) fails with EACCES while the directory's
+// own metadata stays visible. The promise is "the agent cannot WRITE or
+// NETWORK outside the contract," NOT "the agent cannot SEE anything."
 //
 // The sandbox is layered WITH exec-ro: exec-sandbox is the authoritative OS
 // layer (kernel-enforced); exec-ro is the script-level heuristic pre-filter.

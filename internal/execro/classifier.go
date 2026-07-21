@@ -299,6 +299,19 @@ var gitGlobalFlagRegistry = []gitGlobalFlag{
 // unknown flags (the walker treats unknown `-flag` tokens as never-strip
 // booleans consumed one-at-a-time so a mutation hidden behind an unrecognized
 // flag is STILL caught).
+//
+// ACCEPTED HEURISTIC RESIDUAL (D-3 F6, characterization-pinned): only the SPACED
+// form `-C <path>` (valueForm vfNext) consumes and classifies the path; the
+// ATTACHED short form `-C<path>` (e.g. `git -C/tmp/out-of-repo diff`) is NOT
+// recognized here — the `=`-split below requires eqIdx > 2 (i.e. `--long=val`),
+// so `-C<path>` falls through as an unknown flag, is consumed one-at-a-time,
+// and the verb is extracted past it WITHOUT the path being classified. This is
+// accepted because (a) the verb is still reachable so a mutation hidden behind
+// attached `-C<path>` is still caught, and (b) exec-ro is explicitly a heuristic
+// layer (exec-sandbox is authoritative). Closing the residual would require
+// maintaining equivalent attached-short-form semantics in BOTH this Go
+// classifier AND the JS shell-guard walker, plus parity tests — not justified
+// by the demonstrated benefit. See TestClassify_GitAttachedCIsAcceptedResidual.
 func lookupGitGlobalFlag(token string) (entry *gitGlobalFlag, attached string, isAttached, ok bool) {
 	if token == "-" || token == "--" || !strings.HasPrefix(token, "-") {
 		return nil, "", false, false
@@ -804,11 +817,21 @@ func scanNonGitWriteFlags(tokens []string) string {
 
 // isSedInPlaceFlag reports whether tok is a sed -i/--in-place flag form. GNU
 // sed's -i takes an optional backup-extension suffix (`-i`, `-i.bak`). --sandbox
-// does NOT disable -i (verified), so every -i form is denied when --sandbox is
-// present. To avoid false-tripping on a hypothetical future `-iX` flag (the char
-// after -i being a letter), only bare `-i`, `--in-place`, `--in-place=`, and
-// `-i<suffix>` forms where the char after -i is NON-ALPHA are matched — sed's
-// suffix is a backup extension, not a flag letter.
+// does NOT disable -i (verified), so the recognized -i forms are denied when
+// --sandbox is present. To avoid false-tripping on a hypothetical future `-iX`
+// flag (the char after -i being a letter), the matcher only recognizes bare
+// `-i`, `--in-place`, `--in-place=`, and `-i<suffix>` forms where the char
+// after -i is NON-ALPHA. sed's suffix is a backup extension, not a flag letter.
+//
+// ACCEPTED HEURISTIC RESIDUAL (D-3 F7, characterization-pinned): alpha-leading
+// suffixes like `-ibak` or `-iX` are NOT matched by this function — they look
+// like an unknown `-iX` flag rather than `-i<backup-ext>`. The cost of
+// false-tripping (denying a legit future `-iX` flag) was judged higher than the
+// cost of accepting the residual (a write-vector via `sed -i<alpha-suffix>`
+// that goes through the allowlisted exec-ro path). The authoritative layer for
+// that long tail is the OS-level exec-sandbox. Do NOT broadly describe `sed -i`
+// as denied without this qualifier. If a future fix tightens the matcher, update
+// the characterization tests in classifier_test.go DELIBERATELY.
 func isSedInPlaceFlag(tok string) bool {
 	if tok == "-i" || tok == "--in-place" {
 		return true
