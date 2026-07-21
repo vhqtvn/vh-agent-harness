@@ -12,7 +12,8 @@ integration and the first shipped embedded overlay pack.
 
 The pack contributes one agent — `releaser` — plus a `core/release` capability
 manifest with a hard dependency on `core/gated-commit` (the releaser delegates
-the migration-note commit to the gated-commit agents, so selecting this pack
+up to three single-path commits to the gated-commit agents — the migration
+note, the readiness artifact, and the DEFER manifest — so selecting this pack
 pulls that cluster in automatically).
 
 The agent is structured as a **thin spine + default adapter**:
@@ -39,9 +40,10 @@ hard-dep closure, so both selection paths render the same cluster.
 
 ## Invariants (spine contract)
 
-1. **Never raw git mutation.** Mutations occur ONLY via (a) one narrow
-   committer delegation for the migration note in Prepare, and (b) the
-   sanctioned release-tag wrapper in Execute.
+1. **Never raw git mutation.** Mutations occur ONLY via (a) up to three
+   narrow single-path committer delegations in Prepare — one for the
+   migration note, one for the readiness artifact, and one for the DEFER
+   manifest — and (b) the sanctioned release-tag wrapper in Execute.
 2. **Never raw-tag.** The annotated tag is applied ONLY through the sanctioned
    release-tag wrapper.
 3. **Never create a tag you were not asked for.**

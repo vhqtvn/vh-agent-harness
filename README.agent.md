@@ -1132,11 +1132,13 @@ no env switch and no legacy fallback — manifest authority is always active.
 commit-time promoter mechanism (which stays non-blocking); release mode never
 reads it.
 
-The `releaser` agent owns the manifest ceremony end-to-end: it recomputes the
-manifest's handshake SHAs against the release-prep HEAD, delegates the
-manifest-only commit M to the committer, re-verifies the handshake, and invokes
-the wrapper. A release-agent-only operator gets manifest authority by default —
-no out-of-band operator release-prep.
+The `releaser` agent owns the release ceremony end-to-end. Across three
+single-path `committer` delegations it lands N (the migration note), R (the
+readiness artifact, written by the parent-orchestrator-invoked
+`harness-release-readiness` agent), then M (the manifest, whose handshake SHAs
+bind to R = HEAD^ at tag time). It re-verifies the handshake and invokes the
+wrapper. A release-agent-only operator gets manifest authority by default — no
+out-of-band operator release-prep.
 
 The gate surfaces TWO distinct failure classes, with different remedies — both
 are reported before any `git tag` invocation:
@@ -1173,29 +1175,47 @@ handshake, and override semantics live in
   `metadata_state ∈ {valid,stale,invalid}`, summary/reason/source_ref, and an
   optional `override` object.
 
-### Manifest-only reconciliation commit ceremony (releaser-owned)
+### Release ceremony: note → readiness artifact → manifest (releaser-owned)
 
 The releaser agent owns this ceremony end-to-end. There is NO out-of-band
-operator release-prep. When invoked, the releaser:
+operator release-prep. The ceremony produces THREE sequential single-path
+`committer` delegations — N (migration note), R (readiness artifact), and M
+(manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`.
+The release-tag wrapper's deterministic gates refuse the tag unless each
+commit binds to its predecessor exactly.
 
-1. Recomputes the release arc at commit P (the release-prep HEAD, after the
-   migration-note commit lands).
-2. Rewrites `.vh-agent-harness/release-defer-dispositions.json`'s three
+When invoked, the releaser:
+
+1. **Step 3.1 — migration note commit N.** Authors
+   `templates/migrations/v<next>.md` and delegates a single-path commit to the
+   committer (scope = that one path). N is HEAD after this step.
+2. **Step 3.2 — readiness artifact commit R.** The parent orchestrator
+   (`build` / `coordination` / `project-coordinator`) invokes
+   `harness-release-readiness` against N; the readiness agent writes
+   `.vh-agent-harness/release-readiness-pass.json` (its exclusive edit — the
+   releaser cannot write it, and the releaser cannot invoke the readiness
+   agent directly under `task: {"committer":"allow","*":"deny"}`). The
+   releaser DISCOVERS the artifact read-only, VALIDATES that its `commit_sha`
+   binds to N and all five model gates (G1-G5) report `ready`, then delegates
+   a single-path commit R to the committer (scope = the artifact path), so
+   `R^ == N` and `git diff --name-only N..R` is exactly the artifact path. R
+   is HEAD after this step.
+3. **Step 3.3 — manifest commit M.** Recomputes the release arc against R and
+   rewrites `.vh-agent-harness/release-defer-dispositions.json`'s three
    handshake SHA fields — `evaluated_commit` AND `manifest_parent_commit`
-   (both = full SHA of P), and `evaluated_tree` = `tree(P)`. The releaser does
+   (both = full SHA of R), and `evaluated_tree` = `tree(R)`. The releaser does
    NOT touch `release_base`, `records[]` dispositions, or any other
-   operator-attested field.
-3. Delegates a manifest-only immediate-child commit M of P to the committer
-   (single-path scope = the manifest file), so `M^ == P` and
-   `git diff --name-only P..M` is exactly the manifest path.
+   operator-attested field. Delegates a single-path immediate-child commit M
+   of R to the committer (scope = the manifest file), so `M^ == R` and
+   `git diff --name-only R..M` is exactly the manifest path.
 4. Re-runs the evaluator against M to confirm the handshake passes.
 5. Invokes the wrapper to tag M as the release.
 
 The operator's release-time role is reduced to: confirming an override when an
 `override_required` record exists (see Wrapper flags below). The first release
 after the seed manifest lands is the canonical case — the seed manifest's SHAs
-are placeholders that the releaser recomputes against the actual release-prep
-HEAD on its first run.
+are placeholders that the releaser recomputes against the actual post-artifact
+commit R on its first run.
 
 ### Wrapper flags
 
