@@ -10,8 +10,9 @@
   //   - readonly + git_readonly allowed (discover tags/commits/sha read-only).
   //   - gateExempt committer-delegator: the releaser is a gateExempt agent that
   //     OMITS the gate decision (no gate key in location). Its two sanctioned
-  //     mutations are (a) ONE narrow task delegation to `committer` (the
-  //     migration-note commit — the committer, NOT the releaser, runs the
+  //     mutations are (a) UP TO TWO narrow single-path task delegations to
+  //     `committer` (one for the migration-note commit and one for the
+  //     manifest-only commit — the committer, NOT the releaser, runs the
   //     gated-commit message-as-file protocol and holds the gate), and (b) the
   //     single release-tag wrapper invocation via the harness:allow group
   //     (vh-agent-harness exec <wrapper>). The wrapper is tag-only; it never
@@ -28,11 +29,12 @@
   //     session; it does NOT make the releaser itself a gate caller.
   //   - wildcard DENIED: no arbitrary commands.
   //   - task {"committer":"allow","*":"deny"}: leaf specialist that delegates
-  //     ONLY the migration-note commit (`templates/migrations/v<next>.md`) to
-  //     committer; every other downstream delegation is denied. The committer
-  //     edge is dropped at render time when core/gated-commit is unselected
-  //     (permconfig.Emit's present-agent filter), so the edge is inert in any
-  //     profile where the committer does not render.
+  //     up to two narrow single-path commits to `committer` (one for the
+  //     migration note `templates/migrations/v<next>.md` and one for the
+  //     manifest-only commit); every other downstream delegation is denied.
+  //     The committer edge is dropped at render time when core/gated-commit is
+  //     unselected (permconfig.Emit's present-agent filter), so the edge is
+  //     inert in any profile where the committer does not render.
   //   - delegateFrom [build, coordination, project-coordinator]: those three
   //     orchestrators may delegate a release task to the releaser.
   "agents": {
