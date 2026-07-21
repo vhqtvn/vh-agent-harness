@@ -674,6 +674,165 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 		})
 	}
 
+	// --- G4 inert-literal classifier matrix (rg/grep ONLY) ------------------
+	//
+	// The raw forbidden-pattern scanner sees forbidden literals (e.g. `/tmp`
+	// matching system-tmp-access) ANYWHERE in the command string. The G4
+	// classifier proves — via the EXISTING bash parser — that a forbidden
+	// match appears ONLY in the search-pattern operand of a single simple
+	// rg/grep command, in which case evaluate() disregards the match and
+	// falls through to the allowlist (which authorizes `rg *`/`grep *`).
+	//
+	// Load-bearing invariants pinned here:
+	//   - Pattern-operand matches ARE suppressed end-to-end through the Go
+	//     hook + node bridge + WASM parser (not just unit-tested in JS).
+	//   - Path-operand matches, real operations, and any complex shell
+	//     construct still DENY: the classifier fails closed.
+	//   - Deny-before-allowlist ordering is preserved (the raw scan still
+	//     runs first; the classifier only consults on a CONFIRMED match).
+	//   - Existing behavior for non-rg/grep unallowlisted commands (deny)
+	//     is unchanged.
+	//
+	// Each command is passed as a single-element argv so eval.js's
+	// argv.join(" ") yields exactly the intended command string.
+	g4Cases := []struct {
+		name string
+		cmd  string
+		want Action
+	}{
+		// --- MUST ALLOW: pattern operand, forbidden match is inert ---------
+		{
+			name: "rg -F -- '/tmp' docs allowed (G4 pattern operand, -- terminator)",
+			cmd:  `rg -F -- '/tmp' docs`,
+			want: Allow,
+		},
+		{
+			name: "grep -F '/tmp' docs allowed (G4 pattern operand, grep)",
+			cmd:  `grep -F '/tmp' docs`,
+			want: Allow,
+		},
+		{
+			name: "rg '/tmp' docs allowed (G4 no-flag pattern operand)",
+			cmd:  `rg '/tmp' docs`,
+			want: Allow,
+		},
+		{
+			name: "rg --fixed-strings '/tmp' file allowed (G4 long-form whitelist flag)",
+			cmd:  `rg --fixed-strings '/tmp' file`,
+			want: Allow,
+		},
+		{
+			name: "rg '/tmp' file1 file2 allowed (G4 multiple paths)",
+			cmd:  `rg '/tmp' file1 file2`,
+			want: Allow,
+		},
+
+		// --- MUST DENY: forbidden match is a real operation ---------------
+		{
+			// /tmp is a PATH operand, not a pattern. The regex matches the
+			// path token, so the classifier refuses to suppress.
+			name: "rg needle /tmp/file denied (G4 /tmp in path operand, not pattern)",
+			cmd:  `rg needle /tmp/file`,
+			want: Deny,
+		},
+		{
+			// Not rg/grep: classifier returns false, original deny stands.
+			name: "cat /tmp/file denied (G4 not rg/grep family)",
+			cmd:  `cat /tmp/file`,
+			want: Deny,
+		},
+		{
+			// Redirection: root's only named child is redirected_statement,
+			// not command → root-structure check fails.
+			name: "echo x >/tmp/file denied (G4 redirection construct)",
+			cmd:  `echo x >/tmp/file`,
+			want: Deny,
+		},
+		{
+			// Chain: root's only named child is list → root-structure check
+			// fails, AND the second leg is a real /tmp access.
+			name: "echo '/tmp' && cat /tmp/file denied (G4 chain construct)",
+			cmd:  `echo '/tmp' && cat /tmp/file`,
+			want: Deny,
+		},
+		{
+			// Command substitution inside the pattern string: a
+			// command_substitution named descendant appears →
+			// hasOnlyAllowedNamedNodes fails closed.
+			name: `rg "$(cat /tmp/x)" files denied (G4 command substitution in pattern)`,
+			cmd:  `rg "$(cat /tmp/x)" files`,
+			want: Deny,
+		},
+		{
+			// Executor wrapper: command_name is vh-agent-harness (not rg/grep)
+			// → classifier returns false; original deny stands. The nested
+			// payload is intentionally OUT OF SCOPE for the G4 grammar
+			// (single simple rg/grep command only).
+			name: "vh-agent-harness exec bash -c 'cat /tmp/file' denied (G4 executor wrapper out of scope)",
+			cmd:  `vh-agent-harness exec bash -c 'cat /tmp/file'`,
+			want: Deny,
+		},
+		{
+			// Forbidden match appears in BOTH a path operand AND would match
+			// a pattern: the per-path regex test fails closed.
+			name: "rg pattern /tmp /etc denied (G4 forbidden match in path operand)",
+			cmd:  `rg pattern /tmp /etc`,
+			want: Deny,
+		},
+		{
+			// Combined short flag -Fi is NOT in the closed whitelist
+			// {"-F","--fixed-strings"}: classifying it would require a
+			// growing option parser. Fail closed → original deny stands.
+			name: "rg -Fi '/tmp' file denied (G4 combined short flag not in whitelist)",
+			cmd:  `rg -Fi '/tmp' file`,
+			want: Deny,
+		},
+		{
+			// Value-taking flag -e is NOT in the whitelist: classifying it
+			// would require a value-aware parser. Fail closed.
+			name: "rg -e '/tmp' files denied (G4 value-taking flag not in whitelist)",
+			cmd:  `rg -e '/tmp' files`,
+			want: Deny,
+		},
+		{
+			// Bare `rg PATTERN` reading stdin: no PATH operand, so the
+			// pattern vs path role cannot be proven. Grammar requires
+			// PATTERN PATH+; reject as ambiguous per design.
+			name: "rg '/tmp' denied (G4 no path operand, ambiguous layout)",
+			cmd:  `rg '/tmp'`,
+			want: Deny,
+		},
+		{
+			// Forbidden match appears in BOTH the pattern AND a path. Even
+			// though the pattern is a search string, the path is a real
+			// /tmp access → per-path regex test fails closed.
+			name: "rg -F '/tmp' /tmp denied (G4 forbidden match in pattern AND path)",
+			cmd:  `rg -F '/tmp' /tmp`,
+			want: Deny,
+		},
+
+		// --- UNCHANGED-BEHAVIOR controls ----------------------------------
+		{
+			// Non-rg/grep unallowlisted command. The classifier is never
+			// consulted (command_name ≠ rg/grep). Original deny path stands.
+			name: "nonsense-cmd foo bar denied (G4 control: unchanged non-rg/grep unallowlisted)",
+			cmd:  `nonsense-cmd foo bar`,
+			want: Deny,
+		},
+	}
+	for _, c := range g4Cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, _, evalErr := h.Evaluate(context.Background(), []string{c.cmd})
+			if evalErr != nil {
+				t.Fatalf("Evaluate(%q) error %v; want verdict %s (no bridge error)", c.cmd, evalErr, c.want)
+			}
+			if got != c.want {
+				t.Errorf("Evaluate(%q) = %s; want %s", c.cmd, got, c.want)
+			}
+		})
+	}
+
 	// --- git global-flag walker matrix ---------------------------------------
 	//
 	// These cases exercise walkGitGlobals end-to-end through eval.js. They use
