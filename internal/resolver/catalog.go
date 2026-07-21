@@ -214,12 +214,22 @@ func (c *Catalog) Validate() []error {
 //     solution-brief). Also self-contained: no capability-level hard_deps.
 //   - core/media-perception owns a single read-only perception specialist
 //     (media-perception) plus its caller-facing skill. Opt-in: not in any
-//     profile preset, so it renders only when a project explicitly selects it.
-//     Self-contained: no capability-level hard_deps. The four inbound caller
-//     edges (build, coordination, project-coordinator, researcher →
-//     media-perception) live in permconfig.CoreTaskRules and are dropped at
-//     emit time by the present-agent filter when the capability is not
-//     selected (so an unselected capability leaves no dangling task edge).
+//     profile preset. Note the resolver does NOT itself control file presence
+//     — it only emits the capability-answer boolean (capabilities.media_perception)
+//     consumed by `{{ if .capabilities.media_perception }}` template
+//     conditionals, and the logical agent identity (the Provides list). The
+//     opencode.jsonc subagent block is gated on that boolean and so only
+//     appears when a project selects the capability; everything else that
+//     gates on the capability follows the same template-conditional path. The
+//     renderer walks templates/core/ unconditionally, so the agent and skill
+//     files are always emitted regardless of capability selection. Do not
+//     conflate capability resolution (a boolean + an agent identity) with
+//     file rendering (driven by the unconditional corpus walk). Self-contained:
+//     no capability-level hard_deps. The four inbound caller edges (build,
+//     coordination, project-coordinator, researcher → media-perception) live
+//     in permconfig.CoreTaskRules and are dropped at emit time by the
+//     present-agent filter when the capability is not selected (so an
+//     unselected capability leaves no dangling task edge).
 //   - The 8 universal agents are the always-on baseline (see the Catalog
 //     baseline-representation note).
 //
