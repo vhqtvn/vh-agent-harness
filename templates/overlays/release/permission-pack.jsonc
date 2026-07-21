@@ -9,14 +9,18 @@
   // Surface:
   //   - readonly + git_readonly allowed (discover tags/commits/sha read-only).
   //   - gateExempt committer-delegator: the releaser is a gateExempt agent that
-  //     OMITS the gate decision (no gate key in location). Its two sanctioned
-  //     mutations are (a) UP TO TWO narrow single-path task delegations to
-  //     `committer` (one for the migration-note commit and one for the
-  //     manifest-only commit — the committer, NOT the releaser, runs the
-  //     gated-commit message-as-file protocol and holds the gate), and (b) the
-  //     single release-tag wrapper invocation via the harness:allow group
-  //     (vh-agent-harness exec <wrapper>). The wrapper is tag-only; it never
-  //     stages or commits the migration note. The releaser itself never runs
+  //     OMITS the gate decision (no gate key in location). Its sanctioned
+  //     mutations are (a) UP TO THREE narrow single-path task delegations to
+  //     `committer` — one for the migration-note commit
+  //     (`templates/migrations/v<next>.md`), one for the readiness-artifact
+  //     commit (`.vh-agent-harness/release-readiness-pass.json`, written by the
+  //     readiness agent), and one for the manifest-only commit
+  //     (`.vh-agent-harness/release-defer-dispositions.json`) — the committer,
+  //     NOT the releaser, runs the gated-commit message-as-file protocol and
+  //     holds the gate, and (b) the single release-tag wrapper invocation via
+  //     the harness:allow group (vh-agent-harness exec <wrapper>). The wrapper
+  //     is tag-only; it never stages or commits the migration note, the
+  //     readiness artifact, or the manifest. The releaser itself never runs
   //     commit-gate.sh — its bash block carries NONE of the commit-gate.sh
   //     mutation subcommands (acquire/commit/release/heartbeat/revert/
   //     stage-message) and no uuidgen; the committer independently holds the
@@ -24,17 +28,32 @@
   //     deriveSubagentSessionPermission merges parent denies into a subagent
   //     session via findLast, so a parent gate:deny on the releaser would bleed
   //     into the delegated committer session and override the committer's
-  //     gate:allow — breaking the gated-commit protocol the note commit depends
-  //     on. Omitting gate keeps the releaser's posture out of the committer's
-  //     session; it does NOT make the releaser itself a gate caller.
+  //     gate:allow — breaking the gated-commit protocol the note/artifact/
+  //     manifest commits depend on. Omitting gate keeps the releaser's posture
+  //     out of the committer's session; it does NOT make the releaser itself a
+  //     gate caller.
   //   - wildcard DENIED: no arbitrary commands.
   //   - task {"committer":"allow","*":"deny"}: leaf specialist that delegates
-  //     up to two narrow single-path commits to `committer` (one for the
-  //     migration note `templates/migrations/v<next>.md` and one for the
-  //     manifest-only commit); every other downstream delegation is denied.
-  //     The committer edge is dropped at render time when core/gated-commit is
-  //     unselected (permconfig.Emit's present-agent filter), so the edge is
-  //     inert in any profile where the committer does not render.
+  //     up to three narrow single-path commits to `committer` — (1) the
+  //     migration note `templates/migrations/v<next>.md`, (2) the readiness
+  //     artifact `.vh-agent-harness/release-readiness-pass.json` (written by
+  //     the readiness agent; the releaser commits it), and (3) the
+  //     manifest-only commit `.vh-agent-harness/release-defer-dispositions.json`;
+  //     every other downstream delegation is denied. The committer edge is
+  //     dropped at render time when core/gated-commit is unselected (permconfig
+  //     .Emit's present-agent filter), so the edge is inert in any profile
+  //     where the committer does not render.
+  //   - NO editOverrides: the releaser has NO edit-tool write access at all.
+  //     Critically, `.vh-agent-harness/release-readiness-pass.json` is ABSENT
+  //     from this pack by design — that path is EXCLUSIVE to the
+  //     `harness-release-readiness` agent (the readiness reporter's pack
+  //     carries the editOverride). The releaser cannot author the model-gate
+  //     verdict artifact the wrapper later checks against: the model-driven
+  //     verdict is authored by the readiness agent (no tag authority) and
+  //     enforced by the wrapper (tag authority, no model judgment). Neither
+  //     surface can both author AND authorize. The readiness-artifact commit
+  //     is delegated to `committer` (the releaser's task edge), NOT authored
+  //     by the releaser directly.
   //   - delegateFrom [build, coordination, project-coordinator]: those three
   //     orchestrators may delegate a release task to the releaser.
   "agents": {

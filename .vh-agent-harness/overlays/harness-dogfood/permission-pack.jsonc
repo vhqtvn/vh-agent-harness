@@ -11,10 +11,19 @@
   //   - readonly + git_readonly allowed (discover tags/commits/sha + read
   //     templates/migrations/, guide.go, README.agent.md, .goreleaser.yml).
   //   - gate DENIED: the readiness reporter is NOT part of the gated-commit
-  //     protocol and never calls commit-gate.sh. It performs NO mutation — no
-  //     tag, no commit, no push, no edit. The harness group is DENIED too: it has
+  //     protocol and never calls commit-gate.sh. It performs NO git mutation — no
+  //     tag, no commit, no push. The harness group is DENIED too: it has
   //     no sanctioned wrapper to invoke (unlike the releaser).
   //   - wildcard DENIED: no arbitrary commands.
+  //   - edit DENIED broadly, with ONE scoped editOverride: the agent writes
+  //     exactly `.vh-agent-harness/release-readiness-pass.json` (the model-gate
+  //     verdict artifact the release-tag wrapper checks at tag time). This is
+  //     the ONLY file the agent may edit. The releaser's permission-pack
+  //     intentionally OMITS this override — the releaser cannot author the
+  //     artifact it is later checked against. The edit object renders as
+  //     {"*":"deny", ".vh-agent-harness/release-readiness-pass.json":"allow",
+  //      "tmp/**":"allow"} (deny-* first, override last-but-one, tmp/** last;
+  //      findLast picks the narrow allow for the artifact path).
   //   - task {"*":"deny"}: accepts no downstream delegations — it is a leaf
   //     reporter that emits one structured report and stops.
   //   - delegateFrom [build, coordination, project-coordinator]: those three
@@ -24,7 +33,14 @@
   //     satisfied by carrying `gate: deny` and omitting `gateExempt`.
   "agents": {
     "harness-release-readiness": {
-      "location": { "wildcard": "deny", "readonly": "allow", "git_readonly": "allow", "gate": "deny", "harness": "deny" },
+      "location": {
+        "wildcard": "deny",
+        "readonly": "allow",
+        "git_readonly": "allow",
+        "gate": "deny",
+        "harness": "deny",
+        "editOverrides": { ".vh-agent-harness/release-readiness-pass.json": "allow" }
+      },
       "task": { "*": "deny" },
       "delegateFrom": ["build", "coordination", "project-coordinator"]
     }

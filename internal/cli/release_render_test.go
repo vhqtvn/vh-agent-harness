@@ -760,8 +760,8 @@ func assertReleaserManifestCeremonyContent(t *testing.T, label, got string) {
 		{"Discover step manifest-authority state", "Manifest-authority state"},
 		{"Decide step release-prep path decision", "release-prep path"},
 		{"Prepare split substep 3.1 (note)", "Step 3.1"},
-		{"Prepare split substep 3.2 (manifest ceremony)", "Step 3.2"},
-		{"Prepare split substep 3.3 (tag-message staging)", "Step 3.3"},
+		{"Prepare split substep 3.3 (manifest ceremony)", "Step 3.3"},
+		{"Prepare split substep 3.4 (tag-message staging)", "Step 3.4"},
 		{"first-run-from-seed transition framing", "first run after the seed manifest lands"},
 		{"trailing section reframed as canonical-flow reference", "Manifest ceremony reference (canonical flow)"},
 		{"releaser-owns-ceremony framing (description)", "owns the manifest-authority ceremony end-to-end"},
@@ -770,6 +770,82 @@ func assertReleaserManifestCeremonyContent(t *testing.T, label, got string) {
 	for _, c := range checks {
 		if !strings.Contains(got, c.needle) {
 			t.Errorf("%s: missing %s — %q (manifest-authority ceremony drifted out of the releaser spine)", label, c.name, c.needle)
+		}
+	}
+}
+
+// TestReleaser_SourceAndMirrorCarryReadinessCeremony is the deterministic
+// content contract for the releaser's readiness-artifact ceremony (Phase C of
+// the release-boundary enforcement design). The readiness agent gains an
+// exclusive write to .vh-agent-harness/release-readiness-pass.json; the
+// releaser discovers + validates + delegates the artifact-only commit as the
+// SECOND of three single-path committer delegations (note → artifact →
+// manifest). The wrapper independently checks the artifact at tag time
+// (schema, commit_sha binding to HEAD^^, single-path diff, all model gates
+// ready). A regression that drops the ceremony from the releaser spine fails
+// here before a release can ship with a releaser that silently bypasses the
+// readiness artifact.
+func TestReleaser_SourceAndMirrorCarryReadinessCeremony(t *testing.T) {
+	root := findModuleRoot(t)
+	relPaths := []string{
+		filepath.Join("templates", "overlays", "release", "agents", "releaser.md"),
+		filepath.Join(".opencode", "agents", "releaser.md"),
+	}
+	for _, rel := range relPaths {
+		body, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("read releaser agent %s: %v", rel, err)
+		}
+		got := string(body)
+		t.Run(rel, func(t *testing.T) {
+			assertReleaserReadinessCeremonyContent(t, rel, got)
+		})
+	}
+	// Re-assert the gateExempt shape is intact: the readiness ceremony added
+	// a THIRD committer delegation, which MUST NOT have re-introduced any
+	// gate-group command into the releaser's bash block.
+	assertReleaserGateExemptShape(t, root)
+}
+
+// assertReleaserReadinessCeremonyContent asserts the distinctive
+// readiness-artifact ceremony tokens are present in one releaser agent body.
+func assertReleaserReadinessCeremonyContent(t *testing.T, label, got string) {
+	t.Helper()
+	checks := []struct{ name, needle string }{
+		// Step 3.2 is the readiness ceremony (between note 3.1 and manifest 3.3).
+		{"Prepare substep 3.2 (readiness ceremony)", "Step 3.2"},
+		// Invariant 1 updated for three delegations.
+		{"Invariant 1 three-delegation count", "UP TO THREE"},
+		// Readiness agent invocation.
+		{"harness-release-readiness agent name", "harness-release-readiness"},
+		// Artifact path exclusive to the readiness agent.
+		{"readiness artifact path", ".vh-agent-harness/release-readiness-pass.json"},
+		// Schema fields documented in the ceremony.
+		{"schema_version field", "schema_version"},
+		{"commit_sha field", "commit_sha"},
+		{"model_gates field", "model_gates"},
+		// All 5 gate keys.
+		{"gate G1_coverage", "G1_coverage"},
+		{"gate G2_significance", "G2_significance"},
+		{"gate G3_docs", "G3_docs"},
+		{"gate G4_visibility", "G4_visibility"},
+		{"gate G5_curated_note", "G5_curated_note"},
+		// Closed enum for verdicts.
+		{"verdict enum ready", "ready"},
+		{"verdict enum blocked", "blocked"},
+		{"verdict enum skipped", "skipped"},
+		// Lifecycle case for resumable artifact.
+		{"lifecycle case resumable_existing_artifact", "resumable_existing_artifact"},
+		// Sequencing constraint: artifact between note and manifest.
+		{"artifact sequencing constraint (HEAD^)", "HEAD^^..HEAD^"},
+		// commit_sha binding to release-prep (HEAD^^).
+		{"commit_sha binding to HEAD^^", "HEAD^^"},
+		// THIRD delegation for manifest.
+		{"THIRD delegation marker", "THIRD (and"},
+	}
+	for _, c := range checks {
+		if !strings.Contains(got, c.needle) {
+			t.Errorf("%s: missing %s — %q (readiness ceremony drifted out of the releaser spine)", label, c.name, c.needle)
 		}
 	}
 }

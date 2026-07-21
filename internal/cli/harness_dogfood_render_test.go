@@ -21,6 +21,7 @@ package cli
 // regression can silently delete, not model reasoning, so it is assertable.
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -59,7 +60,8 @@ const harnessDogfoodAppendJSONC = `{
       "prompt": "{file:.opencode/agents/harness-release-readiness.md}",
       "permission": {
         "bash": { "__placeholder__": "deny" },
-        "task": { "__placeholder__": "deny" }
+        "task": { "__placeholder__": "deny" },
+        "edit": "deny"
       }
     }
   }
@@ -69,11 +71,21 @@ const harnessDogfoodAppendJSONC = `{
 // harnessDogfoodPermissionPackJSONC mirrors the real pack's permission-pack.jsonc
 // (readonly + git_readonly allow, gate deny, harness deny, task {"*":"deny"},
 // delegateFrom the three orchestrators, NO gateExempt — satisfies the validate
-// rule: gate key present + no gateExempt).
+// rule: gate key present + no gateExempt). Carries editOverrides for the
+// exclusive release-readiness-pass artifact path — the ONE scoped file the
+// readiness agent may edit. The releaser's permission-pack intentionally omits
+// this override.
 const harnessDogfoodPermissionPackJSONC = `{
   "agents": {
     "harness-release-readiness": {
-      "location": { "wildcard": "deny", "readonly": "allow", "git_readonly": "allow", "gate": "deny", "harness": "deny" },
+      "location": {
+        "wildcard": "deny",
+        "readonly": "allow",
+        "git_readonly": "allow",
+        "gate": "deny",
+        "harness": "deny",
+        "editOverrides": { ".vh-agent-harness/release-readiness-pass.json": "allow" }
+      },
       "task": { "*": "deny" },
       "delegateFrom": ["build", "coordination", "project-coordinator"]
     }
@@ -464,6 +476,137 @@ func assertManifestAuthorityContent(t *testing.T, label, got string) {
 	for _, c := range checks {
 		if !strings.Contains(got, c.needle) {
 			t.Errorf("%s: missing %s — %q (manifest-authority framing drifted out of the readiness agent)", label, c.name, c.needle)
+		}
+	}
+}
+
+// TestHarnessDogfood_ReleaseReadinessCarriesReadinessArtifactCapability is the
+// deterministic content contract for the release-readiness-pass artifact
+// capability (Phase B of the release-boundary enforcement). The readiness agent
+// gains a scoped edit-write exception for exactly
+// .vh-agent-harness/release-readiness-pass.json — the model-gate verdict
+// artifact the release-tag wrapper checks at tag time. This test pins:
+//
+//  1. CONTENT: the artifact-writing capability section, the relaxed INVARIANT #1
+//     ("ONE scoped exception"), the exclusive-path language, and the schema
+//     tokens are present in BOTH the AUTHORITATIVE overlay source AND its 1:1
+//     RENDERED MIRROR.
+//  2. PERMISSION BOUNDARY: the rendered opencode.jsonc carries the editOverride
+//     for the readiness agent AND does NOT carry it for the releaser (the
+//     releaser cannot author the artifact it is checked against).
+//
+// If the artifact capability drifts out of either surface, OR the permission
+// boundary breaks (releaser gains write access, or readiness loses it), this
+// test fails before a release can ship with a forged model-gate verdict.
+func TestHarnessDogfood_ReleaseReadinessCarriesReadinessArtifactCapability(t *testing.T) {
+	root := findModuleRoot(t)
+
+	// --- 1. CONTENT: source + mirror carry the capability tokens ---
+	relPaths := []string{
+		filepath.Join(".vh-agent-harness", "overlays", "harness-dogfood", "agents", "harness-release-readiness.md"),
+		filepath.Join(".opencode", "agents", "harness-release-readiness.md"),
+	}
+	for _, rel := range relPaths {
+		body, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("read readiness agent %s: %v", rel, err)
+		}
+		t.Run(rel, func(t *testing.T) {
+			assertReadinessArtifactCapabilityContent(t, rel, string(body))
+		})
+	}
+
+	// --- 2. PERMISSION BOUNDARY: opencode.jsonc edit blocks ---
+	// The edit field renders in TWO forms across agents: flat string
+	// ("allow") for agents with blanket edit, or object form
+	// ({"*":"deny","path":"allow","tmp/**":"allow"}) for agents with
+	// scoped edit. Use json.RawMessage so we can type-assert per agent.
+	cfg, err := os.ReadFile(filepath.Join(root, "opencode.jsonc"))
+	if err != nil {
+		t.Fatalf("read opencode.jsonc: %v", err)
+	}
+	var doc struct {
+		Agent map[string]struct {
+			Permission struct {
+				Edit json.RawMessage `json:"edit"`
+			} `json:"permission"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(cfg, &doc); err != nil {
+		t.Fatalf("unmarshal opencode.jsonc: %v\n--- cfg ---\n%s", err, cfg)
+	}
+
+	// Readiness agent MUST have the editOverride for the artifact path.
+	// Its edit block MUST be object form with the scoped allow.
+	readiness, ok := doc.Agent["harness-release-readiness"]
+	if !ok {
+		t.Fatalf("harness-release-readiness must be registered in opencode.jsonc")
+	}
+	const artifactPath = ".vh-agent-harness/release-readiness-pass.json"
+	var readinessEdit map[string]string
+	if err := json.Unmarshal(readiness.Permission.Edit, &readinessEdit); err != nil {
+		t.Fatalf("harness-release-readiness edit must be object form {\"*\":\"deny\",...}; got raw=%s err=%v",
+			readiness.Permission.Edit, err)
+	}
+	overrideVal, hasOverride := readinessEdit[artifactPath]
+	if !hasOverride {
+		t.Errorf("harness-release-readiness permission.edit MUST carry the exclusive override for %s; got edit=%v",
+			artifactPath, readinessEdit)
+	}
+	if hasOverride && overrideVal != "allow" {
+		t.Errorf("harness-release-readiness override must be \"allow\"; got %q for %s", overrideVal, artifactPath)
+	}
+	// The broad deny must be present too (object-form edit with deny-* first).
+	if d := readinessEdit["*"]; d != "deny" {
+		t.Errorf("harness-release-readiness permission.edit[\"*\"] must be \"deny\" (broad deny with scoped override); got %q", d)
+	}
+
+	// Releaser MUST NOT have the editOverride for the artifact path.
+	// The releaser's edit may be absent (falls to top-level default),
+	// flat string ("allow"/"deny"), or object form — in ALL cases the
+	// artifact path string must NOT appear in its edit block.
+	releaser, ok := doc.Agent["releaser"]
+	if !ok {
+		t.Fatalf("releaser must be registered in opencode.jsonc")
+	}
+	// Scan the raw edit bytes for the artifact path as a JSON key. The
+	// path quoted as ".vh-agent-harness/release-readiness-pass.json" would
+	// only appear if the releaser had the override — which it must not.
+	if bytes.Contains(releaser.Permission.Edit, []byte(`".vh-agent-harness/release-readiness-pass.json"`)) {
+		t.Errorf("releaser permission.edit MUST NOT carry %s (exclusive to harness-release-readiness); got edit=%s",
+			artifactPath, releaser.Permission.Edit)
+	}
+}
+
+// assertReadinessArtifactCapabilityContent asserts the distinctive
+// release-readiness-pass artifact tokens are present in one readiness agent
+// body. Each needle is new content the pre-artifact readiness agent did NOT
+// carry, so a regression that drops the artifact capability (or weakens the
+// exclusive-path guarantee) fails here.
+func assertReadinessArtifactCapabilityContent(t *testing.T, label, got string) {
+	t.Helper()
+	checks := []struct{ name, needle string }{
+		{"artifact section header", "## RELEASE-READINESS-PASS ARTIFACT"},
+		{"artifact path", ".vh-agent-harness/release-readiness-pass.json"},
+		{"schema_version field", "schema_version"},
+		{"model_gates field", "model_gates"},
+		{"G1_coverage gate key", "G1_coverage"},
+		{"G2_significance gate key", "G2_significance"},
+		{"G3_docs gate key", "G3_docs"},
+		{"G4_visibility gate key", "G4_visibility"},
+		{"G5_curated_note gate key", "G5_curated_note"},
+		{"relaxed invariant (ONE scoped exception)", "ONE scoped exception"},
+		{"exclusive path language", "EXCLUSIVE to this agent"},
+		{"releaser cannot write language", "releaser"},
+		{"closed enum ready", "ready"},
+		{"closed enum blocked", "blocked"},
+		{"closed enum skipped", "skipped"},
+		{"commit_sha field", "commit_sha"},
+		{"fail-closed language", "fail-closed"},
+	}
+	for _, c := range checks {
+		if !strings.Contains(got, c.needle) {
+			t.Errorf("%s: missing %s — %q (readiness-artifact capability drifted out of the readiness agent)", label, c.name, c.needle)
 		}
 	}
 }

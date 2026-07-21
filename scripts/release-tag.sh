@@ -480,6 +480,257 @@ if [ "$PARSED_OK" = "1" ]; then
   fi
 fi
 
+# --- release deterministic-readiness gate (G0/G0b) ---
+#
+# Independent re-computation at tag time of the deterministic readiness
+# gates G0 (green tree) and G0b (clean worktree). The wrapper is the SOLE
+# pre-tag transition authority for these gates: any failure refuses BEFORE
+# the `git tag -a` mutation. These are the SAME four Go commands the
+# harness-release-readiness agent recommends as release prerequisites;
+# the wrapper now independently verifies them at tag time so a model
+# surface (the readiness report) cannot bypass them. Path 2 of the
+# release-boundary enforcement design.
+#
+# Gates:
+#   G0   go test ./..., go vet ./..., go build ./..., gofmt -l .
+#        (any nonzero exit OR any gofmt -l output -> refuse)
+#   G0b  git status --short (dirty worktree -> refuse; a dirty tree can
+#        mask what CI's fresh checkout will see and breaks the
+#        committed-blob authority contract the override ceremony binds to)
+#
+# G6-structure (S2 cross-check) is intentionally DEFERRED to a follow-up
+# phase: the backlog prose parsing for `s2-hold:` tokens is heuristic and
+# the readiness agent's G6 model-driven judgment already covers this gate
+# at the model layer. A wrapper-side deterministic re-computation will
+# land when the parsing contract is firmly established.
+#
+# Cost: G0 typically takes ~15s on this repo (dominated by `go test ./...`).
+# This is the price of mechanical readiness enforcement at the tag
+# boundary — the wrapper is the sole tag-cutting surface and verifying
+# readiness at tag time is its job.
+
+# G0 — green tree. Run the four Go commands in order; capture the first
+# failing command's output for the refusal reason. `gofmt -l` is special:
+# it exits 0 even when it lists files, so we treat ANY non-empty stdout
+# as a formatting failure.
+G0_REASON=""
+G0_OUTPUT=""
+if ! G0_OUTPUT=$(go test ./... 2>&1); then
+  G0_REASON="release-readiness-gate: G0 go test ./... failed"
+elif ! G0_OUTPUT=$(go vet ./... 2>&1); then
+  G0_REASON="release-readiness-gate: G0 go vet ./... failed"
+elif ! G0_OUTPUT=$(go build ./... 2>&1); then
+  G0_REASON="release-readiness-gate: G0 go build ./... failed"
+else
+  # gofmt -l exits 0 even when listing files; any non-empty stdout is a
+  # formatting failure. (Parse errors exit nonzero and would have been
+  # caught by `go build` above, but `|| true` defends the command
+  # substitution under `set -e` regardless.)
+  G0_OUTPUT=$(gofmt -l . 2>&1) || true
+  if [ -n "$G0_OUTPUT" ]; then
+    G0_REASON="release-readiness-gate: G0 gofmt -l . reported unformatted files"
+  fi
+fi
+if [ -n "$G0_REASON" ]; then
+  emit false "$VERSION" "" false \
+    "$G0_REASON (output: $G0_OUTPUT)" \
+    "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+  exit 1
+fi
+
+# G0b — clean worktree. A dirty worktree at tag time means the tag would
+# not capture uncommitted edits, breaking the contract that the tagged
+# commit is exactly what was reviewed. This also closes the worktree-vs-
+# HEAD bypass class at the wrapper level: even if a future gate read the
+# worktree file, G0b prevents a dirty worktree from reaching the tag
+# mutation.
+G0B_OUTPUT=$(git status --short 2>&1) || true
+if [ -n "$G0B_OUTPUT" ]; then
+  emit false "$VERSION" "" false \
+    "release-readiness-gate: G0b dirty worktree (commit or stash before tagging); git status --short: $G0B_OUTPUT" \
+    "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+  exit 1
+fi
+
+# --- release readiness-pass artifact gate (G1-G5, model-driven) ---
+#
+# Wrapper-side enforcement of the model-driven readiness gates G1-G5.
+# The harness-release-readiness agent writes an exclusive-signing artifact
+# at .vh-agent-harness/release-readiness-pass.json after evaluating the
+# model-driven gates (G1-coverage, G2-significance, G3-docs, G4-visibility,
+# G5-curated-note). The wrapper reads it from HEAD (committed) and refuses
+# the tag unless all five model-driven gates report `ready`.
+#
+# Why this is here: deterministic gates (G0/G0b/G7-DEFER) are re-computed
+# by the wrapper from primary state, so they cannot be bypassed by model
+# output. Model-driven gates (G1-G5) require judgment and cannot be
+# re-computed from primary state. Path 1 of the release-boundary
+# enforcement design: the readiness agent (which has NO tag authority)
+# authors the verdict, and the wrapper (which has tag authority but NO
+# model judgment) checks the artifact before cutting the tag. Neither
+# surface can both author AND authorize — that is the safety split.
+#
+# Commit-binding handshake (mirrors the DEFER manifest pattern, but one
+# level deeper because the manifest is always HEAD):
+#   - The release ceremony sequences: note → artifact → manifest. At tag
+#     time HEAD is the manifest commit (DEFER handshake: HEAD^..HEAD diff
+#     is exactly the manifest path). The artifact commit is at HEAD^,
+#     authored on top of the release-prep commit at HEAD^^.
+#   - The artifact must exist at `HEAD:.vh-agent-harness/release-readiness-pass.json`
+#     (read via `git show HEAD:`, NOT the worktree — G0b already refused a
+#     dirty tree).
+#   - `commit_sha` in the artifact must equal HEAD^^ (the release-prep
+#     commit the readiness agent evaluated). NOT HEAD, because HEAD is the
+#     manifest commit (DEFER constraint — the manifest is always HEAD).
+#   - `HEAD^^..HEAD^ diff` must be exactly the artifact path (the artifact
+#     commit is a single-path child of the release-prep commit, mirroring
+#     the manifest ceremony).
+#
+# Fail-closed (9 cases, all refuse BEFORE `git tag -a`):
+#   1. Deterministic gate failure (G0/G0b) — already refused above
+#   2. Dirty tree (G0b) — already refused above
+#   3. DEFER/G6 failure — already refused by the DEFER gate
+#   4. Missing artifact at HEAD:<path>
+#   5. Invalid schema (malformed JSON, missing fields, unknown verdict)
+#   6. commit_sha ≠ HEAD^^
+#   7. Any gate = blocked
+#   8. Any gate = skipped
+#   9. Any unknown verdict value (case 5 covers schema; this is the enum)
+#
+# Closed verdict enum: `ready` | `blocked` | `skipped`. Any other value
+# (including the empty string) → refuse. The wrapper NEVER defaults to
+# `ready`.
+
+READINESS_REL=".vh-agent-harness/release-readiness-pass.json"
+
+# Resolve HEAD^ (expected: artifact commit) and HEAD^^ (expected:
+# release-prep commit). If the history is too shallow, the readiness
+# ceremony has not happened — refuse fail-closed.
+HEAD_PARENT_SHA=""
+if ! HEAD_PARENT_SHA=$(git rev-parse --verify "HEAD^" 2>/dev/null); then
+  emit false "$VERSION" "" false \
+    "release-readiness-gate: G1-G5 missing readiness ceremony (HEAD^ does not exist; expected note -> artifact -> manifest sequencing with manifest at HEAD)" \
+    "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+  exit 1
+fi
+HEAD_GP_SHA=""
+if ! HEAD_GP_SHA=$(git rev-parse --verify "HEAD^^" 2>/dev/null); then
+  emit false "$VERSION" "" false \
+    "release-readiness-gate: G1-G5 missing readiness ceremony (HEAD^^ does not exist; expected note -> artifact -> manifest sequencing with manifest at HEAD)" \
+    "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+  exit 1
+fi
+
+# Artifact must exist at HEAD (committed). Use `git cat-file -e` to check
+# existence without loading bytes.
+if ! git cat-file -e "HEAD:${READINESS_REL}" 2>/dev/null; then
+  emit false "$VERSION" "" false \
+    "release-readiness-gate: G1-G5 missing readiness artifact at HEAD:${READINESS_REL} (readiness agent must evaluate and the releaser must commit the artifact as HEAD^ before the manifest commit)" \
+    "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+  exit 1
+fi
+
+# Artifact commit (HEAD^) must be a single-path child of HEAD^^, and the
+# single changed path must be the readiness artifact. Mirrors the DEFER
+# manifest's single-path child check one level deeper.
+ARTIFACT_DIFF=$(git diff --name-only "HEAD^^" "HEAD^" 2>/dev/null) || true
+if [ "$ARTIFACT_DIFF" != "$READINESS_REL" ]; then
+  emit false "$VERSION" "" false \
+    "release-readiness-gate: G1-G5 artifact commit (HEAD^) must change only ${READINESS_REL}; got: ${ARTIFACT_DIFF}" \
+    "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+  exit 1
+fi
+
+# Validate the artifact content (schema + extract verdict). Parse via
+# node (mirrors the DEFER gate's JSON parsing pattern). The validator
+# returns a JSON object: {ok, reason, commit_sha, gates}. `ok=false`
+# means schema/enum validation failed and `reason` carries the refusal
+# text. `ok=true` means the artifact is well-formed; the wrapper then
+# checks commit_sha binding and all-ready below.
+READINESS_BYTES=$(git show "HEAD:${READINESS_REL}" 2>/dev/null) || true
+READINESS_VERDICT=$(printf '%s' "$READINESS_BYTES" | node -e '
+  let data = ""; process.stdin.on("data", (c) => (data += c));
+  process.stdin.on("end", () => {
+    const ALLOWED = new Set(["ready", "blocked", "skipped"]);
+    const GATES = ["G1_coverage", "G2_significance", "G3_docs", "G4_visibility", "G5_curated_note"];
+    function refuse(reason) {
+      process.stdout.write(JSON.stringify({ok: false, reason: reason, commit_sha: "", gates: ""}));
+      process.exit(0);
+    }
+    let o;
+    try { o = JSON.parse(data); } catch (e) {
+      refuse("release-readiness-gate: G1-G5 artifact is not valid JSON (" + e.message + ")");
+      return;
+    }
+    if (typeof o !== "object" || o === null) {
+      refuse("release-readiness-gate: G1-G5 artifact is not a JSON object");
+      return;
+    }
+    if (o.schema_version !== 1) {
+      refuse("release-readiness-gate: G1-G5 artifact schema_version must be 1 (got " + JSON.stringify(o.schema_version) + ")");
+      return;
+    }
+    if (typeof o.commit_sha !== "string" || !/^[0-9a-f]{40}$/.test(o.commit_sha)) {
+      refuse("release-readiness-gate: G1-G5 artifact commit_sha must be a 40-char hex SHA (got " + JSON.stringify(o.commit_sha) + ")");
+      return;
+    }
+    if (typeof o.model_gates !== "object" || o.model_gates === null) {
+      refuse("release-readiness-gate: G1-G5 artifact missing model_gates object");
+      return;
+    }
+    for (const g of GATES) {
+      if (!(g in o.model_gates)) {
+        refuse("release-readiness-gate: G1-G5 artifact missing gate " + g);
+        return;
+      }
+      const v = o.model_gates[g];
+      if (!ALLOWED.has(v)) {
+        refuse("release-readiness-gate: G1-G5 gate " + g + " has unknown verdict " + JSON.stringify(v) + " (allowed: ready|blocked|skipped)");
+        return;
+      }
+    }
+    const gates = GATES.map((g) => g + "=" + o.model_gates[g]).join(",");
+    process.stdout.write(JSON.stringify({ok: true, reason: "", commit_sha: o.commit_sha, gates: gates}));
+  });
+' 2>/dev/null) || true
+
+if [ -z "$READINESS_VERDICT" ]; then
+  READINESS_VERDICT='{"ok":false,"reason":"release-readiness-gate: G1-G5 artifact validator crashed (no output)","commit_sha":"","gates":""}'
+fi
+
+# Extract fields from the verdict (mirrors the DEFER gate extraction).
+RV_OK=$(printf '%s' "$READINESS_VERDICT" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(JSON.parse(d).ok?"1":"0");})') || RV_OK="0"
+RV_REASON=$(printf '%s' "$READINESS_VERDICT" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(JSON.parse(d).reason||"");})') || RV_REASON=""
+RV_COMMIT=$(printf '%s' "$READINESS_VERDICT" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(JSON.parse(d).commit_sha||"");})') || RV_COMMIT=""
+RV_GATES=$(printf '%s' "$READINESS_VERDICT" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(JSON.parse(d).gates||"");})') || RV_GATES=""
+
+if [ "$RV_OK" != "1" ]; then
+  emit false "$VERSION" "" false \
+    "$RV_REASON" \
+    "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+  exit 1
+fi
+
+# commit_sha binding: the artifact must be pinned to the release-prep
+# commit (HEAD^^), which is what the readiness agent evaluated. This
+# prevents stale artifacts (evaluated against an older commit) from
+# authorizing a release built on a different commit.
+if [ "$RV_COMMIT" != "$HEAD_GP_SHA" ]; then
+  emit false "$VERSION" "" false \
+    "release-readiness-gate: G1-G5 artifact commit_sha (${RV_COMMIT}) does not match release-prep commit HEAD^^ (${HEAD_GP_SHA}); the readiness artifact must be re-evaluated and re-committed against the current release-prep commit" \
+    "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+  exit 1
+fi
+
+# All five model-driven gates must be `ready`. Any blocked/skipped
+# (unknown was already refused at schema validation) → refuse.
+if printf '%s' "$RV_GATES" | grep -Eq '=blocked|=skipped'; then
+  emit false "$VERSION" "" false \
+    "release-readiness-gate: G1-G5 not all ready (${RV_GATES}); every model-driven gate must report ready before tagging" \
+    "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+  exit 1
+fi
+
 # --- pre-tag disclosure print ---
 #
 # The operator sees disclosures + accepted overrides on stderr BEFORE the

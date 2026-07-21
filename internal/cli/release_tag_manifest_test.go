@@ -100,14 +100,20 @@ func setupReleaseTagManifestRepo(t *testing.T, spec manifestSpec) (scratch, wrap
 			t.Fatalf("write %s: %v", rel, err)
 		}
 	}
-	writeFile("fileA.go", "package main\n")
-	writeFile("fileB.go", "package main\n")
-	writeFile("dir/fileC.go", "package dir\n")
+	// Seed a buildable, gofmt-stable Go module so the wrapper's G0
+	// green-tree gate (go test/vet/build/gofmt) passes by default. The
+	// package name is non-main so no `func main()` is required.
+	writeFile("go.mod", "module scratch\n\ngo 1.21\n")
+	writeFile("fileA.go", "package scratch\n")
+	writeFile("fileB.go", "package scratch\n")
+	writeFile("dir/fileC.go", "package scratch\n")
 	git("add", "-A")
 	git("commit", "-q", "-m", "initial")
 	git("tag", "v0.1.0")
-	writeFile("fileA.go", "package main\n// changed in arc\n")
-	writeFile("dir/fileC.go", "package dir\n// changed in arc\n")
+	// Post-tag changes (in the arc v0.1.0..HEAD): fileA.go + dir/fileC.go.
+	// Use declarations (not bare comments) so gofmt -l stays clean.
+	writeFile("fileA.go", "package scratch\n\n// FileAChanged marks the arc commit.\nconst FileAChanged = true\n")
+	writeFile("dir/fileC.go", "package scratch\n\n// FileCChanged marks the arc commit.\nconst FileCChanged = true\n")
 	git("add", "-A")
 	git("commit", "-q", "-m", "changes for release")
 
@@ -180,13 +186,16 @@ func runReleaseTagManifest(t *testing.T, wrapper, msgFile, version string, extra
 // TestReleaseTag_Manifest_NoDiscloseRecord_Allows — single no+disclose record
 // is disclosed and the tag is created.
 func TestReleaseTag_Manifest_NoDiscloseRecord_Allows(t *testing.T) {
-	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpec{
+	spec := manifestSpec{
 		ReleaseBaseKind:     "tag",
 		ReleaseBaseValue:    "v0.1.0",
 		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
 		Records:             []manifestRecordSpec{seededNoDiscloseInvalid("defer-seed")},
-	})
-	msgFile := filepath.Join(scratch, "msg.txt")
+	}
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, spec)
+	// Phase C: insert a valid readiness artifact so the readiness gate passes.
+	insertReadinessArtifactCommit(t, scratch, spec, readinessArtifactSpec{})
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
 	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
 		t.Fatalf("write msg: %v", err)
 	}
@@ -250,7 +259,7 @@ func TestReleaseTag_Manifest_OverrideRequiredNoConfirmationRefuses(t *testing.T)
 		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
 		Records:             []manifestRecordSpec{overrideRequiredRecord("defer-ov", "v0.2.0")},
 	})
-	msgFile := filepath.Join(scratch, "msg.txt")
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
 	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
 		t.Fatalf("write msg: %v", err)
 	}
@@ -285,7 +294,7 @@ func TestReleaseTag_Manifest_OverrideReleaseVersionMismatchRefuses(t *testing.T)
 		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
 		Records:             []manifestRecordSpec{overrideRequiredRecord("defer-ov", "v0.2.0")},
 	})
-	msgFile := filepath.Join(scratch, "msg.txt")
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
 	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
 		t.Fatalf("write msg: %v", err)
 	}
@@ -315,7 +324,7 @@ func TestReleaseTag_Manifest_OverrideManifestShaMismatchRefuses(t *testing.T) {
 		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
 		Records:             []manifestRecordSpec{overrideRequiredRecord("defer-ov", "v0.2.0")},
 	})
-	msgFile := filepath.Join(scratch, "msg.txt")
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
 	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
 		t.Fatalf("write msg: %v", err)
 	}
@@ -342,13 +351,17 @@ func TestReleaseTag_Manifest_OverrideManifestShaMismatchRefuses(t *testing.T) {
 // evaluator accepts the override, the wrapper prints the accepted override to
 // stderr and embeds it in the JSON, and the tag is created.
 func TestReleaseTag_Manifest_OverrideValidAllowsAndDiscloses(t *testing.T) {
-	scratch, wrapper, _, manifestSHA, _ := setupReleaseTagManifestRepo(t, manifestSpec{
+	spec := manifestSpec{
 		ReleaseBaseKind:     "tag",
 		ReleaseBaseValue:    "v0.1.0",
 		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
 		Records:             []manifestRecordSpec{overrideRequiredRecord("defer-ov", "v0.2.0")},
-	})
-	msgFile := filepath.Join(scratch, "msg.txt")
+	}
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, spec)
+	// Phase C: insert a valid readiness artifact. This re-stamps the manifest,
+	// so the operator's ceremony SHA must be recomputed from the re-stamped blob.
+	manifestSHA := insertReadinessArtifactCommit(t, scratch, spec, readinessArtifactSpec{})
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
 	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
 		t.Fatalf("write msg: %v", err)
 	}
@@ -391,7 +404,7 @@ func TestReleaseTag_Manifest_OverrideCannotCureStaleManifest(t *testing.T) {
 		Records:             []manifestRecordSpec{overrideRequiredRecord("defer-ov", "v0.2.0")},
 		ForgedSchemaVersion: 2,
 	})
-	msgFile := filepath.Join(scratch, "msg.txt")
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
 	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
 		t.Fatalf("write msg: %v", err)
 	}
@@ -480,7 +493,7 @@ func TestReleaseTag_Manifest_RefusalsOccurBeforeTagMutation(t *testing.T) {
 			rcmd("init", "--bare", "-q", remote)
 			rcmd("-C", scratch, "remote", "add", "origin", remote)
 
-			msgFile := filepath.Join(scratch, "msg.txt")
+			msgFile := filepath.Join(t.TempDir(), "msg.txt")
 			if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
 				t.Fatalf("write msg: %v", err)
 			}
@@ -622,7 +635,7 @@ func TestReleaseTag_Manifest_DirtyWorktreeManifestRefusesTag(t *testing.T) {
 
 	// 3. Invoke the wrapper with manifest mode active. No override flags — the
 	//    committed record is a hard block, not override_required.
-	msgFile := filepath.Join(scratch, "msg.txt")
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
 	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
 		t.Fatalf("write msg: %v", err)
 	}
@@ -652,32 +665,39 @@ func TestReleaseTag_Manifest_DirtyWorktreeManifestRefusesTag(t *testing.T) {
 	}
 }
 
-// TestReleaseTag_Manifest_DirtyWorktreeOverrideCeremonyBindsToCommittedBlob —
-// complementary to the block-record test: even when the operator runs the
-// override ceremony, the SHA the wrapper compares --override-manifest-sha
-// against is `git rev-parse HEAD:<path>`, NOT `git hash-object <path>`. So a
-// dirty worktree cannot swap the SHA under the ceremony either.
+// TestReleaseTag_Manifest_DirtyWorktreeRefusedByG0bEvenWithOverrideCeremony —
+// the wrapper's deterministic G0b gate (clean-worktree check, added in the
+// Phase A release-readiness enforcement) now fires BEFORE the override
+// ceremony can take effect: a dirty worktree is refused at G0b even when
+// the operator supplies consistent --override-release-version +
+// --override-manifest-sha flags that would otherwise bind to the committed
+// manifest blob. This closes the dirty-worktree bypass class at the wrapper
+// level — uncommitted edits cannot reach the tag mutation.
+//
+// Historical note: this test was originally
+// DirtyWorktreeOverrideCeremonyBindsToCommittedBlob, verifying the F1 fix
+// that switched the ceremony's SHA comparison from `git hash-object` (worktree
+// blob) to `git rev-parse HEAD:<path>` (committed blob). The F1 fix is still
+// in the code and is still tested at the EVALUATOR level
+// (TestReleaseEval_DirtyWorktreeManifestReadsCommittedHEAD in
+// check_defer_release_manifest_test.go). At the WRAPPER level, G0b now fires
+// first on any dirty worktree, so the F1 ceremony binding is no longer the
+// relevant defense — G0b is strictly stronger (prevents the dirty worktree
+// from reaching the ceremony at all).
 //
 // Scenario:
 //  1. Commit a manifest with defer-ov = `yes+override_required+valid` and an
 //     override.release_version matching the version being tagged.
 //  2. Compute the operator's --override-manifest-sha from the COMMITTED blob
-//     (`git rev-parse HEAD:<path>` — what the wrapper now uses).
+//     (`git rev-parse HEAD:<path>`).
 //  3. Dirty the worktree: rewrite the manifest file (uncommitted) so the
 //     worktree blob SHA differs from the committed blob SHA.
 //  4. Invoke the wrapper with the ceremony flags bound to the COMMITTED SHA.
 //
-// Before the F1 fix: the wrapper ran `git hash-object` (worktree SHA), which
-// no longer matched the operator's committed-blob SHA → ceremony refused
-// (good outcome by accident, but for the wrong reason — the wrapper was
-// reading the worktree).
-//
-// After the F1 fix: the wrapper runs `git rev-parse HEAD:<path>` (committed
-// SHA), which matches the operator's committed-blob SHA → ceremony succeeds,
-// override is forwarded, evaluator accepts (reading the committed
-// override_required record from HEAD), and the tag is created. This proves
-// the ceremony now binds coherently to the committed blob.
-func TestReleaseTag_Manifest_DirtyWorktreeOverrideCeremonyBindsToCommittedBlob(t *testing.T) {
+// Expected (post-G0b): G0b refuses because the worktree is dirty. The tag
+// is NOT created. The ceremony flags are irrelevant — G0b fires before the
+// ceremony matters.
+func TestReleaseTag_Manifest_DirtyWorktreeRefusedByG0bEvenWithOverrideCeremony(t *testing.T) {
 	scratch, wrapper, manifestPath, _, _ := setupReleaseTagManifestRepo(t, manifestSpec{
 		ReleaseBaseKind:     "tag",
 		ReleaseBaseValue:    "v0.1.0",
@@ -720,26 +740,646 @@ func TestReleaseTag_Manifest_DirtyWorktreeOverrideCeremonyBindsToCommittedBlob(t
 	}
 
 	// 4. Invoke the wrapper with the ceremony bound to the COMMITTED blob SHA.
-	//    After the F1 fix the wrapper also derives ACTUAL_SHA from the
-	//    committed blob, so the ceremony matches and the tag is created.
-	msgFile := filepath.Join(scratch, "msg.txt")
+	//    G0b must refuse because the worktree is dirty, regardless of the
+	//    ceremony's validity.
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
 	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
 		t.Fatalf("write msg: %v", err)
 	}
 	exitCode, result, _, _, _ := runReleaseTagManifest(t, wrapper, msgFile, "v0.2.0",
 		[]string{"--override-release-version", "v0.2.0", "--override-manifest-sha", committedSHAStr})
 
+	if exitCode == 0 {
+		t.Fatalf("dirty worktree must be REFUSED by G0b (nonzero); got exit 0 (ok=%v error=%v)",
+			result.OK, result.Error)
+	}
+	if result.OK {
+		t.Errorf("expected ok=false; got true")
+	}
+	if !tagExists(t, scratch, "v0.2.0") {
+		// expected — tag must NOT be created
+	} else {
+		t.Errorf("tag v0.2.0 must NOT exist after G0b dirty-worktree refusal")
+	}
+	// The error must mention G0b dirty worktree, proving G0b fired (not the
+	// ceremony gate, not the DEFER gate, not the manifest evaluator).
+	if result.Error == nil || !strings.Contains(*result.Error, "G0b") {
+		t.Errorf("error must mention G0b dirty worktree; got %v", result.Error)
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "dirty worktree") {
+		t.Errorf("error must mention dirty worktree; got %v", result.Error)
+	}
+}
+
+// =============================================================================
+// DETERMINISTIC GATE TESTS — G0 (green tree) / G0b (clean worktree)
+//
+// The wrapper now independently recomputes the deterministic readiness gates
+// at tag time (Phase A of release-boundary enforcement). These tests verify
+// each gate's pass and refuse behavior. The green-path (G0+G0b pass → tag
+// created) is already covered by TestReleaseTag_Manifest_NoDiscloseRecord_Allows
+// which runs the full wrapper including the G0/G0b block on the buildable
+// seed; the tests below cover the REFUSE side.
+//
+// IMPORTANT: the DEFER gate runs BEFORE G0/G0b. To make G0 refuse tests
+// reach the G0 gate, the manifest must be re-stamped (fresh handshake)
+// AFTER committing the broken/unformatted file so the DEFER gate passes.
+// =============================================================================
+
+// commitScratchFile writes content to rel within scratch and commits it.
+// Used by G0 refuse tests to introduce broken/unformatted Go files into
+// the committed tree (so G0 sees them at tag time).
+func commitScratchFile(t *testing.T, scratch, rel, content, msg string) {
+	t.Helper()
+	full := filepath.Join(scratch, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", rel, err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", rel, err)
+	}
+	cmd := exec.Command("git", "-C", scratch, "add", rel)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git add %s: %v", rel, err)
+	}
+	cmd = exec.Command("git", "-C", scratch, "commit", "-q", "-m", msg)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git commit %s: %v", rel, err)
+	}
+}
+
+// restampManifest re-commits the manifest with a fresh handshake (pointing
+// at the current HEAD) so the DEFER gate passes after a test has committed
+// additional files on top of the manifest commit. This creates a new
+// immediate-child manifest commit at HEAD.
+func restampManifest(t *testing.T, scratch string, spec manifestSpec) {
+	t.Helper()
+	manifestBytes := buildManifestBytes(t, scratch, spec)
+	commitReleaseManifest(t, scratch, manifestBytes, "")
+}
+
+// TestReleaseTag_DeterministicGate_G0_BrokenBuildRefuses — a committed .go
+// file with a syntax error causes G0 (go test ./...) to fail and the wrapper
+// to refuse the tag BEFORE `git tag -a`. This is fail-closed matrix case 1
+// (deterministic gate failure).
+func TestReleaseTag_DeterministicGate_G0_BrokenBuildRefuses(t *testing.T) {
+	spec := manifestSpec{
+		ReleaseBaseKind:     "tag",
+		ReleaseBaseValue:    "v0.1.0",
+		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+		Records:             []manifestRecordSpec{seededNoDiscloseInvalid("defer-seed")},
+	}
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, spec)
+	// Commit a broken .go file (syntax error) so G0 go test ./... fails.
+	commitScratchFile(t, scratch, "broken.go", "package scratch\n\nfunc broken( {}\n", "broken")
+	// Re-stamp the manifest so the DEFER gate passes and G0 gets to run.
+	restampManifest(t, scratch, spec)
+
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
+	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
+		t.Fatalf("write msg: %v", err)
+	}
+	exitCode, result, _, _, _ := runReleaseTagManifest(t, wrapper, msgFile, "v0.2.0", nil)
+
+	if exitCode == 0 {
+		t.Fatalf("broken build must be REFUSED by G0 (nonzero); got exit 0")
+	}
+	if result.OK {
+		t.Errorf("expected ok=false; got true")
+	}
+	if tagExists(t, scratch, "v0.2.0") {
+		t.Errorf("tag v0.2.0 must NOT exist after G0 refusal")
+	}
+	// The error must mention G0 and the failing command.
+	if result.Error == nil || !strings.Contains(*result.Error, "G0") {
+		t.Errorf("error must mention G0; got %v", result.Error)
+	}
+}
+
+// TestReleaseTag_DeterministicGate_G0_GofmtRefuses — a committed .go file
+// that is not gofmt-formatted causes G0 (gofmt -l .) to report it and the
+// wrapper to refuse. The file compiles fine (go test/vet/build pass) but
+// fails the formatting check. This is fail-closed matrix case 1.
+func TestReleaseTag_DeterministicGate_G0_GofmtRefuses(t *testing.T) {
+	spec := manifestSpec{
+		ReleaseBaseKind:     "tag",
+		ReleaseBaseValue:    "v0.1.0",
+		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+		Records:             []manifestRecordSpec{seededNoDiscloseInvalid("defer-seed")},
+	}
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, spec)
+	// Commit a valid but unformatted .go file. go test/vet/build pass;
+	// gofmt -l reports it.
+	commitScratchFile(t, scratch, "ugly.go", "package scratch\n\ntype T struct{x int}\n", "ugly")
+	// Re-stamp the manifest so the DEFER gate passes and G0 gets to run.
+	restampManifest(t, scratch, spec)
+
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
+	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
+		t.Fatalf("write msg: %v", err)
+	}
+	exitCode, result, _, _, _ := runReleaseTagManifest(t, wrapper, msgFile, "v0.2.0", nil)
+
+	if exitCode == 0 {
+		t.Fatalf("unformatted file must be REFUSED by G0 (nonzero); got exit 0")
+	}
+	if result.OK {
+		t.Errorf("expected ok=false; got true")
+	}
+	if tagExists(t, scratch, "v0.2.0") {
+		t.Errorf("tag v0.2.0 must NOT exist after G0 refusal")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "G0") {
+		t.Errorf("error must mention G0; got %v", result.Error)
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "gofmt") {
+		t.Errorf("error must mention gofmt; got %v", result.Error)
+	}
+}
+
+// TestReleaseTag_DeterministicGate_G0b_DirtyWorktreeRefuses — an uncommitted
+// modification causes G0b (git status --short) to report it and the wrapper
+// to refuse. This is fail-closed matrix case 2 (dirty tree).
+//
+// Note: this test does NOT re-stamp the manifest because the dirty edit is
+// uncommitted — the manifest at HEAD is already fresh. The DEFER gate reads
+// committed state (HEAD) and passes; G0 passes on the buildable seed; G0b
+// catches the uncommitted modification.
+func TestReleaseTag_DeterministicGate_G0b_DirtyWorktreeRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpec{
+		ReleaseBaseKind:     "tag",
+		ReleaseBaseValue:    "v0.1.0",
+		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+		Records:             []manifestRecordSpec{seededNoDiscloseInvalid("defer-seed")},
+	})
+	// Dirty the worktree WITHOUT committing: modify an existing tracked file.
+	dirtyPath := filepath.Join(scratch, "fileB.go")
+	if err := os.WriteFile(dirtyPath, []byte("package scratch\n\n// dirty uncommitted edit\nconst DirtyEdit = true\n"), 0o644); err != nil {
+		t.Fatalf("write dirty fileB.go: %v", err)
+	}
+
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
+	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
+		t.Fatalf("write msg: %v", err)
+	}
+	exitCode, result, _, _, _ := runReleaseTagManifest(t, wrapper, msgFile, "v0.2.0", nil)
+
+	if exitCode == 0 {
+		t.Fatalf("dirty worktree must be REFUSED by G0b (nonzero); got exit 0")
+	}
+	if result.OK {
+		t.Errorf("expected ok=false; got true")
+	}
+	if tagExists(t, scratch, "v0.2.0") {
+		t.Errorf("tag v0.2.0 must NOT exist after G0b refusal")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "G0b") {
+		t.Errorf("error must mention G0b; got %v", result.Error)
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "dirty worktree") {
+		t.Errorf("error must mention dirty worktree; got %v", result.Error)
+	}
+}
+
+// =============================================================================
+// RELEASE READINESS-PASS ARTIFACT GATE (G1-G5, model-driven) — Phase C
+// =============================================================================
+//
+// Phase C activates the readiness-artifact requirement. After Phase C, every
+// release requires: deterministic gates pass (G0/G0b, Phase A) AND DEFER gate
+// passes (G7, pre-existing) AND readiness artifact exists at
+// HEAD:.vh-agent-harness/release-readiness-pass.json with all five model
+// gates (G1-G5) reporting "ready" and commit_sha pinned to HEAD^^.
+//
+// The readiness ceremony sequences: note → artifact → manifest. At tag time
+// HEAD is the manifest commit (DEFER handshake intact), HEAD^ is the artifact
+// commit, HEAD^^ is the release-prep commit the readiness agent evaluated.
+
+// readinessArtifactSpec controls the content of the readiness-pass artifact.
+// By default it produces a valid schema-v1 artifact with all five gates
+// "ready" and commit_sha pinned to the release-prep commit. Fields like
+// RawJSON or OmitField let tests forge invalid artifacts for the fail-closed
+// matrix.
+type readinessArtifactSpec struct {
+	// CommitSHA overrides commit_sha. If empty, uses the release-prep SHA
+	// (HEAD^^ at tag time). Set to a wrong 40-hex value to test the binding.
+	CommitSHA string
+
+	// Gates overrides individual gate verdicts. If nil, all five default
+	// to "ready". Use to set specific gates to "blocked" or "skipped" or
+	// an unknown value.
+	Gates map[string]string
+
+	// RawJSON, if non-empty, is written verbatim (bypasses the builder).
+	// Use for malformed-JSON tests.
+	RawJSON string
+
+	// OmitField, if non-empty, removes the named top-level field from the
+	// built JSON (e.g. "schema_version", "commit_sha", "model_gates").
+	OmitField string
+
+	// OmitGate, if non-empty, removes the named gate from model_gates.
+	OmitGate string
+}
+
+// buildReadinessArtifactBytes builds the schema-v1 readiness-pass artifact
+// JSON from the spec. If spec.RawJSON is non-empty, it is returned verbatim.
+func buildReadinessArtifactBytes(t *testing.T, spec readinessArtifactSpec) []byte {
+	t.Helper()
+	if spec.RawJSON != "" {
+		return []byte(spec.RawJSON)
+	}
+	gates := map[string]string{
+		"G1_coverage":     "ready",
+		"G2_significance": "ready",
+		"G3_docs":         "ready",
+		"G4_visibility":   "ready",
+		"G5_curated_note": "ready",
+	}
+	for k, v := range spec.Gates {
+		gates[k] = v
+	}
+	if spec.OmitGate != "" {
+		delete(gates, spec.OmitGate)
+	}
+	obj := map[string]interface{}{
+		"schema_version": 1,
+		"commit_sha":     spec.CommitSHA,
+		"model_gates":    gates,
+	}
+	if spec.OmitField != "" {
+		delete(obj, spec.OmitField)
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatalf("marshal readiness artifact: %v", err)
+	}
+	return b
+}
+
+// insertReadinessArtifactCommit inserts a readiness-pass artifact commit as
+// HEAD^ and re-stamps the manifest as HEAD. The release-prep commit
+// (previously HEAD^) becomes HEAD^^.
+//
+// Before: HEAD=manifest, HEAD^=release-prep
+// After:  HEAD=manifest(re-stamped), HEAD^=artifact(single-path), HEAD^^=release-prep
+//
+// The artifact's commit_sha is set to the release-prep SHA unless the spec
+// overrides it. Returns the re-stamped manifest blob SHA (for the override
+// ceremony).
+func insertReadinessArtifactCommit(t *testing.T, scratch string, mspec manifestSpec, aspec readinessArtifactSpec) string {
+	t.Helper()
+
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", scratch}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	// 1. Capture release-prep SHA (current HEAD^ = arc commit).
+	out, err := exec.Command("git", "-C", scratch, "rev-parse", "HEAD^").Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD^: %v", err)
+	}
+	releasePrepSHA := strings.TrimSpace(string(out))
+
+	// 2. Undo the manifest commit (soft reset keeps manifest staged).
+	git("reset", "--soft", "HEAD~1")
+
+	// 3. Unstage the manifest so the artifact commit is single-path.
+	git("reset", "HEAD", "--", ".vh-agent-harness/release-defer-dispositions.json")
+
+	// 4. Fill commit_sha if not overridden.
+	if aspec.CommitSHA == "" {
+		aspec.CommitSHA = releasePrepSHA
+	}
+
+	// 5. Write and commit the artifact.
+	artifactBytes := buildReadinessArtifactBytes(t, aspec)
+	artifactPath := filepath.Join(scratch, ".vh-agent-harness", "release-readiness-pass.json")
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, artifactBytes, 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	git("add", ".vh-agent-harness/release-readiness-pass.json")
+	git("commit", "-q", "-m", "release-readiness artifact")
+
+	// 6. Re-stamp the manifest (evaluated_commit = HEAD = artifact commit).
+	restampManifest(t, scratch, mspec)
+
+	// 7. Return the re-stamped manifest blob SHA for the override ceremony.
+	out, err = exec.Command("git", "-C", scratch, "hash-object", ".vh-agent-harness/release-defer-dispositions.json").Output()
+	if err != nil {
+		t.Fatalf("hash-object manifest after re-stamp: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// manifestSpecForReadiness is a shorthand for the common manifest spec used
+// by readiness tests: a single no-disclose record over the v0.1.0 → v0.2.0 arc.
+func manifestSpecForReadiness() manifestSpec {
+	return manifestSpec{
+		ReleaseBaseKind:     "tag",
+		ReleaseBaseValue:    "v0.1.0",
+		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+		Records:             []manifestRecordSpec{seededNoDiscloseInvalid("defer-seed")},
+	}
+}
+
+// runReleaseTagFromScratch is a shorthand for the common wrapper invocation
+// used by readiness tests: write a msg file OUTSIDE the repo, run the wrapper
+// for v0.2.0, return the result.
+func runReleaseTagFromScratch(t *testing.T, wrapper string) (int, releaseTagManifestResult) {
+	t.Helper()
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
+	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
+		t.Fatalf("write msg: %v", err)
+	}
+	exitCode, result, _, _, _ := runReleaseTagManifest(t, wrapper, msgFile, "v0.2.0", nil)
+	return exitCode, result
+}
+
+// --- GREEN PATH ---
+
+// TestReleaseTag_ReadinessArtifact_GreenPath_Allows — valid artifact with
+// all five gates "ready", deterministic gates pass, DEFER passes → tag created.
+func TestReleaseTag_ReadinessArtifact_GreenPath_Allows(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+	insertReadinessArtifactCommit(t, scratch, manifestSpecForReadiness(), readinessArtifactSpec{})
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
 	if exitCode != 0 {
-		t.Fatalf("dirty-worktree override must ALLOW with committed-SHA ceremony (exit 0); got %d (ok=%v err=%v)",
-			exitCode, result.OK, result.Error)
+		t.Fatalf("green-path readiness must ALLOW (exit 0); got %d (error=%v)", exitCode, result.Error)
 	}
 	if !result.OK {
 		t.Errorf("expected ok=true; got false (error=%v)", result.Error)
 	}
 	if !tagExists(t, scratch, "v0.2.0") {
-		t.Errorf("tag v0.2.0 must exist after accepted override")
+		t.Errorf("tag v0.2.0 must exist after green-path readiness")
 	}
-	if len(result.AcceptedOverrides) != 1 {
-		t.Errorf("accepted_overrides must have 1 entry; got %v", result.AcceptedOverrides)
+}
+
+// --- FAIL-CLOSED MATRIX (cases 4-9; cases 1-3 covered by Phase A) ---
+
+// Case 4: missing artifact at HEAD: → refuse.
+func TestReleaseTag_ReadinessArtifact_MissingArtifactRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+	// No readiness artifact committed.
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
+	if exitCode == 0 {
+		t.Fatalf("missing readiness artifact must REFUSE (nonzero); got exit 0")
+	}
+	if result.OK {
+		t.Errorf("expected ok=false; got true")
+	}
+	if tagExists(t, scratch, "v0.2.0") {
+		t.Errorf("tag v0.2.0 must NOT exist after missing-artifact refusal")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "missing readiness artifact") {
+		t.Errorf("error must mention missing readiness artifact; got %v", result.Error)
+	}
+}
+
+// Case 5a: malformed JSON → refuse.
+func TestReleaseTag_ReadinessArtifact_MalformedJSONRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+	insertReadinessArtifactCommit(t, scratch, manifestSpecForReadiness(), readinessArtifactSpec{
+		RawJSON: `{not valid json`,
+	})
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
+	if exitCode == 0 {
+		t.Fatalf("malformed JSON must REFUSE; got exit 0")
+	}
+	if result.OK {
+		t.Errorf("expected ok=false; got true")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "not valid JSON") {
+		t.Errorf("error must mention invalid JSON; got %v", result.Error)
+	}
+}
+
+// Case 5b: missing schema_version → refuse.
+func TestReleaseTag_ReadinessArtifact_MissingSchemaVersionRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+	insertReadinessArtifactCommit(t, scratch, manifestSpecForReadiness(), readinessArtifactSpec{
+		OmitField: "schema_version",
+	})
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
+	if exitCode == 0 {
+		t.Fatalf("missing schema_version must REFUSE; got exit 0")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "schema_version") {
+		t.Errorf("error must mention schema_version; got %v", result.Error)
+	}
+}
+
+// Case 5c: missing commit_sha → refuse.
+func TestReleaseTag_ReadinessArtifact_MissingCommitSHARefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+	insertReadinessArtifactCommit(t, scratch, manifestSpecForReadiness(), readinessArtifactSpec{
+		OmitField: "commit_sha",
+	})
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
+	if exitCode == 0 {
+		t.Fatalf("missing commit_sha must REFUSE; got exit 0")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "commit_sha") {
+		t.Errorf("error must mention commit_sha; got %v", result.Error)
+	}
+}
+
+// Case 5d: missing model_gates → refuse.
+func TestReleaseTag_ReadinessArtifact_MissingModelGatesRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+	insertReadinessArtifactCommit(t, scratch, manifestSpecForReadiness(), readinessArtifactSpec{
+		OmitField: "model_gates",
+	})
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
+	if exitCode == 0 {
+		t.Fatalf("missing model_gates must REFUSE; got exit 0")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "model_gates") {
+		t.Errorf("error must mention model_gates; got %v", result.Error)
+	}
+}
+
+// Case 5e: missing a gate key → refuse.
+func TestReleaseTag_ReadinessArtifact_MissingGateRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+	insertReadinessArtifactCommit(t, scratch, manifestSpecForReadiness(), readinessArtifactSpec{
+		OmitGate: "G3_docs",
+	})
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
+	if exitCode == 0 {
+		t.Fatalf("missing gate key must REFUSE; got exit 0")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "missing gate G3_docs") {
+		t.Errorf("error must mention missing gate G3_docs; got %v", result.Error)
+	}
+}
+
+// Case 9: unknown verdict value → refuse (schema validation).
+func TestReleaseTag_ReadinessArtifact_UnknownVerdictRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+	insertReadinessArtifactCommit(t, scratch, manifestSpecForReadiness(), readinessArtifactSpec{
+		Gates: map[string]string{"G2_significance": "pending"},
+	})
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
+	if exitCode == 0 {
+		t.Fatalf("unknown verdict must REFUSE; got exit 0")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "unknown verdict") {
+		t.Errorf("error must mention unknown verdict; got %v", result.Error)
+	}
+}
+
+// Case 6: commit_sha ≠ HEAD^^ → refuse.
+func TestReleaseTag_ReadinessArtifact_CommitSHAMismatchRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+	// Use a valid 40-hex SHA that is NOT the release-prep SHA.
+	insertReadinessArtifactCommit(t, scratch, manifestSpecForReadiness(), readinessArtifactSpec{
+		CommitSHA: "0000000000000000000000000000000000000000",
+	})
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
+	if exitCode == 0 {
+		t.Fatalf("commit_sha mismatch must REFUSE; got exit 0")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "commit_sha") {
+		t.Errorf("error must mention commit_sha; got %v", result.Error)
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "does not match") {
+		t.Errorf("error must mention SHA mismatch; got %v", result.Error)
+	}
+}
+
+// Case 7: any gate = blocked → refuse.
+func TestReleaseTag_ReadinessArtifact_GateBlockedRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+	insertReadinessArtifactCommit(t, scratch, manifestSpecForReadiness(), readinessArtifactSpec{
+		Gates: map[string]string{"G3_docs": "blocked"},
+	})
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
+	if exitCode == 0 {
+		t.Fatalf("blocked gate must REFUSE; got exit 0")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "not all ready") {
+		t.Errorf("error must mention not all ready; got %v", result.Error)
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "blocked") {
+		t.Errorf("error must mention blocked gate; got %v", result.Error)
+	}
+}
+
+// Case 8: any gate = skipped → refuse.
+func TestReleaseTag_ReadinessArtifact_GateSkippedRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+	insertReadinessArtifactCommit(t, scratch, manifestSpecForReadiness(), readinessArtifactSpec{
+		Gates: map[string]string{"G5_curated_note": "skipped"},
+	})
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
+	if exitCode == 0 {
+		t.Fatalf("skipped gate must REFUSE; got exit 0")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "not all ready") {
+		t.Errorf("error must mention not all ready; got %v", result.Error)
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "skipped") {
+		t.Errorf("error must mention skipped gate; got %v", result.Error)
+	}
+}
+
+// Non-single-path artifact commit → refuse (the artifact commit changed more
+// than just the readiness artifact path).
+func TestReleaseTag_ReadinessArtifact_NonSinglePathArtifactCommitRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", scratch}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	// Capture release-prep SHA for the artifact commit_sha.
+	out, err := exec.Command("git", "-C", scratch, "rev-parse", "HEAD^").Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD^: %v", err)
+	}
+	releasePrepSHA := strings.TrimSpace(string(out))
+
+	// Undo manifest, unstage it, then commit artifact + an extra file.
+	git("reset", "--soft", "HEAD~1")
+	git("reset", "HEAD", "--", ".vh-agent-harness/release-defer-dispositions.json")
+
+	artifactBytes := buildReadinessArtifactBytes(t, readinessArtifactSpec{CommitSHA: releasePrepSHA})
+	artifactPath := filepath.Join(scratch, ".vh-agent-harness", "release-readiness-pass.json")
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, artifactBytes, 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	// Also write an extra file so the artifact commit is not single-path.
+	extraPath := filepath.Join(scratch, "extra.go")
+	if err := os.WriteFile(extraPath, []byte("package scratch\n\nconst ExtraChange = true\n"), 0o644); err != nil {
+		t.Fatalf("write extra.go: %v", err)
+	}
+	git("add", ".vh-agent-harness/release-readiness-pass.json", "extra.go")
+	git("commit", "-q", "-m", "artifact + extra (non-single-path)")
+
+	// Re-stamp the manifest so DEFER passes.
+	restampManifest(t, scratch, manifestSpecForReadiness())
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
+	if exitCode == 0 {
+		t.Fatalf("non-single-path artifact commit must REFUSE; got exit 0")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "must change only") {
+		t.Errorf("error must mention single-path requirement; got %v", result.Error)
+	}
+}
+
+// Shallow history (no HEAD^^) → refuse. The readiness ceremony requires at
+// least note → artifact → manifest sequencing; a 2-commit repo cannot satisfy it.
+func TestReleaseTag_ReadinessArtifact_ShallowHistoryRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+	// Squash to a 2-commit history: reset to the initial commit (v0.1.0 tag),
+	// then commit only the manifest on top. HEAD^ = initial (exists), HEAD^^ =
+	// (does not exist). The worktree must stay clean so G0b does not fire
+	// before the readiness gate.
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", scratch}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("reset", "--hard", "v0.1.0")
+	// Re-stamp the manifest directly on top of the initial commit. No arc
+	// file changes — the worktree stays clean.
+	restampManifest(t, scratch, manifestSpecForReadiness())
+	// Now HEAD = manifest, HEAD^ = initial (only 2 commits). HEAD^^ does not exist.
+
+	exitCode, result := runReleaseTagFromScratch(t, wrapper)
+	if exitCode == 0 {
+		t.Fatalf("shallow history must REFUSE; got exit 0")
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "HEAD^^ does not exist") {
+		t.Errorf("error must mention HEAD^^ does not exist; got %v", result.Error)
 	}
 }

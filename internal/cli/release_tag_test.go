@@ -34,7 +34,9 @@ import (
 //   - a prior tag v0.1.0 + post-tag changes to fileA.go and dir/fileC.go
 //     (so the release arc v0.1.0..HEAD contains exactly those two paths;
 //     fileB.go is UNCHANGED and therefore NOT in the arc)
-//   - a valid annotated-tag message file at <scratch>/msg.txt
+//   - a valid annotated-tag message file at a temp path OUTSIDE <scratch>
+//     (so the wrapper's G0b clean-worktree gate does not flag it as an
+//     untracked file).
 //
 // Returns (scratch, wrapperPath, tasksDir, msgFile).
 func setupReleaseTagRepo(t *testing.T) (scratch, wrapper, tasksDir, msgFile string) {
@@ -107,20 +109,25 @@ func setupReleaseTagRepo(t *testing.T) (scratch, wrapper, tasksDir, msgFile stri
 			t.Fatalf("write %s: %v", rel, err)
 		}
 	}
-	writeFile("fileA.go", "package main\n")
-	writeFile("fileB.go", "package main\n")
-	writeFile("dir/fileC.go", "package dir\n")
+	// Seed a buildable, gofmt-stable Go module so the wrapper's G0
+	// green-tree gate (go test/vet/build/gofmt) passes by default. The
+	// package name is non-main so no `func main()` is required.
+	writeFile("go.mod", "module scratch\n\ngo 1.21\n")
+	writeFile("fileA.go", "package scratch\n")
+	writeFile("fileB.go", "package scratch\n")
+	writeFile("dir/fileC.go", "package scratch\n")
 	git("add", "-A")
 	git("commit", "-q", "-m", "initial")
 	git("tag", "v0.1.0")
 	// Post-tag changes (in the arc v0.1.0..HEAD): fileA.go + dir/fileC.go.
-	writeFile("fileA.go", "package main\n// changed in arc\n")
-	writeFile("dir/fileC.go", "package dir\n// changed in arc\n")
+	// Use declarations (not bare comments) so gofmt -l stays clean.
+	writeFile("fileA.go", "package scratch\n\n// FileAChanged marks the arc commit.\nconst FileAChanged = true\n")
+	writeFile("dir/fileC.go", "package scratch\n\n// FileCChanged marks the arc commit.\nconst FileCChanged = true\n")
 	git("add", "-A")
 	git("commit", "-q", "-m", "changes for release")
 
 	// Annotated-tag message file.
-	msgFile = filepath.Join(scratch, "msg.txt")
+	msgFile = filepath.Join(t.TempDir(), "msg.txt")
 	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
 		t.Fatalf("write msg: %v", err)
 	}
