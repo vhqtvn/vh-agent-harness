@@ -345,6 +345,56 @@ var mediaPerceptionAgents = []string{"media-perception"}
 // core/media-perception capability (mirrors permconfig.CoreTaskRules).
 var mediaPerceptionCallers = []string{"build", "coordination", "project-coordinator", "researcher"}
 
+// readRenderedAgentPrompt reads the rendered agent prompt file at
+// <root>/.opencode/agents/<name>.md and returns its content. This is how a
+// caller agent's conditional media-perception block (rendered from the
+// .md.tmpl source via Go text/template) surfaces in the test seam.
+func readRenderedAgentPrompt(t *testing.T, root, agent string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, ".opencode", "agents", agent+".md"))
+	if err != nil {
+		t.Fatalf("read rendered agent prompt %q: %v", agent, err)
+	}
+	return string(b)
+}
+
+// mediaPerceptionEnabledMarkers are substrings that MUST appear in every
+// caller's rendered prompt when core/media-perception IS selected. They pin
+// the shared ENABLED-branch contract: skill-loading instruction, dual-channel
+// locator (@file + path:), one-bounded-delegation rule, parent-attachment
+// non-propagation, report-shape consumption, and provenance preservation.
+var mediaPerceptionEnabledMarkers = []string{
+	"## Media perception (capability available)",
+	"Load and follow the `media-perception` skill",
+	"@file <path>",
+	"path: <repo-relative path>",
+	"ONE bounded delegation",
+	"Parent-session attachments do NOT automatically propagate",
+	"capability_status",
+	"compact provenance",
+}
+
+// mediaPerceptionDisabledMarkers are substrings that MUST appear in every
+// caller's rendered prompt when core/media-perception is NOT selected. They
+// pin the DISABLED-branch contract: no skill load, no delegation/probing, and
+// honest gap reporting.
+var mediaPerceptionDisabledMarkers = []string{
+	"## Media perception (capability not available)",
+	"Do NOT load the `media-perception` skill",
+	"Do NOT delegate or probe",
+	"Do NOT invent paths",
+}
+
+// mediaPerceptionRoleMarkers is the role-specific tail each caller carries in
+// its ENABLED branch. This pins that the conditional block preserves the
+// caller's identity-specific perception boundary, not just the shared core.
+var mediaPerceptionRoleMarkers = map[string]string{
+	"build":               "candidate evidence, never transition authority",
+	"coordination":        "Remain read-only",
+	"project-coordinator": "lane selection",
+	"researcher":          "source packet",
+}
+
 // TestSeamRender_MediaPerceptionOptInCapabilityRenders is the opt-in proof for
 // the core/media-perception capability: a profile declaring `profile: minimal`
 // (empty preset) plus `capabilities: [core/media-perception]` must render the
@@ -408,6 +458,31 @@ func TestSeamRender_MediaPerceptionOptInCapabilityRenders(t *testing.T) {
 			t.Errorf(`media-perception.task[%q] must NOT exist (read-only leaf, deny-all only)`, target)
 		}
 	}
+
+	// Each caller's rendered prompt must carry the ENABLED media-perception
+	// branch (the .md.tmpl conditional resolved to the enabled arm), including
+	// the shared contract markers and the role-specific tail. The DISABLED
+	// branch must be absent.
+	for _, caller := range mediaPerceptionCallers {
+		prompt := readRenderedAgentPrompt(t, root, caller)
+		for _, marker := range mediaPerceptionEnabledMarkers {
+			if !strings.Contains(prompt, marker) {
+				t.Errorf("caller %q ENABLED branch must contain %q", caller, marker)
+			}
+		}
+		for _, marker := range mediaPerceptionDisabledMarkers {
+			if strings.Contains(prompt, marker) {
+				t.Errorf("caller %q ENABLED branch must NOT contain disabled marker %q", caller, marker)
+			}
+		}
+		roleMarker, ok := mediaPerceptionRoleMarkers[caller]
+		if !ok {
+			t.Fatalf("missing role marker for caller %q", caller)
+		}
+		if !strings.Contains(prompt, roleMarker) {
+			t.Errorf("caller %q ENABLED branch must contain role marker %q", caller, roleMarker)
+		}
+	}
 }
 
 // TestSeamRender_MediaPerceptionUnselectedDropsEdges proves the graceful-
@@ -441,6 +516,123 @@ func TestSeamRender_MediaPerceptionUnselectedDropsEdges(t *testing.T) {
 	for _, caller := range mediaPerceptionCallers {
 		if edges[caller]["media-perception"] {
 			t.Errorf("%s -> media-perception task edge must NOT render when core/media-perception is unselected", caller)
+		}
+	}
+
+	// Each caller's rendered prompt must carry the DISABLED media-perception
+	// branch (the .md.tmpl conditional resolved to the disabled arm) and must
+	// NOT carry any ENABLED-branch marker.
+	for _, caller := range mediaPerceptionCallers {
+		prompt := readRenderedAgentPrompt(t, root, caller)
+		for _, marker := range mediaPerceptionDisabledMarkers {
+			if !strings.Contains(prompt, marker) {
+				t.Errorf("caller %q DISABLED branch must contain %q", caller, marker)
+			}
+		}
+		for _, marker := range mediaPerceptionEnabledMarkers {
+			if strings.Contains(prompt, marker) {
+				t.Errorf("caller %q DISABLED branch must NOT contain enabled marker %q", caller, marker)
+			}
+		}
+	}
+}
+
+// TestSeamRender_MediaPerceptionCallerPromptsSurviveHarnessTokens is the
+// regression guard for the .md.tmpl conversion. The four caller prompts now
+// carry Go template actions ({{ if .capabilities.media_perception }}) AND
+// escaped harness sentinels ({{ "{{PROJECT_NAME}}" }}). This test proves the
+// sentinels survive the Go text/template phase (emitted as literal
+// {{PROJECT_NAME}} strings) and are resolved by the downstream
+// SubstituteHarnessTokens pass — so no raw {{...}} sentinel leaks into the
+// rendered output, and the resolved project name DOES appear.
+//
+// Without this test, a future edit that drops the {{ "..." }} escape (or
+// changes the renderer to skip the substitution pass for .tmpl files) would
+// silently leave {{PROJECT_NAME}} / {{PROJECT_SLUG}} / {{COORDINATOR_DIR}}
+// visible in every caller prompt — a confusing regression that only surfaces
+// when an operator reads the rendered agent file.
+func TestSeamRender_MediaPerceptionCallerPromptsSurviveHarnessTokens(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	writeProfile(t, root, "profile: minimal\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\ncapabilities:\n  - core/media-perception\n")
+	if _, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("update with capabilities:[core/media-perception]: %v", err)
+	}
+	for _, caller := range mediaPerceptionCallers {
+		prompt := readRenderedAgentPrompt(t, root, caller)
+		// No raw harness sentinel must survive into the rendered output.
+		for _, sentinel := range []string{
+			"{{PROJECT_NAME}}",
+			"{{PROJECT_SLUG}}",
+			"{{COORDINATOR_DIR}}",
+		} {
+			if strings.Contains(prompt, sentinel) {
+				t.Errorf("caller %q rendered prompt must NOT contain raw sentinel %q (token escape or substitution failed)", caller, sentinel)
+			}
+		}
+	}
+	// The default install uses name="My Project" — it must resolve into the
+	// rendered prompt (proving the sentinel was emitted as a literal by the
+	// Go template phase, then substituted by the downstream pass).
+	buildPrompt := readRenderedAgentPrompt(t, root, "build")
+	if !strings.Contains(buildPrompt, "My Project") {
+		t.Errorf("build rendered prompt must contain resolved project name %q; the token escape did not survive to substitution", "My Project")
+	}
+}
+
+// TestSeamRender_MediaPerceptionFlagParity is the end-to-end parity proof: the
+// SAME capability selection that controls the media-perception agent roster AND
+// the caller task edges ALSO controls the caller prompt conditional branch.
+// This pins that agent registration, task-edge wiring, and prompt gating all
+// move together under a single flag — no caller can be left in a split state
+// where it has the task edge but a DISABLED prompt (or vice versa).
+func TestSeamRender_MediaPerceptionFlagParity(t *testing.T) {
+	for _, selected := range []bool{true, false} {
+		root := t.TempDir()
+		seamInstallInto(t, root)
+		if selected {
+			writeProfile(t, root, "profile: minimal\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\ncapabilities:\n  - core/media-perception\n")
+		} else {
+			writeProfile(t, root, "profile: supervised\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\n")
+		}
+		if _, err := seamUpdateOut(t, root); err != nil {
+			t.Fatalf("update (selected=%v): %v", selected, err)
+		}
+		rendered := parseRenderedAgents(t, root)
+		edges := parseRenderedTaskEdges(t, root)
+		enabledHeading := "## Media perception (capability available)"
+		disabledHeading := "## Media perception (capability not available)"
+		for _, caller := range mediaPerceptionCallers {
+			prompt := readRenderedAgentPrompt(t, root, caller)
+			hasAgent := rendered["media-perception"]
+			hasEdge := edges[caller]["media-perception"]
+			if selected {
+				if !hasAgent {
+					t.Errorf("selected: media-perception agent must be present")
+				}
+				if !hasEdge {
+					t.Errorf("selected: %s -> media-perception edge must be present", caller)
+				}
+				if !strings.Contains(prompt, enabledHeading) {
+					t.Errorf("selected: %s prompt must contain enabled heading", caller)
+				}
+				if strings.Contains(prompt, disabledHeading) {
+					t.Errorf("selected: %s prompt must NOT contain disabled heading", caller)
+				}
+			} else {
+				if hasAgent {
+					t.Errorf("unselected: media-perception agent must be absent")
+				}
+				if hasEdge {
+					t.Errorf("unselected: %s -> media-perception edge must be absent", caller)
+				}
+				if !strings.Contains(prompt, disabledHeading) {
+					t.Errorf("unselected: %s prompt must contain disabled heading", caller)
+				}
+				if strings.Contains(prompt, enabledHeading) {
+					t.Errorf("unselected: %s prompt must NOT contain enabled heading", caller)
+				}
+			}
 		}
 	}
 }

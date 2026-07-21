@@ -119,7 +119,7 @@ only:
 | --- | --- | --- | --- |
 | `core/gated-commit` | `commit-message`, `commit-reviewer`, `commit-reviewer-a..d`, `committer` | `supervised` | The gated-commit protocol (commit-message drafting, tiered cascade review, committer-exclusive git mutations). |
 | `core/debate` | `debate`, `debate-proposer`, `debate-critic`, `debate-synth`, `solution-brief` | `supervised` | The multi-model debate pipeline plus the solution-brief wrapper. |
-| `core/media-perception` | `media-perception` (agent + caller-facing skill) | none (opt-in) | A single read-only perception specialist that inspects media (image, diagram, chart, video, document/PDF, audio) handed over as a `path:` or `url:` locator, using whatever capability-class tool the session exposes. |
+| `core/media-perception` | `media-perception` (agent + caller-facing skill) | none (opt-in) | A single read-only perception specialist that inspects media (image, diagram, chart, video, document/PDF, audio). For local media, callers pass BOTH `@file <path>` (bytes) and `path:` (locator); for remote media, `url:`. Parent-session attachments do NOT auto-propagate to a task child. |
 
 Select `core/media-perception` by adding it to `capabilities:`:
 
@@ -133,7 +133,16 @@ When unselected, the agent block is absent from `opencode.jsonc` and the four
 inbound caller edges (`build`, `coordination`, `project-coordinator`,
 `researcher` → `media-perception`) are dropped by the permission emitter's
 present-agent filter — so an unselected capability leaves zero dangling
-edges.
+edges. Additionally, each caller's prompt carries a conditional block (the
+source `*.md.tmpl` resolves `{{ if .capabilities.media_perception }}` at
+render time): when the capability is NOT selected, the callers' DISABLED
+branch instructs them to NOT load the skill, NOT delegate or probe through
+trial task calls, and to state honestly that media understanding is
+unavailable in the current configuration (asking the operator to enable the
+capability or provide an accessible `path:`/`url:` they can perceive
+directly). This prevents the failure mode where a caller holds a screenshot,
+self-refuses "I can't read the image," and does not know the specialist
+exists.
 
 #### Media-perception model seed
 
@@ -170,6 +179,40 @@ The agent CANNOT catch a pre-invocation config failure (OpenCode may reject
 the config before the agent runs), so the second mode is owned by the harness
 seed + doctor diagnostics, not by the agent prompt.
 
+#### Media-perception: attachment propagation and dual-channel handoff
+
+Parent-session attachments do NOT automatically propagate into a task child's
+context. OpenCode's `task` tool creates the child from `params.prompt` only —
+any image, screenshot, or file attached to the parent session stays in the
+parent. This is the root cause of the vh-solara failure: a build agent
+received a screenshot as a parent attachment, self-refused ("I can't read the
+image"), and did not know the specialist existed or how to hand the bytes
+forward.
+
+The fix has two parts:
+
+1. **Caller prompt gating** — each of the four callers (`build`,
+   `coordination`, `project-coordinator`, `researcher`) now carries a
+   conditional block in its `*.md.tmpl` source. When the capability is
+   selected, the ENABLED branch tells the caller to load the skill and make
+   ONE bounded delegation. When unselected, the DISABLED branch tells the
+   caller to honestly state media understanding is unavailable. Either way,
+   the caller KNOWS whether the specialist exists.
+
+2. **Dual-channel handoff** — for local media, the caller MUST pass BOTH:
+   - `@file <path>` — so the specialist receives the bytes (opencode attaches
+     the file content to the child's prompt)
+   - `path: <repo-relative path>` — so the specialist has an explicit locator
+     it can hand to its perception capability
+
+   For remote media, pass `url: <accessible URL>` (no `@file` needed — the
+   capability fetches the URL itself). If only a parent attachment is
+   available without a locator, the caller must request an accessible path or
+   URL rather than inventing one. The specialist itself classifies failures
+   into structured classes (`missing_locator`, `inaccessible_local`,
+   `inaccessible_remote`, `unavailable_capability`, `timeout`, etc.) and
+   maps them into its report's `limitations` and `next_action` fields.
+
 #### Media-perception integration recipe (overlay / operator)
 
 To wire a perception capability into a consuming project:
@@ -198,8 +241,9 @@ To verify live:
 
 1. Ensure a perception-capable tool is exposed to the session (overlay or
    operator config).
-2. Delegate a perception task to `media-perception` with `path: <an
-   accessible image/diagram/chart path>` and a real question.
+2. Delegate a perception task to `media-perception` with `@file <an
+   accessible image/diagram/chart path>` AND `path: <the same path>` (the
+   dual-channel handoff — bytes + locator), plus a real question.
 3. Confirm the agent returns `capability_status: available` with grounded
    observations, NOT a refusal and NOT `unavailable` (when a capability was
    in fact available).
