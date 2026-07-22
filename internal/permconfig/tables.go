@@ -282,10 +282,10 @@ var CoreLocationRules = map[string]LocationRule{
 	"solution-brief":      {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	"repo-explorer":       {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	"docs-steward": {
-		Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyAsk, Edit: Allow, // gate-exempt
+		Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyReadOnly, Edit: Allow, // gate-exempt
 	},
-	"commit-message":  {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
-	"commit-reviewer": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
+	"commit-message":  {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"commit-reviewer": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	"committer": {
 		Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Allow, HasGate: true, HarnessPolicy: HarnessPolicyDeny,
 		// Object-form edit: deny-* FIRST, then the ONE scoped allow LAST. The
@@ -299,7 +299,7 @@ var CoreLocationRules = map[string]LocationRule{
 		Edit:          Deny,
 		EditOverrides: []EditRule{{Pattern: CommitGateMessageGlob, Decision: Allow}},
 	},
-	"ship-review": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
+	"ship-review": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	// media-perception: opt-in read-only perception specialist
 	// (core/media-perception). Rendered only when the capability is selected;
 	// the four inbound caller edges below are dropped by Emit's present-agent
@@ -309,10 +309,10 @@ var CoreLocationRules = map[string]LocationRule{
 	// Cluster leaves (commit-reviewer-a..d) — the corpus ships these as full
 	// agent blocks. They carry the leafBaseRule (deny wildcard, allow
 	// readonly/git_readonly, deny gate, allow devSh) and a deny-all task rule.
-	"commit-reviewer-a": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
-	"commit-reviewer-b": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
-	"commit-reviewer-c": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
-	"commit-reviewer-d": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
+	"commit-reviewer-a": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"commit-reviewer-b": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"commit-reviewer-c": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"commit-reviewer-d": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 }
 
 // GateExemptBase is the set of agents that must NOT carry a gate key in their

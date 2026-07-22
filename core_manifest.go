@@ -75,52 +75,7 @@ func CoreOwnershipDefaults() (ownership.ModuleDefaults, error) {
 		// liveRel is relative to the corpus root and uses forward slashes
 		// (fs.FS convention); the classifier matches on the same forward-slash
 		// rel paths the apply walk computes.
-		rule := ownership.PathRule{
-			Class:      ownership.ClassPlatformManaged,
-			Provenance: "core",
-		}
-		switch liveRel {
-		case ".vh-agent-harness/vh-harness-profile.yml":
-			rule.Class = ownership.ClassPlatformArmed
-			rule.Provenance = "core.profile"
-		case "docs/planning/backlog.md", "docs/planning/roadmap.md":
-			// Planning docs: the harness seeds a canonical starter on a greenfield
-			// install, then NEVER clobbers — the backlog is the project's living
-			// source of task truth that agents edit constantly. project_owned.
-			rule.Class = ownership.ClassProjectOwned
-			rule.Provenance = "core.planning"
-		case ".gitignore", "README.md", "CLAUDE.md", "Makefile":
-			// Project-identity files: the harness ships a generic scaffold, but
-			// these belong to the consuming project (its ignores, its readme, its
-			// make targets, its cross-agent rules). Seed the
-			// scaffold once on a greenfield install, then NEVER clobber — a project
-			// that already has any of these keeps its own. This is what makes the
-			// harness safe to `install`/`update` into an EXISTING repo without a
-			// per-project harness-ownership.yml override. The harness's own runtime
-			// engine files (.opencode/package.json, AGENTS.core.md, etc.) stay
-			// platform_managed; only these root project-identity files are owned.
-			rule.Class = ownership.ClassProjectOwned
-			rule.Provenance = "core.project-identity"
-		case ".opencode/repo-configs/forbidden-patterns.project.js":
-			// Project-owned deny-rule payload: harness seeds a blank scaffold on
-			// first install, then preserves project edits forever. The generic
-			// engine (forbidden-patterns.core.js) stays platform_managed.
-			rule.Class = ownership.ClassProjectOwned
-			rule.Provenance = "core.deny.project"
-		case ".vh-agent-harness/config-transform.mjs":
-			// Project-owned permission transform: harness seeds a blank no-op
-			// scaffold on first install, then preserves project edits forever.
-			// The types/helpers support file (config-transform.core.mjs) stays
-			// platform_managed.
-			rule.Class = ownership.ClassProjectOwned
-			rule.Provenance = "core.transform.project"
-		case ".opencode/repo-configs/repo-recon-data.yml":
-			// Project-generated recon data: harness seeds a blank skeleton on
-			// first install, then leaves it to the project's recon-generator
-			// skill / project agents to maintain. external_generated.
-			rule.Class = ownership.ClassExternalGenerated
-			rule.Provenance = "core.repo-recon.data"
-		}
+		rule := classifyCorePath(liveRel)
 		out[liveRel] = rule
 		return nil
 	})
@@ -178,30 +133,7 @@ func CoreOwnershipDefaultsWithExclusion(inactive map[string]bool) (ownership.Mod
 			// managed path.
 			return nil
 		}
-		rule := ownership.PathRule{
-			Class:      ownership.ClassPlatformManaged,
-			Provenance: "core",
-		}
-		switch liveRel {
-		case ".vh-agent-harness/vh-harness-profile.yml":
-			rule.Class = ownership.ClassPlatformArmed
-			rule.Provenance = "core.profile"
-		case "docs/planning/backlog.md", "docs/planning/roadmap.md":
-			rule.Class = ownership.ClassProjectOwned
-			rule.Provenance = "core.planning"
-		case ".gitignore", "README.md", "CLAUDE.md", "Makefile":
-			rule.Class = ownership.ClassProjectOwned
-			rule.Provenance = "core.project-identity"
-		case ".opencode/repo-configs/forbidden-patterns.project.js":
-			rule.Class = ownership.ClassProjectOwned
-			rule.Provenance = "core.deny.project"
-		case ".vh-agent-harness/config-transform.mjs":
-			rule.Class = ownership.ClassProjectOwned
-			rule.Provenance = "core.transform.project"
-		case ".opencode/repo-configs/repo-recon-data.yml":
-			rule.Class = ownership.ClassExternalGenerated
-			rule.Provenance = "core.repo-recon.data"
-		}
+		rule := classifyCorePath(liveRel)
 		out[liveRel] = rule
 		return nil
 	})
@@ -209,6 +141,67 @@ func CoreOwnershipDefaultsWithExclusion(inactive map[string]bool) (ownership.Mod
 		return nil, fmt.Errorf("core ownership walk: %w", err)
 	}
 	return out, nil
+}
+
+// classifyCorePath maps a LIVE (suffix-stripped, forward-slash, corpus-relative)
+// path to its ownership PathRule. Every embedded corpus file defaults to
+// platform_managed (provenance "core") EXCEPT the documented armed/owned
+// exceptions that the platform ships with hand-protection. Every exception below
+// is mirrored exactly in coreExceptionsForDoc.
+//
+// This helper is shared by CoreOwnershipDefaults (the all-known walk) and
+// CoreOwnershipDefaultsWithExclusion (the selection-aware walk) so the two never
+// drift on the per-path class — extracting it closes the X1 duplication that
+// previously maintained the switch twice (and had dropped the rich per-case
+// rationale comments from the exclusion variant).
+func classifyCorePath(liveRel string) ownership.PathRule {
+	rule := ownership.PathRule{
+		Class:      ownership.ClassPlatformManaged,
+		Provenance: "core",
+	}
+	switch liveRel {
+	case ".vh-agent-harness/vh-harness-profile.yml":
+		rule.Class = ownership.ClassPlatformArmed
+		rule.Provenance = "core.profile"
+	case "docs/planning/backlog.md", "docs/planning/roadmap.md":
+		// Planning docs: the harness seeds a canonical starter on a greenfield
+		// install, then NEVER clobbers — the backlog is the project's living
+		// source of task truth that agents edit constantly. project_owned.
+		rule.Class = ownership.ClassProjectOwned
+		rule.Provenance = "core.planning"
+	case ".gitignore", "README.md", "CLAUDE.md", "Makefile":
+		// Project-identity files: the harness ships a generic scaffold, but
+		// these belong to the consuming project (its ignores, its readme, its
+		// make targets, its cross-agent rules). Seed the
+		// scaffold once on a greenfield install, then NEVER clobber — a project
+		// that already has any of these keeps its own. This is what makes the
+		// harness safe to `install`/`update` into an EXISTING repo without a
+		// per-project harness-ownership.yml override. The harness's own runtime
+		// engine files (.opencode/package.json, AGENTS.core.md, etc.) stay
+		// platform_managed; only these root project-identity files are owned.
+		rule.Class = ownership.ClassProjectOwned
+		rule.Provenance = "core.project-identity"
+	case ".opencode/repo-configs/forbidden-patterns.project.js":
+		// Project-owned deny-rule payload: harness seeds a blank scaffold on
+		// first install, then preserves project edits forever. The generic
+		// engine (forbidden-patterns.core.js) stays platform_managed.
+		rule.Class = ownership.ClassProjectOwned
+		rule.Provenance = "core.deny.project"
+	case ".vh-agent-harness/config-transform.mjs":
+		// Project-owned permission transform: harness seeds a blank no-op
+		// scaffold on first install, then preserves project edits forever.
+		// The types/helpers support file (config-transform.core.mjs) stays
+		// platform_managed.
+		rule.Class = ownership.ClassProjectOwned
+		rule.Provenance = "core.transform.project"
+	case ".opencode/repo-configs/repo-recon-data.yml":
+		// Project-generated recon data: harness seeds a blank skeleton on
+		// first install, then leaves it to the project's recon-generator
+		// skill / project agents to maintain. external_generated.
+		rule.Class = ownership.ClassExternalGenerated
+		rule.Provenance = "core.repo-recon.data"
+	}
+	return rule
 }
 
 // CorePaths returns the sorted list of forward-slash relative file paths in the

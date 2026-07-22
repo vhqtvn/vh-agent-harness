@@ -80,6 +80,41 @@ No active or archived backlog row exists for `media-perception` (verified via gr
 ## Acceptance signal status
 **UNVERIFIED (pending operator-backed validation).** No perception backend (e.g., z.ai MCP) was available during build. Per task spec, NOT claimed passed from prompt inspection alone. The prompt's no-refusal signal is established structurally (identity rule + prohibited phrases + capability-scan-before-refuse) but the behavioral proof requires a live run in a capability-selected, operator-wired session.
 
+## Verification scope (accuracy clarification — added 2026-07-22)
+
+This section was added in a later closeout pass to make the *breadth* of the
+2026-07-18 verification explicit. The checkpoint above already marks the live
+behavioral signal UNVERIFIED; the notes below sharpen what the render-test
+coverage DID and DID NOT exercise, so a reader does not over-read the "yes"
+rows in the Verification table as live behavioral proof.
+
+- **Modality breadth = image sub-classes only.** The render/structural tests
+  proved the capability renders and routes, but no live perception backend was
+  driven across modalities. What was structurally covered amounts to image
+  sub-classes (chart/data-viz, screenshot OCR, natural image). **Video, PDF,
+  and audio were NEVER tested** — not even structurally beyond the prompt's
+  vocabulary. Do not read any "yes" row as a 3/3 modality PASS; it is a 3/3
+  image sub-class PASS at most, with video/PDF/audio never exercised.
+- **Caller coverage = anti-refusal/delegation only, not perception.** Two
+  caller roles were reasoned about (coordination-style and build-style). The
+  build-caller path timed out on every perception attempt (no backend), so
+  only the anti-refusal behavior was proven (the caller delegated instead of
+  self-refusing) — **perception itself was never observed from the build
+  caller**. The coordination caller's delegation was reasoned structurally.
+  This is a 2/2 caller *anti-refusal* PASS, not a 2/2 caller *perception* PASS.
+- **`researcher` and `project-coordinator` caller routing = render-tested
+  only.** The inbound caller edges for these two roles were verified via the
+  emit/render tests (edges present when capability selected, dropped when
+  unselected) but were **never exercised live**.
+- **capability-OFF behavior (disabled branch) = render-test coverage only.**
+  The unselected-capability path (agent block absent, task edges dropped) was
+  validated by render tests; **no live behavioral validation** of the
+  disabled branch was performed.
+
+**Verification thread remains OPEN — not all claims are fully validated.**
+Anything beyond render/structural coverage requires a live, operator-wired,
+capability-selected run.
+
 ## Next step
 Hand off to coordinator for routing to `committer` agent (gated-commit protocol). Suggested commit split:
 - (a) code commit: `templates/core/` + `internal/` source + tests

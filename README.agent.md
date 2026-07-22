@@ -457,10 +457,21 @@ block:
 
 | Policy | Region 4 emission | Used by |
 |---|---|---|
-| `allow` | `"vh-agent-harness *": "allow"` (broad) | `build`, `coordination`, `project-coordinator`, `commit-message`, `commit-reviewer`, `ship-review` |
-| `ask` | `"vh-agent-harness *": "ask"` (broad) | `plan`, `docs-steward` |
-| `deny` | `"vh-agent-harness *": "deny"` (broad) | `committer` (keeps its gated command surface) |
-| `read_only` | `"vh-agent-harness *": "deny"` **FIRST**, then a canonical set of safe read-only verbs as `"allow"` **AFTER** | `researcher`, `planner`, `media-perception`, `repo-explorer`, `debate`, `debate-proposer`, `debate-critic`, `debate-synth`, `solution-brief` |
+| `allow` | `"vh-agent-harness *": "allow"` (broad) | `build`, `coordination`, `project-coordinator` |
+| `ask` | `"vh-agent-harness *": "ask"` (broad) | `plan` |
+| `deny` | `"vh-agent-harness *": "deny"` (broad) | `committer` (keeps its gated command surface; uses `commit-gate.sh` directly, needs no harness exec surface) |
+| `read_only` | `"vh-agent-harness *": "deny"` **FIRST**, then a canonical set of safe read-only verbs as `"allow"` **AFTER** | see below (18 agents) |
+
+The `read_only` roster is **18 agents** total:
+
+- **9 original RO specialists:** `researcher`, `planner`, `media-perception`, `repo-explorer`, `debate`, `debate-proposer`, `debate-critic`, `debate-synth`, `solution-brief`.
+- **9 read-only service roles (F7-residue migration):** `commit-message`, `commit-reviewer`, `commit-reviewer-a`, `commit-reviewer-b`, `commit-reviewer-c`, `commit-reviewer-d`, `ship-review`, `docs-steward`, `harness-release-readiness`.
+
+The first 8 of those service roles are asserted in CoreLocationRules
+(`internal/permconfig/tables.go`); `harness-release-readiness` is
+overlay-managed (the `.vh-agent-harness` release pack renders its block and
+emits the same read_only surface). These roles draft text, review diffs,
+audit changes, or edit via the Edit tool — none needs a mutating `vh-agent-harness exec` surface, so `read_only` is the correct least-privilege policy.
 
 The `read_only` policy is **deny-first + canonical-exceptions-after**, which is
 the correct shape under `findLast`: the trailing `allow` entries win over the

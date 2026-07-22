@@ -464,12 +464,20 @@ func TestReadOnly_FindLast_ScalarPolicies(t *testing.T) {
 // Test D: Role regression — verify each core role produces the correct policy.
 // ---------------------------------------------------------------------------
 
-// readOnlySpecialists is the canonical list of 9 RO specialists migrated to
-// read_only.
+// readOnlySpecialists is the canonical list of core agents migrated to
+// read_only. The first 9 are the original RO specialists; the latter 8 are the
+// F7-residue migration (commit-message, commit-reviewer + its a..d leaves,
+// ship-review, docs-steward). harness-release-readiness is the 18th read_only
+// agent overall but is overlay-managed (the .vh-agent-harness release pack),
+// so it is NOT in CoreLocationRules and is not asserted here.
 var readOnlySpecialists = []string{
 	"planner", "researcher", "repo-explorer", "media-perception",
 	"debate", "debate-proposer", "debate-critic", "debate-synth",
 	"solution-brief",
+	// F7-residue migration (m0120):
+	"commit-message", "commit-reviewer",
+	"commit-reviewer-a", "commit-reviewer-b", "commit-reviewer-c", "commit-reviewer-d",
+	"ship-review", "docs-steward",
 }
 
 // TestReadOnly_RoleRegression_SpecialistsAreReadOnly: all 9 RO specialists
