@@ -214,22 +214,24 @@ func (c *Catalog) Validate() []error {
 //     solution-brief). Also self-contained: no capability-level hard_deps.
 //   - core/media-perception owns a single read-only perception specialist
 //     (media-perception) plus its caller-facing skill. Opt-in: not in any
-//     profile preset. Note the resolver does NOT itself control file presence
-//     — it only emits the capability-answer boolean (capabilities.media_perception)
-//     consumed by `{{ if .capabilities.media_perception }}` template
-//     conditionals, and the logical agent identity (the Provides list). The
-//     opencode.jsonc subagent block is gated on that boolean and so only
-//     appears when a project selects the capability; everything else that
-//     gates on the capability follows the same template-conditional path. The
-//     renderer walks templates/core/ unconditionally, so the agent and skill
-//     files are always emitted regardless of capability selection. Do not
-//     conflate capability resolution (a boolean + an agent identity) with
-//     file rendering (driven by the unconditional corpus walk). Self-contained:
-//     no capability-level hard_deps. The four inbound caller edges (build,
-//     coordination, project-coordinator, researcher → media-perception) live
-//     in permconfig.CoreTaskRules and are dropped at emit time by the
-//     present-agent filter when the capability is not selected (so an
-//     unselected capability leaves no dangling task edge).
+//     profile preset. It is the first capability to declare CoreOutputs — the
+//     two core-corpus files it owns (.opencode/agents/media-perception.md and
+//     .opencode/skills/media-perception/SKILL.md) are gated by selection: when
+//     the capability is SELECTED the renderer emits them; when unselected the
+//     renderer skips them and any prior-version file on disk is left untouched
+//     as inactive residue (exempt from managed-drift and unexpected-drift).
+//     The resolver emits the capability-answer boolean
+//     (capabilities.media_perception) consumed by `{{ if
+//     .capabilities.media_perception }}` template conditionals, and the logical
+//     agent identity (the Provides list). The opencode.jsonc subagent block is
+//     gated on that boolean and so only appears when a project selects the
+//     capability; everything else that gates on the capability follows the same
+//     template-conditional path. CoreOutputs makes the FILE rendering follow the
+//     same selection. Self-contained: no capability-level hard_deps. The four
+//     inbound caller edges (build, coordination, project-coordinator,
+//     researcher -> media-perception) live in permconfig.CoreTaskRules and are
+//     dropped at emit time by the present-agent filter when the capability is
+//     not selected (so an unselected capability leaves no dangling task edge).
 //   - The 8 universal agents are the always-on baseline (see the Catalog
 //     baseline-representation note).
 //
@@ -287,6 +289,16 @@ func CoreCatalog() *Catalog {
 			// any profile preset. Inbound caller edges from baseline agents
 			// live in permconfig.CoreTaskRules and are dropped by Emit's
 			// present-agent filter when this capability is unselected.
+			//
+			// CoreOutputs gate the two core-corpus files this capability owns
+			// by selection. Declared as LIVE (suffix-stripped) paths,
+			// source-relative to templates/core. When the capability is
+			// unselected the renderer skips these source files and the CLI
+			// treats any prior-version on-disk file as inactive residue.
+			CoreOutputs: []string{
+				".opencode/agents/media-perception.md",
+				".opencode/skills/media-perception/SKILL.md",
+			},
 		},
 	)
 }

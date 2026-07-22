@@ -183,3 +183,102 @@ func TestManifestValidate_DuplicateDep(t *testing.T) {
 		t.Fatalf("expected duplicate-dep error, got: %+v", errs)
 	}
 }
+
+func TestManifestValidate_CoreOutputsClean(t *testing.T) {
+	// A well-formed CoreOutputs list (forward-slash relative, no traversal)
+	// validates clean. This mirrors core/media-perception's declaration.
+	m := CapabilityManifest{
+		ID:       "core/media-perception",
+		Provides: []string{"media-perception"},
+		CoreOutputs: []string{
+			".opencode/agents/media-perception.md",
+			".opencode/skills/media-perception/SKILL.md",
+		},
+	}
+	if errs := m.Validate(); len(errs) != 0 {
+		t.Fatalf("clean CoreOutputs should validate, got: %+v", errs)
+	}
+}
+
+func TestManifestValidate_CoreOutputsEmptyOK(t *testing.T) {
+	// An empty (or nil) CoreOutputs list is the default and must validate —
+	// it means the capability does not gate core outputs (unconditional render).
+	m := CapabilityManifest{ID: "core/debate", Provides: []string{"debate"}}
+	if errs := m.Validate(); len(errs) != 0 {
+		t.Fatalf("empty CoreOutputs should validate, got: %+v", errs)
+	}
+}
+
+func TestManifestValidate_CoreOutputsAbsoluteRejected(t *testing.T) {
+	for _, bad := range []string{
+		"/abs/path.md", // leading slash
+		"C:/foo.md",    // Windows drive letter (forward-slash form; backslash form is caught by the backslash check first)
+	} {
+		m := CapabilityManifest{
+			ID:          "core/x",
+			Provides:    []string{"a"},
+			CoreOutputs: []string{bad},
+		}
+		errs := m.Validate()
+		if !errContains(t, errs, "absolute") {
+			t.Fatalf("expected absolute error for %q, got: %+v", bad, errs)
+		}
+	}
+}
+
+func TestManifestValidate_CoreOutputsBackslashRejected(t *testing.T) {
+	m := CapabilityManifest{
+		ID:          "core/x",
+		Provides:    []string{"a"},
+		CoreOutputs: []string{".opencode\\agents\\foo.md"},
+	}
+	errs := m.Validate()
+	if !errContains(t, errs, "backslash") {
+		t.Fatalf("expected backslash error, got: %+v", errs)
+	}
+}
+
+func TestManifestValidate_CoreOutputsTraversalRejected(t *testing.T) {
+	for _, bad := range []string{
+		"../escape.md",
+		".opencode/../escape.md",
+		"foo/../../bar.md",
+	} {
+		m := CapabilityManifest{
+			ID:          "core/x",
+			Provides:    []string{"a"},
+			CoreOutputs: []string{bad},
+		}
+		errs := m.Validate()
+		if !errContains(t, errs, "traversal") {
+			t.Fatalf("expected traversal error for %q, got: %+v", bad, errs)
+		}
+	}
+}
+
+func TestManifestValidate_CoreOutputsDuplicateRejected(t *testing.T) {
+	m := CapabilityManifest{
+		ID:       "core/x",
+		Provides: []string{"a"},
+		CoreOutputs: []string{
+			".opencode/agents/foo.md",
+			".opencode/agents/foo.md",
+		},
+	}
+	errs := m.Validate()
+	if !errContains(t, errs, "duplicate output") {
+		t.Fatalf("expected duplicate-output error, got: %+v", errs)
+	}
+}
+
+func TestManifestValidate_CoreOutputsEmptyEntryRejected(t *testing.T) {
+	m := CapabilityManifest{
+		ID:          "core/x",
+		Provides:    []string{"a"},
+		CoreOutputs: []string{""},
+	}
+	errs := m.Validate()
+	if !errContains(t, errs, "core_outputs[0] is empty") {
+		t.Fatalf("expected empty-entry error, got: %+v", errs)
+	}
+}

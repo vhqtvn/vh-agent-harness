@@ -647,21 +647,11 @@ func additionalSchemaPaths() []schemaPath {
 // path keeps OriginDefault and behavior is byte-identical to the raw-class check
 // for repos without overrides.
 func checkManagedDrift(target string) checkResult {
-	defaults, err := corpus.CoreOwnershipDefaults()
-	if err != nil {
-		return checkResult{name: "managed-drift", tier: tierFail,
-			detail: fmt.Sprintf("core ownership: %v", err)}
-	}
-	overrides, oerr := readOwnershipOverrides(target)
-	if oerr != nil {
-		return checkResult{name: "managed-drift", tier: tierFail,
-			detail: fmt.Sprintf("read ownership overrides: %v", oerr)}
-	}
-	eff, rverr := ownership.Resolve(defaults, overrides)
-	if rverr != nil {
-		return checkResult{name: "managed-drift", tier: tierFail,
-			detail: fmt.Sprintf("ownership resolve (raise-only): %v", rverr)}
-	}
+	// First render with the shared pipeline so we obtain the request-scoped
+	// inactive-live-path set (capability-owned core outputs NOT in the resolved
+	// selection). The active ownership map EXCLUDES those paths, so prior-version
+	// files left over from a selected→deselected transition are NOT counted as
+	// drift (they are inactive residue, exempt by exact path).
 	sub, err := coreSubFSImpl()
 	if err != nil {
 		return checkResult{name: "managed-drift", tier: tierFail, detail: err.Error()}
@@ -682,9 +672,31 @@ func checkManagedDrift(target string) checkResult {
 	// install answers the token-bearing managed files would false-flag drift
 	// whenever the install name/slug differ from the target dir basename.
 	answers := mergeRenderAnswers(installRenderAnswers(target), readProfileAnswers(target))
-	if _, _, err := renderSeamStaging(staging, r, answers, target); err != nil {
+	inactiveLive := map[string]bool{}
+	if _, _, il, err := renderSeamStaging(staging, r, answers, target); err != nil {
 		return checkResult{name: "managed-drift", tier: tierFail,
 			detail: fmt.Sprintf("render staging: %v", err)}
+	} else {
+		inactiveLive = il
+	}
+	// Active ownership defaults EXCLUDE inactive capability-owned paths. This is
+	// the set we byte-compare against: only paths that SHOULD be managed under
+	// the current selection are checked. nil/empty inactive fast-paths to the
+	// unconditional all-known walk (byte-identical to pre-capability behavior).
+	defaults, err := corpus.CoreOwnershipDefaultsWithExclusion(inactiveLive)
+	if err != nil {
+		return checkResult{name: "managed-drift", tier: tierFail,
+			detail: fmt.Sprintf("core ownership: %v", err)}
+	}
+	overrides, oerr := readOwnershipOverrides(target)
+	if oerr != nil {
+		return checkResult{name: "managed-drift", tier: tierFail,
+			detail: fmt.Sprintf("read ownership overrides: %v", oerr)}
+	}
+	eff, rverr := ownership.Resolve(defaults, overrides)
+	if rverr != nil {
+		return checkResult{name: "managed-drift", tier: tierFail,
+			detail: fmt.Sprintf("ownership resolve (raise-only): %v", rverr)}
 	}
 	drifted, missing, preserved := 0, 0, 0
 	checked := 0

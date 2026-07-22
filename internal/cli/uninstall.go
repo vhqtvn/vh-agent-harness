@@ -182,7 +182,7 @@ func runSeamUninstall(cmd *cobra.Command, target string, force bool) error {
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
-	staging, eff, staged, err := seamInventory(target)
+	staging, eff, staged, _, err := seamInventory(target)
 	if err != nil {
 		fmt.Fprintln(errOut, "error:", err)
 		return err

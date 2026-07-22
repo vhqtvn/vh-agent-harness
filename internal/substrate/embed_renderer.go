@@ -64,6 +64,13 @@ func (r EmbedFSRenderer) Render(stagingDir string, spec RenderSpec) error {
 			return walkErr
 		}
 		// rel is relative to the corpus root and uses forward slashes.
+		// Capability-owned core-output filter: skip inactive source files BEFORE
+		// reading/templating/staging. The exclude set keys by LIVE
+		// (suffix-stripped) paths; pathExcluded maps the walked source-relative
+		// entry to its live form for the lookup. Directories are never excluded.
+		if !d.IsDir() && pathExcluded(rel, spec.ExcludeLivePaths) {
+			return nil
+		}
 		dst := filepath.Join(stagingDir, filepath.FromSlash(rel))
 		if d.IsDir() {
 			return os.MkdirAll(dst, 0o755)

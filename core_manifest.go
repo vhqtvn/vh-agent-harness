@@ -130,6 +130,87 @@ func CoreOwnershipDefaults() (ownership.ModuleDefaults, error) {
 	return out, nil
 }
 
+// CoreOwnershipDefaultsWithExclusion is the selection-aware variant of
+// CoreOwnershipDefaults. It walks the same embedded corpus and applies the same
+// per-path class exceptions, but OMITS any LIVE path present in the inactive
+// set. A nil/empty inactive set produces output identical to
+// CoreOwnershipDefaults (no exclusion — the default unconditional behavior).
+//
+// The inactive set is the set of LIVE (suffix-stripped, forward-slash,
+// corpus-relative) paths owned by capabilities that are NOT in the resolved
+// selection. Those source files are skipped at render time (the renderer's
+// ExcludeLivePaths), so they do not appear in staging and should NOT appear in
+// the active ownership map used by the classifier (apply) and the managed-drift
+// check. A prior-version file left on disk from a previously-selected
+// capability is NOT in the active map — it is inactive residue: not overwritten,
+// not deleted, and exempt from managed-drift / unexpected-drift failures.
+//
+// The ALL-KNOWN view (CoreOwnershipDefaults, no exclusion) is retained for:
+//   - armed-schema linting (platform_armed files are always in the all-known
+//     set regardless of capability selection),
+//   - residue recognition (the drift/inventory paths need to know which live
+//     paths are KNOWN capability outputs so they can exempt them as residue
+//     rather than reporting them as unexpected),
+//   - the memoized core-only classifier used outside the seam path.
+func CoreOwnershipDefaultsWithExclusion(inactive map[string]bool) (ownership.ModuleDefaults, error) {
+	if len(inactive) == 0 {
+		// Fast path: no exclusion is byte-identical to the unconditional walk.
+		return CoreOwnershipDefaults()
+	}
+	sub, err := fs.Sub(CoreFS, CoreDir)
+	if err != nil {
+		return nil, fmt.Errorf("core ownership walk: fs.Sub: %w", err)
+	}
+	out := ownership.ModuleDefaults{}
+	err = fs.WalkDir(sub, ".", func(rel string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		liveRel := strings.TrimSuffix(rel, substrateTemplateSuffix)
+		liveRel = strings.TrimSuffix(liveRel, substrateStaticTemplateSuffix)
+		if inactive[liveRel] {
+			// Inactive capability output: skip. The source file is not rendered
+			// (renderer's ExcludeLivePaths), so it must not appear in the active
+			// ownership map. A prior-version file on disk is residue, not a
+			// managed path.
+			return nil
+		}
+		rule := ownership.PathRule{
+			Class:      ownership.ClassPlatformManaged,
+			Provenance: "core",
+		}
+		switch liveRel {
+		case ".vh-agent-harness/vh-harness-profile.yml":
+			rule.Class = ownership.ClassPlatformArmed
+			rule.Provenance = "core.profile"
+		case "docs/planning/backlog.md", "docs/planning/roadmap.md":
+			rule.Class = ownership.ClassProjectOwned
+			rule.Provenance = "core.planning"
+		case ".gitignore", "README.md", "CLAUDE.md", "Makefile":
+			rule.Class = ownership.ClassProjectOwned
+			rule.Provenance = "core.project-identity"
+		case ".opencode/repo-configs/forbidden-patterns.project.js":
+			rule.Class = ownership.ClassProjectOwned
+			rule.Provenance = "core.deny.project"
+		case ".vh-agent-harness/config-transform.mjs":
+			rule.Class = ownership.ClassProjectOwned
+			rule.Provenance = "core.transform.project"
+		case ".opencode/repo-configs/repo-recon-data.yml":
+			rule.Class = ownership.ClassExternalGenerated
+			rule.Provenance = "core.repo-recon.data"
+		}
+		out[liveRel] = rule
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("core ownership walk: %w", err)
+	}
+	return out, nil
+}
+
 // CorePaths returns the sorted list of forward-slash relative file paths in the
 // embedded core corpus. Useful for diagnostics, ownership audits, and tests that
 // need to assert the curated set.

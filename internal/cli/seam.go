@@ -16,6 +16,7 @@ import (
 	"github.com/vhqtvn/vh-agent-harness/internal/permconfig"
 	"github.com/vhqtvn/vh-agent-harness/internal/proposals"
 	"github.com/vhqtvn/vh-agent-harness/internal/renderstate"
+	"github.com/vhqtvn/vh-agent-harness/internal/resolver"
 	"github.com/vhqtvn/vh-agent-harness/internal/runshape"
 	"github.com/vhqtvn/vh-agent-harness/internal/substrate"
 
@@ -149,7 +150,7 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	// profile) and perform the overlay merges (opencode-append deep-merge,
 	// callable-graph append). Returns the LIVE .opencode-relative paths the
 	// overlays contributed so the classifier can mark them overlay_extension.
-	overlayFiles, skillRecords, err := renderSeamStaging(staging, renderer, renderAnswers, target)
+	overlayFiles, skillRecords, inactiveLive, err := renderSeamStaging(staging, renderer, renderAnswers, target)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +180,7 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	if oerr != nil {
 		return nil, fmt.Errorf("seam: ownership overrides: %w", oerr)
 	}
-	cls, err := seamClassifierWithOverlays(overlayFiles, overrides)
+	cls, err := seamClassifierWithOverlays(overlayFiles, overrides, inactiveLive)
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +525,7 @@ func seedRunShapeDefault(target string) error {
 // gated on no tracked overlay-skill destination reporting WriteFailed).
 // Non-skill overlay units (agents/commands, permission packs) are NOT recorded:
 // v1 orphan detection is overlay-skill-scoped only.
-func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswers map[string]string, target string) ([]string, []renderstate.Record, error) {
+func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswers map[string]string, target string) ([]string, []renderstate.Record, map[string]bool, error) {
 	// Fold in the project.config.json-sourced tokens (mission/architecture/db).
 	// project.config.json is project_owned and read LIVE from the target so the
 	// seeded CLAUDE.md/Makefile resolve {{MISSION_SUMMARY}} etc. The config keys
@@ -539,11 +540,46 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// re-render, and inventory all see the same capability gates. If only
 	// seamApply resolved capabilities, doctor would re-render without them and
 	// false-flag drift on every gated agent block.
-	capAnswers, renderPacks, err := resolveCapabilityAnswers(target)
+	capAnswers, renderPacks, capCatalog, capSelected, err := resolveCapabilityAnswers(target)
 	if err != nil {
-		return nil, nil, fmt.Errorf("seam: %w", err)
+		return nil, nil, nil, fmt.Errorf("seam: %w", err)
 	}
 	renderAnswers = mergeRenderAnswers(renderAnswers, capAnswers)
+	// Capability-owned core-output filter (Slice 2): compile the per-request
+	// selection plan and pass inactive live paths to the renderer so files
+	// owned by unselected capabilities are SKIPPED at corpus-walk time. The
+	// plan is built from the same merged catalog + resolved selection that
+	// produced capAnswers, so the render filter and the template-conditional
+	// gates ({{ if .capabilities.<key> }}) see the SAME selection. An empty plan
+	// (no CoreOutputs-declaring capabilities) excludes nothing — the default
+	// unconditional full-tree walk. This runs INSIDE renderSeamStaging so EVERY
+	// render path filters like-for-like: install/update, doctor's managed-drift
+	// re-render, and inventory all skip the same inactive source files.
+	corePlan := resolver.CompileCoreSelectionPlan(capCatalog, capSelected)
+	// Declared-source existence (the runtime half of the CoreOutputs contract):
+	// every LIVE path declared by ANY capability in the MERGED catalog (core
+	// seeds PLUS overlay-pack contributions) must correspond to a real source
+	// file in the embedded core corpus. The resolver side of the contract
+	// (compileCoreSelectionPlan / validateOutputPaths) is leaf-level and has no
+	// corpus access, so this check lives here at the CLI seam — the one site
+	// that sees BOTH the merged catalog and the embedded corpus.
+	//
+	// This is the guarantee that an overlay pack declaring a nonexistent
+	// CoreOutput path (e.g. `core_outputs: ['.opencode/agents/not-real.md']`)
+	// fails FAST with a diagnostic instead of silently entering the inactive set
+	// (when unselected) and then masking real unexpected-file drift via the
+	// inactive-residue exemption, or silently being absent (when selected). It
+	// runs BEFORE any rendering or staging.
+	if err := validateCoreOutputsSourceExistence(capCatalog); err != nil {
+		return nil, nil, nil, fmt.Errorf("seam: %w", err)
+	}
+	if err := renderer.Render(staging, substrate.RenderSpec{
+		TemplateSource:   corpus.CoreDir,
+		Answers:          renderAnswers,
+		ExcludeLivePaths: corePlan.InactiveLivePaths,
+	}); err != nil {
+		return nil, nil, nil, fmt.Errorf("seam: render into staging: %w", err)
+	}
 	// Phase 5 modules deprecation: warn (to the swappable profileDeprecationSink)
 	// when the LIVE profile still carries a non-empty `modules:` list. Because it
 	// lives here INSIDE renderSeamStaging (the shared render path), it fires on
@@ -552,12 +588,6 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// the operator sees the migration nudge from whichever path they run. No-op on
 	// greenfield (no live profile yet) so the seeding render stays quiet.
 	emitModulesDeprecationWarning(target)
-	if err := renderer.Render(staging, substrate.RenderSpec{
-		TemplateSource: corpus.CoreDir,
-		Answers:        renderAnswers,
-	}); err != nil {
-		return nil, nil, fmt.Errorf("seam: render into staging: %w", err)
-	}
 	// existing is the set of LIVE .opencode-relative paths already on disk in
 	// staging. Core has just rendered the builtin corpus; an overlay MUST NOT
 	// silently shadow any of these (Slice 3 fail-closed guard). As each pack
@@ -582,7 +612,7 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 			// from the profile overlays: list / capabilities: selection.
 			// Refusing the whole render is correct: a partial overlay set is
 			// unpredictable state.
-			return nil, nil, fmt.Errorf("seam: overlay %q (selected via the profile overlays: list or a resolved capability) failed to open: %w\n"+
+			return nil, nil, nil, fmt.Errorf("seam: overlay %q (selected via the profile overlays: list or a resolved capability) failed to open: %w\n"+
 				"fix the pack or remove it from the profile overlays: list / capabilities: selection; refusing to render an incomplete overlay set",
 				name, err)
 		}
@@ -591,14 +621,14 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 		// at the explicit S2 managed→owned replacement path.
 		shadow, err := pack.DetectShadowing(existing)
 		if err != nil {
-			return nil, nil, fmt.Errorf("seam: overlay %s: shadow check: %w", name, err)
+			return nil, nil, nil, fmt.Errorf("seam: overlay %s: shadow check: %w", name, err)
 		}
 		if shadow != nil {
-			return nil, nil, shadow
+			return nil, nil, nil, shadow
 		}
 		rendered, err := pack.RenderUnits(staging, renderAnswers)
 		if err != nil {
-			return nil, nil, fmt.Errorf("seam: overlay %s: %w", name, err)
+			return nil, nil, nil, fmt.Errorf("seam: overlay %s: %w", name, err)
 		}
 		overlayFiles = append(overlayFiles, rendered...)
 		for _, rel := range rendered {
@@ -633,10 +663,10 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 			})
 		}
 		if err := pack.MergeAppend(staging); err != nil {
-			return nil, nil, fmt.Errorf("seam: overlay %s: %w", name, err)
+			return nil, nil, nil, fmt.Errorf("seam: overlay %s: %w", name, err)
 		}
 		if err := pack.AppendCallableGraph(staging); err != nil {
-			return nil, nil, fmt.Errorf("seam: overlay %s: %w", name, err)
+			return nil, nil, nil, fmt.Errorf("seam: overlay %s: %w", name, err)
 		}
 		// Materialize the pack's self-describing permission descriptor (if any)
 		// so the Go-native permission emitter (internal/permconfig) can resolve
@@ -644,7 +674,7 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 		// canonical Go tables hardcoding any pack's agents.
 		ppRel, err := pack.MaterializePermissionPack(staging)
 		if err != nil {
-			return nil, nil, fmt.Errorf("seam: overlay %s: %w", name, err)
+			return nil, nil, nil, fmt.Errorf("seam: overlay %s: %w", name, err)
 		}
 		if ppRel != "" {
 			overlayFiles = append(overlayFiles, ppRel)
@@ -657,7 +687,7 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// silently dropped.
 	report, err := overlay.InjectExtensionSnippets(staging, packs, renderAnswers)
 	if err != nil {
-		return nil, nil, fmt.Errorf("seam: inject prompt-extension snippets: %w", err)
+		return nil, nil, nil, fmt.Errorf("seam: inject prompt-extension snippets: %w", err)
 	}
 	for _, o := range report.Orphans {
 		fmt.Fprintf(os.Stderr, "seam: warning: orphan prompt-extension snippet (no matching anchor): pack=%s target=%s slot=%s\n", o.Pack, o.TargetRel, o.Slot)
@@ -674,12 +704,12 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// auto-coheres with the canonical form.
 	permPacks, err := permconfig.LoadPacks(staging)
 	if err != nil {
-		return nil, nil, fmt.Errorf("seam: load permission-packs: %w", err)
+		return nil, nil, nil, fmt.Errorf("seam: load permission-packs: %w", err)
 	}
 	cfgPath := filepath.Join(staging, "opencode.jsonc")
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("seam: read staged opencode.jsonc for permission emission: %w", err)
+		return nil, nil, nil, fmt.Errorf("seam: read staged opencode.jsonc for permission emission: %w", err)
 	}
 	features := permconfig.Features{Backlog: renderAnswers["features.backlog"] == "true"}
 	// Phase 2c permission transform (F-intent): if the project maintains a
@@ -691,18 +721,18 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// as drift or a loud FAIL — never silent.
 	roster, err := permconfig.ExtractRoster(data)
 	if err != nil {
-		return nil, nil, fmt.Errorf("seam: extract agent roster: %w", err)
+		return nil, nil, nil, fmt.Errorf("seam: extract agent roster: %w", err)
 	}
 	extra, err := applyConfigTransform(target, data, roster, renderPacks, renderAnswers)
 	if err != nil {
-		return nil, nil, fmt.Errorf("seam: %w", err)
+		return nil, nil, nil, fmt.Errorf("seam: %w", err)
 	}
 	emitted, err := permconfig.EmitWithExtra(data, permPacks, features, extra)
 	if err != nil {
-		return nil, nil, fmt.Errorf("seam: emit canonical permissions: %w", err)
+		return nil, nil, nil, fmt.Errorf("seam: emit canonical permissions: %w", err)
 	}
 	if err := os.WriteFile(cfgPath, emitted, 0o644); err != nil {
-		return nil, nil, fmt.Errorf("seam: write canonical opencode.jsonc: %w", err)
+		return nil, nil, nil, fmt.Errorf("seam: write canonical opencode.jsonc: %w", err)
 	}
 	// Phase 4 capability-installer: post-render fail-closed reference
 	// validation. Assert that no reference in the just-emitted opencode.jsonc
@@ -716,7 +746,7 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// closed before the broken artifact reaches the live tree. True no-op when
 	// the render is consistent (the dogfood render today).
 	if err := validateRenderedRefs(staging, emitted); err != nil {
-		return nil, nil, fmt.Errorf("seam: %w", err)
+		return nil, nil, nil, fmt.Errorf("seam: %w", err)
 	}
 	// Generate allowed-commands.js from the same Go canonical tables so the
 	// shell-guard runtime hook (which imports it as a JS module at exec time)
@@ -725,12 +755,99 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// artifact. The file is platform_managed; see README.agent.md.
 	acDir := filepath.Join(staging, ".opencode", "repo-configs")
 	if err := os.MkdirAll(acDir, 0o755); err != nil {
-		return nil, nil, fmt.Errorf("seam: ensure repo-configs dir: %w", err)
+		return nil, nil, nil, fmt.Errorf("seam: ensure repo-configs dir: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(acDir, "allowed-commands.js"), permconfig.GenerateAllowedCommandsJS(), 0o644); err != nil {
-		return nil, nil, fmt.Errorf("seam: write generated allowed-commands.js: %w", err)
+		return nil, nil, nil, fmt.Errorf("seam: write generated allowed-commands.js: %w", err)
 	}
-	return overlayFiles, skillRecords, nil
+	return overlayFiles, skillRecords, corePlan.InactiveLivePaths, nil
+}
+
+// validateCoreOutputsSourceExistence is the runtime half of the CoreOutputs
+// declared-source contract. For every CoreOutputs entry in the MERGED catalog
+// (core seed capabilities PLUS overlay-pack contributions) it asserts that the
+// declared LIVE path corresponds to a real source file in the embedded core
+// corpus (templates/core), accepting three source forms — plain path, .tmpl
+// suffix, .template suffix. A declaration pointing at a non-existent source
+// fails closed.
+//
+// Why this is needed (the B1 fix): an overlay manifest declaring a nonexistent
+// CoreOutput path would otherwise be accepted by the resolver's structural
+// validation (which only checks path FORM, not existence — the resolver is
+// leaf-level and has no corpus access). Such a phantom path then enters the
+// selection plan's inactive/active sets: if SELECTED the file is silently
+// absent from the render; if UNSELECTED the path enters InactiveLivePaths and
+// findSeamUnexpected exempts any on-disk file at that exact path as "residue"
+// — masking real unexpected-file drift. This check closes that hole by failing
+// fast at plan-compile time, before any rendering or staging, with a diagnostic
+// naming the offending capability and the missing path.
+//
+// catalog is the merged catalog (the same one CompileCoreSelectionPlan
+// consumed). A nil/empty catalog is a no-op (nothing to validate). The corpus
+// FS is the memoized coreSubFSImpl().
+func validateCoreOutputsSourceExistence(catalog *resolver.Catalog) error {
+	if catalog == nil {
+		return nil
+	}
+	// Collect every declared LIVE path up front; if none, short-circuit without
+	// walking the corpus (the common case — most catalogs declare no
+	// CoreOutputs).
+	var decls []struct {
+		capID string
+		live  string
+	}
+	for _, id := range catalog.IDs() {
+		m, ok := catalog.Get(id)
+		if !ok {
+			continue
+		}
+		for _, live := range m.CoreOutputs {
+			decls = append(decls, struct {
+				capID string
+				live  string
+			}{capID: id, live: live})
+		}
+	}
+	if len(decls) == 0 {
+		return nil
+	}
+	sub, err := coreSubFSImpl()
+	if err != nil {
+		return err
+	}
+	// Walk once to build the set of all source paths (forward-slash).
+	sources := make(map[string]bool, 256)
+	if werr := fs.WalkDir(sub, ".", func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return nil
+		}
+		sources[p] = true
+		return nil
+	}); werr != nil {
+		return fmt.Errorf("walk core corpus for CoreOutputs source validation: %w", werr)
+	}
+	var errs []string
+	for _, d := range decls {
+		// Try plain, .tmpl, .template — at least one must exist. The renderer
+		// maps the declared LIVE (suffix-stripped) path back to its source by
+		// checking these same suffixes, so a declaration is valid iff at least
+		// one candidate is present.
+		candidates := []string{d.live, d.live + ".tmpl", d.live + ".template"}
+		found := false
+		for _, c := range candidates {
+			if sources[c] {
+				found = true
+				break
+			}
+		}
+		if !found {
+			errs = append(errs, fmt.Sprintf("capability %s: declared CoreOutput %q does not exist in the core corpus (checked plain, .tmpl, .template)", d.capID, d.live))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("CoreOutputs declared-source existence check failed:\n  %s", strings.Join(errs, "\n  "))
+	}
+	return nil
 }
 
 // skillsPathPrefix and opencodePrefixCLI are the live-path prefixes the skill
@@ -811,8 +928,19 @@ func isAllowedCommandsCustomized(target, staging string) bool {
 // other D2-A violation: unknown path, invalid class, off-lattice class) makes
 // ownership.Resolve return a joined error; this function surfaces it so
 // seamApply aborts before any write touches the live tree.
-func seamClassifierWithOverlays(overlayFiles []string, overrides ownership.Overrides) (*substrate.Classifier, error) {
-	defaults, err := corpus.CoreOwnershipDefaults()
+// seamClassifierWithOverlays builds the apply-time Classifier from the
+// selection-aware core ownership map plus overlay_extension rules. The inactive
+// set is the set of LIVE (suffix-stripped) core paths owned by capabilities NOT
+// in the resolved selection — those source files are skipped at render time, so
+// they must be excluded from the active ownership map (a prior-version file on
+// disk is residue, not a managed path). A nil/empty inactive set means no
+// capability owns core outputs OR every CoreOutputs-declaring capability is
+// selected — the map is byte-identical to the unconditional all-known walk.
+// Pass nil when the caller intentionally needs the ALL-KNOWN view (e.g.
+// pruneClassifier, which is about overlay orphan deletion-safety, not capability
+// residue).
+func seamClassifierWithOverlays(overlayFiles []string, overrides ownership.Overrides, inactive map[string]bool) (*substrate.Classifier, error) {
+	defaults, err := corpus.CoreOwnershipDefaultsWithExclusion(inactive)
 	if err != nil {
 		return nil, fmt.Errorf("seam: core ownership: %w", err)
 	}

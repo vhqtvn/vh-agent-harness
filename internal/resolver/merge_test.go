@@ -281,3 +281,66 @@ func TestContributionSource_String(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeCatalogs_CoreOutputsNoCollision(t *testing.T) {
+	// Two capabilities each declaring DISTINCT core outputs merge clean.
+	core := CoreCatalog()
+	merged, err := MergeCatalogs(core, []PackContribution{
+		{Pack: "acme", Source: SourceProject, Manifest: CapabilityManifest{
+			ID:          "acme/thing",
+			Provides:    []string{"thing-agent"},
+			CoreOutputs: []string{".opencode/agents/thing-agent.md"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("distinct CoreOutputs should merge clean, got: %v", err)
+	}
+	m, _ := merged.Get("acme/thing")
+	if len(m.CoreOutputs) != 1 {
+		t.Errorf("acme/thing CoreOutputs should survive merge; got %v", m.CoreOutputs)
+	}
+}
+
+func TestMergeCatalogs_CoreOutputsCollisionAcrossPacksBlocked(t *testing.T) {
+	// Two DIFFERENT capability ids both declaring the SAME core output path is
+	// an ambiguous-ownership blocker (a core output is owned by at most one
+	// capability).
+	core := CoreCatalog()
+	_, err := MergeCatalogs(core, []PackContribution{
+		{Pack: "acme", Source: SourceProject, Manifest: CapabilityManifest{
+			ID:          "acme/one",
+			Provides:    []string{"agent-a"},
+			CoreOutputs: []string{".opencode/agents/shared.md"},
+		}},
+		{Pack: "globex", Source: SourceProject, Manifest: CapabilityManifest{
+			ID:          "globex/two",
+			Provides:    []string{"agent-b"},
+			CoreOutputs: []string{".opencode/agents/shared.md"},
+		}},
+	})
+	if err == nil {
+		t.Fatalf("MergeCatalogs must block duplicate core output across capabilities")
+	}
+	if !strings.Contains(err.Error(), `core output ".opencode/agents/shared.md" declared by both`) {
+		t.Errorf("collision error should name the path and both owners; got: %v", err)
+	}
+}
+
+func TestMergeCatalogs_CoreOutputsCollisionWithCoreSeedBlocked(t *testing.T) {
+	// A pack re-declaring a core output that a core seed (core/media-perception)
+	// already owns is a collision blocker — core outputs are not shadowable.
+	core := CoreCatalog()
+	_, err := MergeCatalogs(core, []PackContribution{
+		{Pack: "rogue", Source: SourceProject, Manifest: CapabilityManifest{
+			ID:          "rogue/cap",
+			Provides:    []string{"rogue-agent"},
+			CoreOutputs: []string{".opencode/agents/media-perception.md"},
+		}},
+	})
+	if err == nil {
+		t.Fatalf("MergeCatalogs must block a pack colliding with a core seed's CoreOutput")
+	}
+	if !strings.Contains(err.Error(), `.opencode/agents/media-perception.md" declared by both`) {
+		t.Errorf("collision error should name the contended path; got: %v", err)
+	}
+}

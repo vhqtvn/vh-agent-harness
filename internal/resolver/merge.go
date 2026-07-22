@@ -14,6 +14,7 @@ package resolver
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 )
 
@@ -81,9 +82,8 @@ type PackContribution struct {
 //     most one capability); unknown hard_dep = blocker; unknown optional_dep is
 //     tolerated (forward/overlay references). These are exactly Catalog.
 //     Validate's checks; MergeCatalogs builds the combined catalog and returns
-//     its Validate errors joined. A duplicate OUTPUT PATH check is an extension
-//     point (Phase-1 manifests do not yet carry output paths) — see
-//     validateOutputPaths, currently a no-op.
+//     its Validate errors joined. A duplicate OUTPUT PATH check (a core output
+//     owned by two capabilities) is enforced by validateOutputPaths.
 //
 // Core seed capabilities (core/gated-commit, core/debate) are NOT shadowable:
 // a pack manifest reusing a core id is a duplicate-id blocker, not a shadow.
@@ -166,13 +166,31 @@ func ResolveContributions(contribs []PackContribution) []PackContribution {
 	return out
 }
 
-// validateOutputPaths is the extension point for a duplicate-output-path check
-// across merged capabilities. Phase-1 capability manifests do NOT yet carry
-// output paths (a capability contributes agents via Provides, not file paths),
-// so this is currently a no-op returning nil. When a future phase adds a path
-// field to CapabilityManifest, the duplicate-path blocker check lands here —
-// keeping the merge's fail-closed contract in one place rather than scattering
-// path-conflict detection across callers.
-func validateOutputPaths(_ *Catalog) []error {
-	return nil
+// validateOutputPaths enforces the fail-closed cross-capability invariant for
+// CoreOutputs: a single LIVE core output path may be owned by at most one
+// capability. Two capabilities declaring the same path would leave the
+// selection plan ambiguous (which capability's selection gates the file?), so
+// the merge rejects it rather than picking a winner.
+//
+// Per-manifest structural form (forward-slash, no absolute/traversal, no
+// intra-manifest duplicates) is already enforced by CapabilityManifest.Validate
+// (called from Catalog.Validate above). This function owns ONLY the
+// cross-capability duplicate-ownership check. The declared-source-existence
+// check (the path must exist in templates/core) needs the embedded corpus FS
+// and is performed by the CLI selection-plan builder, not here (the resolver is
+// leaf-level and has no corpus access).
+func validateOutputPaths(catalog *Catalog) []error {
+	var errs []error
+	owner := make(map[string]string) // live path -> first capability id
+	for _, m := range catalog.caps {
+		for _, p := range m.CoreOutputs {
+			clean := filepath.Clean(p)
+			if prev, ok := owner[clean]; ok {
+				errs = append(errs, fmt.Errorf("catalog: core output %q declared by both %q and %q (a core output is owned by at most one capability)", p, prev, m.ID))
+			} else {
+				owner[clean] = m.ID
+			}
+		}
+	}
+	return errs
 }

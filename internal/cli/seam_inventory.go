@@ -23,31 +23,34 @@ import (
 // maps every classified path (core defaults + overlay_extension entries) to its
 // resolved class; staged is the sorted list of every rel path the renderer
 // actually wrote (a superset of eff for post-render composed files such as
-// AGENTS.md). Callers classify a staged path with eff.ClassOf(rel).
-func seamInventory(target string) (staging string, eff ownership.EffectiveMap, staged []string, err error) {
+// AGENTS.md). inactive is the set of capability-owned core LIVE paths NOT in
+// the resolved selection (capability residue candidates); callers use it to
+// exempt prior-version on-disk files from unexpected-drift detection. Callers
+// classify a staged path with eff.ClassOf(rel).
+func seamInventory(target string) (staging string, eff ownership.EffectiveMap, staged []string, inactive map[string]bool, err error) {
 	sub, err := coreSubFSImpl()
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, nil, err
 	}
 	staging, err = os.MkdirTemp("", "harness-seam-staging-*")
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("create staging: %w", err)
+		return "", nil, nil, nil, fmt.Errorf("create staging: %w", err)
 	}
 	// On any error past this point the staging dir is removed so callers never
 	// leak it on the failure path (they only defer-clean on success).
-	cleanup := func(e error) (string, ownership.EffectiveMap, []string, error) {
+	cleanup := func(e error) (string, ownership.EffectiveMap, []string, map[string]bool, error) {
 		os.RemoveAll(staging)
-		return "", nil, nil, e
+		return "", nil, nil, nil, e
 	}
 
 	answers := mergeRenderAnswers(installRenderAnswers(target), readProfileAnswers(target))
 	r := substrate.EmbedFSRenderer{Source: sub}
-	overlayFiles, _, rerr := renderSeamStaging(staging, r, answers, target)
+	overlayFiles, _, inactiveLive, rerr := renderSeamStaging(staging, r, answers, target)
 	if rerr != nil {
 		return cleanup(rerr)
 	}
 
-	defaults, derr := corpus.CoreOwnershipDefaults()
+	defaults, derr := corpus.CoreOwnershipDefaultsWithExclusion(inactiveLive)
 	if derr != nil {
 		return cleanup(fmt.Errorf("core ownership: %w", derr))
 	}
@@ -70,7 +73,7 @@ func seamInventory(target string) (staging string, eff ownership.EffectiveMap, s
 		staged = append(staged, rel)
 	}
 	sort.Strings(staged)
-	return staging, eff, staged, nil
+	return staging, eff, staged, inactiveLive, nil
 }
 
 // isSeamInstalled reports whether target carries an S1 lineage record (i.e. it

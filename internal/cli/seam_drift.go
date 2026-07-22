@@ -56,7 +56,7 @@ var seamUnexpectedSkip = map[string]bool{
 // platform-controlled path against the live tree, plus discovers unexpected
 // files under .opencode/. The returned lists are sorted. It is read-only.
 func computeSeamDrift(target string) (*seamDriftReport, error) {
-	staging, eff, _, err := seamInventory(target)
+	staging, eff, _, inactive, err := seamInventory(target)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +87,7 @@ func computeSeamDrift(target string) (*seamDriftReport, error) {
 			rep.drifted = append(rep.drifted, rel)
 		}
 	}
-	rep.unexpected = findSeamUnexpected(target, expected)
+	rep.unexpected = findSeamUnexpected(target, expected, inactive)
 
 	sort.Strings(rep.ok)
 	sort.Strings(rep.drifted)
@@ -100,7 +100,14 @@ func computeSeamDrift(target string) (*seamDriftReport, error) {
 // in expected, skipping the runtime-state / generated subtrees (by first path
 // segment) the corpus never tracks. Scoped to .opencode/ so project files
 // elsewhere in the repo are never flagged.
-func findSeamUnexpected(target string, expected map[string]bool) []string {
+//
+// inactive is the set of capability-owned core LIVE paths NOT in the resolved
+// selection. A prior-version file left on disk from a selected→deselected
+// transition is inactive residue: it is exempt from unexpected-drift detection
+// BY EXACT PATH so the operator is not told to delete a file the harness leaves
+// untouched on purpose. The exemption is exact-path only — a different file in
+// the same directory (or a renamed copy) is still reported as unexpected.
+func findSeamUnexpected(target string, expected map[string]bool, inactive map[string]bool) []string {
 	root := filepath.Join(target, manifest.DirName)
 	var out []string
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -119,6 +126,14 @@ func findSeamUnexpected(target string, expected map[string]bool) []string {
 			return nil
 		}
 		if expected[relSlash] {
+			return nil
+		}
+		// Exact-path residue exemption: an inactive capability-owned file is
+		// not "unexpected" even though it is absent from the active expected
+		// map. The harness leaves prior-version files untouched on a
+		// deselection; flagging them would prompt a deletion that violates the
+		// no-retirement contract.
+		if inactive != nil && inactive[relSlash] {
 			return nil
 		}
 		if seg := firstOpencodeSegment(relSlash); seg != "" && seamUnexpectedSkip[seg] {

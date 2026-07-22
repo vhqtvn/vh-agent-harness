@@ -17,6 +17,7 @@ package resolver
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -76,6 +77,28 @@ type CapabilityManifest struct {
 	Provides     []string `yaml:"provides"`
 	HardDeps     []string `yaml:"hard_deps"`
 	OptionalDeps []string `yaml:"optional_deps"`
+	// CoreOutputs are the core-corpus LIVE output paths (source-relative to
+	// templates/core, forward-slash, suffix-stripped) this capability owns and
+	// gates. When EMPTY (the default), the capability's outputs are NOT gated by
+	// selection — they render unconditionally, matching the pre-existing
+	// behavior (the renderer walks templates/core/ in full). When non-empty,
+	// only the declared paths render when the capability is SELECTED; when
+	// unselected, the declared paths are skipped at render time (not staged, not
+	// overwritten) and any prior-version file on disk is left untouched as
+	// inactive residue (exempt from managed-drift and unexpected-drift failures).
+	//
+	// Paths reference LIVE (suffix-stripped) names because both the ownership
+	// map and the live tree key by the suffix-stripped name. A capability that
+	// owns a templated output declares the suffix-stripped form (e.g.
+	// ".opencode/agents/foo.md" whether the source is foo.md or foo.md.tmpl);
+	// the renderer maps the live path back to its source file at walk time.
+	//
+	// Validation: Validate() checks structural form per-manifest (forward-slash
+	// relative, no absolute/traversal segments, no intra-manifest duplicates);
+	// merge.validateOutputPaths checks cross-capability duplicate ownership (a
+	// live path owned by two capabilities); the CLI selection-plan builder
+	// checks declared-source existence against the embedded corpus.
+	CoreOutputs []string `yaml:"core_outputs,omitempty"`
 }
 
 // Validate reports every self-contained structural problem with a manifest. It
@@ -112,7 +135,65 @@ func (m CapabilityManifest) Validate() []error {
 
 	errs = append(errs, validateDepList(m.ID, "hard_deps", m.HardDeps)...)
 	errs = append(errs, validateDepList(m.ID, "optional_deps", m.OptionalDeps)...)
+	errs = append(errs, validateCoreOutputs(m.ID, m.CoreOutputs)...)
 	return errs
+}
+
+// validateCoreOutputs checks the structural form of a manifest's CoreOutputs
+// list: each path must be a non-empty, forward-slash, source-relative path with
+// no absolute (leading "/") or traversal (".." segment) components, and no
+// duplicates within the list. Cross-capability duplicate ownership is a
+// merge.validateOutputPaths concern (needs the full catalog). An empty list is
+// valid — it means the capability does not gate core outputs (the default,
+// preserving unconditional render behavior).
+func validateCoreOutputs(capID string, paths []string) []error {
+	var errs []error
+	seen := make(map[string]bool, len(paths))
+	for i, p := range paths {
+		field := fmt.Sprintf("core_outputs[%d]", i)
+		if strings.TrimSpace(p) == "" {
+			errs = append(errs, fmt.Errorf("capability %q: %s is empty", capID, field))
+			continue
+		}
+		// Backslash is non-portable (Windows path separator); the declaration
+		// MUST use forward slashes. Reject rather than silently normalize so a
+		// malformed declaration is surfaced, not papered over.
+		if strings.Contains(p, "\\") {
+			errs = append(errs, fmt.Errorf("capability %q: %s %q contains a backslash (use forward slashes)", capID, field, p))
+			continue
+		}
+		// Absolute (leading slash) or volume-relative (leading drive letter +
+		// colon on Windows) is not source-relative.
+		if strings.HasPrefix(p, "/") || (len(p) >= 2 && p[1] == ':') {
+			errs = append(errs, fmt.Errorf("capability %q: %s %q is absolute (must be source-relative)", capID, field, p))
+			continue
+		}
+		// Traversal: any ".." path segment escapes the corpus root.
+		if hasTraversalSegment(p) {
+			errs = append(errs, fmt.Errorf("capability %q: %s %q contains a \"..\" traversal segment", capID, field, p))
+			continue
+		}
+		// Clean and canonicalize so ".." and "." detection is robust and the
+		// duplicate check compares canonical forms.
+		clean := filepath.Clean(p)
+		if seen[clean] {
+			errs = append(errs, fmt.Errorf("capability %q: %s duplicate output %q", capID, field, p))
+		}
+		seen[clean] = true
+	}
+	return errs
+}
+
+// hasTraversalSegment reports whether any segment of a forward-slash path is
+// exactly "..". A path segment of "." is tolerated (filepath.Clean collapses
+// it); only ".." can escape the corpus root and is rejected.
+func hasTraversalSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // validateDepList checks one dependency list (hard_deps or optional_deps) for

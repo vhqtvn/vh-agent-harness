@@ -96,6 +96,49 @@ func TestCoreCatalog_MediaPerceptionProvides(t *testing.T) {
 	}
 }
 
+func TestCoreCatalog_MediaPerceptionCoreOutputs(t *testing.T) {
+	// core/media-perception is the first capability to declare CoreOutputs.
+	// The two core-corpus files it owns must match the actual templates/core
+	// paths (LIVE / suffix-stripped form), and the declaration must validate
+	// clean (forward-slash relative, no traversal, no duplicates).
+	c := CoreCatalog()
+	m, ok := c.Get("core/media-perception")
+	if !ok {
+		t.Fatalf("missing core/media-perception")
+	}
+	want := []string{
+		".opencode/agents/media-perception.md",
+		".opencode/skills/media-perception/SKILL.md",
+	}
+	if len(m.CoreOutputs) != len(want) {
+		t.Fatalf("CoreOutputs length: got %d, want %d (%v)", len(m.CoreOutputs), len(want), m.CoreOutputs)
+	}
+	for i, p := range want {
+		if m.CoreOutputs[i] != p {
+			t.Errorf("CoreOutputs[%d]: got %q, want %q", i, m.CoreOutputs[i], p)
+		}
+	}
+	if errs := m.Validate(); len(errs) != 0 {
+		t.Fatalf("media-perception CoreOutputs should validate clean, got: %+v", errs)
+	}
+}
+
+func TestCoreCatalog_OtherCapabilitiesHaveNoCoreOutputs(t *testing.T) {
+	// Only core/media-perception declares CoreOutputs in this slice.
+	// core/gated-commit and core/debate retain their current unconditional
+	// behavior (empty CoreOutputs = not gated by selection).
+	c := CoreCatalog()
+	for _, id := range []string{"core/gated-commit", "core/debate"} {
+		m, ok := c.Get(id)
+		if !ok {
+			t.Fatalf("missing %s", id)
+		}
+		if len(m.CoreOutputs) != 0 {
+			t.Errorf("%s should have empty CoreOutputs (retains unconditional behavior), got %v", id, m.CoreOutputs)
+		}
+	}
+}
+
 func TestCoreCatalog_BaselineEightAgents(t *testing.T) {
 	c := CoreCatalog()
 	baseline := c.BaselineAgents()

@@ -266,7 +266,7 @@ func pruneClassifier(target string) (*substrate.Classifier, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read ownership overrides: %w", err)
 	}
-	cls, err := seamClassifierWithOverlays(nil, overrides)
+	cls, err := seamClassifierWithOverlays(nil, overrides, nil)
 	if err != nil {
 		return nil, fmt.Errorf("ownership resolve: %w", err)
 	}

@@ -27,6 +27,20 @@ type RenderSpec struct {
 	// --vcs-ref git-tag model is retired: the version comes from the harness,
 	// not a git tag on templates/core/).
 	Ref string
+	// ExcludeLivePaths, when non-nil, is a set of LIVE (suffix-stripped),
+	// forward-slash, source-relative paths to SKIP during the corpus walk. The
+	// renderer computes the live name of each walked entry (stripping the
+	// .tmpl/.template suffix) and skips it BEFORE reading, templating, or
+	// staging if that live name is in the set. nil (or empty) means no
+	// exclusion — the default, preserving the unconditional full-tree walk for
+	// callers that do not participate in capability-owned core-output
+	// filtering.
+	//
+	// The capability-owned core-output filter compiles this set from the
+	// resolver's CoreSelectionPlan.InactiveLivePaths: paths owned by
+	// unselected capabilities are excluded so they do not render, and any
+	// prior-version file on disk is left untouched as inactive residue.
+	ExcludeLivePaths map[string]bool
 }
 
 // Renderer renders a template into a staging directory. The seam NEVER renders
@@ -78,6 +92,25 @@ func stripTemplateSuffix(name string) string {
 		return s
 	}
 	return strings.TrimSuffix(name, TemplateSuffix)
+}
+
+// pathExcluded reports whether a walked source-relative entry should be SKIPPED
+// because its LIVE (suffix-stripped) name is in the exclude set. The exclude
+// set keys by LIVE paths — the same form the ownership map and the live tree
+// use — so a CoreOutputs declaration of ".opencode/agents/foo.md" matches
+// EITHER source form (foo.md or foo.md.tmpl): the walked source path is
+// suffix-stripped before the lookup. An empty/nil exclude set excludes nothing
+// (the default unconditional full-tree walk).
+func pathExcluded(walkedSourceRel string, exclude map[string]bool) bool {
+	if len(exclude) == 0 {
+		return false
+	}
+	// Normalize to forward-slash for cross-platform parity (the embed FS and
+	// the exclude set both use forward slashes; the filesystem renderer walks
+	// OS-native separators on some platforms).
+	rel := filepath.ToSlash(walkedSourceRel)
+	live := stripTemplateSuffix(rel)
+	return exclude[live]
 }
 
 // renderWriteMode returns the on-disk permission bits for a staged/live file
@@ -148,6 +181,18 @@ func (r GoTemplateRenderer) Render(stagingDir string, spec RenderSpec) error {
 		rel, err := filepath.Rel(root, p)
 		if err != nil {
 			return err
+		}
+		// Capability-owned core-output filter: skip inactive source files BEFORE
+		// reading/templating/staging. The exclude set keys by LIVE
+		// (suffix-stripped) paths; pathExcluded maps the walked source-relative
+		// entry to its live form for the lookup. Directories are never excluded
+		// (an excluded file's parent dir may still contain active siblings), so
+		// the check only applies to regular files — but we test here (before the
+		// d.IsDir branch) because a skipped file should not create its staging
+		// dir either when it is the sole occupant; the walk's natural
+		// mkdir-on-demand for sibling files handles active files in the same dir.
+		if !d.IsDir() && pathExcluded(rel, spec.ExcludeLivePaths) {
+			return nil
 		}
 		dst := filepath.Join(stagingDir, rel)
 		if d.IsDir() {
@@ -449,6 +494,12 @@ func (r FixtureRenderer) Render(stagingDir string, spec RenderSpec) error {
 		rel, err := filepath.Rel(root, p)
 		if err != nil {
 			return err
+		}
+		// Capability-owned core-output filter: skip inactive source files BEFORE
+		// copying, matching the production renderers. The fixture keys staging
+		// by the suffix-stripped name, and pathExcluded checks the live form.
+		if !d.IsDir() && pathExcluded(rel, spec.ExcludeLivePaths) {
+			return nil
 		}
 		// Stage under the suffix-stripped name, matching the production renderer
 		// (both .tmpl and .template suffixes are stripped). The exec bit is

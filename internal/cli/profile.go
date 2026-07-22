@@ -345,10 +345,16 @@ func readProfileSelection(target string) []resolver.CapabilityID {
 //     overlays: list (profile order) UNION packs owning resolved capabilities
 //     (sorted, deduplicated). Either selection path therefore reaches the
 //     render loop.
-func resolveCapabilityAnswers(target string) (answers map[string]string, renderPacks []string, err error) {
+//   - catalog: the merged catalog (core seeds ∪ discoverable overlay-pack
+//     manifests) used to resolve the selection. The caller needs it to compile
+//     the CoreSelectionPlan (capability-owned core-output filtering) without
+//     re-building the catalog.
+//   - selected: the resolved capability set. The caller needs it to compile
+//     the CoreSelectionPlan.
+func resolveCapabilityAnswers(target string) (answers map[string]string, renderPacks []string, catalog *resolver.Catalog, selected *resolver.CapabilitySet, err error) {
 	contribs, derr := discoverPackContributions(target)
 	if derr != nil {
-		return nil, nil, fmt.Errorf("seam: %w", derr)
+		return nil, nil, nil, nil, fmt.Errorf("seam: %w", derr)
 	}
 	survivors := resolver.ResolveContributions(contribs)
 
@@ -365,7 +371,7 @@ func resolveCapabilityAnswers(target string) (answers map[string]string, renderP
 
 	catalog, merr := resolver.MergeCatalogs(resolver.CoreCatalog(), contribs)
 	if merr != nil {
-		return nil, nil, fmt.Errorf("seam: %w", merr)
+		return nil, nil, nil, nil, fmt.Errorf("seam: %w", merr)
 	}
 
 	// Selection = preset(profile) ∪ explicit(capabilities:) ∪ capabilities
@@ -382,11 +388,14 @@ func resolveCapabilityAnswers(target string) (answers map[string]string, renderP
 			overlayImplied = append(overlayImplied, id)
 		}
 	}
-	selected := unionCapabilities(explicit, overlayImplied)
+	// selectedIDs is the capability-id selection fed to the resolver; the named
+	// return `selected` carries the RESOLVED set (with closure-applied hard
+	// deps) out to the caller for CoreSelectionPlan compilation.
+	selectedIDs := unionCapabilities(explicit, overlayImplied)
 
-	set, rerr := resolver.Resolve(selected, catalog)
+	set, rerr := resolver.Resolve(selectedIDs, catalog)
 	if rerr != nil {
-		return nil, nil, fmt.Errorf("resolve capabilities %v: %w", selected, rerr)
+		return nil, nil, nil, nil, fmt.Errorf("resolve capabilities %v: %w", selectedIDs, rerr)
 	}
 
 	// Render answers: one key per catalog id (closed projection).
@@ -419,7 +428,7 @@ func resolveCapabilityAnswers(target string) (answers map[string]string, renderP
 	sort.Strings(implied)
 	packs = append(packs, implied...)
 
-	return out, packs, nil
+	return out, packs, catalog, set, nil
 }
 
 // discoverPackContributions reads capability-manifest.yml from EVERY
