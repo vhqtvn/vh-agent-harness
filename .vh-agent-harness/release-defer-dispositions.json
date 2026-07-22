@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "release_base": { "kind": "tag", "value": "v0.13.0" },
-  "evaluated_commit": "45895b6079bc1733aec33e18b1843705358df6f5",
-  "evaluated_tree": "79d74bc8a078736524cf8dd04e86234525160d91",
-  "manifest_parent_commit": "45895b6079bc1733aec33e18b1843705358df6f5",
+  "release_base": { "kind": "tag", "value": "v0.13.1" },
+  "evaluated_commit": "56159403044bfa3f26a01d9567d2d859adc087f7",
+  "evaluated_tree": "f4532f0c6ebd48b532a4bd7ace0703b45e81a553",
+  "manifest_parent_commit": "56159403044bfa3f26a01d9567d2d859adc087f7",
   "reconciliation": {
     "status": "confirmed",
-    "scope": "Release arc: v0.13.0 through evaluated_commit. The handshake SHAs (evaluated_commit / evaluated_tree / manifest_parent_commit) bind to N (the release-note commit), NOT to the assessed release-prep HEAD P. The release ceremony is forced into two commits because the migration note (templates/migrations/vX.Y.Z.md) must also land at HEAD: first note commit N (child of P), then this manifest-only commit M (child of N). At HEAD=M the handshake invariant requires HEAD^ == N == evaluated_commit == manifest_parent_commit AND HEAD^^{tree} == evaluated_tree == tree(N). Release mode is manifest-authority-only; the wrapper and CI recheck always read this committed manifest. records[] dispositions are operator-attested and unchanged by the releaser's SHA recompute. (v0.13.0 wording bug corrected: do NOT write evaluated_commit = P.)",
+    "scope": "Release arc: v0.13.1 through evaluated_commit (intended release v0.14.0). The handshake SHAs (evaluated_commit / evaluated_tree / manifest_parent_commit) bind to R (the readiness-artifact commit), which sits between N (the release-note commit) and M (this manifest commit) in the wrapper-required three-commit ceremony note(N) -> artifact(R) -> manifest(M): N (beaecfd, the migration-note commit, child of release-prep P) -> R (the single-path readiness-artifact commit, child of N) -> M (this manifest-only commit, child of R). At HEAD=M the DEFER handshake invariant requires HEAD^ == R == evaluated_commit == manifest_parent_commit AND tree(HEAD^) == evaluated_tree == tree(R); the readiness gate additionally requires the committed artifact (.vh-agent-harness/release-readiness-pass.json) to carry commit_sha == HEAD^^ == N (beaecfd) and to be the single path changed in HEAD^^..HEAD^. Release mode is manifest-authority-only; the wrapper and CI recheck always read this committed manifest. records[] dispositions are operator-attested and unchanged by the releaser's SHA recompute.",
     "zero_records_confirmed": false
   },
   "records": [
