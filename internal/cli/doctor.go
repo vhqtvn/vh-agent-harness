@@ -61,6 +61,7 @@ var doctorCmd = &cobra.Command{
   auto-gate-ignore never-commit auto-gate paths tracked/ignored properly  FAIL if tracked/exposed/literal-key; WARN if missing/non-portable
   skills          every rendered skill's SKILL.md frontmatter valid       FAIL if invalid
   subagent-depth  effective merged subagent_depth >= delegation minimum  WARN if unset/too low
+  defer-liveness  open defer/errata cards contradict no released claim     FAIL if open card contradicts a present note
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -205,6 +206,21 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	sdr := checkSubagentDepth(abs)
 	fmt.Fprintln(out, "    "+sdr.String())
 	applyTier(sdr.tier, &problems, &warns)
+
+	// 12. Defer-liveness (§4.3 generic release-readiness gate). Reads open
+	//     coordinator task cards (.local/coordinator/tasks/{defer,errata}-*.json)
+	//     against released/about-to-release migration notes
+	//     (templates/migrations/v*.md) and FAILs when an open card contradicts a
+	//     present claim — the miss that left errata-v0120 unresolved across three
+	//     releases. Absorbs the former erratum_gate_test.go (a strict superset:
+	//     open errata card → FAIL is preserved, generalized to defer cards that
+	//     target an existing note). SKIP when either side is absent or git is
+	//     unavailable. This is the SAFETY LAYER acting (gates act; registry
+	//     informs).
+	fmt.Fprintln(out, "  defer-liveness:")
+	dlr := checkDeferLiveness(abs)
+	fmt.Fprintln(out, "    "+dlr.String())
+	applyTier(dlr.tier, &problems, &warns)
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)
