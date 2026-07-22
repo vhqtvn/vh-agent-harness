@@ -19,6 +19,7 @@ package permconfig
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // Decision is a permission verdict: "allow", "deny", or "ask".
@@ -32,6 +33,64 @@ const (
 
 func validDecision(d Decision) bool {
 	return d == Allow || d == Deny || d == Ask
+}
+
+// HarnessPolicy is the first-class policy governing how the fixed
+// "vh-agent-harness *" entry (and its canonical read-only exceptions) is
+// emitted in a permission.bash block. It replaces the inconsistent legacy
+// practice of assigning one of three scalar decisions (allow/ask/deny) to
+// the "vh-agent-harness *" wildcard for read-only specialist agents.
+//
+// opencode resolves permission.bash with findLast (last-match-wins)
+// semantics (refs/opencode/packages/core/src/permission.ts). The four states:
+//
+//   - allow    → emit "vh-agent-harness *": "allow" (broad — build,
+//     coordination, project-coordinator). No exceptions region.
+//   - ask      → emit "vh-agent-harness *": "ask" (broad — external only).
+//     No exceptions region.
+//   - deny     → emit "vh-agent-harness *": "deny" (broad — committer keeps
+//     its gated command surface). No exceptions region.
+//   - read_only → emit "vh-agent-harness *": "deny" FIRST (region 4a, the
+//     catch-all), THEN emit each canonical safe read-only harness verb as
+//     "allow" AFTER (region 4b). Under findLast the later specific allows
+//     win over the earlier broad deny, so read-only agents get prompt-free
+//     access to safe inspection verbs while every other verb (mutations,
+//     shell, diagnostics-export, unknown future verbs) stays denied.
+//
+// The deny-first + allows-after ordering is the ONLY correct shape under
+// findLast: allows-first + deny-last would deny everything (the bug the
+// original report's suggested pattern would have produced), and a bare
+// allow/ask scalar with no exceptions region is what non-read-only agents
+// already had.
+type HarnessPolicy string
+
+const (
+	HarnessPolicyAllow    HarnessPolicy = "allow"
+	HarnessPolicyAsk      HarnessPolicy = "ask"
+	HarnessPolicyDeny     HarnessPolicy = "deny"
+	HarnessPolicyReadOnly HarnessPolicy = "read_only"
+)
+
+func validHarnessPolicy(p HarnessPolicy) bool {
+	return p == HarnessPolicyAllow || p == HarnessPolicyAsk || p == HarnessPolicyDeny || p == HarnessPolicyReadOnly
+}
+
+// wildcardDecision returns the scalar Decision implied for the
+// "vh-agent-harness *" wildcard under this policy. Allow/Ask/Deny map to
+// themselves; ReadOnly maps to Deny (the catch-all that the canonical
+// read-only exceptions in region 4b override under findLast).
+func (p HarnessPolicy) wildcardDecision() Decision {
+	switch p {
+	case HarnessPolicyAllow:
+		return Allow
+	case HarnessPolicyAsk:
+		return Ask
+	case HarnessPolicyDeny:
+		return Deny
+	case HarnessPolicyReadOnly:
+		return Deny
+	}
+	return Deny // unknown → fail-closed scalar
 }
 
 // LocationRule is the per-agent (or top-level "default") bash permission rule:
@@ -56,11 +115,19 @@ type LocationRule struct {
 	GitReadonly Decision // git_readonly group decision
 	Gate        Decision // gate group decision (only emitted when HasGate)
 	HasGate     bool     // whether the gate key is present
-	// Harness is the preferred spelling for the fixed "vh-agent-harness *"
-	// entry (the vh-agent-harness binary's own decision). It mirrors DevSh for
-	// backward compatibility: permission-pack.jsonc may use either "harness"
-	// (preferred) or "devSh" (deprecated alias); both must agree if present.
-	// At emit time Harness and DevSh carry the same normalized value.
+	// HarnessPolicy is the first-class policy governing how the fixed
+	// "vh-agent-harness *" entry (and its canonical read-only exceptions
+	// under read_only) is emitted. It is the PREFERRED declaration channel:
+	// core tables and new permission-pack.jsonc entries set this field.
+	// Legacy scalar channels (Harness, DevSh below) are normalized into a
+	// HarnessPolicy by normalizeHarnessFields at resolve/validate time.
+	// read_only is the only policy NOT expressible via the legacy scalars.
+	HarnessPolicy HarnessPolicy
+	// Harness is the legacy preferred scalar spelling for the fixed
+	// "vh-agent-harness *" entry. It mirrors DevSh for backward compatibility:
+	// permission-pack.jsonc may use "harness" (preferred legacy) or "devSh"
+	// (deprecated alias); both must agree if present. After normalization,
+	// Harness carries the wildcardDecision() of HarnessPolicy.
 	Harness       Decision
 	DevSh         Decision   // "vh-agent-harness *" entry (DEPRECATED input alias; mirrors Harness)
 	Edit          Decision   // flat edit decision; also the "*" action when EditOverrides is non-empty
@@ -175,4 +242,109 @@ func (o orderedMap) MarshalJSON() ([]byte, error) {
 	}
 	buf.WriteByte('}')
 	return buf.Bytes(), nil
+}
+
+// normalizeHarnessFields reconciles the three harness declaration channels
+// (HarnessPolicy [new, preferred], Harness [legacy scalar], DevSh [deprecated
+// alias]) into a single coherent state. After normalization, when any channel
+// was non-empty:
+//
+//   - HarnessPolicy is non-empty and valid (the canonical policy).
+//   - Harness and DevSh both carry wildcardDecision(HarnessPolicy) (the
+//     implied scalar for the "vh-agent-harness *" entry).
+//
+// Conflict detection (fail-closed):
+//   - If HarnessPolicy is set AND Harness/DevSh implies a different policy,
+//     return an error. Each policy's implied scalar: allow→Allow, ask→Ask,
+//     deny→Deny, read_only→Deny.
+//   - If Harness and DevSh are both set with different values, return an
+//     error (preserves the legacy both-different rejection).
+//
+// Derivation (when no conflict):
+//   - HarnessPolicy set, Harness/DevSh empty: derive scalar from policy.
+//   - HarnessPolicy empty, Harness/DevSh set: derive policy from scalar
+//     (read_only is NOT derivable from a scalar — it requires the explicit
+//     HarnessPolicy field/declaration).
+//   - All empty: return nil without modification (the downstream validate's
+//     validDecision(rule.DevSh) check surfaces the missing declaration; core
+//     tables and parseLocation always set at least one channel).
+//
+// normalizeHarnessFields is idempotent: calling it on an already-normalized
+// rule is a no-op. It is called from resolveRules (for core-table-sourced
+// rules) and validate (defensively, for directly-constructed rules in tests).
+func normalizeHarnessFields(rule *LocationRule) error {
+	// Reconcile Harness and DevSh (legacy scalar channels). Both set → agree.
+	if rule.Harness != "" && rule.DevSh != "" && rule.Harness != rule.DevSh {
+		return fmt.Errorf(
+			"conflicting harness declarations: Harness (%q) and DevSh (%q) specify different decisions — "+
+				"use a single channel (HarnessPolicy preferred; Harness/DevSh are legacy scalar aliases)",
+			rule.Harness, rule.DevSh)
+	}
+	// scalarFromLegacy is the scalar decision declared via the legacy channel
+	// (empty if neither Harness nor DevSh was set).
+	var scalarFromLegacy Decision
+	if rule.Harness != "" {
+		scalarFromLegacy = rule.Harness
+	} else if rule.DevSh != "" {
+		scalarFromLegacy = rule.DevSh
+	}
+
+	if rule.HarnessPolicy != "" {
+		if !validHarnessPolicy(rule.HarnessPolicy) {
+			return fmt.Errorf("harnessPolicy %q is not a valid policy (allow, ask, deny, read_only)", rule.HarnessPolicy)
+		}
+		implied := rule.HarnessPolicy.wildcardDecision()
+		if scalarFromLegacy != "" && scalarFromLegacy != implied {
+			return fmt.Errorf(
+				"conflicting harness declarations: HarnessPolicy %q implies scalar %q but Harness/DevSh is %q — "+
+					"use HarnessPolicy only, or keep them consistent",
+				rule.HarnessPolicy, implied, scalarFromLegacy)
+		}
+		// Derive scalar from policy.
+		rule.Harness = implied
+		rule.DevSh = implied
+		return nil
+	}
+
+	// HarnessPolicy empty: derive from legacy scalar if present. read_only is
+	// NOT expressible via a scalar Decision (only allow/ask/deny are).
+	if scalarFromLegacy != "" {
+		switch scalarFromLegacy {
+		case Allow:
+			rule.HarnessPolicy = HarnessPolicyAllow
+		case Ask:
+			rule.HarnessPolicy = HarnessPolicyAsk
+		case Deny:
+			rule.HarnessPolicy = HarnessPolicyDeny
+		default:
+			return fmt.Errorf("legacy Harness/DevSh decision %q is not allow/deny/ask (read_only requires the HarnessPolicy field)", scalarFromLegacy)
+		}
+		rule.Harness = scalarFromLegacy
+		rule.DevSh = scalarFromLegacy
+		return nil
+	}
+
+	// All channels empty: leave fields as-is. validate's validDecision check
+	// catches the missing declaration downstream.
+	return nil
+}
+
+// parseHarnessValue converts one raw declaration value (from any of the
+// harnessPolicy, harness, or devSh JSON keys) into a (policy, scalar) pair.
+// All four values are accepted by all three channels so that a pack author
+// can write "harness": "read_only" (legacy scalar key with the new policy
+// value) and get HarnessPolicyReadOnly. The scalar is the implied
+// wildcardDecision for the policy. Returns ok=false for an unrecognized value.
+func parseHarnessValue(raw string) (policy HarnessPolicy, scalar Decision, ok bool) {
+	switch HarnessPolicy(raw) {
+	case HarnessPolicyAllow:
+		return HarnessPolicyAllow, Allow, true
+	case HarnessPolicyAsk:
+		return HarnessPolicyAsk, Ask, true
+	case HarnessPolicyDeny:
+		return HarnessPolicyDeny, Deny, true
+	case HarnessPolicyReadOnly:
+		return HarnessPolicyReadOnly, Deny, true
+	}
+	return "", "", false
 }

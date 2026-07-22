@@ -449,6 +449,49 @@ determinism. This means an extra `allow` beats the leading `*:deny` (it comes
 later), and does not interfere with the `"vh-agent-harness *"` boundary
 (project patterns do not match `vh-agent-harness ...` commands).
 
+### Harness policy (4-state)
+
+Each core role carries a `HarnessPolicy` that selects how the
+`"vh-agent-harness *"` wildcard entry is emitted in Region 4 of the bash
+block:
+
+| Policy | Region 4 emission | Used by |
+|---|---|---|
+| `allow` | `"vh-agent-harness *": "allow"` (broad) | `build`, `coordination`, `project-coordinator`, `commit-message`, `commit-reviewer`, `ship-review` |
+| `ask` | `"vh-agent-harness *": "ask"` (broad) | `plan`, `docs-steward` |
+| `deny` | `"vh-agent-harness *": "deny"` (broad) | `committer` (keeps its gated command surface) |
+| `read_only` | `"vh-agent-harness *": "deny"` **FIRST**, then a canonical set of safe read-only verbs as `"allow"` **AFTER** | `researcher`, `planner`, `media-perception`, `repo-explorer`, `debate`, `debate-proposer`, `debate-critic`, `debate-synth`, `solution-brief` |
+
+The `read_only` policy is **deny-first + canonical-exceptions-after**, which is
+the correct shape under `findLast`: the trailing `allow` entries win over the
+leading `deny`. A non-canonical harness verb (e.g. a future `vh-agent-harness
+new-command` or any mutation verb) falls through to the `deny` because nothing
+after it matches.
+
+The canonical read-only verb inventory is **Go-owned** (defined once in
+`internal/permconfig/tables.go` as `HarnessReadOnlyCommands`) and is **not**
+copied per agent — every `read_only` role emits the same list. It currently
+allows the safe read surface: `exec-ro *`, `guide`, `doctor`, `preflight`,
+`diff`, `status`, `proposals`, `version`, `docs`, `example`, `sys-prompt`,
+`help`, `--help`/`-h`, `skill list`, and `overlay docs *` (each with and
+without arguments).
+
+Withheld pending audit (still denied): `skill validate`, `logs`, `ps`.
+Excluded entirely: all mutation verbs (`exec`, `exec-sandbox`, `shell`, `up`,
+`down`, `install`, `update`, `uninstall`, `self-update`, `overlay new`),
+artifact producers (`diagnostics-export`), and broad wildcards (`skill *`,
+`overlay *`).
+
+All canonical read-only verbs are protected keys — a config transform cannot
+collide with or replace them, and a non-canonical harness pattern injected by a
+transform lands BEFORE the Region 4 `deny`, so it is inert under `findLast`.
+
+**Legacy compatibility:** the deprecated `devSh` and `harness` config keys
+still accept the scalar values `allow`/`ask`/`deny` and normalize to the
+matching `HarnessPolicy`. The new `read_only` value may be expressed through
+any of `harnessPolicy`, `harness`, or `devSh`. Conflicting declarations across
+these keys fail closed.
+
 ### Dry-run / failure behavior
 
 - `update --dry-run` runs the transform and shows the changed config; writes

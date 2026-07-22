@@ -209,6 +209,27 @@ func splitFields(s string) []string {
 // The committer is the ONLY agent with Gate=Allow (it commits through the
 // gate wrapper). Every other gate-present agent has Gate=Deny.
 //
+// HarnessPolicy (the first-class policy for the "vh-agent-harness *" entry)
+// replaces the inconsistent legacy scalar practice. The mapping:
+//
+//   - build, coordination, project-coordinator (broad orchestrators):
+//     HarnessPolicyAllow — they freely invoke the harness binary.
+//   - read-only specialists (researcher, planner, media-perception,
+//     repo-explorer, debate, debate-proposer, debate-critic, debate-synth,
+//     solution-brief): HarnessPolicyReadOnly — they get prompt-free access
+//     to the canonical safe read-only harness verbs (HarnessReadOnlyCommands)
+//     while every mutation/shell/diagnostics-export/unknown verb stays
+//     denied. This replaces the old inconsistent allow/ask/deny scalars.
+//   - committer: HarnessPolicyDeny — it keeps its gated command surface
+//     (commit-gate.sh) but the broad harness wildcard denies so the
+//     committer never invokes the harness binary directly outside its gate.
+//   - docs-steward, commit-message, commit-reviewer, ship-review, plan, the
+//     commit-reviewer-a..d cluster leaves, and the top-level default carry
+//     scalar-derived policies (Allow/Ask/Deny) matching their pre-read_only
+//     behavior; they were NOT migrated to read_only because they are not
+//     read-only harness specialists (orchestrators, gate-scoped, or
+//     advisory).
+//
 // Edit values mirror the corpus template's edit decisions, extended by a
 // UNIVERSAL disposable-scratch carve-out: every agent may Write the gitignored,
 // watcher-ignored `tmp/**` scratch surface (see TmpWriteGlob). The emitter's
@@ -245,28 +266,28 @@ func splitFields(s string) []string {
 // review of the findLast interaction (key order is load-bearing: "*" first,
 // then EditOverrides, then tmp/** last).
 var CoreLocationRules = map[string]LocationRule{
-	"default": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Ask},
-	"plan":    {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Ask, Edit: Deny},
+	"default": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Ask},
+	"plan":    {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAsk, Edit: Deny},
 	"build": {
-		Wildcard: Ask, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Allow, Edit: Allow, // gate-exempt
+		Wildcard: Ask, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyAllow, Edit: Allow, // gate-exempt
 	},
-	"coordination":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Allow, Edit: Deny}, // gate-exempt
-	"planner":             {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
-	"researcher":          {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
-	"project-coordinator": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Allow, Edit: Deny}, // gate-exempt
-	"debate":              {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny, Edit: Deny},
-	"debate-proposer":     {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny, Edit: Deny},
-	"debate-critic":       {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny, Edit: Deny},
-	"debate-synth":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny, Edit: Deny},
-	"solution-brief":      {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Deny, Edit: Deny},
-	"repo-explorer":       {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Ask, Edit: Deny},
+	"coordination":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyAllow, Edit: Deny}, // gate-exempt
+	"planner":             {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"researcher":          {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"project-coordinator": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyAllow, Edit: Deny}, // gate-exempt
+	"debate":              {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"debate-proposer":     {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"debate-critic":       {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"debate-synth":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"solution-brief":      {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"repo-explorer":       {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	"docs-steward": {
-		Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, DevSh: Ask, Edit: Allow, // gate-exempt
+		Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyAsk, Edit: Allow, // gate-exempt
 	},
-	"commit-message":  {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
-	"commit-reviewer": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	"commit-message":  {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
+	"commit-reviewer": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
 	"committer": {
-		Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Allow, HasGate: true, DevSh: Deny,
+		Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Allow, HasGate: true, HarnessPolicy: HarnessPolicyDeny,
 		// Object-form edit: deny-* FIRST, then the ONE scoped allow LAST. The
 		// committer authors its commit message via the Write tool at
 		// tmp/commit-gate-message/msg-${UUID}, which acquire --message-file
@@ -278,20 +299,20 @@ var CoreLocationRules = map[string]LocationRule{
 		Edit:          Deny,
 		EditOverrides: []EditRule{{Pattern: CommitGateMessageGlob, Decision: Allow}},
 	},
-	"ship-review": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	"ship-review": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
 	// media-perception: opt-in read-only perception specialist
 	// (core/media-perception). Rendered only when the capability is selected;
 	// the four inbound caller edges below are dropped by Emit's present-agent
 	// filter when this agent is absent from the rendered roster. NOT
 	// gate-exempt — gate-exempt is reserved for the four orchestrators above.
-	"media-perception": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	"media-perception": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	// Cluster leaves (commit-reviewer-a..d) — the corpus ships these as full
 	// agent blocks. They carry the leafBaseRule (deny wildcard, allow
 	// readonly/git_readonly, deny gate, allow devSh) and a deny-all task rule.
-	"commit-reviewer-a": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
-	"commit-reviewer-b": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
-	"commit-reviewer-c": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
-	"commit-reviewer-d": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, DevSh: Allow, Edit: Deny},
+	"commit-reviewer-a": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
+	"commit-reviewer-b": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
+	"commit-reviewer-c": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
+	"commit-reviewer-d": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Deny},
 }
 
 // GateExemptBase is the set of agents that must NOT carry a gate key in their
@@ -446,6 +467,82 @@ const BacklogCommand = "vh-agent-harness exec node .opencode/scripts/normalize-b
 // DevShCommand is the always-last entry in every bash block, keyed by the
 // "vh-agent-harness *" wildcard that matches the binary's own invocations.
 const DevShCommand = "vh-agent-harness *"
+
+// HarnessReadOnlyCommands is the CANONICAL, Go-owned inventory of safe
+// read-only vh-agent-harness verbs emitted as "allow" AFTER the broad
+// "vh-agent-harness *": "deny" entry (region 4b) for every agent whose
+// HarnessPolicy is read_only. Under opencode's findLast (last-match-wins)
+// resolution, these specific allows override the broad deny so read-only
+// specialists get prompt-free access to inspection verbs while every
+// mutation/shell/diagnostics-export/unknown-future verb stays denied.
+//
+// This table is NOT copied per-agent: it is the single source of truth. The
+// emitter (computeBashBlock) reads it directly; protectedBashKeys adds every
+// entry so transform-contributed extras can never collide with or shadow a
+// canonical allow. Adding a verb here grants it to ALL read_only agents; add
+// only verbs that are (a) strictly read-only (no side effects, no writes, no
+// network egress, no secret disclosure) and (b) safe for EVERY read_only
+// specialist to run.
+//
+// v1 inventory — deliberately conservative. Withheld pending audit (stay
+// denied in v1): "vh-agent-harness skill validate *" (accepts caller-selected
+// paths, needs path-confinement audit), "vh-agent-harness logs *" (needs
+// information-disclosure audit), "vh-agent-harness ps" (needs command-line/
+// env-adjacent info audit). Explicitly EXCLUDED: all mutation verbs (exec *,
+// exec-sandbox *, shell *, up *, down *, install *, update *, uninstall *,
+// self-update *, overlay new *), artifact-producing verbs (diagnostics-export
+// *, __*), and broad wildcards (skill *, overlay *).
+//
+// "vh-agent-harness exec-ro *" also appears in the readonly CommandGroup
+// (tables.go:readonly). For read_only agents, computeBashBlock SKIPS it in
+// the command-group region (region 2) because it would be a dead entry
+// (shadowed by the 4a deny) AND a duplicate of the 4b canonical allow. For
+// non-read_only agents, it stays in the command-group region as before
+// (harmlessly dead — always shadowed by the scalar "vh-agent-harness *"
+// entry — but consistent with the legacy emission).
+var HarnessReadOnlyCommands = []string{
+	"vh-agent-harness exec-ro *",
+	"vh-agent-harness --help",
+	"vh-agent-harness -h",
+	"vh-agent-harness guide",
+	"vh-agent-harness guide *",
+	"vh-agent-harness doctor",
+	"vh-agent-harness doctor *",
+	"vh-agent-harness preflight",
+	"vh-agent-harness preflight *",
+	"vh-agent-harness diff",
+	"vh-agent-harness diff *",
+	"vh-agent-harness status",
+	"vh-agent-harness status *",
+	"vh-agent-harness proposals",
+	"vh-agent-harness proposals *",
+	"vh-agent-harness version",
+	"vh-agent-harness version *",
+	"vh-agent-harness docs",
+	"vh-agent-harness docs *",
+	"vh-agent-harness example",
+	"vh-agent-harness example *",
+	"vh-agent-harness sys-prompt",
+	"vh-agent-harness sys-prompt *",
+	"vh-agent-harness help",
+	"vh-agent-harness help *",
+	"vh-agent-harness skill list",
+	"vh-agent-harness skill list *",
+	"vh-agent-harness overlay docs *",
+}
+
+// HarnessReadOnlyCommandsSet is the set form of HarnessReadOnlyCommands for
+// O(1) membership lookup (used by computeBashBlock to skip dead duplicates in
+// the command-group region for read_only agents, and by protectedBashKeys to
+// guard transform collisions). Built once at package init from the slice so
+// the slice stays the canonical ordered source.
+var HarnessReadOnlyCommandsSet = func() map[string]bool {
+	m := make(map[string]bool, len(HarnessReadOnlyCommands))
+	for _, cmd := range HarnessReadOnlyCommands {
+		m[cmd] = true
+	}
+	return m
+}()
 
 // CommitGateMessageGlob is the ONE scoped edit-tool path the committer may
 // Write to (in addition to the universal TmpWriteGlob carve-out). It is

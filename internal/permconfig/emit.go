@@ -169,11 +169,15 @@ func mergeExtraBash(locations map[string]LocationRule, present map[string]bool, 
 func resolveRules(packs []Pack) (locations map[string]LocationRule, tasks map[string][]TaskEntry, gateExempt map[string]bool) {
 	locations = make(map[string]LocationRule, len(CoreLocationRules))
 	for k, v := range CoreLocationRules {
-		// Core tables use the DevSh field directly. Mirror it into Harness so
-		// the invariant "Harness and DevSh carry the same normalized value"
-		// holds for core-table-sourced rules as well as parsed packs.
-		if v.Harness == "" && v.DevSh != "" {
-			v.Harness = v.DevSh
+		// Core tables declare HarnessPolicy directly (the preferred channel).
+		// normalizeHarnessFields derives the scalar Harness/DevSh fields from
+		// the policy so emission and validation read consistent values. A core
+		// table that fails normalization is a compile-time authoring bug —
+		// panic rather than silently emit an invalid config. (Overlay-pack
+		// rules arriving via parseLocation are normalized defensively inside
+		// validate below.)
+		if err := normalizeHarnessFields(&v); err != nil {
+			panic(fmt.Sprintf("permconfig: core location rule %q fails normalizeHarnessFields: %v", k, err))
 		}
 		locations[k] = v // LocationRule is a value type; no deep copy needed
 	}
@@ -219,6 +223,19 @@ func resolveRules(packs []Pack) (locations map[string]LocationRule, tasks map[st
 		}
 	}
 
+	// Normalize all resolved rules so downstream consumers (computeBashBlock,
+	// validate) read consistent HarnessPolicy/Harness/DevSh values. Core-table
+	// rules are already normalized (idempotent no-op); pack-sourced rules may
+	// arrive with only a scalar channel (Harness or DevSh) set. Normalization
+	// errors here are not fatal — validate re-normalizes defensively and
+	// surfaces them as hard errors. But successful normalization populates
+	// HarnessPolicy from the scalar so computeBashBlock reads the correct
+	// policy.
+	for name, rule := range locations {
+		_ = normalizeHarnessFields(&rule)
+		locations[name] = rule
+	}
+
 	return locations, tasks, gateExempt
 }
 
@@ -230,14 +247,25 @@ func resolveRules(packs []Pack) (locations map[string]LocationRule, tasks map[st
 //     for gate-exempt agents), each command paired with its group's decision,
 //     ALL sorted by length-ascending then byte-locale. The backlog entry (if
 //     enabled and this is the top-level "default" location) participates in
-//     this same sort.
+//     this same sort. For read_only agents, canonical read-only harness verbs
+//     (HarnessReadOnlyCommandsSet members) are SKIPPED here — they are emitted
+//     as specific allows in region 4b instead, and emitting them here would
+//     produce a dead entry (shadowed by the 4a deny) plus a duplicate key.
 //  3. Transform-contributed extra entries (rule.ExtraBash), sorted
 //     length-then-locale. These are merged AFTER the command-group region so
 //     that an extra allow (e.g. "./dev.sh *") wins over the leading "*": "deny"
 //     under OpenCode's findLast (last-match-wins) semantics. Protected-key
-//     collisions with "*", command-group commands, or "vh-agent-harness *" are
-//     rejected at validate time.
-//  4. "vh-agent-harness *" (devSh decision) — always LAST.
+//     collisions with "*", command-group commands, "vh-agent-harness *", or any
+//     canonical read-only harness verb are rejected at validate time.
+//  4. The policy-owned harness region:
+//     - 4a: the broad "vh-agent-harness *" entry carrying the policy's
+//     wildcardDecision (allow/ask/deny scalar, or deny for read_only).
+//     - 4b: for read_only ONLY, each canonical safe read-only harness verb
+//     (HarnessReadOnlyCommands) emitted as "allow" AFTER 4a. Under findLast
+//     these later specific allows win over the earlier broad deny, so
+//     read-only specialists get prompt-free access to safe inspection verbs
+//     while every mutation/shell/diagnostics-export/unknown verb stays
+//     denied. allow/ask/deny agents emit NO 4b region.
 func computeBashBlock(rule LocationRule, locationName string, features Features) *orderedMap {
 	om := newOrderedMap()
 	om.set("*", string(rule.Wildcard))
@@ -261,6 +289,18 @@ func computeBashBlock(rule LocationRule, locationName string, features Features)
 			continue
 		}
 		for _, cmd := range group.Commands {
+			// read_only agents emit the canonical read-only harness verbs as
+			// specific allows in region 4b AFTER the 4a deny. If a command-
+			// group entry is also a canonical read-only command (today only
+			// "vh-agent-harness exec-ro *"), emitting it here would produce a
+			// dead entry (shadowed by the later 4a deny) AND a duplicate of
+			// the 4b allow. Skip it for read_only agents; non-read_only agents
+			// keep the legacy emission (the entry is harmlessly shadowed by
+			// their scalar "vh-agent-harness *" entry but stays for byte-
+			// stability with the pre-read_only output).
+			if rule.HarnessPolicy == HarnessPolicyReadOnly && HarnessReadOnlyCommandsSet[cmd] {
+				continue
+			}
 			entries = append(entries, cmdEntry{cmd, string(decision)})
 		}
 	}
@@ -301,7 +341,23 @@ func computeBashBlock(rule LocationRule, locationName string, features Features)
 		}
 	}
 
-	om.set(DevShCommand, string(rule.DevSh))
+	// Region 4 — the policy-owned harness region. Emission depends on the
+	// agent's HarnessPolicy:
+	//   - read_only: emit "vh-agent-harness *": "deny" FIRST (region 4a, the
+	//     catch-all that denies every mutation/shell/diagnostics/unknown verb),
+	//     THEN emit each canonical safe read-only verb as "allow" AFTER (region
+	//     4b). Under findLast the later specific allows win over the earlier
+	//     broad deny — this is the ONLY correct shape under findLast.
+	//   - allow/ask/deny: emit only the scalar "vh-agent-harness *":
+	//     <wildcardDecision> (region 4a, no 4b exceptions). Transform-injected
+	//     harness patterns in region 3 are inert under findLast (this 4a scalar
+	//     is later and wins).
+	om.set(DevShCommand, string(rule.HarnessPolicy.wildcardDecision()))
+	if rule.HarnessPolicy == HarnessPolicyReadOnly {
+		for _, cmd := range HarnessReadOnlyCommands {
+			om.set(cmd, string(Allow))
+		}
+	}
 	return om
 }
 
@@ -371,15 +427,21 @@ func computeTaskBlock(rule []TaskEntry, present map[string]bool) *orderedMap {
 
 // protectedBashKeys returns the set of bash-block keys that the transform's
 // extra entries may NEVER collide with: the "*" wildcard, every command-group
-// command (readonly + git_readonly + gate), the backlog command, and the fixed
-// "vh-agent-harness *" devSh entry. Colliding with any of these would either
-// shadow a canonical entry or corrupt the "vh-agent-harness *"-last boundary.
+// command (readonly + git_readonly + gate), the backlog command, the fixed
+// "vh-agent-harness *" devSh entry, and every canonical read-only harness verb
+// (HarnessReadOnlyCommands). Colliding with any of these would either shadow a
+// canonical entry, corrupt the "vh-agent-harness *"-last boundary, or let a
+// transform weaken the read_only deny-first contract by injecting a hostile
+// decision ahead of the canonical 4b allows.
 func protectedBashKeys() map[string]bool {
 	protected := map[string]bool{"*": true, DevShCommand: true, BacklogCommand: true}
 	for _, group := range CommandGroups {
 		for _, cmd := range group.Commands {
 			protected[cmd] = true
 		}
+	}
+	for _, cmd := range HarnessReadOnlyCommands {
+		protected[cmd] = true
 	}
 	return protected
 }
@@ -427,6 +489,16 @@ func validateExtraBash(agentName string, entries []BashEntry) error {
 func validate(locations map[string]LocationRule, tasks map[string][]TaskEntry, gateExempt map[string]bool) error {
 	// Location rule decisions.
 	for name, rule := range locations {
+		// normalizeHarnessFields defensively reconciles the three harness
+		// channels for rules arriving from any source (core tables are already
+		// normalized in resolveRules; overlay packs arrive via parseLocation;
+		// test literals may construct rules directly). A conflict is a hard
+		// error. `rule` is a value-typed iteration copy; normalizing it does
+		// not mutate the map, but the subsequent validDecision checks read the
+		// normalized scalar fields, which is what matters here.
+		if err := normalizeHarnessFields(&rule); err != nil {
+			return fmt.Errorf("agent %q: %w", name, err)
+		}
 		if !validDecision(rule.Wildcard) {
 			return fmt.Errorf("agent %q: wildcard decision %q invalid", name, rule.Wildcard)
 		}
@@ -644,16 +716,25 @@ func parsePack(data []byte, name string) (Pack, error) {
 }
 
 // parseLocation converts a JSON object with wildcard/readonly/git_readonly/
-// gate/harness/devSh keys into a LocationRule. The gate key is optional: its
-// absence means HasGate=false (the agent is gate-exempt or the pack author
-// chose to omit it).
+// gate/harnessPolicy/harness/devSh keys into a LocationRule. The gate key is
+// optional: its absence means HasGate=false (the agent is gate-exempt or the
+// pack author chose to omit it).
 //
-// "harness" (PREFERRED) and "devSh" (DEPRECATED alias) both set the fixed
-// "vh-agent-harness *" decision. If BOTH are present they must carry the SAME
-// decision; specifying both with different decisions is a hard error (a
-// confused pack is rejected rather than silently picking one). The normalized
-// value is stored in both rule.Harness and rule.DevSh so emission (which reads
-// rule.DevSh) and validation stay unchanged.
+// The harness policy is read from three mutually-compatible declaration
+// channels, all of which accept all four values (allow, ask, deny, read_only):
+//
+//   - "harnessPolicy" (NEW, PREFERRED — the dedicated policy key).
+//   - "harness" (legacy scalar).
+//   - "devSh" (deprecated alias of "harness").
+//
+// If multiple channels are present they must all resolve to the same
+// (policy, scalar) pair; specifying channels with different decisions is a
+// hard error (fail-closed). The normalized HarnessPolicy is stored on the
+// rule; Harness and DevSh carry the implied scalar (wildcardDecision) so
+// emission and validation read consistent values. "read_only" is expressible
+// through any channel — e.g. {"harness": "read_only"} yields
+// HarnessPolicyReadOnly — but the preferred spelling is the dedicated
+// "harnessPolicy" key.
 func parseLocation(m map[string]any) (LocationRule, error) {
 	rule := LocationRule{}
 	if v, ok := m["wildcard"].(string); ok {
@@ -669,24 +750,48 @@ func parseLocation(m map[string]any) (LocationRule, error) {
 		rule.Gate = Decision(v)
 		rule.HasGate = true
 	}
-	// Read the fixed "vh-agent-harness *" decision from the preferred "harness"
-	// key and the deprecated "devSh" alias. If both are present they must agree.
-	harnessRaw, hasHarness := m["harness"].(string)
-	devShRaw, hasDevSh := m["devSh"].(string)
-	if hasHarness && hasDevSh {
-		if harnessRaw != devShRaw {
-			return LocationRule{}, fmt.Errorf(
-				"location: 'harness' (%q) and 'devSh' (%q) both specified with different decisions — "+
-					"use 'harness' only (devSh is deprecated), or specify both with the same decision",
-				harnessRaw, devShRaw)
+	// Read the harness policy from any of three declaration channels:
+	//   - harnessPolicy (NEW, preferred — the only way to express read_only
+	//     via the dedicated policy key; also expressible via the legacy keys)
+	//   - harness (legacy scalar — accepts allow/ask/deny/read_only values)
+	//   - devSh (deprecated alias of harness)
+	// All channels accept all four values (allow/ask/deny/read_only) via
+	// parseHarnessValue, so a pack author can write "harness": "read_only" and
+	// get HarnessPolicyReadOnly. If multiple channels are present they must all
+	// resolve to the SAME (policy, scalar) pair; any disagreement is a hard
+	// error (fail-closed). The resulting HarnessPolicy is stored on the rule;
+	// Harness and DevSh carry the implied scalar (wildcardDecision).
+	// normalizeHarnessFields (called in resolveRules for core tables and
+	// validate for all rules) re-checks consistency defensively.
+	var declaredPolicy HarnessPolicy
+	var declaredScalar Decision
+	channelsPresent := 0
+	for _, key := range []string{"harnessPolicy", "harness", "devSh"} {
+		raw, ok := m[key].(string)
+		if !ok {
+			continue
 		}
+		policy, scalar, parsedOK := parseHarnessValue(raw)
+		if !parsedOK {
+			return LocationRule{}, fmt.Errorf(
+				"location: %q value %q is not a valid harness decision (allow, ask, deny, read_only)",
+				key, raw)
+		}
+		if channelsPresent == 0 {
+			declaredPolicy = policy
+			declaredScalar = scalar
+		} else if policy != declaredPolicy {
+			return LocationRule{}, fmt.Errorf(
+				"location: conflicting harness declarations — %q (%q) and a previous channel (%q) specify different decisions; "+
+					"use a single channel (harnessPolicy preferred; harness/devSh are legacy scalar aliases)",
+				key, raw, string(declaredPolicy))
+		}
+		channelsPresent++
 	}
-	if hasHarness {
-		rule.Harness = Decision(harnessRaw)
-		rule.DevSh = Decision(harnessRaw)
-	} else if hasDevSh {
-		rule.Harness = Decision(devShRaw)
-		rule.DevSh = Decision(devShRaw)
+	if channelsPresent > 0 {
+		rule.HarnessPolicy = declaredPolicy
+		rule.Harness = declaredScalar
+		rule.DevSh = declaredScalar
 	}
 	if v, ok := m["edit"].(string); ok {
 		rule.Edit = Decision(v)
