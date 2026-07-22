@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "commit_sha": "beaecfddfd7ebef131e8dbc148303bbc8f9dfcb9",
+  "model_gates": {
+    "G1_coverage": "ready",
+    "G2_significance": "ready",
+    "G3_docs": "ready",
+    "G4_visibility": "ready",
+    "G5_curated_note": "ready"
+  }
+}
