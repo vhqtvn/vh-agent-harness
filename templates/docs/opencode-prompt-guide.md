@@ -75,6 +75,24 @@ Every non-trivial prompt should include these fields when applicable:
 | **What to preserve** | You MUST NOT delete or overwrite the items listed here. |
 | **Verification** | Run the specified commands or checks to confirm cleanup is complete. |
 
+### Recommended for prompts that carry load-bearing premises across a boundary
+
+A **load-bearing premise** is a mutable fact the downstream step will act on as
+true (e.g. "the profile does not select X", "the gate already passed"). When a
+prompt, handoff, or task card carries one across a lossy boundary (handoff →
+dispatch → resume → post-compression re-entry), encode it as a re-derivable
+4-tuple instead of bare truth, and instruct the receiver to re-derive it before
+acting:
+
+| Field | Agent rule & processing instruction |
+| --- | --- |
+| **Load-bearing premises** | List each as `(value, source, re_derivation_command, observed_at)`. `re_derivation_command` must be a cheap, side-effect-free command that reproduces `value` from current ground truth. The receiving session MUST run it before acting on the premise; on disagreement the premise is stale and is re-adjudicated, not silently re-asserted. |
+
+This is a **discipline, not a gate** — no boundary check can see inside the
+receiving session's own (post-compression) context, which is the
+structurally-hardest lossy surface. The field reduces stale-premise
+re-assertion only insofar as the receiver actually runs the re-derivation.
+
 ### Verification fields for checkpoints and handoffs
 
 All non-trivial checkpoints and handoffs MUST include these structured sections:
