@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "release_base": { "kind": "tag", "value": "v0.13.1" },
-  "evaluated_commit": "34cb1abce8ff523ab162f90ede0bdb8405c51d10",
-  "evaluated_tree": "207594567b27597801f38ca7684cbde8c90b2d26",
-  "manifest_parent_commit": "34cb1abce8ff523ab162f90ede0bdb8405c51d10",
+  "release_base": { "kind": "tag", "value": "v0.14.0" },
+  "evaluated_commit": "f585702a89363858759887ca8cde41301e0bb4ce",
+  "evaluated_tree": "d7f9637be09a1db43f5fa18bb669be999f0dc3bb",
+  "manifest_parent_commit": "f585702a89363858759887ca8cde41301e0bb4ce",
   "reconciliation": {
     "status": "confirmed",
-    "scope": "Release arc: v0.13.1 through evaluated_commit (intended release v0.14.0). The handshake SHAs (evaluated_commit / evaluated_tree / manifest_parent_commit) bind to R (the readiness-artifact commit), which sits between N (the release-note commit) and M (this manifest commit) in the wrapper-required three-commit ceremony note(N) -> artifact(R) -> manifest(M): N (beaecfd, the migration-note commit, child of release-prep P) -> R (the single-path readiness-artifact commit, child of N) -> M (this manifest-only commit, child of R). At HEAD=M the DEFER handshake invariant requires HEAD^ == R == evaluated_commit == manifest_parent_commit AND tree(HEAD^) == evaluated_tree == tree(R); the readiness gate additionally requires the committed artifact (.vh-agent-harness/release-readiness-pass.json) to carry commit_sha == HEAD^^ == N (beaecfd) and to be the single path changed in HEAD^^..HEAD^. Release mode is manifest-authority-only; the wrapper and CI recheck always read this committed manifest. records[] dispositions are operator-attested and unchanged by the releaser's SHA recompute.",
+    "scope": "Release arc: v0.14.0 (derived on read from the last reachable tag) through evaluated_commit (intended release v0.15.0). The handshake SHAs (evaluated_commit / evaluated_tree / manifest_parent_commit) bind to R' (the readiness-artifact commit re-pinned to release-prep base 28deee3), which sits between the pre-existing note commit (07d37f3, resumable_existing_note — the note is in history, not re-authored) and M' (this manifest commit) in the wrapper-required three-commit ceremony note(N) -> artifact(R') -> manifest(M'). At HEAD=M' the DEFER handshake invariant requires HEAD^ == R' == evaluated_commit == manifest_parent_commit AND tree(HEAD^) == evaluated_tree == tree(R'); the readiness gate additionally requires the committed artifact (.vh-agent-harness/release-readiness-pass.json) to carry commit_sha == HEAD^^ == 28deee3 (the release-prep base under resumable_existing_note) and to be the single path changed in HEAD^^..HEAD^. Release mode is manifest-authority-only; the wrapper and CI recheck always read this committed manifest. release_base.value is advisory (derive-on-read via gitLatestTag); kind stays operator-attested. records[] dispositions are operator-attested and unchanged by the releaser's SHA recompute.",
     "zero_records_confirmed": false
   },
   "records": [
