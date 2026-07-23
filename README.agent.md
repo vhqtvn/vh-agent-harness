@@ -830,7 +830,7 @@ export default function transform({ context }) {
 
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   overlay-perm, environment, config-refs, gitignore, auto-classifier,
-  auto-gate-ignore, skills, subagent-depth). The `auto-classifier` check lints the shape (field
+  auto-gate-ignore, skills, subagent-depth, defer-liveness). The `auto-classifier` check lints the shape (field
   set + types + enums) of the auto-classifier-pilot overlay's config files when
   present — a present-but-invalid `auto-gate-config.json` / `auto-gate-llm.json`
   FAILs; absent configs are never failures (defaults apply). The `auto-gate-ignore`
@@ -848,7 +848,10 @@ export default function transform({ context }) {
   global) and WARNs when it is unset or below the minimum this harness's
   multi-level delegation needs (`subagent_depth` defaults to 1, which breaks
   coordination→build→committer and the solution-brief chain); a user-level
-  override is honored and never false-flagged missing. `vh-agent-harness diff` shows drift vs. the corpus.
+  override is honored and never false-flagged missing. The `defer-liveness`
+  check FAILs when an open coordinator defer/errata card contradicts a present
+  released (or about-to-release) migration-note claim, and is fail-closed on
+  malformed cards. `vh-agent-harness diff` shows drift vs. the corpus.
 - **Inspect / validate skills:** `vh-agent-harness skill list` prints every skill
   (core, overlay-pack, and rendered) with its source, whether it is rendered to
   `.opencode/skills/`, and whether its SKILL.md frontmatter is valid.
