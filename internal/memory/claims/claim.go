@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,12 +88,19 @@ type NoteClaim struct {
 // rest is carried to name the offending card. Path, IsErrata, and
 // ReferencedVersions are DERIVED from the on-disk filename and the scope strings
 // (not present in the card JSON), so they are excluded from JSON decoding.
+//
+// StagedPath is a REAL decoded field (present in the errata-card schema as
+// "staged_path") that points at the staged erratum text file. It is empty for
+// defer cards and for errata cards not yet staged. The staged-errata-content
+// gate (doctor check #13) and `release inject-errata` read it so they never
+// have to re-parse the card JSON.
 type DeferCard struct {
 	TaskID       string   `json:"task_id"`
 	Title        string   `json:"title"`
 	Status       string   `json:"status"`
 	FilesInScope []string `json:"files_in_scope"`
 	RoughScope   []string `json:"rough_scope"`
+	StagedPath   string   `json:"staged_path"`
 	// Derived (not decoded). json:"-" so a stray same-named key never touches them.
 	Path               string   `json:"-"`
 	IsErrata           bool     `json:"-"`
@@ -134,6 +142,45 @@ var semverVersionRe = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
 // "v0.12.0.md". extractReferencedVersions pulls ALL matches from a string (not
 // just the first) so a scope entry naming two notes is fully evaluated.
 var migrationNotePathRe = regexp.MustCompile(`v\d+\.\d+\.\d+\.md`)
+
+// semverLess compares two bare release version tokens (vX.Y.Z) numerically by
+// major.minor.patch. This is used to sort migration notes so that
+// about[len-1] is the true highest version — not the lexicographic highest
+// (which would order v0.10.0 below v0.9.0). Both consumers of the sorted list
+// (doctor check #13 staged-errata-content and `release inject-errata`) select
+// about[len-1] as the shipping note, so the sort comparator is load-bearing for
+// release safety.
+func semverLess(a, b string) bool {
+	aa := parseSemver(a)
+	bb := parseSemver(b)
+	if aa[0] != bb[0] {
+		return aa[0] < bb[0]
+	}
+	if aa[1] != bb[1] {
+		return aa[1] < bb[1]
+	}
+	return aa[2] < bb[2]
+}
+
+// parseSemver extracts [major, minor, patch] from a bare vX.Y.Z token. On any
+// parse failure it returns [0,0,0], which sorts first — a safe fallback since
+// the semverVersionRe gate already rejects non-matching names upstream.
+func parseSemver(v string) [3]int {
+	s := strings.TrimPrefix(v, "v")
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return [3]int{0, 0, 0}
+	}
+	var out [3]int
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return [3]int{0, 0, 0}
+		}
+		out[i] = n
+	}
+	return out
+}
 
 // closedStatuses are the task-card statuses no longer an OPEN contradiction
 // against a released/about-to-release claim: completed (landed), cancelled
@@ -282,7 +329,7 @@ func migrationNotes(repoRoot string) (notes []NoteClaim, present bool, err error
 			Released: released[ver],
 		})
 	}
-	sort.Slice(notes, func(i, j int) bool { return notes[i].Version < notes[j].Version })
+	sort.Slice(notes, func(i, j int) bool { return semverLess(notes[i].Version, notes[j].Version) })
 	return notes, len(notes) > 0, nil
 }
 

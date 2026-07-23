@@ -62,6 +62,7 @@ var doctorCmd = &cobra.Command{
   skills          every rendered skill's SKILL.md frontmatter valid       FAIL if invalid
   subagent-depth  effective merged subagent_depth >= delegation minimum  WARN if unset/too low
   defer-liveness  open defer/errata cards contradict no released claim     FAIL if open card contradicts a present note
+  staged-errata-content staged errata correction present in release note   FAIL if staged card content missing from the about-to-release note
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -221,6 +222,22 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	dlr := checkDeferLiveness(abs)
 	fmt.Fprintln(out, "    "+dlr.String())
 	applyTier(dlr.tier, &problems, &warns)
+
+	// 13. Staged-errata-content (the THIRD failure mode). defer-liveness (#12)
+	//     treats `staged` as closed, but "staged" only means "correction queued"
+	//     — it does NOT prove the correction was injected into the about-to-
+	//     release note. This check FAILs when a staged errata card's correction
+	//     body is absent from the untagged (about-to-release) migration note.
+	//     It is the hard stop that turns the four-times-missed v0.12.0 erratum
+	//     defect into a machine-enforced block. Composes with #12 and the
+	//     `release inject-errata` subcommand: inject flips staged→completed, so
+	//     this check sees no staged cards and passes; if inject was forgotten,
+	//     the card stays staged and the note lacks the content → FAIL. SKIPs
+	//     cleanly when no about-to-release note exists (no imminent release).
+	fmt.Fprintln(out, "  staged-errata-content:")
+	secr := checkStagedErrataContent(abs)
+	fmt.Fprintln(out, "    "+secr.String())
+	applyTier(secr.tier, &problems, &warns)
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)

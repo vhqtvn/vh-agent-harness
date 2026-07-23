@@ -18,12 +18,51 @@ package cli
 // `make update` having run.
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
+
+// harnessBinaryOnce builds the vh-agent-harness binary at most once per test
+// process and prepends its directory to PATH. This lets scripts/release-tag.sh's
+// G0c gate (`vh-agent-harness doctor`) resolve the binary when run from scratch
+// test fixtures. Because os.Setenv modifies the process environment, ALL
+// subsequent os.Environ() calls (used to build cmd.Env) inherit the binary.
+var (
+	harnessBinaryOnce sync.Once
+	harnessBinaryErr  error
+)
+
+func ensureHarnessBinaryOnPath(t *testing.T) {
+	t.Helper()
+	harnessBinaryOnce.Do(func() {
+		root := findModuleRoot(t)
+		dir, err := os.MkdirTemp("", "vh-test-bin-*")
+		if err != nil {
+			harnessBinaryErr = fmt.Errorf("mkdtemp: %w", err)
+			return
+		}
+		binPath := filepath.Join(dir, "vh-agent-harness")
+		cmd := exec.Command("go", "build", "-o", binPath, "./cmd/vh-agent-harness")
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			harnessBinaryErr = fmt.Errorf("go build harness binary: %w\n%s", err, out)
+			return
+		}
+		os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		// G0c gates doctor on seam-installation (lineage.yml presence); scratch
+		// fixtures lack lineage.yml, so G0c skips there naturally — no env-var
+		// bypass is needed or shipped. The binary-on-PATH is still required for
+		// the dedicated G0c test whose fixture DOES write a lineage.yml.
+	})
+	if harnessBinaryErr != nil {
+		t.Fatalf("ensure harness binary on PATH: %v", harnessBinaryErr)
+	}
+}
 
 // setupReleaseTagRepo creates an isolated scratch git repo with:
 //   - scripts/release-tag.sh copied from the repo source (project-local)
@@ -46,6 +85,7 @@ func setupReleaseTagRepo(t *testing.T) (scratch, wrapper, tasksDir, msgFile stri
 			t.Skipf("%s not on PATH: %v", bin, err)
 		}
 	}
+	ensureHarnessBinaryOnPath(t)
 	root := findModuleRoot(t)
 
 	// Copy the project-local wrapper (source = shipped).

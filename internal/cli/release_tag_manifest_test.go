@@ -50,6 +50,7 @@ func setupReleaseTagManifestRepo(t *testing.T, spec manifestSpec) (scratch, wrap
 			t.Skipf("%s not on PATH: %v", bin, err)
 		}
 	}
+	ensureHarnessBinaryOnPath(t)
 	root := findModuleRoot(t)
 	wrapperBody, err := os.ReadFile(filepath.Join(root, "scripts", "release-tag.sh"))
 	if err != nil {
@@ -1417,5 +1418,72 @@ func TestReleaseTag_ReadinessArtifact_ShallowHistoryRefuses(t *testing.T) {
 	}
 	if result.Error == nil || !strings.Contains(*result.Error, "HEAD^^ does not exist") {
 		t.Errorf("error must mention HEAD^^ does not exist; got %v", result.Error)
+	}
+}
+
+// TestReleaseTag_G0c_DoctorUnhealthyRefuses — the G0c gate runs
+// `vh-agent-harness doctor` and refuses the tag when doctor is not HEALTHY.
+// The scratch fixture lacks the full .opencode/ tree, so doctor's
+// managed-drift check correctly reports drift (UNHEALTHY).
+//
+// G0c is gated on seam-installation (lineage.yml presence): scratch fixtures
+// normally lack it, so G0c skips there. This test writes a minimal lineage.yml
+// into the fixture so G0c ACTUALLY RUNS doctor, proving the gate fires and
+// produces a clear error message. No env-var bypass is involved.
+func TestReleaseTag_G0c_DoctorUnhealthyRefuses(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+
+	// Write a minimal lineage.yml so G0c's seam-installation gate runs doctor.
+	// (Without it, G0c skips — the correct behavior for a non-seam tree.)
+	// Commit it as a new commit, then re-stamp the manifest so the DEFER gate
+	// passes (the manifest's handshake references the new parent HEAD^). This
+	// mirrors the pattern used by other tests that commit extra files on top
+	// of the manifest commit (e.g. G0 broken-build tests).
+	linBody := "lineage_version: \"1\"\ntemplate:\n    source: templates/core\n    commit: \"\"\n    ref: test\nrender:\n    rendered_by: test\n"
+	commitScratchFile(t, scratch, ".vh-agent-harness/lineage.yml", linBody, "lineage for G0c test")
+	restampManifest(t, scratch, manifestSpecForReadiness())
+
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
+	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
+		t.Fatalf("write msg: %v", err)
+	}
+	cmd := exec.Command("bash", wrapper, "v0.2.0")
+	cmd.Dir = filepath.Dir(filepath.Dir(wrapper)) // <scratch>
+	cmd.Env = append(os.Environ(),
+		"RELEASE_TAG_MESSAGE_FILE="+msgFile,
+	)
+	var outb, errb strings.Builder
+	cmd.Stdout = &outb
+	cmd.Stderr = &errb
+	timer := time.AfterFunc(60*time.Second, func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	defer timer.Stop()
+	runErr := cmd.Run()
+	exitCode := 0
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("bash spawn error: %v\nstderr: %s", runErr, errb.String())
+		}
+	}
+	if exitCode == 0 {
+		t.Fatalf("G0c must REFUSE (doctor unhealthy in scratch fixture); got exit 0\nstdout: %s\nstderr: %s", outb.String(), errb.String())
+	}
+	var result releaseTagManifestResult
+	stdout := outb.String()
+	if stdout != "" {
+		_ = json.Unmarshal([]byte(stdout), &result)
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "G0c doctor not HEALTHY") {
+		t.Errorf("error must mention G0c doctor not HEALTHY; got %v\nstdout: %s", result.Error, stdout)
+	}
+	// The tag must NOT exist.
+	if tagExists(t, scratch, "v0.2.0") {
+		t.Errorf("tag v0.2.0 must NOT exist after G0c refusal")
 	}
 }

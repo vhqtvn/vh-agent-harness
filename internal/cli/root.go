@@ -144,6 +144,8 @@ func init() {
 		// binary self-management
 		selfUpdateCmd,
 		versionCmd,
+		// release-ceremony machine steps (errata injection)
+		releaseCmd,
 		// health checks
 		preflightCmd,
 		doctorCmd,
@@ -180,7 +182,7 @@ func init() {
 	// titled group so the help surface reads as Lifecycle / Orientation /
 	// Health & Diagnostics / Runtime instead of one alphabetical flat list.
 	assignGroup(groupLifecycle,
-		installCmd, updateCmd, uninstallCmd, selfUpdateCmd, overlayCmd)
+		installCmd, updateCmd, uninstallCmd, selfUpdateCmd, overlayCmd, releaseCmd)
 	assignGroup(groupOrientation,
 		guideCmd, exampleCmd, docsCmd, sysPromptCmd, helpCmd)
 	assignGroup(groupHealth,

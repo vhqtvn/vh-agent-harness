@@ -16,6 +16,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -444,5 +445,234 @@ func TestDeferLivenessGate_LiveRepoIsClean(t *testing.T) {
 	}
 	if r.tier != tierPass {
 		t.Fatalf("live repo must be clean under the defer-liveness gate, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// --- doctor check #13: staged-errata-content (the THIRD failure mode) ---
+
+// sampleErratumBody is a minimal corrective body an erratum file carries after
+// its title + status blockquote. Used by the #13 tests as the content that must
+// appear in the about-to-release note for a staged card to pass.
+const sampleErratumBody = `## What was wrong
+
+The release note falsely claimed the feature worked.
+
+### 1. Specific defect
+
+**Claimed:** X happens.
+**Actual behavior:** Y happens.`
+
+// writeErratumFile writes an erratum markdown file at <dir>/<relPath> with a
+// standard title + status blockquote + the given corrective body. relPath is
+// repo-relative (e.g. "docs/migration-errata/v0.12.0.md").
+func writeErratumFile(t *testing.T, dir, relPath, version, body string) {
+	t.Helper()
+	abs := filepath.Join(dir, filepath.FromSlash(relPath))
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatalf("mkdir erratum dir: %v", err)
+	}
+	content := fmt.Sprintf("# Erratum: %s — sample false claim\n\n> **Status:** staged for injection into the next release note.\n\n%s\n", version, body)
+	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+		t.Fatalf("write erratum %s: %v", relPath, err)
+	}
+}
+
+// writeStagedErrataCard writes an errata card with status "staged" and a
+// staged_path pointing at relPath (repo-relative). Mirrors the real
+// errata-v0120 card shape but minimal (only fields the gate + inject read).
+func writeStagedErrataCard(t *testing.T, dir, name, taskID, title, stagedPath string) {
+	t.Helper()
+	obj := map[string]any{
+		"schema_version": 1,
+		"task_id":        taskID,
+		"title":          title,
+		"status":         "staged",
+		"staged_path":    stagedPath,
+		"files_in_scope": []string{},
+		"rough_scope":    []string{},
+	}
+	raw, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal card %s: %v", name, err)
+	}
+	writeTaskCard(t, dir, name, string(raw))
+}
+
+// writeMigrationNoteBody writes a migration note at
+// <dir>/templates/migrations/<version>.md with an arbitrary body (not just the
+// version title), so a test can seed a note that already contains erratum text.
+func writeMigrationNoteBody(t *testing.T, dir, version, body string) {
+	t.Helper()
+	d := filepath.Join(dir, "templates", "migrations")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatalf("mkdir migrations: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(d, version+".md"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write note %s: %v", version, err)
+	}
+}
+
+// TestStagedErrataContent_FailWhenContentMissing: a staged errata card whose
+// correction body is ABSENT from the about-to-release (untagged) note → FAIL.
+// This is the core third-failure-mode contract: the release ceremony must stop.
+func TestStagedErrataContent_FailWhenContentMissing(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n\nNo errata here.\n")
+	writeErratumFile(t, dir, "docs/migration-errata/v0.12.0.md", "v0.12.0", sampleErratumBody)
+	writeStagedErrataCard(t, dir, "errata-v0120-sample.json",
+		"errata-v0120-sample", "Erratum: sample false claim in v0.12.0", "docs/migration-errata/v0.12.0.md")
+
+	r := checkStagedErrataContent(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for staged errata whose content is missing from the note, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "errata-v0120-sample") {
+		t.Errorf("FAIL should name the offending card; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "v0.15.0") {
+		t.Errorf("FAIL should name the checked about-to-release note; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "inject-errata") {
+		t.Errorf("FAIL should point at the recovery command; got %q", r.detail)
+	}
+}
+
+// TestStagedErrataContent_PassWhenContentPresent: a staged errata card whose
+// correction body IS present in the about-to-release note → PASS. Proves the
+// content check is a real signature match, not card status alone.
+func TestStagedErrataContent_PassWhenContentPresent(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeErratumFile(t, dir, "docs/migration-errata/v0.12.0.md", "v0.12.0", sampleErratumBody)
+	writeStagedErrataCard(t, dir, "errata-v0120-sample.json",
+		"errata-v0120-sample", "Erratum: sample false claim in v0.12.0", "docs/migration-errata/v0.12.0.md")
+	// The note CONTAINS the erratum body under a section heading.
+	noteBody := "# v0.15.0\n\n## Errata for v0.12.0\n\n" + sampleErratumBody + "\n"
+	writeMigrationNoteBody(t, dir, "v0.15.0", noteBody)
+
+	r := checkStagedErrataContent(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for staged errata whose content is present in the note, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestStagedErrataContent_SkipWhenNoAboutToReleaseNote: a staged errata card but
+// NO about-to-release (untagged) note exists → SKIP. This is the current
+// steady-state of the real repo (no v0.15.0 note yet) and proves the check does
+// not false-flag a repo with no imminent release.
+func TestStagedErrataContent_SkipWhenNoAboutToReleaseNote(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	// Only a RELEASED note (tagged) exists — nothing about-to-release.
+	writeMigrationNoteBody(t, dir, "v0.14.0", "# v0.14.0\n")
+	gitCommitStub(t, dir)
+	gitTag(t, dir, "v0.14.0")
+	writeErratumFile(t, dir, "docs/migration-errata/v0.12.0.md", "v0.12.0", sampleErratumBody)
+	writeStagedErrataCard(t, dir, "errata-v0120-sample.json",
+		"errata-v0120-sample", "Erratum: sample false claim in v0.12.0", "docs/migration-errata/v0.12.0.md")
+
+	r := checkStagedErrataContent(dir)
+	// Assert the positive SKIP contract directly. Do NOT intercept our own
+	// expected outcome with t.Skipf — that would make the test pass trivially
+	// even if the implementation returned tierSkip for the wrong reason.
+	if r.tier != tierSkip {
+		t.Fatalf("want SKIP (no about-to-release note), got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "about-to-release") {
+		t.Errorf("SKIP detail should explain why (no about-to-release note); got %q", r.detail)
+	}
+}
+
+// TestStagedErrataContent_PassWhenNoStagedCards: an about-to-release note exists
+// but no staged errata cards exist (all flipped to completed by inject) → PASS.
+// This is the post-inject steady state.
+func TestStagedErrataContent_PassWhenNoStagedCards(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n")
+	// A COMPLETED errata card (not staged) — inject already flipped it.
+	writeStagedErrataCard(t, dir, "errata-v0120-sample.json",
+		"errata-v0120-sample", "Erratum: sample false claim in v0.12.0", "docs/migration-errata/v0.12.0.md")
+	// Overwrite the card status to completed (writeStagedErrataCard writes staged;
+	// flip it here to simulate post-inject).
+	writeTaskCardObj(t, dir, "errata-v0120-sample.json",
+		"errata-v0120-sample", "Erratum: sample false claim in v0.12.0", "completed",
+		nil, nil)
+
+	r := checkStagedErrataContent(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS (no staged cards), got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestStagedErrataContent_FailWhenStagedPathUnreadable: a staged card whose
+// staged_path points at a missing file → FAIL (fail-closed). A staged card with
+// no staged erratum text is itself a release blocker.
+func TestStagedErrataContent_FailWhenStagedPathUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n")
+	writeStagedErrataCard(t, dir, "errata-v0120-sample.json",
+		"errata-v0120-sample", "Erratum: sample false claim in v0.12.0", "docs/migration-errata/v0.12.0.md")
+	// NOTE: no erratum file written — staged_path is unreadable.
+
+	r := checkStagedErrataContent(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for staged card with unreadable staged_path, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "unreadable") {
+		t.Errorf("FAIL should flag the unreadable staged_path; got %q", r.detail)
+	}
+}
+
+// TestStagedErrataContent_FailWhenHighestNoteLacksContent: with MULTIPLE
+// about-to-release (untagged) notes, check #13 must target the SAME
+// highest-version note that `release inject-errata` injects into. A staged
+// erratum whose body lives ONLY in an older (lower-version) untagged note
+// must FAIL — the note that will actually ship lacks the correction. This is
+// the regression test for the round-2 review finding (target-note selection
+// mismatch between #13 and inject-errata).
+func TestStagedErrataContent_FailWhenHighestNoteLacksContent(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeErratumFile(t, dir, "docs/migration-errata/v0.12.0.md", "v0.12.0", sampleErratumBody)
+	writeStagedErrataCard(t, dir, "errata-v0120-sample.json",
+		"errata-v0120-sample", "Erratum: sample false claim in v0.12.0", "docs/migration-errata/v0.12.0.md")
+	// Two untagged notes. v0.15.0 contains the erratum body; v0.16.0 (the
+	// highest) does NOT. inject-errata would write into v0.16.0; #13 must
+	// therefore check v0.16.0 and FAIL because the body is absent there.
+	writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n\n## Errata for v0.12.0\n\n"+sampleErratumBody+"\n")
+	writeMigrationNoteBody(t, dir, "v0.16.0", "# v0.16.0\n\nNo errata here.\n")
+
+	r := checkStagedErrataContent(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL when highest untagged note lacks content, got %s: %s", r.tier, r.detail)
+	}
+	// The FAIL must name the HIGHEST note (v0.16.0), not the stale one (v0.15.0).
+	if !strings.Contains(r.detail, "v0.16.0") {
+		t.Errorf("FAIL should name the highest about-to-release note v0.16.0; got %q", r.detail)
+	}
+	if strings.Contains(r.detail, "v0.15.0") {
+		t.Errorf("FAIL should NOT reference the stale lower note v0.15.0; got %q", r.detail)
+	}
+}
+
+// TestStagedErrataContent_LiveRepoIsClean runs the check against the real repo.
+// It SKIPs today (no about-to-release note exists), proving the new check does
+// not break the existing green doctor state.
+func TestStagedErrataContent_LiveRepoIsClean(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available; cannot locate repo root for live gate")
+	}
+	repoRoot, err := repoRootFromCwd(t)
+	if err != nil {
+		t.Skipf("could not locate git working-tree root: %v", err)
+	}
+	r := checkStagedErrataContent(repoRoot)
+	// The check must not FAIL on the real repo (no about-to-release note → SKIP,
+	// or PASS if a note exists and errata is clean). FAIL is a regression.
+	if r.tier == tierFail {
+		t.Fatalf("live repo must not FAIL the staged-errata-content check, got FAIL: %s", r.detail)
 	}
 }

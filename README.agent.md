@@ -830,7 +830,8 @@ export default function transform({ context }) {
 
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   overlay-perm, environment, config-refs, gitignore, auto-classifier,
-  auto-gate-ignore, skills, subagent-depth, defer-liveness). The `auto-classifier` check lints the shape (field
+  auto-gate-ignore, skills, subagent-depth, defer-liveness,
+  staged-errata-content). The `auto-classifier` check lints the shape (field
   set + types + enums) of the auto-classifier-pilot overlay's config files when
   present — a present-but-invalid `auto-gate-config.json` / `auto-gate-llm.json`
   FAILs; absent configs are never failures (defaults apply). The `auto-gate-ignore`
@@ -851,7 +852,11 @@ export default function transform({ context }) {
   override is honored and never false-flagged missing. The `defer-liveness`
   check FAILs when an open coordinator defer/errata card contradicts a present
   released (or about-to-release) migration-note claim, and is fail-closed on
-  malformed cards. `vh-agent-harness diff` shows drift vs. the corpus.
+  malformed cards. The `staged-errata-content` check FAILs when an
+  about-to-release (untagged) migration note exists AND any errata card with
+  `status: staged` has correction content NOT present in that note — this turns
+  the "staged erratum never actually injected" failure mode into a hard stop.
+  `vh-agent-harness diff` shows drift vs. the corpus.
 - **Inspect / validate skills:** `vh-agent-harness skill list` prints every skill
   (core, overlay-pack, and rendered) with its source, whether it is rendered to
   `.opencode/skills/`, and whether its SKILL.md frontmatter is valid.
@@ -1286,12 +1291,23 @@ operator release-prep. The ceremony produces THREE sequential single-path
 `committer` delegations — N (migration note), R (readiness artifact), and M
 (manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`.
 The release-tag wrapper's deterministic gates refuse the tag unless each
-commit binds to its predecessor exactly.
+commit binds to its predecessor exactly. The wrapper also runs **G0c**
+(`vh-agent-harness doctor` — all 13 checks, including #12 defer-liveness and
+#13 staged-errata-content) as a hard machine gate AFTER the clean-worktree
+gate (G0b) and BEFORE the readiness-pass artifact gate (G1-G5). A
+non-HEALTHY doctor refuses the tag. This makes doctor a HARD ceremony stop,
+not a human-remembered pre-flight. Push-only mode exits before G0c (the tag
+already passed it at creation).
 
 When invoked, the releaser:
 
 1. **Step 3.1 — migration note commit N.** Authors
-   `templates/migrations/v<next>.md` and delegates a single-path commit to the
+   `templates/migrations/v<next>.md`, then runs
+   `vh-agent-harness release inject-errata --note templates/migrations/v<next>.md`
+   (a clean no-op when no staged errata cards exist) to inject each `status:
+   staged` errata card's correction body into the note as a
+   `## Errata for v<version>` section and flip each card `staged → completed`
+   (zero human copy-paste), and delegates a single-path commit to the
    committer (scope = that one path). N is HEAD after this step.
 2. **Step 3.2 — readiness artifact commit R.** The parent orchestrator
    (`build` / `coordination` / `project-coordinator`) invokes

@@ -552,6 +552,52 @@ if [ -n "$G0B_OUTPUT" ]; then
   exit 1
 fi
 
+# G0c — vh-agent-harness doctor HEALTHY (all 13 checks). This is the mandatory
+# machine gate that makes `vh-agent-harness doctor` a HARD ceremony stop: any
+# problem-tier or fail-tier check (including #12 defer-liveness and #13
+# staged-errata-content) refuses the tag BEFORE the readiness-pass artifact gate
+# or any tag mutation.
+#
+# This kills the "human-remembered pre-flight" anti-pattern: doctor is no longer
+# a step the releaser agent might forget — it is a non-zero-exit gate the wrapper
+# enforces at the tag boundary, the same boundary that already enforces G0/G0b.
+#
+# Why this lives in the WRAPPER (not the releaser prompt): opencode caches the
+# releaser subagent prompt per-process, so a prompt-only ceremony step would be
+# stale-cached and NOT active for the ceremony run in the current session. The
+# wrapper reads from disk and is effective immediately. The binary is the
+# authority, not the prose.
+#
+# SEAM-INSTALLATION GATE: doctor is a seam-health probe; it is meaningless on a
+# tree that was never seam-installed (no .vh-agent-harness/lineage.yml means no
+# managed .opencode/ tree to drift against — doctor's managed-drift check would
+# false-positive). The lineage record is the authoritative "this is a
+# seam-managed tree" marker, so G0c only runs doctor when it is present. This is
+# a STRUCTURAL gate (file presence), not a runtime env-var bypass — a production
+# release cannot select it, and deleting a committed managed file is itself a
+# doctor problem. Push-only mode exits before reaching this gate (the tag
+# already passed it at creation).
+#
+# STALENESS GUARD: the binary on PATH could predate check #13
+# (staged-errata-content) and report HEALTHY while lacking the enforcement this
+# gate exists to provide. The canary `vh-agent-harness release inject-errata
+# --help` exits 0 only on a binary that has the new subcommand; a stale binary
+# fails it and G0c refuses with a clear "rebuild" message.
+if [ -f ".vh-agent-harness/lineage.yml" ]; then
+  if ! vh-agent-harness release inject-errata --help >/dev/null 2>&1; then
+    emit false "$VERSION" "" false \
+      "release-readiness-gate: G0c staleness guard — the vh-agent-harness binary on PATH predates the staged-errata-content enforcement (no \`release inject-errata\` subcommand); run \`make build\` so doctor reflects the current source, then retry" \
+      "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+    exit 1
+  fi
+  if ! G0C_OUTPUT=$(vh-agent-harness doctor 2>&1); then
+    emit false "$VERSION" "" false \
+      "release-readiness-gate: G0c doctor not HEALTHY (a machine check FAILED — run \`vh-agent-harness doctor\` for the full report). Doctor output: $G0C_OUTPUT" \
+      "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+    exit 1
+  fi
+fi
+
 # --- release readiness-pass artifact gate (G1-G5, model-driven) ---
 #
 # Wrapper-side enforcement of the model-driven readiness gates G1-G5.

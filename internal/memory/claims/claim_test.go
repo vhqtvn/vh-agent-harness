@@ -379,3 +379,61 @@ func TestDerive_RecordsCarryS1(t *testing.T) {
 		t.Errorf("card VerifierRef = %q, want to name the gate", cc.VerifierRef)
 	}
 }
+
+// TestDerive_SemverSortNotLexicographic proves migration notes are sorted by
+// numeric semver, not lexicographic string order. With notes v0.9.0 and
+// v0.10.0, lexicographic order would place v0.10.0 BEFORE v0.9.0 (because "1"
+// < "9"), making v0.9.0 the "highest" — which would be wrong. The correct
+// highest is v0.10.0. This is load-bearing for release safety: doctor check
+// #13 and `release inject-errata` both select about[len-1] as the shipping note.
+func TestDerive_SemverSortNotLexicographic(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeNote(t, dir, "v0.9.0")
+	writeNote(t, dir, "v0.10.0")
+	writeNote(t, dir, "v0.8.0")
+	gitCommitStub(t, dir)
+	// None tagged → all about-to-release.
+
+	reg, err := Derive(dir)
+	if err != nil {
+		t.Fatalf("Derive: %v", err)
+	}
+	if len(reg.Notes) != 3 {
+		t.Fatalf("want 3 notes, got %d", len(reg.Notes))
+	}
+	// Ascending semver order: v0.8.0, v0.9.0, v0.10.0.
+	want := []string{"v0.8.0", "v0.9.0", "v0.10.0"}
+	for i, w := range want {
+		if reg.Notes[i].Version != w {
+			t.Errorf("notes[%d].Version = %q, want %q (semver sort)", i, reg.Notes[i].Version, w)
+		}
+	}
+	// The highest (about[len-1]) MUST be v0.10.0, not v0.9.0.
+	highest := reg.Notes[len(reg.Notes)-1].Version
+	if highest != "v0.10.0" {
+		t.Errorf("highest note = %q, want v0.10.0 (semver, not lexicographic)", highest)
+	}
+}
+
+// TestSemverLess directly exercises the comparator on cross-digit-boundary cases.
+func TestSemverLess(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"v0.10.0", "v0.9.0", false}, // 10 > 9 numerically
+		{"v0.9.0", "v0.10.0", true},  // 9 < 10 numerically
+		{"v0.1.0", "v0.1.1", true},
+		{"v1.0.0", "v0.99.99", false},
+		{"v0.0.1", "v0.0.2", true},
+		{"v0.0.2", "v0.0.1", false},
+		{"v0.1.0", "v0.1.0", false}, // equal → not less
+	}
+	for _, c := range cases {
+		got := semverLess(c.a, c.b)
+		if got != c.want {
+			t.Errorf("semverLess(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}

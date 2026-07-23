@@ -143,8 +143,18 @@ extended to require:
 - Do NOT add errata cards to the release-defer manifest. The manifest is for
   release-arc DEFERs; errata is a released-claim contradiction, not a
   release-arc finding.
-- Do NOT make the wrapper call doctor. The defer-liveness check should be
-  invoked as a read-only pre-flight, not as a wrapper-internal dependency.
+- ~~Do NOT make the wrapper call doctor. The defer-liveness check should be
+  invoked as a read-only pre-flight, not as a wrapper-internal dependency.~~
+  **SUPERSEDED** by the wiring card `defer-release-wire-doctor-liveness-into-ceremony`
+  (operator directive, 2026-07-23): read-only pre-flight / prompt prose is NOT
+  enforcement. opencode caches the releaser subagent prompt per-process, so a
+  prompt-only ceremony step is stale-cached and inactive for the ceremony run in
+  the current session. The wrapper (`scripts/release-tag.sh`) is the sole tag
+  authority and the only machine layer effective this session, so doctor (all
+  checks, now including #13 staged-errata-content) MUST be a hard non-zero-exit
+  gate (G0c) the wrapper enforces at the tag boundary — gated on seam-installation
+  (lineage.yml presence) so it only runs where doctor is meaningful. This is the
+  closing of the THIRD failure mode the memo itself identified (lines 128-138).
 
 ## Residual trust boundary
 

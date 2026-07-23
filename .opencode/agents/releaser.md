@@ -390,6 +390,22 @@ Before authoring, decide the note's lifecycle state from the discovered tree
   heredoc or redirection — Write tool only. (Skipped entirely under
   `resumable_existing_note` — the already-committed note is reused, not
   rewritten.)
+- **Inject staged errata (machine step — REQUIRED before the note commit)** —
+  after authoring (or validating) the note, run:
+  ```
+  vh-agent-harness release inject-errata --note templates/migrations/v<next>.md
+  ```
+  This subcommand reads every `status: staged` errata card under
+  `.local/coordinator/tasks/errata-*.json`, injects each card's `staged_path`
+  correction body into the note as a `## Errata for v<version>` section, and
+  flips each card `staged → completed` (zero human copy-paste). It is a clean
+  no-op when no staged errata cards exist, so it is always safe to run. **The
+  note commit (below) MUST happen AFTER this step** so the committed note
+  includes the erratum. This closes the third failure mode (staged erratum
+  written but never actually injected into the release note). Authority: the
+  binary reads from disk (effective this session); the wrapper gate G0c +
+  doctor check #13 will FAIL the tag if this step is skipped and a staged
+  card's content is absent from the note.
 - **Commit the note (one narrow committer delegation, only when authoring/
   correcting)** — delegate EXACTLY ONE commit to the `committer` carrying only
   the single path `templates/migrations/v<next>.md`, via the canonical
@@ -408,8 +424,11 @@ This sub-step runs ALWAYS (the release-tag wrapper requires the readiness
 artifact at tag time and refuses to tag when it is missing, invalid, or stale).
 The readiness artifact binds the model-driven gates (G1-coverage through
 G5-curated-note) to the release-prep commit; the wrapper independently
-re-checks the deterministic gates (G0/G0b) at tag time, so neither surface can
-both author AND authorize the same gate.
+re-checks the deterministic gates (G0/G0b/G0c) at tag time, so neither surface can
+both author AND authorize the same gate. G0c is `vh-agent-harness doctor`
+(all 13 checks, including #12 defer-liveness and #13 staged-errata-content) — a
+non-HEALTHY doctor refuses the tag. This makes doctor a HARD machine gate, not a
+human-remembered pre-flight.
 
 **Prerequisite — parent orchestrator owns the readiness invocation, against
 the note commit N.** At the start of Step 3.2, HEAD = N (the note commit from

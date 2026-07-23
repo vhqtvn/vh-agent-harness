@@ -57,8 +57,10 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -239,4 +241,311 @@ func countReleasedNotes(notes []claims.NoteClaim) (released, aboutToRelease int)
 		}
 	}
 	return
+}
+
+// --- doctor check #13: staged-errata-content (the THIRD failure mode) ---
+//
+// This check closes the hole that let errata-v0120 ship uncorrected across four
+// releases (v0.12.0 → v0.13.0 → v0.13.1 → v0.14.0). Doctor check #12
+// (defer-liveness) treats `staged` as a CLOSED (passing) status — it only fails
+// on OPEN cards. But "staged" only means "correction queued for the next
+// release"; it says nothing about whether the correction was actually INJECTED
+// into the about-to-release note. A staged erratum whose content is missing from
+// the note that is about to ship is the exact defect this check catches.
+//
+// The check is the mechanism half of the auto-inject closure: once the inject
+// subcommand (`release inject-errata`) copies the erratum body into the note AND
+// flips the card staged→completed, this check sees no staged cards and passes.
+// If the inject was forgotten, the card stays staged and the about-to-release
+// note lacks the content → FAIL, naming the offending card.
+
+// erratumTitleVersionRe extracts the target version from an erratum file's
+// title line, e.g. "# Erratum: v0.12.0 — media-perception rendering claims".
+var erratumTitleVersionRe = regexp.MustCompile(`(?i)^#\s*Erratum:\s*(v\d+\.\d+\.\d+)`)
+
+// stagedStatus is the card status that marks an erratum as "correction queued
+// for the next release" — the status defer-liveness (#12) treats as closed but
+// this check (#13) holds open against the note content.
+const stagedStatus = "staged"
+
+// checkStagedErrataContent is the 13th doctor check. It FAILs when an
+// about-to-release (untagged) migration note exists AND any errata card with
+// status "staged" has correction content NOT present in that note — the third
+// failure mode from the reconciliation matrix. It composes with check #12
+// (defer-liveness): #12 holds open cards, #13 holds staged cards accountable to
+// the note they claim to correct.
+//
+// TIERING:
+//   - SKIP when no about-to-release notes exist (no imminent release — the
+//     current steady-state of this repo, which has no untagged migration note),
+//     or when the gate cannot run honestly (git absent / not a work tree / no
+//     tasks dir / no notes).
+//   - PASS when there are no staged errata cards (the common post-inject
+//     steady state — inject already flipped them all to completed), or when
+//     every staged errata card's content is present in the highest-version
+//     about-to-release note.
+//   - FAIL when a staged errata card's correction content is absent from the
+//     HIGHEST-version about-to-release note, naming the offending card + the
+//     target note that was checked. Also FAIL (fail-closed) when a staged card's
+//     staged_path is unreadable — a staged card pointing at a missing erratum
+//     file is itself a release blocker.
+//
+// TARGET SELECTION: the gate targets ONLY the highest-version untagged note —
+// the SAME note that `release inject-errata` injects into (about[len-1] after
+// claims.Derive's ascending NUMERIC semver sort). This alignment is
+// load-bearing: checking against ANY note (the round-2 design) would let a
+// correction present only in a stale/lower note PASS while the note that
+// actually ships lacks it. The semver sort (not lexicographic) ensures
+// v0.10.0 ranks above v0.9.0. If there are no staged cards, the target
+// selection is irrelevant (PASS on empty staged set — the common post-inject
+// steady state).
+//
+// The content check is a REAL signature match (not card status, not a bare
+// "## Errata" header): the erratum file's corrective body — everything after the
+// title line and the status blockquote, whitespace-normalized — must appear as a
+// substring of the highest about-to-release note's normalized text. This is
+// exactly what `release inject-errata` produces (verbatim copy under a section
+// heading), so the check passes deterministically after inject and fails when a
+// human wrote only a stub header.
+//
+// READ-ONLY: never mutates a card or note.
+func checkStagedErrataContent(target string) checkResult {
+	const name = "staged-errata-content"
+
+	// 1. Git availability + work tree (same preconditions as #12: git classifies
+	//    notes as released vs about-to-release).
+	if _, err := exec.LookPath("git"); err != nil {
+		return checkResult{name: name, tier: tierSkip, detail: "git not on PATH"}
+	}
+	wt, err := exec.Command("git", "-C", target, "rev-parse", "--is-inside-work-tree").Output()
+	if err != nil || strings.TrimSpace(string(wt)) != "true" {
+		return checkResult{name: name, tier: tierSkip, detail: "not a git work tree"}
+	}
+
+	reg, err := claims.Derive(target)
+	if err != nil {
+		return checkResult{name: name, tier: tierFail, detail: "could not read claim sources: " + err.Error()}
+	}
+	if !reg.TasksPresent || !reg.NotesPresent {
+		return checkResult{name: name, tier: tierSkip, detail: "no tasks/notes state to verify"}
+	}
+
+	// 2. Only about-to-release notes are in scope (an imminent release). No
+	//    untagged note means no release is imminent → SKIP (nothing to inject
+	//    into). This is why the current steady-state repo (no v0.15.0 note)
+	//    passes this check.
+	aboutToRelease := aboutToReleaseNotes(reg.Notes)
+	if len(aboutToRelease) == 0 {
+		return checkResult{name: name, tier: tierSkip,
+			detail: "no about-to-release (untagged) migration note — no imminent release to verify against"}
+	}
+
+	// 3. Only staged errata cards are in scope. A staged card whose staged_path
+	//    is empty cannot be content-checked → fail-closed (a staged card with no
+	//    staged erratum file is malformed). No staged errata cards at all →
+	//    nothing to verify → PASS (the common post-inject steady state).
+	staged := stagedErrataCards(reg.Cards)
+	if len(staged) == 0 {
+		return checkResult{name: name, tier: tierPass,
+			detail: fmt.Sprintf("%d about-to-release note(s), no staged errata cards — nothing to verify", len(aboutToRelease))}
+	}
+
+	// 4. Target ONLY the highest-version about-to-release note — the same note
+	//    that `release inject-errata` injects into (about[len-1] after ascending
+	//    sort). Checking against ANY untagged note would let an erratum present
+	//    only in a stale/older note PASS while the note that will actually ship
+	//    lacks the correction. Aligning the gate's target with inject's target
+	//    closes that gap (commit-review tier1b-F1).
+	targetNote := aboutToRelease[len(aboutToRelease)-1]
+	noteRaw, rerr := os.ReadFile(targetNote.Path)
+	if rerr != nil {
+		return checkResult{name: name, tier: tierFail,
+			detail: fmt.Sprintf("unreadable about-to-release note %s: %v", targetNote.Version, rerr)}
+	}
+	noteNorm := normalizeForContentMatch(string(noteRaw))
+
+	// 5. For each staged errata card, verify its correction body is present in
+	//    the target (highest-version) about-to-release note.
+	var missing []string
+	var unreadable []string
+	checked := 0
+	for _, c := range staged {
+		sp := strings.TrimSpace(c.StagedPath)
+		if sp == "" {
+			unreadable = append(unreadable, fmt.Sprintf("%s [status=staged]: no staged_path set (card is malformed)", cardLabel(c)))
+			continue
+		}
+		// staged_path is repo-relative in the card; resolve against target.
+		erratumPath := sp
+		if !filepath.IsAbs(erratumPath) {
+			erratumPath = filepath.Join(target, filepath.FromSlash(sp))
+		}
+		raw, rerr := os.ReadFile(erratumPath)
+		if rerr != nil {
+			unreadable = append(unreadable, fmt.Sprintf("%s [status=staged]: staged_path %s unreadable: %v", cardLabel(c), sp, rerr))
+			continue
+		}
+		targetVer, body := extractErratumSignature(string(raw))
+		if body == "" {
+			unreadable = append(unreadable, fmt.Sprintf("%s [status=staged]: staged_path %s has no corrective body (title/status only)", cardLabel(c), sp))
+			continue
+		}
+		checked++
+		if !strings.Contains(noteNorm, body) {
+			ver := targetVer
+			if ver == "" {
+				ver = "(unknown version)"
+			}
+			missing = append(missing, fmt.Sprintf("%s [status=staged]: correction for %s absent from about-to-release note %s — run `vh-agent-harness release inject-errata` to inject it",
+				cardLabel(c), ver, targetNote.Version))
+		}
+	}
+
+	if len(unreadable) > 0 || len(missing) > 0 {
+		var b strings.Builder
+		if len(unreadable) > 0 {
+			fmt.Fprintf(&b, "%d staged errata card(s) with unreadable/empty staged_path (fail-closed):", len(unreadable))
+			for _, m := range unreadable {
+				b.WriteString("\n  - ")
+				b.WriteString(m)
+			}
+		}
+		if len(missing) > 0 {
+			if len(unreadable) > 0 {
+				b.WriteByte('\n')
+			}
+			fmt.Fprintf(&b, "%d staged errata card(s) whose correction is missing from the about-to-release note:", len(missing))
+			for _, m := range missing {
+				b.WriteString("\n  - ")
+				b.WriteString(m)
+			}
+			b.WriteString("\nrun `vh-agent-harness release inject-errata` to inject each staged erratum and flip its card to completed, or stage the correction manually.")
+		}
+		return checkResult{name: name, tier: tierFail, detail: b.String()}
+	}
+	return checkResult{name: name, tier: tierPass,
+		detail: fmt.Sprintf("%d staged errata card(s) verified injected into about-to-release note %s", checked, targetNote.Version)}
+}
+
+// aboutToReleaseNotes filters a note set to untagged (about-to-release) notes.
+func aboutToReleaseNotes(notes []claims.NoteClaim) []claims.NoteClaim {
+	var out []claims.NoteClaim
+	for _, n := range notes {
+		if !n.Released {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// stagedErrataCards filters a card set to errata cards whose status is "staged".
+func stagedErrataCards(cards []claims.DeferCard) []claims.DeferCard {
+	var out []claims.DeferCard
+	for _, c := range cards {
+		if c.IsErrata && strings.ToLower(strings.TrimSpace(c.Status)) == stagedStatus {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// cardLabel renders a short human-readable label for a card (task_id or
+// filename-derived id, plus title).
+func cardLabel(c claims.DeferCard) string {
+	id := c.TaskID
+	if id == "" {
+		id = strings.TrimSuffix(filepath.Base(c.Path), ".json")
+	}
+	title := c.Title
+	if title == "" {
+		title = "(no title)"
+	}
+	return fmt.Sprintf("%s: %s", id, title)
+}
+
+// extractErratumSignature parses an erratum markdown file into (targetVersion,
+// normalizedBody). The title line "# Erratum: vX.Y.Z — ..." yields the target
+// version; the corrective body is everything after the title line and the
+// leading status blockquote (lines starting with '>'), whitespace-normalized
+// (lowercase, runs collapsed to single spaces, trimmed). Returns ("", "") when
+// the file has no recognizable title or no corrective body.
+//
+// The status blockquote is the instructional meta-text ("When creating the next
+// migration note, include..."); stripping it leaves the actionable correction
+// (the "## What was wrong" / "### N." specifics), which is exactly what inject
+// copies under a "## Errata for vX.Y.Z" section and what this check looks for
+// in the note.
+func extractErratumSignature(erratumText string) (targetVersion, normalizedBody string) {
+	ver, rawBody := splitErratumBody(erratumText)
+	if rawBody == "" {
+		return ver, ""
+	}
+	return ver, normalizeForContentMatch(rawBody)
+}
+
+// splitErratumBody parses an erratum markdown file into (targetVersion,
+// rawBody) using a three-phase state machine:
+//   - phase 0: scan for the title line "# Erratum: vX.Y.Z" (everything before
+//     it is preamble/front-matter and skipped).
+//   - phase 1: skip the leading status blockquote (lines starting with '>')
+//     AND blank lines, until the first real content line. This strips the
+//     instructional meta-text ("When creating the next migration note, include
+//     ...") without requiring it to be the very first line after the title.
+//   - phase 2: capture the corrective body verbatim (including any blockquotes
+//     that legitimately appear inside the correction).
+//
+// Returns ("", "") when the file has no recognizable title or no corrective
+// body. Shared by the staged-errata gate (check #13, which normalizes a copy
+// for substring matching) and `release inject-errata` (which writes it raw
+// under a section heading).
+func splitErratumBody(erratumText string) (targetVersion, rawBody string) {
+	lines := strings.Split(erratumText, "\n")
+	var bodyLines []string
+	phase := 0 // 0=looking for title, 1=skipping status blockquote preamble, 2=capturing body
+	for _, ln := range lines {
+		trimmed := strings.TrimSpace(ln)
+		switch phase {
+		case 0:
+			if m := erratumTitleVersionRe.FindStringSubmatch(trimmed); m != nil {
+				targetVersion = m[1]
+				phase = 1
+			}
+		case 1:
+			// Skip the leading status blockquote ('>' lines) and blank lines until
+			// we hit the first real content line.
+			if strings.HasPrefix(trimmed, ">") || trimmed == "" {
+				continue
+			}
+			phase = 2
+			fallthrough
+		case 2:
+			bodyLines = append(bodyLines, ln)
+		}
+	}
+	return targetVersion, strings.TrimSpace(strings.Join(bodyLines, "\n"))
+}
+
+// normalizeForContentMatch collapses a markdown body into a single
+// whitespace-normalized lowercase string for substring content matching. It is
+// intentionally NOT a structural markdown parse: it flattens whitespace so that
+// heading/paragraph reflow or indentation differences do not defeat a verbatim
+// body copy (which is what the inject subcommand produces).
+func normalizeForContentMatch(s string) string {
+	s = strings.ToLower(s)
+	// Collapse every run of whitespace (spaces, tabs, newlines) to a single space.
+	var b strings.Builder
+	b.Grow(len(s))
+	inWS := false
+	for _, r := range s {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f' {
+			if !inWS {
+				b.WriteByte(' ')
+				inWS = true
+			}
+			continue
+		}
+		inWS = false
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
 }
