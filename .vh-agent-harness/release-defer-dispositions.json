@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "release_base": { "kind": "tag", "value": "v0.14.0" },
-  "evaluated_commit": "f585702a89363858759887ca8cde41301e0bb4ce",
-  "evaluated_tree": "d7f9637be09a1db43f5fa18bb669be999f0dc3bb",
-  "manifest_parent_commit": "f585702a89363858759887ca8cde41301e0bb4ce",
+  "release_base": { "kind": "tag", "value": "v0.15.0" },
+  "evaluated_commit": "cddac9c5336da06e42dace0e3356b8721878c527",
+  "evaluated_tree": "ced6f2e73efa3dc88a5c615c5cb2ebe108825a0f",
+  "manifest_parent_commit": "cddac9c5336da06e42dace0e3356b8721878c527",
   "reconciliation": {
     "status": "confirmed",
-    "scope": "Release arc: v0.14.0 (derived on read from the last reachable tag) through evaluated_commit (intended release v0.15.0). The handshake SHAs (evaluated_commit / evaluated_tree / manifest_parent_commit) bind to R' (the readiness-artifact commit re-pinned to release-prep base 28deee3), which sits between the pre-existing note commit (07d37f3, resumable_existing_note — the note is in history, not re-authored) and M' (this manifest commit) in the wrapper-required three-commit ceremony note(N) -> artifact(R') -> manifest(M'). At HEAD=M' the DEFER handshake invariant requires HEAD^ == R' == evaluated_commit == manifest_parent_commit AND tree(HEAD^) == evaluated_tree == tree(R'); the readiness gate additionally requires the committed artifact (.vh-agent-harness/release-readiness-pass.json) to carry commit_sha == HEAD^^ == 28deee3 (the release-prep base under resumable_existing_note) and to be the single path changed in HEAD^^..HEAD^. Release mode is manifest-authority-only; the wrapper and CI recheck always read this committed manifest. release_base.value is advisory (derive-on-read via gitLatestTag); kind stays operator-attested. records[] dispositions are operator-attested and unchanged by the releaser's SHA recompute.",
+    "scope": "Release arc: v0.15.0 (derived on read from the last reachable tag) through evaluated_commit (intended release v0.15.1). The v0.15.0..evaluated_commit arc is docs/comment-only and carries zero consumer-facing behavioral change: the five commits 94afbc0 (research field-report evidence preservation), 4a61db0 (permconfig/decision docs + 21 lines of `//` comments in internal/permconfig/tables.go, with the permission-templates source and rendered mirror co-changed in lockstep as a correctly-synced doc update), 753e831 (decision-memo correction), 72a7acb (P3 context-pruning behavioral spec), and cddac9c5 (vh-solara research disposition addendum) changed no Go logic, constant, inventory, or template-rendered contract — the only Go file in the arc is internal/permconfig/tables.go (comment-only), and drift=0 and doctor=HEALTHY were verified at the evaluated commit with a fresh binary. The vh-solara orchestration items referenced by the research memos in this arc are explicit non-goals for this docs-only release and are future-slice backlog. Single-commit manifest ceremony: this manifest commit M is an immediate child of evaluated_commit P (=HEAD^ at authoring); at HEAD=M the DEFER handshake invariant requires HEAD^ == evaluated_commit == manifest_parent_commit AND tree(HEAD^) == evaluated_tree AND HEAD^..HEAD to change ONLY this manifest path. The readiness artifact .vh-agent-harness/release-readiness-pass.json is intentionally left UNCOMMITTED for v0.15.1 (owned by the readiness agent, overwritten on re-run); the manifest-only diff constraint is satisfied by the committed manifest change alone, since the handshake reads committed trees, not the worktree. Release mode is manifest-authority-only; the authorized release wrapper and CI recheck always read this committed manifest. release_base.value is advisory (derive-on-read via gitLatestTag excluding --release-version); kind stays operator-attested. records[] dispositions are operator-attested and unchanged by the releaser's SHA recompute.",
     "zero_records_confirmed": false
   },
   "records": [
@@ -19,7 +19,7 @@
       "reason": "Not part of the current release. Retained for audit with unsupported legacy trigger metadata (the source card's trigger grammar uses a '||' separator, a directory operand, and a non-predicate feature: term, which the strict release-mode predicate parser rejects). Re-evaluate only when a prune phase is pursued or renderstate/seam is touched for deletion logic. The canonical no+disclose+invalid disposition lets the release proceed while disclosing the conditional follow-up and its invalid metadata state.",
       "source_ref": ".local/coordinator/tasks/defer-p1-lineage-002-001.json",
       "studied_at": "2026-07-15T00:00:00Z",
-      "reviewed_at": "2026-07-20T00:00:00Z",
+      "reviewed_at": "2026-07-24T00:00:00Z",
       "override": null
     }
   ]
