@@ -45,9 +45,10 @@ jobs:
       #   - freshness-handshake mismatch (evaluated_commit / evaluated_tree /
       #     manifest_parent_commit vs HEAD^ / tree(HEAD^))
       #   - HEAD^..HEAD diff contains anything other than the manifest path
-      #   - wrong release_base (tag mismatch with the reachable-tag lookup
-      #     `git tag --merged HEAD --sort=-v:refname`, excluding the
-      #     under-evaluation version supplied via --release-version)
+      #   - release_base.kind=tag with NO reachable prior tag (the value is now
+      #     DERIVED on read from `git tag --merged HEAD --sort=-v:refname`,
+      #     excluding the under-evaluation version supplied via --release-version;
+      #     a stale attested value is a non-fatal advisory and does NOT refuse)
       #   - schema/staleness/malformed-record errors
       #   - any record classified as a blocker
       #   - unsatisfied override_required record

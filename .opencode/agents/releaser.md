@@ -93,8 +93,10 @@ This agent is structured as a **thin spine + default adapter**:
    source of truth. A version hint from the orchestrator is advisory only; if it
    conflicts with the discovered history, report the conflict and refuse rather
    than honor the hint. The same rule applies to manifest-authority state: the
-   discovered handshake SHAs and `release_base` value are authoritative over any
-   readiness report or hint reaching this agent.
+   discovered handshake SHAs are authoritative, and `release_base.value`
+   (kind=tag) is DERIVED by the evaluator from the discovered prior tag at
+   evaluation time and is authoritative over the (advisory) attested manifest
+   field reaching this agent.
 5. **Order tags numerically, never lexically.** `v1.9.0` must NOT sort above
    `v1.33.0`. Always order versions by integer-tuple comparison (or via
    `sort -V`); the lexical-order bug is the classic release-tooling failure.
@@ -575,11 +577,16 @@ end-to-end.
 
 **First-tag root semantics.** For the very first release in a repo's history
 (no prior version tag exists), the manifest's `release_base` MUST already be
-`{"kind":"root","value":null}`. The releaser does NOT change `release_base`;
-it is operator-attested. The evaluator treats `kind:root` as "evaluate the
-whole history up to and including P" and skips the prior-tag match check.
-There is NO `HEAD~32` fallback in release mode; the manifest handshake MUST be
-satisfied.
+`{"kind":"root","value":null}`. `release_base.kind` (root vs tag) is
+operator-attested — a genuine first-release-vs-incremental-arc judgment. The
+releaser does NOT change `release_base`. For `kind=tag`,
+`release_base.value` is DERIVED authoritatively by the evaluator from the last
+reachable tag at evaluation time (excluding the `--release-version` tag); the
+attested value is ADVISORY and can never block a release or go stale in a
+load-bearing way — so the releaser never needs to "advance"
+`release_base.value` across releases (this self-heals). The evaluator treats
+`kind:root` as "evaluate the whole history up to and including P". There is NO
+`HEAD~32` fallback in release mode; the manifest handshake MUST be satisfied.
 
 #### Step 3.4 — Tag-message staging + execute gate
 

@@ -483,15 +483,24 @@ sequence is:
    when tagging == P, and `git diff --name-only P..M` is exactly the manifest
    path). No other file may ride along — the manifest-only diff requirement is
    what prevents a post-evaluation weakening.
-4. Set `release_base` to either `{kind: "tag", value: "<last-tag>"}` for a
-   prior-tag release, OR `{kind: "root", value: null}` for the first tag in the
-   repo's history (whole-history evaluation; the `HEAD~32` fallback is NOT
-   used in release mode).
+4. Set `release_base.kind` to `"tag"` for a prior-tag release, OR `"root"` for
+   the first tag in the repo's history (whole-history evaluation; the
+   `HEAD~32` fallback is NOT used in release mode). `release_base.value` (for
+   kind=tag) is DERIVED authoritatively by the evaluator at evaluation time
+   from the last reachable tag (`git tag --merged HEAD --sort=-v:refname`,
+   excluding `--release-version`); the attested value is ADVISORY — a stale
+   attested value records a non-fatal advisory and CANNOT block the release,
+   so the field can never go stale in a load-bearing way. The attested value
+   is still required to be a well-formed non-empty string (schema v1 shape);
+   if you want the manifest to read cleanly, set it to the current prior tag,
+   but the evaluator no longer relies on it being correct.
 5. Before tagging, verify (the wrapper and CI recheck both re-run this): working
    tree clean; manifest exists in HEAD; `HEAD^` exists; `evaluated_commit ==
    manifest_parent_commit == HEAD^`; `evaluated_tree == tree(HEAD^)`; the
-   `HEAD^..HEAD` diff is exactly the manifest path; `release_base` matches the
-   discovered prior tag (or `root`); schema + disposition checks pass.
+   `HEAD^..HEAD` diff is exactly the manifest path; `release_base.kind=tag`
+   DERIVES a reachable prior tag from git (authoritative; the attested value is
+   advisory and a stale value self-heals without a manifest write) or
+   `release_base.kind=root`; schema + disposition checks pass.
 
 **Evidence collection (read-only):**
 
@@ -510,7 +519,9 @@ sequence is:
    `head_parent_tree`, `reconciliation` (with `scope` and
    `zero_records_confirmed`), `records[]`, `disclosures[]`,
    `accepted_overrides[]`, `refusals[]`, `blocking_ids[]`, `disclose_ids[]`,
-   and `evaluator_error_ids[]`.
+   `evaluator_error_ids[]`, and `advisories[]` (non-fatal; e.g. a stale
+   attested `release_base.value` overridden by the derived prior tag — never
+   changes the classification).
 3. Map each record's disposition outcome to its G7 disposition per the matrix
    below.
 
@@ -526,7 +537,7 @@ the sole release authority):
 | Duplicate `defer_id` / unsorted records | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
 | Handshake mismatch (`evaluated_commit` / `evaluated_tree` / `manifest_parent_commit` ≠ `HEAD^` / `tree(HEAD^)`) | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
 | `HEAD^..HEAD` diff is not manifest-only | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
-| `release_base.kind=tag` does not match discovered prior tag | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
+| `release_base.kind=tag` with NO reachable prior tag (value is now DERIVED on read; a stale attested value is a non-fatal advisory, not a block) | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
 | Empty `records[]` without `reconciliation.zero_records_confirmed: true` | BLOCKER (`G7_ReleaseDeferGate`, evaluator-error class) |
 | Record `release_relevance: yes` + `disposition: block` | BLOCKER (`G7_ReleaseDeferGate`) |
 | Record `release_relevance: yes` + `disposition: disclose` + `metadata_state: stale\|invalid` | BLOCKER (`G7_ReleaseDeferGate`) |

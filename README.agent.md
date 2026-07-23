@@ -1274,7 +1274,11 @@ handshake, and override semantics live in
 
 - `release_base: {kind:"tag"|"root", value:<tag>|null}` — the start of the
   release arc. `kind:"root"` (whole history) is used for the very first release;
-  there is NO `HEAD~32` fallback in release mode.
+  there is NO `HEAD~32` fallback in release mode. For `kind:"tag"`, `value` is
+  DERIVED authoritatively by the evaluator from the last reachable tag at
+  evaluation time; the attested manifest value is advisory (a stale value
+  self-heals with no manifest write and cannot block the release), so it can
+  never go stale in a load-bearing way.
 - `evaluated_commit`, `evaluated_tree`, `manifest_parent_commit` — a freshness
   handshake. All three must equal `HEAD^` and `tree(HEAD^)` at evaluation time.
   The only changed path in `HEAD^..HEAD` must be the manifest itself. This

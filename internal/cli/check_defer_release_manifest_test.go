@@ -188,6 +188,18 @@ func commitReleaseManifest(t *testing.T, scratch string, manifestBytes []byte, e
 	return manifestPath
 }
 
+// manifestAdvisory models one non-fatal advisory entry the evaluator emits
+// when an attested manifest field disagrees with a derived authoritative
+// value (e.g. a stale release_base.value). Advisories never change the
+// classification.
+type manifestAdvisory struct {
+	Field    string `json:"field"`
+	Severity string `json:"severity"`
+	Attested string `json:"attested"`
+	Derived  string `json:"derived"`
+	Note     string `json:"note"`
+}
+
 // manifestResult is the parsed JSON envelope the manifest-authority evaluator
 // emits. Only the fields asserted by the tests are typed.
 type manifestResult struct {
@@ -210,6 +222,7 @@ type manifestResult struct {
 	BlockingIDs       []string                 `json:"blocking_ids"`
 	DiscloseIDs       []string                 `json:"disclose_ids"`
 	EvaluatorErrIDs   []string                 `json:"evaluator_error_ids"`
+	Advisories        []manifestAdvisory       `json:"advisories"`
 	Classification    string                   `json:"classification"`
 	Error             *string                  `json:"error"`
 }
@@ -699,28 +712,75 @@ func TestCheckDefer_Manifest_RootBaseIgnoresHeadFallback(t *testing.T) {
 	}
 }
 
-// TestCheckDefer_Manifest_WrongPriorTagRefuses — release_base.kind=tag with a
-// value that does NOT match `git describe --tags --abbrev=0` → refuse.
-// (Matrix case 16.)
-func TestCheckDefer_Manifest_WrongPriorTagRefuses(t *testing.T) {
+// TestCheckDefer_Manifest_StaleBaseDerivesAuthoritatively — release_base.kind=
+// tag with an attested value that does NOT match the discovered prior tag is
+// self-healed by DERIVE-ON-READ: the evaluator derives the authoritative prior
+// tag from git and uses it; the attested value is demoted to a non-fatal
+// advisory. The release is NOT blocked (PASS / disclose) and the manifest is
+// NOT written. (Replaces the prior "wrong prior tag → refuse" matrix case now
+// that release_base.value is derived, not operator-attested-authoritative.)
+func TestCheckDefer_Manifest_StaleBaseDerivesAuthoritatively(t *testing.T) {
 	scratch, script, _ := setupReleaseEvalRepo(t)
 	spec := manifestSpec{
 		ReleaseBaseKind:     "tag",
-		ReleaseBaseValue:    "v9.9.9", // does not exist; real prior tag is v0.1.0
+		ReleaseBaseValue:    "v9.9.9", // stale/wrong; real prior tag is v0.1.0
 		ReconciliationScope: "release arc from v9.9.9 through evaluated_commit",
 		Records:             []manifestRecordSpec{seededNoDiscloseInvalid("defer-seed")},
 	}
 	manifestBytes := buildManifestBytes(t, scratch, spec)
 	commitReleaseManifest(t, scratch, manifestBytes, "")
 	exitCode, result, _, _ := runReleaseEvalManifest(t, script)
+	if exitCode != 0 {
+		t.Fatalf("stale attested release_base must PASS via derive-on-read (exit 0); got %d (err=%v)", exitCode, result.Error)
+	}
+	if result.Classification == "evaluator-error" || result.Classification == "blocker" {
+		t.Fatalf("stale attested release_base must not be evaluator-error/blocker; got %q (err=%v)", result.Classification, result.Error)
+	}
+	// The envelope echoes the DERIVED authoritative value, not the attested.
+	rb := result.ReleaseBase
+	if rb == nil || rb["kind"] != "tag" || rb["value"] != "v0.1.0" {
+		t.Errorf("envelope release_base must echo derived {tag, v0.1.0}; got %v", rb)
+	}
+	// A non-fatal advisory must be recorded naming the stale attested value.
+	if len(result.Advisories) != 1 {
+		t.Fatalf("exactly one advisory expected for stale release_base.value; got %d (%+v)", len(result.Advisories), result.Advisories)
+	}
+	a := result.Advisories[0]
+	if a.Field != "release_base.value" || a.Attested != "v9.9.9" || a.Derived != "v0.1.0" || a.Severity != "advisory" {
+		t.Errorf("advisory mismatch: %+v", a)
+	}
+}
+
+// TestCheckDefer_Manifest_TagBaseWithNoPriorTagFailsClosed — kind=tag but NO
+// tag is reachable from HEAD (after excluding --release-version) cannot derive
+// a release base. That is a genuine malformed-manifest state (a tag release
+// with no prior tag), NOT a stale value, so the evaluator fails closed
+// (evaluator-error, exit 2). This is the ONLY remaining fail-closed
+// release_base condition now that the value is derived.
+func TestCheckDefer_Manifest_TagBaseWithNoPriorTagFailsClosed(t *testing.T) {
+	scratch, script, _ := setupReleaseEvalRepo(t)
+	// Delete the prior tag so none is reachable from HEAD.
+	cmd := exec.Command("git", "-C", scratch, "tag", "-d", "v0.1.0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git tag -d v0.1.0: %v\n%s", err, out)
+	}
+	spec := manifestSpec{
+		ReleaseBaseKind:     "tag",
+		ReleaseBaseValue:    "v0.0.99", // irrelevant; no prior tag exists at all
+		ReconciliationScope: "release arc through evaluated_commit",
+		Records:             []manifestRecordSpec{seededNoDiscloseInvalid("defer-seed")},
+	}
+	manifestBytes := buildManifestBytes(t, scratch, spec)
+	commitReleaseManifest(t, scratch, manifestBytes, "")
+	exitCode, result, _, _ := runReleaseEvalManifest(t, script)
 	if exitCode != 2 {
-		t.Fatalf("wrong prior-tag release_base must REFUSE (exit 2); got %d", exitCode)
+		t.Fatalf("kind=tag with no reachable prior tag must FAIL CLOSED (exit 2); got %d", exitCode)
 	}
 	if result.Classification != "evaluator-error" {
-		t.Errorf("wrong prior tag → evaluator-error; got %q", result.Classification)
+		t.Errorf("no-prior-tag kind=tag → evaluator-error; got %q", result.Classification)
 	}
-	if result.Error == nil || !strings.Contains(*result.Error, "release_base mismatch") {
-		t.Errorf("error must mention release_base mismatch; got %v", result.Error)
+	if result.Error == nil || !strings.Contains(*result.Error, "no prior tag reachable") {
+		t.Errorf("error must mention no prior tag reachable; got %v", result.Error)
 	}
 }
 
@@ -737,10 +797,13 @@ func TestCheckDefer_Manifest_WrongPriorTagRefuses(t *testing.T) {
 // and CI's set -e blocked GoReleaser publication.
 //
 // Before the reachability fix: gitLatestTag("v1.0.2") scanned all tags and
-// returned v1.1.0 → mismatch with v1.0.0 → exit 2. After the fix:
+// returned v1.1.0 → mismatch with v1.0.0 → exit 2. After the reachability fix:
 // gitLatestTag("v1.0.2") restricts the lookup to `git tag --merged HEAD` (only
-// tags reachable from HEAD), so v1.1.0 is filtered out and v1.0.0 is returned
-// → match → exit 0.
+// tags reachable from HEAD), so v1.1.0 is filtered out and v1.0.0 is returned.
+// Since release_base.value became DERIVE-ON-READ authoritative (a stale
+// attested value is now a non-fatal advisory, not exit 2), this test's
+// load-bearing claim is that the DERIVED tag is the reachable v1.0.0 (not the
+// unreachable v1.1.0) and the manifest's attested v1.0.0 agrees with it → exit 0.
 func TestCheckDefer_Manifest_ReleaseBaseReachableOnlyExcludesUnreachableTags(t *testing.T) {
 	scratch, script, _ := setupReleaseEvalRepo(t)
 	// setupReleaseEvalRepo leaves HEAD two commits past v0.1.0. To build a
