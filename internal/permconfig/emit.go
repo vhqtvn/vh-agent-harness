@@ -247,10 +247,11 @@ func resolveRules(packs []Pack) (locations map[string]LocationRule, tasks map[st
 //     for gate-exempt agents), each command paired with its group's decision,
 //     ALL sorted by length-ascending then byte-locale. The backlog entry (if
 //     enabled and this is the top-level "default" location) participates in
-//     this same sort. For read_only agents, canonical read-only harness verbs
-//     (HarnessReadOnlyCommandsSet members) are SKIPPED here — they are emitted
-//     as specific allows in region 4b instead, and emitting them here would
-//     produce a dead entry (shadowed by the 4a deny) plus a duplicate key.
+//     this same sort. For read_only and deny agents, canonical read-only harness
+//     verbs (HarnessReadOnlyCommandsSet members) are SKIPPED here — read_only
+//     emits them as specific allows in region 4b instead (emitting here too
+//     would be a dead entry shadowed by the 4a deny plus a duplicate key), and
+//     for deny the region 4a deny subsumes them so emitting here would be dead.
 //  3. Transform-contributed extra entries (rule.ExtraBash), sorted
 //     length-then-locale. These are merged AFTER the command-group region so
 //     that an extra allow (e.g. "./dev.sh *") wins over the leading "*": "deny"
@@ -289,16 +290,18 @@ func computeBashBlock(rule LocationRule, locationName string, features Features)
 			continue
 		}
 		for _, cmd := range group.Commands {
-			// read_only agents emit the canonical read-only harness verbs as
-			// specific allows in region 4b AFTER the 4a deny. If a command-
-			// group entry is also a canonical read-only command (today only
-			// "vh-agent-harness exec-ro *"), emitting it here would produce a
-			// dead entry (shadowed by the later 4a deny) AND a duplicate of
-			// the 4b allow. Skip it for read_only agents; non-read_only agents
-			// keep the legacy emission (the entry is harmlessly shadowed by
-			// their scalar "vh-agent-harness *" entry but stays for byte-
-			// stability with the pre-read_only output).
-			if rule.HarnessPolicy == HarnessPolicyReadOnly && HarnessReadOnlyCommandsSet[cmd] {
+			// read_only AND deny agents skip the canonical read-only harness
+			// verbs here in the command-group region. For read_only, the verb
+			// is emitted as a specific allow in region 4b AFTER the 4a deny, so
+			// emitting it here too would be a dead entry (shadowed by the
+			// later 4a deny) AND a duplicate of the 4b allow. For deny, the
+			// broad "vh-agent-harness *": "deny" scalar in region 4a subsumes
+			// EVERY vh-agent-harness-prefixed entry in region 2, so any
+			// readonly command here is dead (shadowed to deny) — skipping it
+			// removes the dead code. allow/ask agents keep the legacy emission
+			// (the entry agrees with their scalar under findLast, so it is
+			// redundant-but-consistent, not dead-to-a-different-value).
+			if (rule.HarnessPolicy == HarnessPolicyReadOnly || rule.HarnessPolicy == HarnessPolicyDeny) && HarnessReadOnlyCommandsSet[cmd] {
 				continue
 			}
 			entries = append(entries, cmdEntry{cmd, string(decision)})

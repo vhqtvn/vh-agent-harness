@@ -223,12 +223,12 @@ func splitFields(s string) []string {
 //   - committer: HarnessPolicyDeny — it keeps its gated command surface
 //     (commit-gate.sh) but the broad harness wildcard denies so the
 //     committer never invokes the harness binary directly outside its gate.
-//   - docs-steward, commit-message, commit-reviewer, ship-review, plan, the
+//   - docs-steward, commit-message, commit-reviewer, ship-review, the
 //     commit-reviewer-a..d cluster leaves, and the top-level default carry
 //     scalar-derived policies (Allow/Ask/Deny) matching their pre-read_only
 //     behavior; they were NOT migrated to read_only because they are not
 //     read-only harness specialists (orchestrators, gate-scoped, or
-//     advisory).
+//     advisory). (plan was migrated to read_only — see its entry below.)
 //
 // Edit values mirror the corpus template's edit decisions, extended by a
 // UNIVERSAL disposable-scratch carve-out: every agent may Write the gitignored,
@@ -267,7 +267,7 @@ func splitFields(s string) []string {
 // then EditOverrides, then tmp/** last).
 var CoreLocationRules = map[string]LocationRule{
 	"default": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAllow, Edit: Ask},
-	"plan":    {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyAsk, Edit: Deny},
+	"plan":    {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	"build": {
 		Wildcard: Ask, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyAllow, Edit: Allow, // gate-exempt
 	},

@@ -458,16 +458,19 @@ block:
 | Policy | Region 4 emission | Used by |
 |---|---|---|
 | `allow` | `"vh-agent-harness *": "allow"` (broad) | `build`, `coordination`, `project-coordinator` |
-| `ask` | `"vh-agent-harness *": "ask"` (broad) | `plan` |
+| `ask` | `"vh-agent-harness *": "ask"` (broad) | _(none in CoreLocationRules — `plan` migrated to `read_only`)_ |
 | `deny` | `"vh-agent-harness *": "deny"` (broad) | `committer` (keeps its gated command surface; uses `commit-gate.sh` directly, needs no harness exec surface) |
-| `read_only` | `"vh-agent-harness *": "deny"` **FIRST**, then a canonical set of safe read-only verbs as `"allow"` **AFTER** | see below (18 agents) |
+| `read_only` | `"vh-agent-harness *": "deny"` **FIRST**, then a canonical set of safe read-only verbs as `"allow"` **AFTER** | see below (18 core agents + 1 overlay-managed) |
 
-The `read_only` roster is **18 agents** total:
+The `read_only` roster is **18 core agents** (in `CoreLocationRules`) plus
+**1 overlay-managed**:
 
 - **9 original RO specialists:** `researcher`, `planner`, `media-perception`, `repo-explorer`, `debate`, `debate-proposer`, `debate-critic`, `debate-synth`, `solution-brief`.
-- **9 read-only service roles (F7-residue migration):** `commit-message`, `commit-reviewer`, `commit-reviewer-a`, `commit-reviewer-b`, `commit-reviewer-c`, `commit-reviewer-d`, `ship-review`, `docs-steward`, `harness-release-readiness`.
+- **8 read-only service roles (F7-residue migration):** `commit-message`, `commit-reviewer`, `commit-reviewer-a`, `commit-reviewer-b`, `commit-reviewer-c`, `commit-reviewer-d`, `ship-review`, `docs-steward`.
+- **1 read-only primary-mode planner:** `plan` (migrated from `ask`).
+- **1 overlay-managed service role (not in `CoreLocationRules`):** `harness-release-readiness`.
 
-The first 8 of those service roles are asserted in CoreLocationRules
+All 18 core roles are asserted in `CoreLocationRules`
 (`internal/permconfig/tables.go`); `harness-release-readiness` is
 overlay-managed (the `.vh-agent-harness` release pack renders its block and
 emits the same read_only surface). These roles draft text, review diffs,

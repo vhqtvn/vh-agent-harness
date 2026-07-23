@@ -73,6 +73,7 @@ func TestDeadRuleLint_NoShadowedAllowOrAsk(t *testing.T) {
 			}
 
 			nonReadOnly := rule.HarnessPolicy != HarnessPolicyReadOnly
+			_ = nonReadOnly // retained for clarity; no carve-out remains (see below)
 			for i, e := range entries {
 				if i >= devShIdx {
 					// Only entries BEFORE the scalar can be shadowed by it.
@@ -96,12 +97,17 @@ func TestDeadRuleLint_NoShadowedAllowOrAsk(t *testing.T) {
 				if devShVal == e.val {
 					continue
 				}
-				// Documented-intentional exemption: readonly command-group
-				// members retained in region 2 for non-read_only agents. See
-				// the HarnessReadOnlyCommands doc comment + this file's header.
-				if nonReadOnly && HarnessReadOnlyCommandsSet[e.key] {
-					continue
-				}
+				// No carve-out: ANY allow/ask entry in region 2 that the later
+				// DevShCommand scalar shadows to a DIFFERENT decision is a dead
+				// rule, for EVERY agent (read_only, allow, ask, deny). The
+				// computeBashBlock emitter now SKIPS canonical read-only verbs
+				// for read_only AND deny agents (so neither emits a dead
+				// region-2 entry). allow/ask agents keep region-2 readonly
+				// entries, but their scalar agrees (allow/ask == allow/ask), so
+				// the redundant-but-consistent guard above passes them. This
+				// lint catches the full class of dead rules; reintroducing one
+				// (e.g. a new agent with an ask/deny scalar but a region-2
+				// readonly allow) fails here rather than slipping through.
 				t.Errorf("dead rule detected for agent %s: pattern %q is shadowed by later %q for all matching inputs (entry value %q, scalar value %q)",
 					agent, e.key, DevShCommand, e.val, devShVal)
 			}

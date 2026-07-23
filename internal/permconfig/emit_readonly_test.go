@@ -465,11 +465,14 @@ func TestReadOnly_FindLast_ScalarPolicies(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // readOnlySpecialists is the canonical list of core agents migrated to
-// read_only. The first 9 are the original RO specialists; the latter 8 are the
+// read_only. The first 9 are the original RO specialists; the next 8 are the
 // F7-residue migration (commit-message, commit-reviewer + its a..d leaves,
-// ship-review, docs-steward). harness-release-readiness is the 18th read_only
-// agent overall but is overlay-managed (the .vh-agent-harness release pack),
-// so it is NOT in CoreLocationRules and is not asserted here.
+// ship-review, docs-steward); plan was migrated from ask to read_only in a
+// follow-up (it was the last non-read_only scalar agent that was actually
+// read-only in spirit). That is 18 core read_only agents.
+// harness-release-readiness is the 19th read_only agent overall but is
+// overlay-managed (the .vh-agent-harness release pack), so it is NOT in
+// CoreLocationRules and is not asserted here.
 var readOnlySpecialists = []string{
 	"planner", "researcher", "repo-explorer", "media-perception",
 	"debate", "debate-proposer", "debate-critic", "debate-synth",
@@ -478,10 +481,13 @@ var readOnlySpecialists = []string{
 	"commit-message", "commit-reviewer",
 	"commit-reviewer-a", "commit-reviewer-b", "commit-reviewer-c", "commit-reviewer-d",
 	"ship-review", "docs-steward",
+	// plan migration (ask → read_only):
+	"plan",
 }
 
-// TestReadOnly_RoleRegression_SpecialistsAreReadOnly: all 9 RO specialists
-// carry HarnessPolicyReadOnly in CoreLocationRules.
+// TestReadOnly_RoleRegression_SpecialistsAreReadOnly: all 18 core read_only
+// agents in readOnlySpecialists carry HarnessPolicyReadOnly in
+// CoreLocationRules.
 func TestReadOnly_RoleRegression_SpecialistsAreReadOnly(t *testing.T) {
 	for _, agent := range readOnlySpecialists {
 		rule, ok := CoreLocationRules[agent]
