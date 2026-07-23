@@ -349,3 +349,55 @@ deferred); no duplicate card.
 House style: bolded-metadata frontmatter + Framing → Verification → Reconciliation
 → Disposition → Authority-line → Deferred → Rejected → Evidence, following the
 `2026-07-05` / `2026-07-22` convention (not YAML frontmatter).
+
+---
+
+## Addendum (2026-07-24) — The generic answer: HYBRID (merge-vs-union by property identity)
+
+This addendum records the reframe that resolves the unify-vs-federate question, so
+it survives compaction independently of the chat that produced it.
+
+### The resolution
+The two governing rules do not conflict — together they ARE the answer:
+- §4.4 "declare once, derive everywhere": **same property → MERGE.**
+- release-defer-dual "union fail-closed, don't collapse": **different property → UNION.**
+
+**Verdict: HYBRID.** A thin, domain-free closure **vocabulary** — property-identity
++ provenance + verifier-ref + was-it-exercised + evidence — with verification and
+enforcement **federated per property**. This is NOT a universal claims database, NOT
+a generic lifecycle, and NOT persistent. It keeps the vocabulary domain-free (core),
+the coordinator **non-authoritative** (gates act; the vocabulary only carries
+declarations), and everything **synchronous** (no background runtime).
+
+### Merge candidates (same property → one derive→act chain)
+- §4.1 closure kernel + §4.3 defer-liveness gate.
+- verdict token + crux clause = one behavioral-completion declaration (crux is
+  evidence feeding the verdict, not a rival "done" signal).
+- premise 4-tuple + motivation *transport* (carrier only, not the check).
+
+### Union candidates (different property → keep separate; fail-closed if either fails)
+behavioral completion ≠ defer-not-drop (debt survival) ≠ HEAD-progress
+(landed-state) ≠ motivation-satisfaction ≠ findings-retention.
+
+### Load-bearing caveat — the token does NOT prove reality
+The verdict/crux token makes a completion **declaration honest and non-droppable**;
+it does **not** prove the crux path was actually exercised. A structural validator
+can reject `proven` + `crux:unproven`, but must not pretend schema-validity means
+the path ran. Proving the crux still requires **repo-specific live verification** —
+the docker-gold pattern: seed real data, induce the real failure, observe the fix,
+and show the assertion goes RED on a pre-fix build. **Harness token + repo
+verification together** close the gap; the token alone would still let a
+green-but-unproven "proven" through in a repo with no crux probe. Do not let the
+pilot be read as a substitute for repo-side verification.
+
+### Evidence that flips the verdict
+- Toward UNIFY: a durable multi-session claim history proves necessary AND cannot be
+  reconstructed from canonical files + HEAD + SourceRef + synchronous checks, AND a
+  persistent design gives fail-closed safety reads without coordinator transition
+  authority.
+- Toward FEDERATE (cheapest falsification): the verdict/crux pilot cannot share one
+  declaration cleanly.
+
+### Status
+Narrows, does not supersede, the committed disposition. The pilot (behavioral-closure)
+remains scheduled AFTER v0.15.0 close. No defer-card triggers change.
