@@ -493,6 +493,27 @@ const DevShCommand = "vh-agent-harness *"
 // self-update *, overlay new *), artifact-producing verbs (diagnostics-export
 // *, __*), and broad wildcards (skill *, overlay *).
 //
+// FAMILY-RO ADMISSION RULE (verb + verb *): a verb is admitted as BOTH the
+// scalar ("vh-agent-harness doctor") AND the wildcard ("vh-agent-harness
+// doctor *") ONLY when the ENTIRE family is currently read-only (inspection
+// flags, no mutating subcommands). doctor, docs, status, guide, proposals,
+// version, example, sys-prompt, help, diff, and preflight all follow this
+// shape. This is DISTINCT from the skill * / overlay * exclusion: those
+// families are withheld because they ALREADY carry mutating verbs (overlay
+// new; future skill verbs) that must stay denied for read_only specialists,
+// so a family-wide wildcard would leak a mutation.
+//
+// FAIL-OPEN CAVEAT: the wildcard form means the read-only matrix does NOT
+// deny a FUTURE subcommand of an admitted verb while "verb *" stays. A future
+// mutating "doctor <subcommand>" (e.g. a repair/write/network/secret path)
+// would therefore INHERIT the allow unless the family is re-audited.
+// Admission of "verb *" carries a standing obligation to re-audit the family
+// the moment it gains any mutator; if that happens, either narrow the
+// wildcard to an explicit read-only subcommand allowlist or move the mutating
+// subcommand under a separate denied verb. Narrowing the inventory as a
+// precaution (when no mutator exists yet) is hardening, not a defect fix, and
+// is parked behind a named trigger (see the 2026-07-24 disposition memo).
+//
 // "vh-agent-harness exec-ro *" also appears in the readonly CommandGroup
 // (tables.go:readonly). For read_only agents, computeBashBlock SKIPS it in
 // the command-group region (region 2) because it would be a dead entry

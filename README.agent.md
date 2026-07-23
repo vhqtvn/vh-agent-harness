@@ -496,6 +496,19 @@ Excluded entirely: all mutation verbs (`exec`, `exec-sandbox`, `shell`, `up`,
 artifact producers (`diagnostics-export`), and broad wildcards (`skill *`,
 `overlay *`).
 
+**Family read-only admission rule.** Each admitted verb appears as both the
+scalar (`vh-agent-harness doctor`) and the wildcard (`vh-agent-harness
+doctor *`) because its entire family is currently read-only — inspection flags,
+no mutating subcommands. This is distinct from the `skill *` / `overlay *`
+exclusion: those families already carry mutating verbs (`overlay new`; future
+skill verbs), so a family-wide wildcard would leak a mutation to read-only
+specialists. **Fail-open caveat:** while the wildcard form is used, the matrix
+does not deny a *future* subcommand of an admitted verb — a future mutating
+`doctor <subcommand>` (e.g. a repair/write/network/secret-sensitive path) would
+inherit the allow unless the family is re-audited. Admission of `verb *`
+carries a standing re-audit obligation; narrowing the wildcard while no
+mutator exists is hardening (parked behind a named trigger), not a defect fix.
+
 All canonical read-only verbs are protected keys — a config transform cannot
 collide with or replace them, and a non-canonical harness pattern injected by a
 transform lands BEFORE the Region 4 `deny`, so it is inert under `findLast`.
@@ -1070,6 +1083,30 @@ absent (a project first updated by a pre-v0.10.0 binary), the first `update`
 establishes a baseline from the current render — it does NOT retroactively
 adopt pre-existing `.opencode/skills/` dirs as managed (there is no historical
 proof they were overlay-rendered).
+
+## Capability residue (deselected capability; NOT an orphan)
+
+A **capability residue** is different from the orphan case above. When a
+capability-owned file (for example the `media-perception` agent prompt + skill)
+was written by a prior `update` while its capability was selected, and the
+capability is later deselected, the already-written on-disk file is **left in
+place as inactive residue** — it is a *known* path, so it is exempt from
+managed-drift and unexpected-drift, and `doctor` does **not** fail on it. It is
+deliberately not auto-deleted.
+
+`--prune-orphans` does **not** remove capability residue. It only consumes
+renderstate *orphans* (files whose producing **source** is now missing); a
+deselected capability's source still exists, so its residue is never a prune
+target.
+
+To remove residue once an operator confirms it is unwanted, delete the **whole
+skill directory** (`.opencode/skills/<name>/`, not `SKILL.md` alone) and, for
+capability-owned agent residue, the agent file too (e.g.
+`.opencode/agents/media-perception.md`). Once the whole skill directory is gone,
+the `doctor` skills check SKIPs (no directory to inspect) and `doctor` passes.
+Note that a **half-deleted** skill — directory present but `SKILL.md` deleted —
+is a deliberate `doctor` **FAIL** (a broken skill definition breaks opencode's
+skill discovery), so never remove `SKILL.md` in isolation.
 
 ## Git global-flag detection (shell-guard)
 
