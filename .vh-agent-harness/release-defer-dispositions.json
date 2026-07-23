@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "release_base": { "kind": "tag", "value": "v0.13.1" },
-  "evaluated_commit": "56159403044bfa3f26a01d9567d2d859adc087f7",
-  "evaluated_tree": "f4532f0c6ebd48b532a4bd7ace0703b45e81a553",
-  "manifest_parent_commit": "56159403044bfa3f26a01d9567d2d859adc087f7",
+  "evaluated_commit": "34cb1abce8ff523ab162f90ede0bdb8405c51d10",
+  "evaluated_tree": "207594567b27597801f38ca7684cbde8c90b2d26",
+  "manifest_parent_commit": "34cb1abce8ff523ab162f90ede0bdb8405c51d10",
   "reconciliation": {
     "status": "confirmed",
     "scope": "Release arc: v0.13.1 through evaluated_commit (intended release v0.14.0). The handshake SHAs (evaluated_commit / evaluated_tree / manifest_parent_commit) bind to R (the readiness-artifact commit), which sits between N (the release-note commit) and M (this manifest commit) in the wrapper-required three-commit ceremony note(N) -> artifact(R) -> manifest(M): N (beaecfd, the migration-note commit, child of release-prep P) -> R (the single-path readiness-artifact commit, child of N) -> M (this manifest-only commit, child of R). At HEAD=M the DEFER handshake invariant requires HEAD^ == R == evaluated_commit == manifest_parent_commit AND tree(HEAD^) == evaluated_tree == tree(R); the readiness gate additionally requires the committed artifact (.vh-agent-harness/release-readiness-pass.json) to carry commit_sha == HEAD^^ == N (beaecfd) and to be the single path changed in HEAD^^..HEAD^. Release mode is manifest-authority-only; the wrapper and CI recheck always read this committed manifest. records[] dispositions are operator-attested and unchanged by the releaser's SHA recompute.",
