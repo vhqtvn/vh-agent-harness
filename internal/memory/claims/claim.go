@@ -62,7 +62,18 @@ type Claim struct {
 	VerifierRef    string `json:"verifier_ref"`     // what checks this claim
 	Disposition    string `json:"disposition"`      // e.g. released / about-to-release / open / closed
 	LastVerifiedAt string `json:"last_verified_at"` // RFC3339
-	ValidUntil     string `json:"valid_until,omitempty"`
+	// ValidUntil is the verdict-expiry horizon from the §4.3 closure-kernel memo.
+	//
+	// CONTRACT (v1 — omitted-for-v1 / no-expiry sentinel): the v1 claim-derivation
+	// path (buildRecords) has NO verdict-expiry input — DeferCard carries no
+	// valid_until field, the migration-note side has no expiry source, and the
+	// release gate performs no timestamp validation. ValidUntil is therefore left
+	// empty for every claim Derive projects, and the omitempty tag drops it from
+	// the JSON body. This omission is BY EXPLICIT CONTRACT, not an oversight: it
+	// means "no expiry declared for v1", NOT "the verdict is proven unexpired".
+	// Projecting a populated ValidUntil and wiring the release gate to FAIL on an
+	// expired verdict is OUT OF SCOPE for the v1 claims kernel (defer-005).
+	ValidUntil string `json:"valid_until,omitempty"`
 
 	// --- §4.3 gate extensions ---
 	Kind               ClaimKind `json:"kind"`
@@ -223,7 +234,13 @@ func Derive(repoRoot string) (Registry, error) {
 		return reg, fmt.Errorf("read coordinator tasks dir: %w", err)
 	}
 	reg.TasksPresent = tasksPresent
-	reg.Cards = cards
+	// Collision-safe claim identity (defer-004): normalize task_id, then reject
+	// empty and duplicate IDs as CardError BEFORE record projection. This runs
+	// before buildRecords so invalid cards can never collapse onto one
+	// record.ID under the substrate's append/dedup (last-write-wins by ID)
+	// semantics. The kernel SURFACES CardError; it does not decide SKIP/FAIL —
+	// the release gate maps a non-empty CardErrors set to tierFail (fail-closed).
+	reg.Cards, cardErrs = validateCardIdentities(cards, cardErrs)
 	reg.CardErrors = cardErrs
 
 	// Side B: released/about-to-release migration notes (canon).
@@ -284,6 +301,86 @@ func loadDeferCards(repoRoot string) (cards []DeferCard, present bool, cardErrs 
 		cards = append(cards, c)
 	}
 	return cards, true, cardErrs, nil
+}
+
+// validateCardIdentities enforces the collision-safe claim-identity contract for
+// Side A cards (defer-004). It runs AFTER parse (loadDeferCards) and BEFORE
+// record projection (buildRecords), so the claim identities Derive emits are
+// guaranteed non-empty and unique.
+//
+// The contract:
+//   - task_id is NORMALIZED (whitespace-trimmed). The stable identity
+//     "defer_disposition:<task_id>" is derived from the normalized value, so two
+//     cards whose task_id differs only by surrounding whitespace cannot sneak
+//     past duplicate detection.
+//   - every selected defer/errata card MUST carry a nonempty task_id. An empty
+//     (post-trim) task_id cannot anchor a claim identity.
+//   - normalized task_id MUST be unique across the selected set. Duplicate IDs
+//     would collapse onto one record.ID under the substrate's append/dedup
+//     (last-write-wins by ID) semantics, silently merging distinct cards.
+//
+// Collision handling is FAIL-CLOSED and respects the authority line: a task_id
+// claimed by more than one card is an AMBIGUOUS identity. The kernel has no
+// authority to pick one card over another, so ALL participants are surfaced as
+// CardError and NONE survives. (Keeping only the first would silently resolve an
+// ambiguity the gate — not the kernel — owns.) Empty task_id cards are likewise
+// surfaced. The release gate maps a non-empty CardErrors set to tierFail.
+//
+// Each CardError carries the offending source path (Path) and a human-readable
+// detail naming the collision class and — for duplicates — the OTHER source(s)
+// sharing the ID, so every offending file is recoverable from CardErrors alone.
+// The appended errors are returned alongside any parse-time errors already
+// collected by loadDeferCards, preserving provenance for both failure classes.
+//
+// Authority line: this function INFORMS only — it surfaces CardError. It does
+// NOT decide SKIP/FAIL and does not gate; only the release gate acts.
+func validateCardIdentities(cards []DeferCard, cardErrs []CardError) (surviving []DeferCard, combined []CardError) {
+	// Normalize first so duplicate detection and the stable record identity agree.
+	for i := range cards {
+		cards[i].TaskID = strings.TrimSpace(cards[i].TaskID)
+	}
+	// Group by normalized task_id (preserving first-seen order for deterministic
+	// error output) so a collision can name every participant at once.
+	byID := map[string][]DeferCard{}
+	order := []string{}
+	for _, c := range cards {
+		if _, ok := byID[c.TaskID]; !ok {
+			order = append(order, c.TaskID)
+		}
+		byID[c.TaskID] = append(byID[c.TaskID], c)
+	}
+	keep := make([]DeferCard, 0, len(cards))
+	for _, id := range order {
+		group := byID[id]
+		switch {
+		case id == "":
+			for _, c := range group {
+				cardErrs = append(cardErrs, CardError{
+					Path: c.Path,
+					Err:  fmt.Errorf("defer/errata card has empty task_id; claim identity cannot be derived (need nonempty task_id)"),
+				})
+			}
+		case len(group) > 1:
+			// Ambiguous identity: flag EVERY participant. Each error names the
+			// other source(s) so both sides of the collision are recoverable.
+			for _, c := range group {
+				var others []string
+				for _, oc := range group {
+					if oc.Path != c.Path {
+						others = append(others, oc.Path)
+					}
+				}
+				cardErrs = append(cardErrs, CardError{
+					Path: c.Path,
+					Err: fmt.Errorf("duplicate task_id %q (also declared by %s); claim identity must be unique to avoid record.ID collision",
+						id, strings.Join(others, ", ")),
+				})
+			}
+		default:
+			keep = append(keep, group[0])
+		}
+	}
+	return keep, cardErrs
 }
 
 // migrationNotes reads Side B: migration notes under

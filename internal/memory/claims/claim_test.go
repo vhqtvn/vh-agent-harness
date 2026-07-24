@@ -378,6 +378,27 @@ func TestDerive_RecordsCarryS1(t *testing.T) {
 	if !strings.Contains(cc.VerifierRef, "defer_liveness") {
 		t.Errorf("card VerifierRef = %q, want to name the gate", cc.VerifierRef)
 	}
+
+	// defer-005 contract: ValidUntil is omitted-for-v1 (empty by explicit
+	// contract, NOT proof a verdict is unexpired). v1 claim derivation has no
+	// verdict-expiry input (DeferCard carries no valid_until field, migration
+	// notes have no expiry source, and the gate performs no timestamp
+	// validation). The omitempty tag must drop the key from every body. Assert
+	// BOTH the decoded field is empty AND the raw JSON body omits the key, so
+	// a future regression that accidentally populates the field cannot slip
+	// through as a silently-present-but-zero value.
+	if cc.ValidUntil != "" {
+		t.Errorf("card ValidUntil = %q, want empty (omitted-for-v1 contract)", cc.ValidUntil)
+	}
+	if nc.ValidUntil != "" {
+		t.Errorf("note ValidUntil = %q, want empty (omitted-for-v1 contract)", nc.ValidUntil)
+	}
+	if strings.Contains(noteRec.Body, "valid_until") {
+		t.Errorf("note body must not carry valid_until under the omitted-for-v1 contract; body=%s", noteRec.Body)
+	}
+	if strings.Contains(cardRec.Body, "valid_until") {
+		t.Errorf("card body must not carry valid_until under the omitted-for-v1 contract; body=%s", cardRec.Body)
+	}
 }
 
 // TestDerive_SemverSortNotLexicographic proves migration notes are sorted by
@@ -436,4 +457,154 @@ func TestSemverLess(t *testing.T) {
 			t.Errorf("semverLess(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
 		}
 	}
+}
+
+// TestDerive_CollisionSafeClaimIdentity (defer-004) proves claim identity is
+// collision-safe: empty and duplicate task_id cards are surfaced as CardError
+// (fail-closed) and EXCLUDED from record projection, so they cannot collapse
+// onto one record.ID under the substrate's append/dedup (last-write-wins by ID)
+// semantics. Every emitted record keeps its SourceRef, and valid unique cards
+// retain the stable identity "defer_disposition:<task_id>".
+func TestDerive_CollisionSafeClaimIdentity(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeNote(t, dir, "v0.1.0")
+	// Two valid unique cards + one empty-task_id card + two duplicate-task_id cards.
+	writeCard(t, dir, "defer-good-a.json", "defer-good-a", "good a", "draft", nil, nil)
+	writeCard(t, dir, "defer-good-b.json", "defer-good-b", "good b", "completed", nil, nil)
+	writeCard(t, dir, "defer-empty.json", "", "empty id", "draft", nil, nil)
+	writeCard(t, dir, "defer-dup-1.json", "defer-dup", "dup one", "draft", nil, nil)
+	writeCard(t, dir, "defer-dup-2.json", "defer-dup", "dup two", "draft", nil, nil)
+
+	reg, err := Derive(dir)
+	if err != nil {
+		t.Fatalf("Derive: unexpected dir-level error: %v", err)
+	}
+
+	// (1) Empty + duplicate IDs surface as CardError, not silently merged.
+	// 1 empty + 2 duplicate = 3 offending cards.
+	if len(reg.CardErrors) != 3 {
+		t.Fatalf("CardErrors: want 3 (1 empty + 2 dup), got %d: %v", len(reg.CardErrors), reg.CardErrors)
+	}
+	// Each offending source path must be recoverable through CardError.Path.
+	paths := map[string]bool{}
+	for _, ce := range reg.CardErrors {
+		paths[filepath.Base(ce.Path)] = true
+	}
+	if !paths["defer-empty.json"] {
+		t.Errorf("CardErrors must name the empty-task_id source defer-empty.json; got paths %v", paths)
+	}
+	if !paths["defer-dup-1.json"] || !paths["defer-dup-2.json"] {
+		t.Errorf("CardErrors must name BOTH duplicate sources; got paths %v", paths)
+	}
+	// Every CardError must also carry the error detail (not a nil Err).
+	for _, ce := range reg.CardErrors {
+		if ce.Err == nil {
+			t.Errorf("CardError for %s has nil Err — detail lost", filepath.Base(ce.Path))
+		}
+	}
+
+	// (2) Only the two valid unique cards survive into reg.Cards.
+	if len(reg.Cards) != 2 {
+		t.Fatalf("Cards: want 2 surviving, got %d", len(reg.Cards))
+	}
+
+	// (3) Invalid-card diagnostics do not themselves share record IDs: the
+	// invalid cards contribute ZERO records (they are CardErrors only), and
+	// every surviving record has a unique ID.
+	ids := map[string]bool{}
+	for _, r := range reg.Records {
+		if ids[r.ID] {
+			t.Errorf("duplicate record.ID %q — collision-safety broken", r.ID)
+		}
+		ids[r.ID] = true
+	}
+	// 1 note + 2 valid cards = 3 records. Invalid cards contribute none.
+	if want := 1 + 2; len(reg.Records) != want {
+		t.Errorf("Records: want %d (note + valid cards only), got %d", want, len(reg.Records))
+	}
+
+	// (4) Every emitted record retains a non-empty SourceRef (provenance preserved).
+	for i, r := range reg.Records {
+		if r.SourceRef == nil || *r.SourceRef == "" {
+			t.Errorf("Records[%d].SourceRef empty — provenance lost", i)
+		}
+	}
+
+	// (5) Valid unique cards retain the stable identity defer_disposition:<task_id>.
+	if !ids["defer_disposition:defer-good-a"] {
+		t.Errorf("missing record defer_disposition:defer-good-a (stable identity); ids=%v", ids)
+	}
+	if !ids["defer_disposition:defer-good-b"] {
+		t.Errorf("missing record defer_disposition:defer-good-b (stable identity); ids=%v", ids)
+	}
+}
+
+// TestDerive_TaskIDNormalized (defer-004) proves task_id is normalized
+// (whitespace-trimmed) BEFORE identity derivation. A single card with surrounding
+// whitespace survives with the TRIMMED stable identity.
+func TestDerive_TaskIDNormalized(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeCard(t, dir, "defer-ws.json", "  defer-ws  ", "ws", "draft", nil, nil)
+
+	reg, err := Derive(dir)
+	if err != nil {
+		t.Fatalf("Derive: %v", err)
+	}
+	if len(reg.CardErrors) != 0 {
+		t.Fatalf("CardErrors: want 0, got %v", reg.CardErrors)
+	}
+	if len(reg.Cards) != 1 {
+		t.Fatalf("Cards: want 1 surviving (normalized), got %d", len(reg.Cards))
+	}
+	if reg.Cards[0].TaskID != "defer-ws" {
+		t.Errorf("surviving TaskID = %q, want trimmed \"defer-ws\"", reg.Cards[0].TaskID)
+	}
+	found := false
+	for _, r := range reg.Records {
+		if r.ID == "defer_disposition:defer-ws" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("missing record defer_disposition:defer-ws (normalized identity); ids=%v", recordIDs(reg.Records))
+	}
+}
+
+// TestDerive_TaskIDWhitespaceDuplicate (defer-004) proves two task_id values
+// differing ONLY by surrounding whitespace collide AFTER normalization. Both
+// participants are surfaced as CardError (ambiguous identity, fail-closed) and
+// neither survives — the kernel does not silently pick one over the other.
+func TestDerive_TaskIDWhitespaceDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeCard(t, dir, "defer-ws-1.json", "  defer-ws  ", "ws one", "draft", nil, nil)
+	writeCard(t, dir, "defer-ws-2.json", "\tdefer-ws\n", "ws two", "draft", nil, nil)
+
+	reg, err := Derive(dir)
+	if err != nil {
+		t.Fatalf("Derive: %v", err)
+	}
+	if len(reg.CardErrors) != 2 {
+		t.Fatalf("CardErrors: want 2 (both collide after trim), got %d: %v", len(reg.CardErrors), reg.CardErrors)
+	}
+	if len(reg.Cards) != 0 {
+		t.Fatalf("Cards: want 0 surviving (ambiguous identity, fail-closed), got %d", len(reg.Cards))
+	}
+	// No record is projected for the ambiguous identity.
+	for _, r := range reg.Records {
+		if r.ID == "defer_disposition:defer-ws" {
+			t.Errorf("record projected for ambiguous identity %q; ids=%v", r.ID, recordIDs(reg.Records))
+		}
+	}
+}
+
+// recordIDs returns the IDs of a record slice (test helper).
+func recordIDs(rs []record.Record) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.ID
+	}
+	return out
 }
