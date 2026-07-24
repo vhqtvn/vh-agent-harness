@@ -126,7 +126,7 @@ seam, a missing declaration is incomplete, not silently satisfied.
 | Control | F1 canonical (producer acts) | F2-derived surface | Prohibited duplication |
 |---|---|---|---|
 | **R1** | property identity; source/lane refs; ancestry; cross-lane join; agreements/contradictions/gaps; hazard↔symptom links; merge/union disposition; bounded conclusion; linkage to R3/P-a | committed doc path+timestamp; chronological streak; headings; filters; status badges; summaries; renderer version | F2 must not recompute joins, infer relationships, replace ancestry, or author a second conclusion |
-| **P-a** | probe target; falsification question; checked scope+sources; result enum; real counter-evidence refs; limitations; weakest claim; confidence | options×costs×evidence-against×weakest-claim×reversal-cost table; ordering; formatting; display summaries | F2 must not invent counter-evidence, convert bounded absence into global absence, change weakest claims, or fill missing probes |
+| **P-a** | probe target; falsification question; checked scope+sources; result enum; real counter-evidence refs; limitations; weakest claim; confidence; **+ the rendered option VALUES `costs` / `risks` / `reversal_cost` / `cheapest_validation` — these are canonical R3 option-record fields (see § R3 fork-trigger above), NOT F2-derived** | the decision TABLE that RENDERS them (`options × costs × evidence-against × weakest-claim × reversal-cost` layout), ordering, formatting, display summaries — derived RENDERING only; the VALUES it formats are canonical | F2 must not invent counter-evidence, convert bounded absence into global absence, change weakest claims, or fill missing probes |
 | **shared envelope** | version, cycle ID, applicability, canonical entry IDs, source refs, validation result, semantic digest | storage locator, write timestamp, view-model/renderer version, verified-media attachment metadata | F2 cannot replace/recalculate semantic content under the same digest |
 
 ### R1 accumulator — NEW SLOT `r1_cross_lane_join`
@@ -158,6 +158,27 @@ narrative.
 redesign option (invalid if it merely renames, delays, or subdivides the same
 repair) + P-a links + operator disposition (`pending`/`selected`/`rejected`/
 `deferred`).
+
+**Option record schema (canonical field-level contract; each R3 option — the
+continue-repair option AND the redesign option — carries this):**
+
+```yaml
+option_id: ...                      # stable option identifier
+mode: ...                           # continue_repair | redesign
+mechanism: ...                      # how the option works
+affected_properties: [...]          # properties touched by this option
+support_refs: [...]                 # canonical source / support references
+counter_evidence_probe_refs: [...]  # links to the mandatory P-a probes
+costs: [...]                        # the option's costs
+risks: [...]                        # the option's risks
+reversal_cost: ...                  # cost to reverse if this option is chosen
+cheapest_validation: ...            # cheapest way to validate the option
+```
+
+`costs` / `risks` / `reversal_cost` / `cheapest_validation` are **canonical
+R3 producer fields** (the R3 producer populates them); they are NOT F2-derived.
+The F2 P-a decision table renders them, but the VALUES come from these
+canonical R3 option records (see the canonical-vs-derived boundary below).
 
 **Persistence across compaction:** the canonical entry + the committed
 projection. The `.local/coordinator/tasks/` card is **transport, not durable
@@ -319,3 +340,17 @@ House style: this memo follows the `2026-07-22` / `2026-07-23` convention
 (bolded-metadata frontmatter; Framing → Decision → Mechanism → Authority →
 Contradictions → Evidence), not the YAML-frontmatter convention, per the
 2026-07-22 memo's house-style note.
+
+## Addendum (2026-07-25): R3 field-level schema restoration (C1 resolution)
+
+> **C1 incident (2026-07-25):** Field-level schema dropped during brief→memo
+> distillation. The full F1 design brief specified `costs` / `risks` /
+> `reversal_cost` / `cheapest_validation` on R3 alternatives; the
+> decision-granularity memo omitted them, causing the F2 P-a decision table's
+> C1 gate to fail (no canonical source found). Amended to restore the fields.
+
+> **House rule (evidence: 2026-07-25 C1 incident):** Field-level schemas that
+> downstream briefs consume are carried VERBATIM in decision memos, never
+> summarized. A decision memo may distill rationale and decisions, but
+> field-level contracts that a downstream brief maps to must be reproduced
+> verbatim.
