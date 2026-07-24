@@ -822,6 +822,26 @@ export default function transform({ context }) {
   `.opencode/` edits with older bytes. `doctor` does not detect this revert (it
   re-renders from the same stale embedded corpus and byte-compares). Consumers
   whose binary embeds the same corpus they run with are unaffected.
+- **This dev-repo footgun is now ENFORCED, not just documented.** A target that
+  positively looks like a source checkout — it carries BOTH `corpus.go` AND
+  `templates/core/` at its root — is guarded. When the binary's embedded corpus
+  DIFFERS from the checkout's `templates/core/`:
+  - a LIVE `vh-agent-harness update` REFUSES (non-zero exit, before any write);
+    recovery is `make update` (the `Makefile` target rebuilds first), and
+    `--allow-stale-corpus` is the explicit override (it is NOT `--force`, which
+    already means bypassing the uninitialized-target confirmation);
+  - `vh-agent-harness update --dry-run` still previews, but warns that the
+    output reflects the BINARY's embedded corpus, not what a rebuilt binary would
+    render;
+  - `vh-agent-harness doctor` surfaces a non-failing `dev-stale-embed` WARN and
+    qualifies its `managed-drift` line to say "in sync with the embedded corpus
+    in this binary" (never a bare "in sync"). The WARN alone never makes doctor
+    UNHEALTHY.
+
+  A target missing either marker (every consumer) is completely unaffected — the
+  guard never fires there. The guard never asserts which side is "ahead": a byte
+  comparison proves difference, not chronology, and the recovery is `make update`
+  either way.
 - **Inspect migration notes for a release:** `vh-agent-harness help migrate`
   (the **bounded forward path** — every bundled note whose target falls in the
   half-open interval `(adopted, binary]`, oldest first, where `adopted` is the
@@ -1244,6 +1264,12 @@ agent / dogfood / CI path stays frictionless. It is skipped when any of:
 An **initialized** target (profile present) never prompts, regardless of TTY or
 flags — the guard only guards the adopt-into-uninitialized case. `install`
 remains the explicit "I mean it" path and is unaffected.
+
+> **`--allow-stale-corpus` is a separate override, NOT `--force`.** `--force`
+> bypasses this uninitialized-target prompt. The stale-corpus guard (a source
+> checkout whose `templates/core/` differs from the binary's embedded corpus)
+> is a different hazard and gets its own explicit opt-in. See "Refresh &
+> migration" above for when it applies.
 
 ## Migration-note convention (releasing)
 

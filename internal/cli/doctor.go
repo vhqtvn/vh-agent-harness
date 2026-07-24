@@ -64,6 +64,7 @@ var doctorCmd = &cobra.Command{
   defer-liveness  open defer/errata cards contradict no released claim     FAIL if open card contradicts a present note
   staged-errata-content staged errata correction present in release note   FAIL if staged card content missing from the about-to-release note
   behavioral-closure closeout declarations internally consistent  FAIL if verdict:proven claimed without a proven crux result
+  dev-stale-embed binary's embedded corpus vs checkout's templates/core  WARN if differs (source checkout only; consumers see nothing)
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -103,6 +104,14 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("resolve target: %w", err)
 	}
 
+	// Compute the dogfood-local staleness signal ONCE. It is meaningful ONLY in
+	// a source checkout (the harness's own repo, where the binary's embedded
+	// corpus can diverge from the on-disk templates/core). Consumers hit
+	// freshnessNotApplicable and see no new diagnostic. Reused by the
+	// managed-drift qualifier (so its "in sync" is never printed unqualified
+	// when dev-stale) and by the dedicated dev-stale-embed section below.
+	freshness := checkCorpusFreshness(abs)
+
 	problems := 0
 	warns := 0
 
@@ -123,6 +132,11 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	// 3. Managed-drift (re-render staging, byte-compare every managed path).
 	fmt.Fprintln(out, "  managed-drift:")
 	dr := checkManagedDrift(abs)
+	// Qualify the detail when dev-stale so it never prints an unqualified
+	// "in sync" against a checkout whose templates/core differs from the
+	// binary's embedded corpus (the circular-drift-check finding). The tier is
+	// unchanged: real drift still FAILs; a byte-match still passes.
+	dr = qualifyManagedDriftOnDevStale(dr, freshness)
 	fmt.Fprintln(out, "    "+dr.String())
 	applyTier(dr.tier, &problems, &warns)
 
@@ -256,6 +270,21 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	bcr := checkBehavioralClosure(abs)
 	fmt.Fprintln(out, "    "+bcr.String())
 	applyTier(bcr.tier, &problems, &warns)
+
+	// 15. dev-stale-embed (the dogfood-local staleness guard, WARN-only). In a
+	//     source checkout, surfaces when the binary's embedded corpus differs
+	//     from (or could not be compared against) the checkout's templates/core
+	//     — the condition under which a live `update` would be refused and
+	//     managed-drift's "in sync" is qualified. WARN-only by construction
+	//     (real drift is owned by managed-drift; this never fails the command
+	//     on its own). Consumers (not-applicable) see NO new section — the
+	//     guard is structurally inert for every consumer.
+	if freshness.status != freshnessNotApplicable {
+		fmt.Fprintln(out, "  dev-stale-embed:")
+		dsr := devStaleCheckResult(freshness)
+		fmt.Fprintln(out, "    "+dsr.String())
+		applyTier(dsr.tier, &problems, &warns)
+	}
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)

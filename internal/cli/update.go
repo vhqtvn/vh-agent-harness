@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	corpus "github.com/vhqtvn/vh-agent-harness"
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 	"github.com/vhqtvn/vh-agent-harness/internal/renderstate"
@@ -58,7 +59,16 @@ bypassed automatically when stdin is not a TTY (piped/redirected input, agents,
 CI; 'make update' and '/harness' only when their stdin is non-interactive), and
 can be skipped with --force (-f) or RUN_FROM_AGENT=1. An interactive 'make
 update' in a terminal still has a TTY and still prompts. --dry-run never prompts
-(it writes nothing).`,
+(it writes nothing).
+
+Stale-corpus guard (dev/dogfood only): in a source checkout — a target carrying
+BOTH corpus.go AND templates/core/ — a live update REFUSES when the binary's
+embedded corpus DIFFERS from the checkout's templates/core, since re-rendering
+would silently overwrite rendered files with the binary's corpus instead of the
+source tree's. Recovery is 'make update' (the Makefile target rebuilds first);
+--allow-stale-corpus overrides (it is NOT --force). --dry-run warns and proceeds
+(writes nothing). Targets missing either marker (every consumer) are completely
+unaffected.`,
 	Args: cobra.NoArgs,
 	RunE: runUpdate,
 }
@@ -68,6 +78,14 @@ var updateTargetFlag string
 var updateDryRun bool
 var updateForce bool
 var updatePruneOrphans bool
+
+// updateAllowStaleCorpus is the explicit override for the dogfood-local
+// staleness guard. It is intentionally NOT aliased to --force (-f): --force
+// already means bypassing the uninitialized-target confirmation guard, a
+// separate concern. A source checkout whose templates/core differs from the
+// binary's embedded corpus is a different hazard (silently overwriting newer
+// renders with older bytes), so it gets its own explicit opt-in.
+var updateAllowStaleCorpus bool
 
 // The uninitialized-target confirmation guard (interactive-only pre-flight gate)
 // is wired through two injectable seams so unit tests can drive both the
@@ -104,6 +122,8 @@ func init() {
 		"bypass the uninitialized-target confirmation prompt")
 	updateCmd.Flags().BoolVar(&updatePruneOrphans, "prune-orphans", false,
 		"delete byte-identical orphan rendered files whose overlay source was removed (refuses hand-edited or project-owned ones; composes with --dry-run)")
+	updateCmd.Flags().BoolVar(&updateAllowStaleCorpus, "allow-stale-corpus", false,
+		"proceed even when the binary's embedded corpus differs from the checkout's templates/core (may overwrite rendered files using a differing corpus; prefer 'make update' which rebuilds the binary first)")
 }
 
 func runUpdate(cmd *cobra.Command, _ []string) (err error) {
@@ -127,6 +147,47 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 	abs, err := filepath.Abs(target)
 	if err != nil {
 		return fmt.Errorf("resolve target: %w", err)
+	}
+
+	// Stale-embed freshness guard (dogfood-local). In a positively-identified
+	// source checkout (corpus.go + templates/core at abs), a live update
+	// re-renders from the binary's embedded corpus — which may be older than
+	// the checkout's templates/core (a binary built before a templates/core
+	// edit). That silently overwrites newer in-tree .opencode/ renders with
+	// older bytes, and doctor cannot detect the revert (it re-renders from the
+	// SAME embedded corpus and byte-compares). When the embedded corpus
+	// DIFFERS from the on-disk templates/core, refuse a LIVE update and point
+	// at `make update` (the Makefile target rebuilds the binary first so the
+	// embedded corpus matches the tree). --allow-stale-corpus overrides;
+	// --dry-run warns prominently and proceeds (it writes nothing, but the
+	// preview represents the BINARY's corpus, not a rebuilt one). Consumers
+	// (no corpus.go + templates/core) hit freshnessNotApplicable and see no
+	// new behavior — the decisive consumer-safety property. This runs BEFORE
+	// the uninitialized-target guard and before seamApply so a refuse never
+	// reaches a write.
+	if fr := checkCorpusFreshness(abs); fr.status == freshnessDiffers || fr.status == freshnessError {
+		verb := "differs from"
+		if fr.status == freshnessError {
+			verb = "could not be compared against"
+		}
+		switch {
+		case updateAllowStaleCorpus:
+			fmt.Fprintf(out, "update: --allow-stale-corpus: proceeding although the embedded corpus %s the checkout's templates/core — rendered files will reflect the BINARY's embedded corpus, NOT a rebuilt one.\n", verb)
+		case updateDryRun:
+			// Dry-run writes nothing; warn prominently and proceed so the
+			// operator can still preview what the current binary would render.
+			fmt.Fprintf(out, "update: warning: embedded corpus %s on-disk templates/core (%s).\n", verb, filepath.Join(abs, corpus.CoreDir))
+			fmt.Fprintln(out, "update: warning: this preview represents the BINARY's embedded corpus, NOT what a rebuilt binary would render. Run `make update` (the Makefile target rebuilds first) to render from current source.")
+		default:
+			return fmt.Errorf("update: refusing to run in a source checkout whose templates/core %s the binary's embedded corpus\n"+
+				"  (a live update would re-render from the BINARY's embedded corpus, which differs from the checkout's\n"+
+				"   templates/core, silently overwriting rendered files to match the binary rather than the source tree;\n"+
+				"   doctor cannot detect the revert — it re-renders from the same embedded corpus)\n"+
+				"  reason: %s\n"+
+				"  recovery: run `make update` (rebuilds the binary first so the embedded corpus matches the tree)\n"+
+				"  override: --allow-stale-corpus (proceed knowing rendered files may reflect a differing corpus)",
+				verb, fr.detail)
+		}
 	}
 
 	// Uninitialized-target confirmation guard (interactive-only pre-flight gate).

@@ -453,6 +453,25 @@ from the same stale embedded corpus and byte-compares, reporting "in sync"). The
 footgun is specific to a repo that edits `templates/core/`; consumers whose binary
 embeds the same corpus they run with are unaffected.
 
+This footgun is now ENFORCED, not just documented: a target that positively
+looks like a source checkout (it carries BOTH `corpus.go` and `templates/core/`
+at its root) is guarded. When the binary's embedded corpus DIFFERS from the
+checkout's `templates/core/`:
+
+- a LIVE `vh-agent-harness update` REFUSES (non-zero exit, before any write);
+  the recovery is `make update` (the `Makefile` target rebuilds first), and
+  `--allow-stale-corpus` is the explicit override;
+- `vh-agent-harness update --dry-run` still previews but warns that the output
+  reflects the BINARY's embedded corpus, not what a rebuilt binary would render;
+- `vh-agent-harness doctor` surfaces a non-failing `dev-stale-embed` WARN and
+  qualifies its `managed-drift` line ("in sync with the embedded corpus in this
+  binary", never a bare "in sync"). The WARN alone never makes doctor UNHEALTHY.
+
+A target without BOTH markers (every consumer) is completely unaffected — the
+guard never fires there. The guard never asserts which side is "ahead" (a byte
+comparison proves difference, not chronology); the recovery is `make update`
+either way.
+
 ## Runtime
 
 Plain Go on the host — `run-shape.yml` uses `backend: host-shell`. Build/test

@@ -72,6 +72,18 @@ vh-agent-harness doctor                 # lint the result
 > re-renders from the same stale corpus and byte-compares). The `Makefile`
 > target rebuilds first, so the embedded corpus matches the tree before
 > re-rendering. Consumer repos that only run a shipped binary are unaffected.
+>
+> This guard is now ENFORCED, not just documented: in a source checkout (a
+> target carrying both `corpus.go` and `templates/core/`), a LIVE
+> `vh-agent-harness update` REFUSES when the binary's embedded corpus DIFFERS
+> from the checkout's `templates/core/`, with `make update` (rebuild first) as
+> the recovery and `--allow-stale-corpus` as the explicit override.
+> `update --dry-run` still previews but warns that the output reflects the
+> BINARY's corpus, not a rebuilt one. `doctor` surfaces a non-failing
+> `dev-stale-embed` WARN and qualifies its `managed-drift` line (it says "in
+> sync with the embedded corpus in this binary", never a bare "in sync"). A
+> target without both `corpus.go` and `templates/core/` (every consumer) is
+> completely unaffected — the guard never fires there.
 
 ## Reading migration notes
 
