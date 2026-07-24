@@ -401,3 +401,149 @@ pilot be read as a substitute for repo-side verification.
 ### Status
 Narrows, does not supersede, the committed disposition. The pilot (behavioral-closure)
 remains scheduled AFTER v0.15.0 close. No defer-card triggers change.
+
+## Addendum (2026-07-24b) — the rewrite-parity / visual-outcome surface: a fourth symptom cluster + three-rec adjudication
+
+**Source:** vh-solara operator addendum (2026-07-24), preserved verbatim at
+`researches/sources/2026-07-24-tree2-rewrite-visual-parity-addendum.md` (485 lines,
+same Class-A/Class-B discipline as the 2026-07-23 field report). This addendum
+adjudicates its three proposed recs under the HYBRID rule committed above; the
+source packet is evidence, not canon.
+
+**The fourth cluster (Class A, un-re-derivable here):** the `tree=2` rewrite
+shipped "all green / done" (Step D: 158 passed, a–e symptoms PASS) yet silently
+dropped user-facing UX behaviors (flat tree, no selected-row highlight, child-flood,
+tab-switch flash, no deep-link reveal, dropped pins/density) found only by the
+operator in the live UI until a forced parity audit. Five structural root causes:
+(a) "done" measured against the new design + named bugs + suite-green, never prior-
+surface parity; (b) the old client was deleted with no prior-surface inventory; (c)
+tests assert MECHANISMS (class applied / DOM present) not OUTCOMES (pixel styled);
+(d) the parity check was honestly attempted then dropped as INFEASIBLE in the
+synthetic fixture rather than escalated; (e) reactive whack-a-mole until the operator
+forced a systematic audit.
+
+**Load-bearing precision (preserved, not reframed):** Step D did NOT silently skip
+parity — it HONESTLY recorded old-client evidence INFEASIBLE. The gap is
+"INFEASIBLE did not block 'complete'," not "nobody considered parity." This sharpens
+root cause (d) and is decisive for rec 1 below.
+
+### Premise-recheck (this addendum adjudicates against LIVE shipped machinery)
+- behavioral-closure pilot shipped (`7f95f29` + `4d8d725`); doctor check #14 live.
+- The shipped crux clause (`AGENTS.core.md:197-216`) carries the `not-demonstrable`
+  state and the honesty caveat "does NOT prove the cited path executed" — that is the
+  PATH-COVERAGE axis (F4/§4.5 family). It does NOT name (i) verifier-infeasible→
+  not-demonstrable or (ii) outcome-observed vs mechanism-asserted. Both gaps are
+  genuine extensions, not already-covered.
+- `AGENTS.core.md:216`: the doctor "does not gate a verdict it cannot verify" —
+  outcome-vs-mechanism and verifier-infeasibility are SEMANTIC, beyond the structural
+  validator's remit. ⇒ rec 1 is a TEMPLATE/DISCIPLINE extension, not a doctor-code
+  spec change; doctor check #14 code is unchanged; `f3f4b69`'s existing closeout stays
+  structurally consistent (no retroactive breakage).
+- HYBRID union list (above) = behavioral completion ≠ defer-not-drop ≠ HEAD-progress
+  ≠ motivation-satisfaction ≠ findings-retention. Rewrite-parity is absent ⇒ rec 2
+  is a genuinely new property.
+- Novelty grep repo-wide for `rewrite-parity|prior-surface|parity-contract|parity-audit`
+  → 0 matches.
+
+### Adjudication
+
+| Rec | Packet verdict | My verdict | Owning seam (if built) | core vs overlay | Cost | Ordering |
+|-----|----------------|------------|------------------------|-----------------|------|----------|
+| **1** outcome-vs-mechanism crux (MERGE-EXTENDS P0-A) | MERGE-EXTENDS P0-A | **ADOPT, SPLIT into 1d (strong) + 1c (softer)** — see below | template discipline: `AGENTS.core.md` crux clause + `prompt-guide.md` + `CLOSEOUT_TEMPLATE.md`; doctor CODE unchanged | core (domain-free); jsdom/Playwright/visual specifics stay in research (consuming-repo) | low (1d reuses shipped `not-demonstrable` + defer-not-drop; 1c adds one clause) | after current release; small standalone slice |
+| **2** rewrite-parity contract (UNION new) | UNION new rec | **ADOPT-AS-DEFER** (genuinely new property; build needs its own plan) | closeout/contract field + gate-shaped presence-check; gate host open (doctor for consistency with pilot) | core = the contract clause (prior-surface inventory + parity verifier per behavior); overlay/research = visual-diff verifier specifics | medium-high (new field + new gate) | dedicated plan after the rec-1 discipline lands; leans on rec 1d for infeasible-handling |
+| **3** P2-A evidence strengthening (MERGE) | MERGE into P2-A | **ADOPT (evidence merge); DEFER STANDS** | `.local/coordinator/tasks/defer-within-session-recurrence-detector.json` (update only) | n/a (transport) | trivial | now (card owner_notes update) |
+
+**Rec 1 — split.** The packet bundles outcome-vs-mechanism (c) and
+verifier-infeasible (d) into one MERGE-EXTENDS. They have different strength and
+cost, so I separate them:
+
+- **1d — verifier-infeasible → `not-demonstrable` (STRONG ADOPT, cheap).** The
+  shipped `not-demonstrable` state exists, but nothing directs a lane to use it when
+  the sanctioned verified seam cannot observe the load-bearing outcome (fixture too
+  small, no prior surface, no real scale, no render). Domain-free discipline: *"when
+  the verified seam cannot observe the load-bearing outcome, declare
+  `result: not-demonstrable` (not `proven`) → `verdict: inconclusive`; this blocks
+  'complete' and routes to defer."* This is THE load-bearing finding given the
+  "INFEASIBLE did not block" precision: an honest lane that records INFEASIBLE in
+  prose is not directed to translate it into `crux: not-demonstrable`, so "complete"
+  lands. Reuses the shipped state + the already-adopted defer-not-drop discipline.
+  Template/prompt-guide edit; doctor code unchanged.
+
+- **1c — outcome-observed vs mechanism-asserted (ADOPT, softer).** "Exercised" has a
+  second axis the shipped clause (path-ran) does not name: for a behavior whose value
+  is user-visible, `proven` must cite an observation of the OUTCOME (the behavior
+  occurred), not an assertion of the MECHANISM (a class is applied, an element is
+  present). The `cd46198` evidence (class on the wrong element → mechanism green,
+  pixel unstyled; crux path ran + a–e passed) proves the gap is real and orthogonal
+  to path-coverage. Domain-free discipline: *"asserting the mechanism without
+  observing the outcome is `result: skipped`, not `proven`."* Softer than 1d because
+  the docker-gold caveat's "observe the fix" gestures at it; offered as MERGE-EXTENDS
+  not settled (a reviewer could argue already-covered — rebuttal: the cd46198 evidence
+  shows the gap the caveat does not name). Template/prompt-guide edit; doctor code
+  unchanged.
+
+- **NOT adopted now:** a structured `verifier_status: ran|infeasible` field that
+  would let the doctor ENFORCE 1d structurally. Keep the slice cheap; reuse the
+  shipped `not-demonstrable` via discipline. Flip toward the structural field only if
+  discipline-only proves insufficient in practice.
+
+**Rec 2 — rewrite-parity contract (ADOPT-AS-DEFER).** Property-identity test passes:
+rewrite-preservation (backward: does a replacement PRESERVE the old thing's accreted
+behavior) ≠ motivation (P1-B, forward) ≠ path-coverage (§4.5) ≠ behavioral-completion
+(P0-A). By release-defer-dual, it is a new fail-closed UNION property — add
+**rewrite-parity ≠** to the union list above. The raw fix ("coordinator must verify
+parity before accepting the rewrite") CROSSES the authority line; CONVERTED to
+gate-shaped (closeout/commit-gate or doctor refuses a closeout replacing/deleting a
+flagged component without a populated parity-contract section) — the gate acts, the
+coordinator reads (mirrors the P5 conversion). Domain-free split: the contract clause
+(prior-surface inventory authored BEFORE deletion + a named parity verifier per
+behavior) is core; visual-diff-as-verifier specifics are consuming-repo (research/
+overlay). Rec 2's "defer-not-drop if infeasible-in-fixture" REUSES rec 1d — state
+that dependency: rec 2 (if built) leans on rec 1d's discipline. Build is substantial
+(new field + new gate) → dedicated plan after rec-1 discipline lands; captured as a
+defer card now. Evidence to flip toward collapse: none found (backward vs forward vs
+path are distinct by definition; the orphaned-surviving-CSS evidence shows the
+inventory IS capturable before deletion).
+
+**Rec 3 — P2-A evidence merge (ADOPT; DEFER STANDS).** A second Class-A instance of
+Pattern 6 (band-aid loop) at the UX/visual layer (the original was state/reconcile).
+MERGED into the existing `defer-within-session-recurrence-detector.json` card as
+additional evidence. This instance has a CLEANER recurrence signature (commits cluster
+on `SessionTree.tsx`/`TreeRow.tsx`/`treeSelectors.ts` + "parity"/"restore" in
+subjects), which marginally strengthens `defer-002`'s standing but does NOT resolve
+it (defer-002 is about signature STABILITY across N reports; two instances ≠ a stable
+signature). P2-A lifecycle UNCHANGED — still deferred, blocked on defer-002. Stated
+explicitly so no one reads this as un-blocking the recurrence detector.
+
+### Authority line (engaged, not silently violated)
+- Rec 1d/1c: template discipline (informs) — does NOT cross.
+- Rec 2: raw form crosses (coordinator acceptance gate) → CONVERTED gate-shaped — the
+  gate acts, the coordinator reads. Consistent with §5 + the P5 conversion.
+- Rec 3: evidence merge — does NOT cross.
+
+### Disagreements with the packet (stated)
+1. Rec 1 is NOT a risky doctor-code spec change — per shipped `AGENTS.core.md:216`,
+   the doctor does not gate semantic verdicts; rec 1 is template/discipline only. The
+   "live machinery with consumers" framing is overstated; `f3f4b69`'s closeout stays
+   structurally consistent.
+2. Rec 1 should be SPLIT (1d strong/cheap, 1c softer) — the packet bundles them; my
+   adjudication separates by strength/cost because 1d is the load-bearing one and
+   reuses shipped machinery while 1c is a genuine-but-caveat-gestured extension.
+3. Rec 2 is ADOPT-AS-DEFER (needs its own plan), not an immediate build — but it is
+   the STRONGEST new-property rec (distinct, well-evidenced, domain-free-splittable).
+4. No structured `verifier_status` field adopted now (keep cheap; reuse shipped
+   `not-demonstrable` via discipline).
+
+### Updates to the HYBRID lists
+- **Union list gains:** rewrite-parity (rec 2). New list: behavioral completion ≠
+  defer-not-drop ≠ HEAD-progress ≠ motivation-satisfaction ≠ findings-retention ≠
+  rewrite-parity.
+- **Merge list:** rec 1d/1c extend the verdict-token+crux merge candidate (same
+  property: behavioral/outcome completion) — they sharpen "what exercised means,"
+  they do not add a rival signal.
+
+### Status
+This addendum NARROWS (does not supersede) the committed disposition. No defer-card
+triggers change except: rec-1 discipline + rec-2 parity contract captured as new
+defer cards; rec-3 evidence merged into the existing recurrence-detector card. The
+builds of rec 1 and rec 2 are separate operator-approved slices (not this slice).
