@@ -1,0 +1,453 @@
+package cli
+
+// F1 pure validator (Slice 1). Pure core: no filesystem, no network, no
+// transitions, no report writes. Given an in-memory F1SynthesisEnvelope it
+// returns the list of structural-consistency errors (empty == structurally
+// consistent). Structural consistency is NOT semantic truth: a structurally
+// valid envelope may still describe conclusions that are not actually true —
+// proving truth is the federated verifier's job, not a structural gate.
+//
+// The validator is fail-closed: any error forces validation_disposition =
+// incomplete, and only a clean envelope is complete. This is the discipline
+// that makes "an applicable seam with a missing entry" incomplete rather than
+// passing — it does NOT reuse behavioral-closure's absent-token-passes
+// behavior.
+
+import (
+	"fmt"
+	"sort"
+)
+
+// ValidateF1Envelope returns the structural-consistency errors for env AS
+// CARRIED BY A COMMITTED ARTIFACT (the doctor parse-site path). It runs the
+// canonical-content checks AND verifies the carried validation disposition is
+// a member of the closed enum — a committed artifact is untrusted input, so
+// an arbitrary disposition string must be rejected just like any other enum.
+// The returned slice is empty iff env is structurally consistent. Pure: no
+// filesystem, no mutation.
+//
+// Producers building a fresh envelope should call AssignF1Validation instead:
+// it validates canonical content WITHOUT rejecting the not-yet-assigned
+// (zero-value) disposition, then sets the disposition from the error count.
+// Calling ValidateF1Envelope on a producer's zero-value Validation would
+// reject the empty disposition — that is the correct defense at the doctor
+// parse site (committed artifacts must carry a valid disposition) but the
+// WRONG behavior on the producer path (which is about to overwrite it).
+func ValidateF1Envelope(env *F1SynthesisEnvelope) []string {
+	errs := validateF1EnvelopeContent(env)
+	if env != nil {
+		if _, ok := f1ValidValidationDispositions[env.Validation.Disposition]; !ok {
+			errs = append(errs, fmt.Sprintf("unknown validation disposition %q (want one of %s)", env.Validation.Disposition, f1SortedKeys(f1ValidValidationDispositions)))
+		}
+	}
+	return errs
+}
+
+// validateF1EnvelopeContent returns the canonical-content structural errors
+// for env (vocabulary, identity, family binding, cross-references, digest) —
+// everything EXCEPT the carried validation disposition. It is the shared core
+// for ValidateF1Envelope (doctor parse site, which additionally checks the
+// carried disposition) and AssignF1Validation (producer path, which is about
+// to OVERWRITE the disposition and so must not reject the not-yet-assigned
+// zero value). Pure: no filesystem, no mutation.
+func validateF1EnvelopeContent(env *F1SynthesisEnvelope) []string {
+	if env == nil {
+		return []string{"envelope is nil"}
+	}
+	var errs []string
+
+	// 1. Closed-vocabulary rejection at the envelope level.
+	if _, ok := f1ValidApplicabilities[env.Applicability]; !ok {
+		errs = append(errs, fmt.Sprintf("unknown applicability %q (want one of %s)", env.Applicability, f1SortedKeys(f1ValidApplicabilities)))
+	}
+	// Required envelope-level identity fields (covered by the digest; must be
+	// non-empty so the digest is anchored on real identity, not "").
+	if env.SchemaVersion == "" {
+		errs = append(errs, "schema_version is empty")
+	}
+	if env.SynthesisCycleID == "" {
+		errs = append(errs, "synthesis_cycle_id is empty")
+	}
+
+	// 2. Per-entry structural checks (run regardless of applicability so a
+	//    malformed entry is always reported, even on a not_triggered
+	//    envelope that happens to carry entries).
+	entryIDs := map[string]int{}
+	for i := range env.Entries {
+		e := &env.Entries[i]
+		pe := fmt.Sprintf("entries[%d]", i)
+		if _, ok := f1ValidFamilies[e.Family]; !ok {
+			errs = append(errs, fmt.Sprintf("%s: unknown family %q (want one of %s)", pe, e.Family, f1SortedKeys(f1ValidFamilies)))
+		}
+		if _, ok := f1ValidTriggered[e.Triggered]; !ok {
+			errs = append(errs, fmt.Sprintf("%s: unknown triggered %q (want one of %s)", pe, e.Triggered, f1SortedKeys(f1ValidTriggered)))
+		}
+		if e.EntryID == "" {
+			errs = append(errs, fmt.Sprintf("%s: empty entry_id", pe))
+		} else if prev, dup := entryIDs[e.EntryID]; dup {
+			errs = append(errs, fmt.Sprintf("%s: duplicate entry_id %q (also at entries[%d])", pe, e.EntryID, prev))
+		} else {
+			entryIDs[e.EntryID] = i
+		}
+		if dup := firstDuplicate(e.SourceRefs); dup != "" {
+			errs = append(errs, fmt.Sprintf("%s: duplicate source_ref %q", pe, dup))
+		}
+		// Family↔summary binding: each entry carries ONLY its matching family's
+		// summary pointer (an r1 entry carries R1, never R3/PA; etc.). A foreign
+		// summary is a structural malformation. A triggered entry MUST carry its
+		// matching summary; a not_triggered OR not_applicable entry MUST NOT (it
+		// produced no synthesis content). See validateF1FamilyBinding.
+		errs = append(errs, validateF1FamilyBinding(pe, e)...)
+		// Validate only the matching family's summary (foreign summaries are
+		// already flagged by the binding check; running their validators would
+		// double-report).
+		switch e.Family {
+		case F1FamilyR1CrossLaneJoin:
+			errs = append(errs, validateR1Summary(pe, e.R1)...)
+		case F1FamilyR3RedesignFork:
+			errs = append(errs, validateR3Summary(pe, e.R3)...)
+		case F1FamilyPACounterEvidence:
+			errs = append(errs, validatePASummary(pe, e.PA)...)
+		}
+	}
+
+	// 3. Exactly-one-entry-per-family when applicable.
+	if env.Applicability == F1ApplicabilityRequired {
+		seen := map[string]int{}
+		for i := range env.Entries {
+			f := env.Entries[i].Family
+			if prev, dup := seen[f]; dup {
+				errs = append(errs, fmt.Sprintf("duplicate family %q (entries[%d] and entries[%d])", f, prev, i))
+			} else {
+				seen[f] = i
+			}
+		}
+		for _, want := range []string{F1FamilyR1CrossLaneJoin, F1FamilyR3RedesignFork, F1FamilyPACounterEvidence} {
+			if _, ok := seen[want]; !ok {
+				errs = append(errs, fmt.Sprintf("applicability=required but family %q is missing (exactly one entry per family required)", want))
+			}
+		}
+	}
+
+	// 4. Cross-reference resolution across families. R3 SupportRefs must
+	//    resolve to R1 conclusion IDs; R3 CounterEvidenceProbeRefs must
+	//    resolve to P-a probe IDs; P-a TargetRef must resolve to an R1
+	//    conclusion ID or an R3 option ID. Resolution is structural (the ID
+	//    exists), not semantic (the link is meaningful).
+	errs = append(errs, resolveF1CrossRefs(env)...)
+
+	// 5. Semantic-digest re-derivation. If a digest is stored, recompute the
+	//    canonical digest and require equality. An empty digest is itself an
+	//    error (the producer must populate it before emit).
+	if env.SemanticDigest == "" {
+		errs = append(errs, "semantic_digest is empty (producer must compute and assign it)")
+	} else {
+		got, derr := env.ComputeDigest()
+		if derr != nil {
+			errs = append(errs, fmt.Sprintf("semantic_digest re-derivation failed: %v", derr))
+		} else if got != env.SemanticDigest {
+			errs = append(errs, fmt.Sprintf("semantic_digest mismatch: stored %q != recomputed %q (canonical content changed without re-derivation)", env.SemanticDigest, got))
+		}
+	}
+
+	return errs
+}
+
+// AssignF1Validation validates canonical CONTENT (not the carried disposition
+// — it is about to be overwritten), assigns the fail-closed disposition +
+// error list onto env.Validation, and returns the errors. This is the bridge
+// producers (and Slice 5 emit) call after populating content + digest. It
+// validates content via validateF1EnvelopeContent (NOT ValidateF1Envelope, the
+// doctor parse-site path, which would reject the producer's not-yet-assigned
+// zero-value disposition). It mutates ONLY env.Validation (assessment), never
+// canonical content.
+//
+// Producer single-call contract: a valid envelope (content + digest, Validation
+// at its zero value) reaches disposition=complete via ONE call. There is no
+// second-call requirement and no caller pre-seeding of the disposition — that
+// would be circular (validation determines disposition, not vice versa).
+func AssignF1Validation(env *F1SynthesisEnvelope) []string {
+	errs := validateF1EnvelopeContent(env)
+	v := F1ValidationInfo{Disposition: F1ValidationComplete}
+	if len(errs) > 0 {
+		v.Disposition = F1ValidationIncomplete
+		v.Errors = errs
+	}
+	if env != nil {
+		env.Validation = v
+	}
+	return errs
+}
+
+// --- family↔summary binding ------------------------------------------------
+
+// validateF1FamilyBinding enforces that an entry carries ONLY the summary
+// matching its family AND that the summary's presence matches the entry's
+// triggered state. An r1_cross_lane_join entry may carry R1 (never R3/PA);
+// r3_redesign_fork may carry R3 (never R1/PA); pa_counter_evidence may carry
+// PA (never R1/R3). A foreign summary is a structural malformation — it would
+// let a misplaced summary silently satisfy cross-references. A triggered entry
+// MUST carry its matching summary (there is content to summarize); a
+// not_triggered OR not_applicable entry MUST NOT carry its matching summary
+// (the family did not fire or does not apply, so it produced no synthesis
+// content — a summary present on a non-triggered entry would be misleading
+// state). This is the PROHIBITIVE reading the DTO doc (f1_envelope.go
+// F1Triggered) commits to; code and doc agree. Per amended memo L113.
+func validateF1FamilyBinding(pe string, e *F1FamilyEntry) []string {
+	hasR1 := e.R1 != nil
+	hasR3 := e.R3 != nil
+	hasPA := e.PA != nil
+	var errs []string
+	switch e.Family {
+	case F1FamilyR1CrossLaneJoin:
+		if hasR3 {
+			errs = append(errs, pe+": r1 entry must not carry an r3 summary (foreign summary)")
+		}
+		if hasPA {
+			errs = append(errs, pe+": r1 entry must not carry a pa summary (foreign summary)")
+		}
+		if e.Triggered == F1TriggeredTriggered && !hasR1 {
+			errs = append(errs, pe+": r1 entry is triggered but its r1 summary is missing")
+		}
+		if e.Triggered != F1TriggeredTriggered && hasR1 {
+			errs = append(errs, pe+": r1 entry is "+e.Triggered+" but carries an r1 summary (a non-triggered family produced no synthesis content)")
+		}
+	case F1FamilyR3RedesignFork:
+		if hasR1 {
+			errs = append(errs, pe+": r3 entry must not carry an r1 summary (foreign summary)")
+		}
+		if hasPA {
+			errs = append(errs, pe+": r3 entry must not carry a pa summary (foreign summary)")
+		}
+		if e.Triggered == F1TriggeredTriggered && !hasR3 {
+			errs = append(errs, pe+": r3 entry is triggered but its r3 summary is missing")
+		}
+		if e.Triggered != F1TriggeredTriggered && hasR3 {
+			errs = append(errs, pe+": r3 entry is "+e.Triggered+" but carries an r3 summary (a non-triggered family produced no synthesis content)")
+		}
+	case F1FamilyPACounterEvidence:
+		if hasR1 {
+			errs = append(errs, pe+": pa entry must not carry an r1 summary (foreign summary)")
+		}
+		if hasR3 {
+			errs = append(errs, pe+": pa entry must not carry an r3 summary (foreign summary)")
+		}
+		if e.Triggered == F1TriggeredTriggered && !hasPA {
+			errs = append(errs, pe+": pa entry is triggered but its pa summary is missing")
+		}
+		if e.Triggered != F1TriggeredTriggered && hasPA {
+			errs = append(errs, pe+": pa entry is "+e.Triggered+" but carries a pa summary (a non-triggered family produced no synthesis content)")
+		}
+	}
+	return errs
+}
+
+// --- per-family summary validation -----------------------------------------
+
+func validateR1Summary(pe string, r1 *F1R1JoinSummary) []string {
+	if r1 == nil {
+		return nil
+	}
+	var errs []string
+	cids := map[string]int{}
+	for i := range r1.Conclusions {
+		c := &r1.Conclusions[i]
+		cep := fmt.Sprintf("%s.r1.conclusions[%d]", pe, i)
+		if c.ConclusionID == "" {
+			errs = append(errs, cep+": empty conclusion_id")
+		} else if prev, dup := cids[c.ConclusionID]; dup {
+			errs = append(errs, fmt.Sprintf("%s: duplicate conclusion_id %q (also at conclusions[%d])", cep, c.ConclusionID, prev))
+		} else {
+			cids[c.ConclusionID] = i
+		}
+		if c.PropertyID == "" {
+			errs = append(errs, cep+": empty property_id")
+		}
+		if dup := firstDuplicate(c.SourceRefs); dup != "" {
+			errs = append(errs, fmt.Sprintf("%s: duplicate source_ref %q", cep, dup))
+		}
+	}
+	return errs
+}
+
+func validateR3Summary(pe string, r3 *F1R3ForkSummary) []string {
+	if r3 == nil {
+		return nil
+	}
+	var errs []string
+	if _, ok := f1ValidR3Dispositions[r3.Disposition]; !ok {
+		errs = append(errs, fmt.Sprintf("%s.r3: unknown disposition %q (want one of %s)", pe, r3.Disposition, f1SortedKeys(f1ValidR3Dispositions)))
+	}
+	oids := map[string]int{}
+	for i := range r3.Options {
+		o := &r3.Options[i]
+		oep := fmt.Sprintf("%s.r3.options[%d]", pe, i)
+		if o.OptionID == "" {
+			errs = append(errs, oep+": empty option_id")
+		} else if prev, dup := oids[o.OptionID]; dup {
+			errs = append(errs, fmt.Sprintf("%s: duplicate option_id %q (also at options[%d])", oep, o.OptionID, prev))
+		} else {
+			oids[o.OptionID] = i
+		}
+		if _, ok := f1ValidR3Modes[o.Mode]; !ok {
+			errs = append(errs, fmt.Sprintf("%s: unknown mode %q (want one of %s)", oep, o.Mode, f1SortedKeys(f1ValidR3Modes)))
+		}
+		if o.Mechanism == "" {
+			errs = append(errs, oep+": empty mechanism")
+		}
+		if dup := firstDuplicate(o.SupportRefs); dup != "" {
+			errs = append(errs, fmt.Sprintf("%s: duplicate support_ref %q", oep, dup))
+		}
+		if dup := firstDuplicate(o.CounterEvidenceProbeRefs); dup != "" {
+			errs = append(errs, fmt.Sprintf("%s: duplicate counter_evidence_probe_ref %q", oep, dup))
+		}
+	}
+	return errs
+}
+
+func validatePASummary(pe string, pa *F1PAProbeSummary) []string {
+	if pa == nil {
+		return nil
+	}
+	var errs []string
+	pids := map[string]int{}
+	for i := range pa.Probes {
+		p := &pa.Probes[i]
+		ppep := fmt.Sprintf("%s.pa.probes[%d]", pe, i)
+		if p.ProbeID == "" {
+			errs = append(errs, ppep+": empty probe_id")
+		} else if prev, dup := pids[p.ProbeID]; dup {
+			errs = append(errs, fmt.Sprintf("%s: duplicate probe_id %q (also at probes[%d])", ppep, p.ProbeID, prev))
+		} else {
+			pids[p.ProbeID] = i
+		}
+		if _, ok := f1ValidPAResults[p.Result]; !ok {
+			errs = append(errs, fmt.Sprintf("%s: unknown result %q (want one of %s)", ppep, p.Result, f1SortedKeys(f1ValidPAResults)))
+		}
+		if p.TargetRef == "" {
+			errs = append(errs, ppep+": empty target_ref")
+		}
+		if dup := firstDuplicate(p.EvidenceRefs); dup != "" {
+			errs = append(errs, fmt.Sprintf("%s: duplicate evidence_ref %q", ppep, dup))
+		}
+	}
+	return errs
+}
+
+// --- cross-reference resolution --------------------------------------------
+
+// resolveF1CrossRefs verifies that inter-family references resolve to a
+// declared ID within the envelope:
+//   - R3 option SupportRefs            -> R1 conclusion IDs
+//   - R3 option CounterEvidenceProbeRefs -> P-a probe IDs
+//   - P-a probe TargetRef              -> R1 conclusion ID OR R3 option ID
+//
+// A dangling reference is a structural inconsistency (the families disagree
+// about what exists). Resolution is structural; it does not assess whether a
+// link is semantically meaningful. Indexing and resolution are FAMILY-GATED:
+// only an r1 entry's R1 summary contributes conclusion IDs, only an r3 entry's
+// R3 summary contributes option IDs, and only a pa entry's PA summary
+// contributes probe IDs. This is defense-in-depth: the family↔summary binding
+// check already rejects foreign summaries, so a foreign summary cannot reach
+// this resolver — but gating here means the resolver stays correct by
+// construction even if that check were ever weakened.
+func resolveF1CrossRefs(env *F1SynthesisEnvelope) []string {
+	r1Conclusions := map[string]struct{}{}
+	r3Options := map[string]struct{}{}
+	paProbes := map[string]struct{}{}
+	for i := range env.Entries {
+		e := &env.Entries[i]
+		switch e.Family {
+		case F1FamilyR1CrossLaneJoin:
+			if e.R1 != nil {
+				for j := range e.R1.Conclusions {
+					r1Conclusions[e.R1.Conclusions[j].ConclusionID] = struct{}{}
+				}
+			}
+		case F1FamilyR3RedesignFork:
+			if e.R3 != nil {
+				for j := range e.R3.Options {
+					r3Options[e.R3.Options[j].OptionID] = struct{}{}
+				}
+			}
+		case F1FamilyPACounterEvidence:
+			if e.PA != nil {
+				for j := range e.PA.Probes {
+					paProbes[e.PA.Probes[j].ProbeID] = struct{}{}
+				}
+			}
+		}
+	}
+	var errs []string
+	for i := range env.Entries {
+		e := &env.Entries[i]
+		switch e.Family {
+		case F1FamilyR3RedesignFork:
+			if e.R3 == nil {
+				continue
+			}
+			for j := range e.R3.Options {
+				o := &e.R3.Options[j]
+				oep := fmt.Sprintf("entries[%d].r3.options[%d]", i, j)
+				for _, ref := range o.SupportRefs {
+					if _, ok := r1Conclusions[ref]; !ok {
+						errs = append(errs, fmt.Sprintf("%s: support_ref %q does not resolve to any r1 conclusion_id", oep, ref))
+					}
+				}
+				for _, ref := range o.CounterEvidenceProbeRefs {
+					if _, ok := paProbes[ref]; !ok {
+						errs = append(errs, fmt.Sprintf("%s: counter_evidence_probe_ref %q does not resolve to any pa probe_id", oep, ref))
+					}
+				}
+			}
+		case F1FamilyPACounterEvidence:
+			if e.PA == nil {
+				continue
+			}
+			for j := range e.PA.Probes {
+				p := &e.PA.Probes[j]
+				ppep := fmt.Sprintf("entries[%d].pa.probes[%d]", i, j)
+				_, isR1 := r1Conclusions[p.TargetRef]
+				_, isR3 := r3Options[p.TargetRef]
+				if !isR1 && !isR3 {
+					errs = append(errs, fmt.Sprintf("%s: target_ref %q does not resolve to any r1 conclusion_id or r3 option_id", ppep, p.TargetRef))
+				}
+			}
+		}
+	}
+	return errs
+}
+
+// --- small helpers ---------------------------------------------------------
+
+// firstDuplicate returns the first string appearing more than once in s, or
+// "" if all entries are distinct (or s is empty).
+func firstDuplicate(s []string) string {
+	seen := map[string]struct{}{}
+	for _, v := range s {
+		if _, ok := seen[v]; ok {
+			return v
+		}
+		seen[v] = struct{}{}
+	}
+	return ""
+}
+
+// f1SortedKeys returns the keys of m in sorted order, formatted as a
+// space-separated list for inclusion in error messages. F1-scoped name to
+// avoid colliding with the package's existing sortedKeys helper.
+func f1SortedKeys(m map[string]struct{}) string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	out := ""
+	for i, k := range ks {
+		if i > 0 {
+			out += " "
+		}
+		out += k
+	}
+	return out
+}

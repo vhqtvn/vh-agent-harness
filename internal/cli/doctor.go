@@ -65,6 +65,7 @@ var doctorCmd = &cobra.Command{
   staged-errata-content staged errata correction present in release note   FAIL if staged card content missing from the about-to-release note
   behavioral-closure closeout declarations internally consistent  FAIL if verdict:proven claimed without a proven crux result
   dev-stale-embed binary's embedded corpus vs checkout's templates/core  WARN if differs (source checkout only; consumers see nothing)
+  f1-envelope     committed f1-synthesis-envelope projections structurally consistent  FAIL if unknown enum / missing family / dangling cross-ref / digest mismatch
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -285,6 +286,23 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 		fmt.Fprintln(out, "    "+dsr.String())
 		applyTier(dsr.tier, &problems, &warns)
 	}
+
+	// 16. f1-envelope (the F1 synthesis-envelope STRUCTURAL-consistency
+	//     audit). Scans the same durable closeout surfaces as behavioral-
+	//     closure (#14) for fenced ```f1-synthesis-envelope JSON projections
+	//     and FAILs only when a COMMITTED projection is internally
+	//     inconsistent — unknown enum, missing/duplicate family when
+	//     applicable, dangling cross-reference, or a semantic_digest that no
+	//     longer matches the canonical content. This is the safety-layer ACT
+	//     on F1: structural consistency, NOT semantic truth (a passing
+	//     projection is internally consistent; it is not thereby proven
+	//     true). SKIPs cleanly when no artifact carries a projection (nothing
+	//     to audit — this is not "passing an applicable seam"; an applicable
+	//     envelope with a missing entry is INCOMPLETE and FAILs).
+	fmt.Fprintln(out, "  f1-envelope:")
+	f1r := checkF1EnvelopeConsistency(abs)
+	fmt.Fprintln(out, "    "+f1r.String())
+	applyTier(f1r.tier, &problems, &warns)
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)

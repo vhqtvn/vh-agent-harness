@@ -878,7 +878,7 @@ export default function transform({ context }) {
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   overlay-perm, environment, config-refs, gitignore, auto-classifier,
   auto-gate-ignore, skills, subagent-depth, defer-liveness,
-  staged-errata-content, behavioral-closure). The `auto-classifier` check lints the shape (field
+  staged-errata-content, behavioral-closure, f1-envelope). The `auto-classifier` check lints the shape (field
   set + types + enums) of the auto-classifier-pilot overlay's config files when
   present — a present-but-invalid `auto-gate-config.json` / `auto-gate-llm.json`
   FAILs; absent configs are never failures (defaults apply). The `auto-gate-ignore`
@@ -910,7 +910,17 @@ export default function transform({ context }) {
   and is fail-closed on unknown/malformed declarations; an absent token PASSES
   (the pilot does not force adoption, so pre-pilot closeouts stay HEALTHY). The
   token declares consistency; it does NOT prove the cited crux path executed
-  (proving that needs the repo-specific live verification).
+  (proving that needs the repo-specific live verification). The `f1-envelope`
+  check scans the same closeout surfaces for fenced `f1-synthesis-envelope`
+  JSON projections and FAILs when a COMMITTED projection is structurally
+  inconsistent — unknown closed-vocabulary enum, missing/duplicate family when
+  applicable, a foreign summary on the wrong family entry, a dangling
+  cross-reference, or a `semantic_digest` that no longer matches the canonical
+  content; it SKIPs cleanly when no artifact carries a projection (nothing to
+  audit — this is not "passing an applicable seam"; an applicable envelope with
+  a missing entry is INCOMPLETE and FAILs). Like behavioral-closure, it is a
+  STRUCTURAL consistency audit, NOT a truth prover: a passing projection is
+  internally consistent, not thereby proven true.
   `vh-agent-harness diff` shows drift vs. the corpus.
 - **Inspect / validate skills:** `vh-agent-harness skill list` prints every skill
   (core, overlay-pack, and rendered) with its source, whether it is rendered to
@@ -1430,8 +1440,9 @@ operator release-prep. The ceremony produces THREE sequential single-path
 (manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`.
 The release-tag wrapper's deterministic gates refuse the tag unless each
 commit binds to its predecessor exactly. The wrapper also runs **G0c**
-(`vh-agent-harness doctor` — all 15 checks, including #12 defer-liveness,
-  #13 staged-errata-content, #14 behavioral-closure, and #15 dev-stale-embed) as a hard machine gate AFTER the clean-worktree
+(`vh-agent-harness doctor` — all 16 checks, including #12 defer-liveness,
+  #13 staged-errata-content, #14 behavioral-closure, #15 dev-stale-embed,
+  and #16 f1-envelope) as a hard machine gate AFTER the clean-worktree
 gate (G0b) and BEFORE the readiness-pass artifact gate (G1-G5). A
 non-HEALTHY doctor refuses the tag. This makes doctor a HARD ceremony stop,
 not a human-remembered pre-flight. Push-only mode exits before G0c (the tag
