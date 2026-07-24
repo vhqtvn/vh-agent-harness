@@ -3819,6 +3819,28 @@ function saveCoordinationTask(sessionID, taskPayload, options = {}) {
         throwCollectedErrors(errors);
         return next;
     });
+    // defer-003: on the first successful canonical coordinator-task save, seed
+    // the committed coordinator-adoption marker (project_owned; idempotent
+    // create-if-absent — NEVER overwrite an existing marker). Its presence flips
+    // the release gate's defer-liveness check from SKIP (greenfield) to
+    // authoritative: a later whole-directory loss of .local/coordinator/tasks/
+    // then FAILs (fail-closed) instead of silently SKIPping. Wrapped in
+    // try/catch so a marker write failure can never break a task save that has
+    // already succeeded — the marker is a gate signal, not a correctness
+    // precondition for the save itself.
+    try {
+        const markerPath = path.join(repoRoot(), ".vh-agent-harness", "coordinator-adoption.json");
+        if (!fs.existsSync(markerPath)) {
+            ensureDir(path.dirname(markerPath));
+            fs.writeFileSync(
+                markerPath,
+                JSON.stringify({ version: 1, adopted: true }, null, 2) + "\n",
+                "utf8",
+            );
+        }
+    } catch (_markerErr) {
+        // Non-fatal: see comment above.
+    }
     const overlaps = detectCoordinationTaskOverlaps(
         saved.task_id,
         saved.files_in_scope,

@@ -608,3 +608,173 @@ func recordIDs(rs []record.Record) []string {
 	}
 	return out
 }
+
+// --- defer-003: coordinator-adoption marker validation (kernel projects, does not act) ---
+
+// writeAdoptionMarker writes a canonical adoption marker payload at
+// <dir>/.vh-agent-harness/coordinator-adoption.json.
+func writeAdoptionMarker(t *testing.T, dir, body string) {
+	t.Helper()
+	d := filepath.Join(dir, ".vh-agent-harness")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatalf("mkdir marker dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "coordinator-adoption.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write adoption marker: %v", err)
+	}
+}
+
+const canonicalAdoptionMarker = `{"version":1,"adopted":true}` + "\n"
+
+// TestLoadAdoptionMarker_Absent: no marker file → AdoptionMarkerAbsent with no
+// detail. This is the greenfield signal (clean no-op), NOT a failure.
+func TestLoadAdoptionMarker_Absent(t *testing.T) {
+	dir := t.TempDir()
+	st, detail := loadAdoptionMarker(dir)
+	if st != AdoptionMarkerAbsent {
+		t.Fatalf("state = %q, want %q", st, AdoptionMarkerAbsent)
+	}
+	if detail != "" {
+		t.Errorf("absent detail should be empty, got %q", detail)
+	}
+}
+
+// TestLoadAdoptionMarker_Valid: the canonical producer payload parses to
+// AdoptionMarkerValid with no detail.
+func TestLoadAdoptionMarker_Valid(t *testing.T) {
+	dir := t.TempDir()
+	writeAdoptionMarker(t, dir, canonicalAdoptionMarker)
+	st, detail := loadAdoptionMarker(dir)
+	if st != AdoptionMarkerValid {
+		t.Fatalf("state = %q, want %q (detail=%q)", st, AdoptionMarkerValid, detail)
+	}
+	if detail != "" {
+		t.Errorf("valid detail should be empty, got %q", detail)
+	}
+}
+
+// TestLoadAdoptionMarker_CorruptUnparseable: an unreadable/unparseable body →
+// AdoptionMarkerCorrupt with a detail naming the failure (fail-closed).
+func TestLoadAdoptionMarker_CorruptUnparseable(t *testing.T) {
+	dir := t.TempDir()
+	writeAdoptionMarker(t, dir, "{not valid json")
+	st, detail := loadAdoptionMarker(dir)
+	if st != AdoptionMarkerCorrupt {
+		t.Fatalf("state = %q, want %q", st, AdoptionMarkerCorrupt)
+	}
+	if !strings.Contains(detail, "parse adoption marker") {
+		t.Errorf("corrupt detail should name the parse failure, got %q", detail)
+	}
+}
+
+// TestLoadAdoptionMarker_CorruptWrongShape: a parseable but non-canonical
+// payload (wrong version, or adopted=false) is corrupt, not silently trusted.
+func TestLoadAdoptionMarker_CorruptWrongShape(t *testing.T) {
+	for _, body := range []string{
+		`{"version":2,"adopted":true}`,  // wrong version
+		`{"version":1,"adopted":false}`, // not adopted
+		`{"version":1}`,                 // adopted missing
+		`{"adopted":true}`,              // version missing
+	} {
+		dir := t.TempDir()
+		writeAdoptionMarker(t, dir, body)
+		st, detail := loadAdoptionMarker(dir)
+		if st != AdoptionMarkerCorrupt {
+			t.Errorf("body %q: state = %q, want %q (detail=%q)", body, st, AdoptionMarkerCorrupt, detail)
+		}
+		if !strings.Contains(detail, "unexpected payload") {
+			t.Errorf("body %q: detail should flag unexpected payload, got %q", body, detail)
+		}
+	}
+}
+
+// TestLoadAdoptionMarker_CorruptSupersetFields: a payload that carries the
+// canonical fields PLUS an extra member must be corrupt, NOT silently accepted
+// as Valid. json.Unmarshal would ignore unknown keys; the loader decodes with
+// DisallowUnknownFields so the "exactly the canonical shape" contract holds and
+// a tampered/forward-incompatible marker fails closed instead of falling through
+// to the running gate (row 3) and potentially PASSing.
+func TestLoadAdoptionMarker_CorruptSupersetFields(t *testing.T) {
+	for _, body := range []string{
+		`{"version":1,"adopted":true,"extra":1}`,            // extra numeric field
+		`{"version":1,"adopted":true,"unexpected":"value"}`, // extra string field
+		`{"version":1,"adopted":true,"note":"x"}`,           // plausible-looking extra
+	} {
+		dir := t.TempDir()
+		writeAdoptionMarker(t, dir, body)
+		st, detail := loadAdoptionMarker(dir)
+		if st != AdoptionMarkerCorrupt {
+			t.Errorf("body %q: state = %q, want %q (detail=%q)", body, st, AdoptionMarkerCorrupt, detail)
+		}
+		if !strings.Contains(detail, "parse adoption marker") {
+			t.Errorf("body %q: detail should flag a parse failure (unknown field), got %q", body, detail)
+		}
+	}
+}
+
+// TestLoadAdoptionMarker_CorruptTrailingContent: a marker whose bytes contain a
+// valid first JSON object FOLLOWED BY more content (a second JSON value or
+// trailing junk) must be corrupt. json.Decoder.Decode reads only the first
+// value; without an io.EOF check the trailing content would be ignored and the
+// marker classified Valid — a fail-open vs the "exactly the canonical shape"
+// contract.
+func TestLoadAdoptionMarker_CorruptTrailingContent(t *testing.T) {
+	for _, body := range []string{
+		"{\"version\":1,\"adopted\":true}\n{\"extra\":1}", // trailing second JSON object
+		"{\"version\":1,\"adopted\":true}garbage",         // trailing non-JSON junk
+	} {
+		dir := t.TempDir()
+		writeAdoptionMarker(t, dir, body)
+		st, detail := loadAdoptionMarker(dir)
+		if st != AdoptionMarkerCorrupt {
+			t.Errorf("body: state = %q, want %q (detail=%q)", st, AdoptionMarkerCorrupt, detail)
+		}
+		if !strings.Contains(detail, "trailing content") {
+			t.Errorf("detail should flag trailing content, got %q", detail)
+		}
+	}
+}
+
+// TestDerive_ProjectsAdoptionMarker proves Derive (the single source the gate
+// consumes) carries the marker state into the Registry for all three states.
+// This is the authority-line seam: the kernel PROJECTS evidence; the gate acts.
+func TestDerive_ProjectsAdoptionMarker(t *testing.T) {
+	t.Run("absent", func(t *testing.T) {
+		dir := t.TempDir()
+		gitInit(t, dir)
+		reg, err := Derive(dir)
+		if err != nil {
+			t.Fatalf("Derive: %v", err)
+		}
+		if reg.AdoptionMarker != AdoptionMarkerAbsent {
+			t.Fatalf("AdoptionMarker = %q, want %q", reg.AdoptionMarker, AdoptionMarkerAbsent)
+		}
+	})
+	t.Run("valid", func(t *testing.T) {
+		dir := t.TempDir()
+		gitInit(t, dir)
+		writeAdoptionMarker(t, dir, canonicalAdoptionMarker)
+		reg, err := Derive(dir)
+		if err != nil {
+			t.Fatalf("Derive: %v", err)
+		}
+		if reg.AdoptionMarker != AdoptionMarkerValid {
+			t.Fatalf("AdoptionMarker = %q, want %q", reg.AdoptionMarker, AdoptionMarkerValid)
+		}
+	})
+	t.Run("corrupt", func(t *testing.T) {
+		dir := t.TempDir()
+		gitInit(t, dir)
+		writeAdoptionMarker(t, dir, "garbage")
+		reg, err := Derive(dir)
+		if err != nil {
+			t.Fatalf("Derive: %v", err)
+		}
+		if reg.AdoptionMarker != AdoptionMarkerCorrupt {
+			t.Fatalf("AdoptionMarker = %q, want %q", reg.AdoptionMarker, AdoptionMarkerCorrupt)
+		}
+		if reg.AdoptionMarkerDetail == "" {
+			t.Errorf("corrupt AdoptionMarkerDetail should be non-empty")
+		}
+	})
+}

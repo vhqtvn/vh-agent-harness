@@ -1333,6 +1333,51 @@ handshake, and override semantics live in
   `metadata_state ∈ {valid,stale,invalid}`, summary/reason/source_ref, and an
   optional `override` object.
 
+### Coordinator-adoption marker (defer-liveness opt-in, project-owned)
+
+`.vh-agent-harness/coordinator-adoption.json` is a schema-v1 marker
+(`{"version":1,"adopted":true}`) attesting that this repo has adopted the local
+coordinator transport — i.e. that at least one canonical coordinator task has
+been saved via `save_coordination_task`. It cures the fail-open in doctor check
+#12 (`checkDeferLiveness`, the §4.3 release gate): without it, the gate could
+not tell "genuine greenfield, never adopted" (correct SKIP) apart from "adopted
+then whole transport deleted" (the silent-pass-on-gitignored-`.local/` vector
+that `38c5c477` cured for the disposition manifest). The marker follows the same
+shape as the disposition manifest: committed channel meta-state, visible on a
+fresh checkout, produced at runtime rather than seeded on install.
+
+- **Producer (sole).** `save_coordination_task` in
+  `.opencode/scripts/state-lib.js` creates the marker idempotently
+  (create-if-absent, NEVER overwrite) on the first successful canonical
+  coordinator-task save. It is NOT written by `/coordination` (read-only) or any
+  other surface, and it is NOT renderer-seeded on install — a greenfield install
+  stays unadopted until its first `save_coordination_task` fires.
+- **Channel-liveness state matrix** (the gate's sole transition authority). The
+  claims kernel (`internal/memory/claims`) only DERIVES the marker state
+  (absent / valid / corrupt) and projects it into the liveness result; it does
+  not choose the tier. `checkDeferLiveness` is the only place that maps state to
+  a check tier:
+
+  | `.local/coordinator/tasks/` | adoption marker | doctor #12 result |
+  |---|---|---|
+  | absent | absent | **SKIP** — greenfield, never adopted |
+  | present | absent | **SKIP** — do not retroactively infer adoption from losable transport |
+  | present | valid | run the existing gate (cards + CardErrors behave normally) |
+  | **absent** | **valid** | **FAIL** — adopted transport lost (the fix) |
+  | either | corrupt / unreadable | **FAIL** — fail-closed (mirrors CardError discipline) |
+
+- **`.local/coordinator/tasks/` is NOT committed truth.** Card contents stay
+  losable transport; the adoption marker is channel meta-state (legitimately
+  committable; it does not promote transport identity to canon). This mirrors how
+  the disposition manifest is the committed authority while `.local/` is
+  provenance transport.
+- **Accepted tradeoff.** Option A closes WHOLE-DIR loss but NOT selective
+  single-card deletion (e.g. one errata card deleted while the directory
+  remains). This is accepted because whole-dir loss is the structurally-forced
+  gitignore vector, and an actor who can delete a single card can also delete
+  the committed marker. The full rationale is recorded in
+  `templates/migrations/v0.16.0.md`.
+
 ### Release ceremony: note → readiness artifact → manifest (releaser-owned)
 
 The releaser agent owns this ceremony end-to-end. There is NO out-of-band

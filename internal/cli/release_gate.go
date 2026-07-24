@@ -147,8 +147,56 @@ func checkDeferLiveness(target string) checkResult {
 		// Directory-level I/O failure on a source the gate needs → FAIL (not SKIP).
 		return checkResult{name: name, tier: tierFail, detail: "could not read claim sources: " + err.Error()}
 	}
-	if !reg.TasksPresent {
-		return checkResult{name: name, tier: tierSkip, detail: "no .local/coordinator/tasks/ state (transport dir absent)"}
+
+	// ── defer-003: coordinator-adoption liveness (the channel-liveness tradeoff) ──
+	//
+	// The committed coordinator-adoption marker at
+	// .vh-agent-harness/coordinator-adoption.json is git-tracked CHANNEL
+	// META-STATE; the cards under .local/coordinator/tasks/ are gitignored LOSABLE
+	// TRANSPORT. Before defer-003, a whole-directory transport loss on a repo that
+	// HAD adopted the coordinator would silently SKIP this check on a fresh
+	// checkout — a fail-open in a safety gate after adoption. Option A (operator-
+	// approved) closes WHOLE-DIRECTORY loss: the adoption marker makes the gate
+	// authoritative, so a valid marker with an absent transport dir FAILs instead
+	// of SKIPping.
+	//
+	// TRADEOFF (accepted, recorded in templates/migrations/v0.16.0.md): this closes
+	// whole-directory loss but NOT selective single-card deletion while the dir
+	// remains (e.g. errata-v0120 deleted with the dir intact). That is accepted
+	// because whole-dir loss is the structurally-forced gitignore vector, and an
+	// actor who can delete one card can also delete the committed marker.
+	//
+	// Authority line: the claims kernel only DERIVES the marker state
+	// (absent/valid/corrupt) — it does NOT choose SKIP/FAIL. This switch is the
+	// SOLE transition authority that maps those states to tiers, mirroring how the
+	// kernel appends to reg.CardErrors without deciding its tier.
+	//
+	// State matrix (all 5 rows, test-mandated):
+	//   tasks absent + marker absent  → tierSkip (greenfield / never adopted)
+	//   tasks present + marker absent → tierSkip (do NOT infer adoption from losable transport)
+	//   tasks present + marker valid  → run the existing gate below (row 3)
+	//   tasks absent + marker valid   → tierFail  (THE FIX — adopted transport dir lost)
+	//   either       + marker corrupt → tierFail  (fail-closed, mirrors CardError)
+	switch reg.AdoptionMarker {
+	case claims.AdoptionMarkerCorrupt:
+		return checkResult{name: name, tier: tierFail,
+			detail: "coordinator-adoption marker is corrupt/unreadable (fail-closed — fix or remove .vh-agent-harness/coordinator-adoption.json before release): " + reg.AdoptionMarkerDetail}
+	case claims.AdoptionMarkerAbsent:
+		// Rows 1 & 2: no committed adoption marker → the coordinator transport is
+		// not trusted to gate releases. SKIP regardless of whether stray task
+		// cards exist (do not retroactively infer adoption from losable transport).
+		return checkResult{name: name, tier: tierSkip,
+			detail: "coordinator transport not adopted (no committed .vh-agent-harness/coordinator-adoption.json marker) — defer-liveness gate inactive"}
+	case claims.AdoptionMarkerValid:
+		if !reg.TasksPresent {
+			// Row 4 (THE FIX): the adoption marker says this repo HAS adopted the
+			// coordinator, but the transport dir is gone. FAIL rather than silently
+			// SKIPping the whole check.
+			return checkResult{name: name, tier: tierFail,
+				detail: "coordinator-adoption marker is set but .local/coordinator/tasks/ is absent — adopted transport dir was lost; re-restore it from git history or rerun a coordinator task to repopulate before release"}
+		}
+		// Row 3: marker valid + tasks present → fall through to the existing
+		// card/contradiction logic below.
 	}
 	if !reg.NotesPresent {
 		// No Side B: no shipped/about-to-ship claim to contradict. Even an open

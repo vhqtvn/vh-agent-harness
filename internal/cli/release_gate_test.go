@@ -100,6 +100,36 @@ func gitCommitStub(t *testing.T, dir string) {
 	}
 }
 
+// writeAdoptionMarker writes a canonical coordinator-adoption marker at
+// <dir>/.vh-agent-harness/coordinator-adoption.json (defer-003). The committed
+// marker is the opt-in that makes checkDeferLiveness authoritative. Tests that
+// exercise the gate's card/contradiction logic must call this so they fall
+// under matrix row 3 (tasks present + marker valid) rather than row 2 (tasks
+// present + marker absent → tierSkip).
+func writeAdoptionMarker(t *testing.T, dir string) {
+	t.Helper()
+	d := filepath.Join(dir, ".vh-agent-harness")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatalf("mkdir marker dir: %v", err)
+	}
+	body := `{"version":1,"adopted":true}` + "\n"
+	if err := os.WriteFile(filepath.Join(d, "coordinator-adoption.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write adoption marker: %v", err)
+	}
+}
+
+// writeCorruptAdoptionMarker writes an unparseable marker body (matrix row 5).
+func writeCorruptAdoptionMarker(t *testing.T, dir string) {
+	t.Helper()
+	d := filepath.Join(dir, ".vh-agent-harness")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatalf("mkdir marker dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "coordinator-adoption.json"), []byte("{not valid json"), 0o644); err != nil {
+		t.Fatalf("write corrupt marker: %v", err)
+	}
+}
+
 // --- errata subset (the former erratum_gate_test.go, now a fixture) ---
 
 // TestDeferLivenessGate_FailOnOpenErrataCard: an OPEN errata card alongside a
@@ -109,6 +139,7 @@ func gitCommitStub(t *testing.T, dir string) {
 func TestDeferLivenessGate_FailOnOpenErrataCard(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
 	writeMigrationNote(t, dir, "v0.12.0")
 	writeTaskCardObj(t, dir, "errata-v0120-fake-claim.json",
 		"errata-v0120-fake-claim", "Erratum: false claim shipped in v0.12.0", "draft",
@@ -135,6 +166,7 @@ func TestDeferLivenessGate_FailOnOpenErrataCard(t *testing.T) {
 func TestDeferLivenessGate_PassWhenErrataStaged(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
 	writeMigrationNote(t, dir, "v0.12.0")
 	writeTaskCardObj(t, dir, "errata-v0120-fake-claim.json",
 		"errata-v0120-fake-claim", "Erratum: false claim shipped in v0.12.0", "staged",
@@ -158,6 +190,7 @@ func TestDeferLivenessGate_PassWhenErrataStaged(t *testing.T) {
 func TestDeferLivenessGate_FailOnOpenDeferCard(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
 	writeMigrationNote(t, dir, "v0.2.0")
 	writeTaskCardObj(t, dir, "defer-v020-watchout.json",
 		"defer-v020-watchout", "Defer: supersede v0.2.0 migration watchout", "draft",
@@ -184,6 +217,7 @@ func TestDeferLivenessGate_FailOnOpenDeferCard(t *testing.T) {
 func TestDeferLivenessGate_FailOnDeferCardViaRoughScope(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
 	writeMigrationNote(t, dir, "v0.14.0")
 	writeTaskCardObj(t, dir, "defer-release-docdrift.json",
 		"defer-release-docdrift", "Defer: doc drift in release notes", "ready",
@@ -205,6 +239,7 @@ func TestDeferLivenessGate_FailOnDeferCardViaRoughScope(t *testing.T) {
 func TestDeferLivenessGate_PassWhenDeferTargetsAbsentNote(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
 	// Only v0.1.0 exists; the card targets v0.9.9 (absent).
 	writeMigrationNote(t, dir, "v0.1.0")
 	writeTaskCardObj(t, dir, "defer-future.json",
@@ -225,6 +260,7 @@ func TestDeferLivenessGate_PassWhenDeferTargetsAbsentNote(t *testing.T) {
 func TestDeferLivenessGate_PassWhenDeferTargetsNoNote(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
 	writeMigrationNote(t, dir, "v0.1.0")
 	writeTaskCardObj(t, dir, "defer-code-only.json",
 		"defer-code-only", "Defer: internal substrate refactor", "draft",
@@ -247,6 +283,7 @@ func TestDeferLivenessGate_PassWhenDeferTargetsNoNote(t *testing.T) {
 func TestDeferLivenessGate_PassWhenAllCardsClosed(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
 	writeMigrationNote(t, dir, "v0.2.0")
 	for _, st := range []string{"completed", "cancelled", "staged"} {
 		writeTaskCardObj(t, dir, "defer-closed-"+st+".json",
@@ -273,6 +310,7 @@ func TestDeferLivenessGate_PassWhenAllCardsClosed(t *testing.T) {
 func TestDeferLivenessGate_ReportsReleasedVsAboutToRelease(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
 	writeMigrationNote(t, dir, "v0.1.0")
 	writeMigrationNote(t, dir, "v0.2.0")
 	gitCommitStub(t, dir)
@@ -317,6 +355,7 @@ func TestDeferLivenessGate_SkipWhenNoTasksDir(t *testing.T) {
 func TestDeferLivenessGate_SkipWhenNoNotes(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
 	writeTaskCardObj(t, dir, "errata-v0120.json",
 		"errata-v0120", "Erratum", "draft", nil, nil)
 
@@ -351,6 +390,7 @@ func TestDeferLivenessGate_SkipWhenNotGitTree(t *testing.T) {
 func TestDeferLivenessGate_FailOnMalformedCardBeforeContradiction(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
 	writeMigrationNote(t, dir, "v0.2.0")
 	// Malformed card, lexically first.
 	writeTaskCard(t, dir, "defer-00-malformed.json", "{not valid json")
@@ -379,6 +419,7 @@ func TestDeferLivenessGate_FailOnMalformedCardBeforeContradiction(t *testing.T) 
 func TestDeferLivenessGate_FailOnMalformedCardAlone(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
 	writeMigrationNote(t, dir, "v0.1.0")
 	writeTaskCard(t, dir, "defer-broken.json", "{broken")
 
@@ -402,6 +443,7 @@ func TestDeferLivenessGate_FailOnMalformedCardAlone(t *testing.T) {
 func TestDeferLivenessGate_FailOnMultiReferenceSecondNote(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
 	// Only v0.2.0 exists; v0.1.0 is absent.
 	writeMigrationNote(t, dir, "v0.2.0")
 	writeTaskCardObj(t, dir, "defer-multiref.json",
@@ -420,6 +462,127 @@ func TestDeferLivenessGate_FailOnMultiReferenceSecondNote(t *testing.T) {
 	}
 	if !strings.Contains(r.detail, "v0.2.0") {
 		t.Errorf("FAIL should name the existing referenced note v0.2.0; got %q", r.detail)
+	}
+}
+
+// --- defer-003: coordinator-adoption state matrix (all 5 rows, test-mandated) ---
+//
+// The committed marker at .vh-agent-harness/coordinator-adoption.json is the
+// opt-in that makes checkDeferLiveness authoritative. These five tests pin the
+// exact state matrix the gate applies; row 4 is the crux (THE FIX — adopted
+// transport dir lost).
+
+// Row 1: tasks absent + marker absent → tierSkip (greenfield / never adopted).
+func TestDeferLivenessGate_Matrix_GreenfieldTasksAbsentMarkerAbsent(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeMigrationNote(t, dir, "v0.1.0")
+	// No tasks dir, no marker.
+
+	r := checkDeferLiveness(dir)
+	if r.tier != tierSkip {
+		t.Fatalf("row 1 (greenfield): want tierSkip, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// Row 2: tasks present + marker absent → tierSkip (do NOT retroactively infer
+// adoption from losable transport).
+func TestDeferLivenessGate_Matrix_TasksPresentMarkerAbsent(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeMigrationNote(t, dir, "v0.1.0")
+	// A stray open errata card that WOULD be a release blocker under row 3 — but
+	// without the adoption marker the gate stays inactive (SKIP).
+	writeTaskCardObj(t, dir, "errata-v0120.json",
+		"errata-v0120", "Erratum", "draft", nil,
+		[]string{"Add erratum to templates/migrations/v0.13.0.md"})
+
+	r := checkDeferLiveness(dir)
+	if r.tier != tierSkip {
+		t.Fatalf("row 2 (tasks present, no marker): want tierSkip, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "not adopted") {
+		t.Errorf("row 2 detail should explain the not-adopted SKIP, got %q", r.detail)
+	}
+}
+
+// Row 3: tasks present + marker valid → the existing gate runs. This is the
+// regression-safety proof that CardError→tierFail still holds under the new
+// adoption-gated path: an unparseable card FAILs (not SKIPs) once adopted.
+func TestDeferLivenessGate_Matrix_TasksPresentMarkerValid_CardErrorStillFails(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
+	writeMigrationNote(t, dir, "v0.1.0")
+	writeTaskCard(t, dir, "defer-broken.json", "{broken")
+
+	r := checkDeferLiveness(dir)
+	if r.tier == tierSkip {
+		t.Skipf("check unavailable in env: %s", r.detail)
+	}
+	if r.tier != tierFail {
+		t.Fatalf("row 3 (adopted, malformed card): want tierFail (CardError regression-safety), got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "defer-broken") {
+		t.Errorf("row 3 FAIL should name the malformed card; got %q", r.detail)
+	}
+}
+
+// Row 4 (THE FIX / crux): tasks absent + marker valid → tierFail. An adopted
+// repo that lost its whole transport dir FAILs instead of silently SKIPping.
+// This is the behavioral-closure crux path.
+func TestDeferLivenessGate_Matrix_TasksAbsentMarkerValid_Fails(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeAdoptionMarker(t, dir)
+	writeMigrationNote(t, dir, "v0.1.0")
+	// No tasks dir — the adopted transport dir is gone.
+
+	r := checkDeferLiveness(dir)
+	if r.tier != tierFail {
+		t.Fatalf("row 4 (THE FIX: adopted transport lost): want tierFail, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "tasks") || !strings.Contains(r.detail, "absent") {
+		t.Errorf("row 4 FAIL should explain the adopted-transport-absent failure; got %q", r.detail)
+	}
+}
+
+// Row 5: marker corrupt/unreadable (either dir state) → tierFail (fail-closed).
+// Exercised with the transport dir PRESENT (a card exists) so the only reason
+// for the FAIL is the corrupt marker.
+func TestDeferLivenessGate_Matrix_CorruptMarkerFails(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeCorruptAdoptionMarker(t, dir)
+	writeMigrationNote(t, dir, "v0.1.0")
+	writeTaskCardObj(t, dir, "defer-clean.json",
+		"defer-clean", "Defer: benign", "completed",
+		[]string{"internal/foo.go"}, nil)
+
+	r := checkDeferLiveness(dir)
+	if r.tier != tierFail {
+		t.Fatalf("row 5 (corrupt marker, dir present): want tierFail, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "corrupt") {
+		t.Errorf("row 5 FAIL should flag the corrupt marker; got %q", r.detail)
+	}
+}
+
+// Row 5 (variant): corrupt marker with the transport dir ABSENT — still FAILs
+// (corrupt dominates regardless of transport state).
+func TestDeferLivenessGate_Matrix_CorruptMarkerFails_TasksAbsent(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeCorruptAdoptionMarker(t, dir)
+	writeMigrationNote(t, dir, "v0.1.0")
+	// No tasks dir.
+
+	r := checkDeferLiveness(dir)
+	if r.tier != tierFail {
+		t.Fatalf("row 5 (corrupt marker, dir absent): want tierFail, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "corrupt") {
+		t.Errorf("row 5 FAIL should flag the corrupt marker; got %q", r.detail)
 	}
 }
 
