@@ -322,6 +322,15 @@ fields. Probe-result semantics are preserved EXACTLY:
    below) — R5's new-UNION verdict is validated against the authoritative
    shipped P2-B schema during Slice 0.
 
+> **C4 RESOLVED (2026-07-25, operator decision):** `findings_delta` remains
+> **memo-only / unshipped** — `(?i)findings.?delta` returns 0 matches in
+> `internal/` and 0 matches in `templates/core/`; the only occurrences are the
+> disposition memo L257 proposal ("ADOPT a `findings_delta` closeout field")
+> and C4-discussion references. **R5 is declared a NEW UNION property
+> independent of P2-B** — build fresh, no phantom seam to extend.
+> `findings_delta` shipping is a separate, optional concern, not a
+> prerequisite for R5. This resolves the F2-build C4 gate.
+
 > **[VERBATIM — operator requirement: Slice-0 stop-conditions as NAMED BUILD GATES]**
 > **C1 — P-a columns versus described canonical fields (NAMED BUILD GATE).** The required table includes costs and reversal cost, but the inspected F1 description did not explicitly locate both fields. F2 cannot invent them. **Before implementing the P-a renderer, build must map each column to an existing `ValidatedF1Emit` field and document its defined absence representation.** If no such canonical fields exist: stop the P-a rendering slice; report an F1/F2 contract incompatibility; do not add fields to F1 within this task; do not fill the columns with renderer-authored prose; do not emit a table that appears complete. This is a schema-evidence gap, not permission to reopen F1.
 >
