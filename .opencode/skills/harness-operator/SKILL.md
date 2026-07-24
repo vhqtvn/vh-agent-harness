@@ -65,15 +65,29 @@ vh-agent-harness update                 # apply platform_managed + active overla
 vh-agent-harness doctor                 # lint the result
 ```
 
+> **Editing `templates/core/` in the working tree?** Run `make update`, not a
+> bare `vh-agent-harness update`. `update` renders from the binary's embedded
+> copy, which may be older than your working-tree edits and will silently
+> overwrite newer `.opencode/` renders — `doctor` cannot detect the revert (it
+> re-renders from the same stale corpus and byte-compares). The `Makefile`
+> target rebuilds first, so the embedded corpus matches the tree before
+> re-rendering. Consumer repos that only run a shipped binary are unaffected.
+
 ## Reading migration notes
 
 Every release ships a migration note so operators and agents know what changed
 and how to migrate:
 
-- `vh-agent-harness help migrate` — detect the locally adopted version and show
-  the relevant note (or the latest available).
+- `vh-agent-harness help migrate` — print the **bounded forward path**: every
+  bundled note whose target falls in the half-open interval `(adopted, binary]`,
+  oldest first (`adopted` = the locally installed version detected from lineage,
+  `binary` = the running binary). Releases in the interval that have no
+  consumer-visible note are skipped silently; a non-released binary (e.g. a
+  `-dev`/`+meta` build) is honestly reported as "cannot infer a released range"
+  rather than guessed.
 - `vh-agent-harness help migrate v0.1.9` — show a specific release's note
-  verbatim (a bare `0.1.9` is normalized to `v0.1.9`).
+  verbatim (a bare `0.1.9` is normalized to `v0.1.9`). This is documentation
+  only — it does not inspect your adopted version or compute an upgrade path.
 
 Notes describe **consumer-visible** changes, the automated migration sequence,
 watch-outs, verification commands, and rollback. Read the note for the version

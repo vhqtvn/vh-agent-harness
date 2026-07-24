@@ -8,6 +8,12 @@ package cli
 //   - helpCmd.RunE delegating every other topic to runDefaultHelp (cobra default)
 //   - the --help flag path still routing to the command's own Help()
 //
+// The no-arg form is a BOUNDED FORWARD PATH: every bundled note whose target
+// version falls in (adopted, binary], oldest first. Tests drive both endpoints
+// (lineage ref for `adopted`, the package var Version for `binary`) so the full
+// five-case edge matrix is exercised deterministically — the real dogfood binary
+// is a "-dev"/"dev" string, which legitimately hits the "cannot infer" path.
+//
 // It also scans the embedded migration notes for the canonical heading/format
 // contract so a malformed note fails CI rather than shipping silently.
 
@@ -20,26 +26,43 @@ import (
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
 )
 
+const migrateDelim = "--- Migration target:"
+
 // --- help migrate <explicit version> ----------------------------------------
 
 // TestHelpMigrate_ExplicitVersion prints the named note verbatim from the
-// embedded copy.
+// embedded copy, preceded by a documentation-only banner on stdout that steers
+// toward the no-arg bounded-path form.
 func TestHelpMigrate_ExplicitVersion(t *testing.T) {
 	out, err := executeCapture(t, []string{"help", "migrate", "v0.1.8"})
 	if err != nil {
 		t.Fatalf("help migrate v0.1.8: want nil error, got %v", err)
 	}
-	// First-line heading + the release-class summary anchor the verbatim body.
-	if !strings.Contains(out, "# Migration: v0.1.8") {
-		t.Errorf("missing migration heading\n--- output ---\n%s", out)
+	// The documentation-only banner MUST precede the note body.
+	const banner = "Documentation only: this is the migration note for upgrading TO v0.1.8."
+	if !strings.Contains(out, banner) {
+		t.Errorf("missing documentation-only banner\n--- output ---\n%s", out)
 	}
-	if !strings.Contains(out, "Release class:") {
-		t.Errorf("missing note body (Release class line)\n--- output ---\n%s", out)
+	if idxBanner, idxNote := strings.Index(out, banner), strings.Index(out, "# Migration: v0.1.8"); idxBanner >= 0 && idxNote >= 0 && idxBanner >= idxNote {
+		t.Errorf("documentation-only banner must precede the note body\n--- output ---\n%s", out)
+	}
+	for _, want := range []string{
+		"This lookup does not inspect your adopted version or compute an upgrade path.",
+		"To review the bounded path from your adopted version to this binary, run:",
+		"  vh-agent-harness help migrate",
+		migrateDelim + " v0.1.8 ---",
+		"# Migration: v0.1.8",
+		"Release class:",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q\n--- output ---\n%s", want, out)
+		}
 	}
 }
 
 // TestHelpMigrate_VersionNormalization confirms a bare "X.Y.Z" arg is normalized
-// to "vX.Y.Z" and resolves to the same note as the explicit v-prefixed form.
+// to "vX.Y.Z" and resolves to the same note as the explicit v-prefixed form,
+// hitting the explicit-version success path (banner present).
 func TestHelpMigrate_VersionNormalization(t *testing.T) {
 	out, err := executeCapture(t, []string{"help", "migrate", "0.1.8"})
 	if err != nil {
@@ -48,28 +71,32 @@ func TestHelpMigrate_VersionNormalization(t *testing.T) {
 	if !strings.Contains(out, "# Migration: v0.1.8") {
 		t.Errorf("normalized 0.1.8 should resolve to v0.1.8 note\n--- output ---\n%s", out)
 	}
+	if !strings.Contains(out, "Documentation only: this is the migration note for upgrading TO v0.1.8.") {
+		t.Errorf("normalized explicit-version path must also print the documentation-only banner\n--- output ---\n%s", out)
+	}
 }
 
-// TestHelpMigrate_ExplicitMissingVersion exits non-zero and lists the available
-// versions (errSilent path — clean message, no cobra "Error:"/usage dump).
+// TestHelpMigrate_ExplicitMissingVersion exits non-zero with the reconciled
+// not-found message (errSilent path — clean message, no cobra "Error:"/usage
+// dump) and steers toward the no-arg bounded-path form.
 func TestHelpMigrate_ExplicitMissingVersion(t *testing.T) {
 	out, err := executeCapture(t, []string{"help", "migrate", "v9.9.9"})
 	if err == nil {
 		t.Fatal("help migrate v9.9.9: want non-nil error (non-zero exit), got nil")
 	}
 	for _, want := range []string{
-		"No migration note for v9.9.9",
-		"Available versions:",
-		"v0.1.8",
+		"No bundled migration note was found for v9.9.9.",
+		"Some releases have no consumer-visible migration note.",
+		"To review the bounded path from your adopted version to this binary, run:",
+		"  vh-agent-harness help migrate",
+		"Available migration notes: v0.1.8",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q\n--- output ---\n%s", want, out)
 		}
 	}
 	// No cobra "Error:" line or usage dump should leak (SilenceErrors/Usage on
-	// helpCmd). Our own lowercase "Usage: vh-agent-harness help migrate [version]"
-	// line IS intentional; the cobra usage dump carries "Global Flags:" / a
-	// "Flags:" block, which must not appear.
+	// helpCmd).
 	if strings.Contains(out, "Error:") {
 		t.Errorf("errSilent path must not print cobra Error line\n--- output ---\n%s", out)
 	}
@@ -78,99 +105,230 @@ func TestHelpMigrate_ExplicitMissingVersion(t *testing.T) {
 	}
 }
 
-// --- help migrate (no version) ----------------------------------------------
-
-// TestHelpMigrate_NoArgNoLineage runs from a directory with no harness install:
-// output must clearly state no install was detected and fall back to the latest
-// available note.
-func TestHelpMigrate_NoArgNoLineage(t *testing.T) {
-	dir := t.TempDir()
-	out, err := executeCaptureCwd(t, dir, []string{"help", "migrate"})
-	if err != nil {
-		t.Fatalf("no-arg no-lineage: want nil error, got %v", err)
+// TestHelpMigrate_ExplicitTooManyArgs rejects more than one positional as a
+// usage error rather than silently ignoring trailing args.
+func TestHelpMigrate_ExplicitTooManyArgs(t *testing.T) {
+	out, err := executeCapture(t, []string{"help", "migrate", "v0.1.8", "v0.2.0"})
+	if err == nil {
+		t.Fatal("help migrate v0.1.8 v0.2.0: want non-nil error (usage error), got nil")
 	}
 	for _, want := range []string{
-		"No harness installation detected",
-		"latest",         // the fallback framing
-		"# Migration: v", // the fallback note body
+		"Usage: vh-agent-harness help migrate [version]",
+		"Specify at most one version",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q\n--- output ---\n%s", want, out)
 		}
 	}
-}
-
-// TestHelpMigrate_NoArgWithLineage runs from a fixture with an installed seam
-// whose lineage ref is forced to harness/v0.1.7. Output must mention BOTH the
-// locally adopted version (v0.1.7) and the binary version, and fall back to the
-// latest note since no v0.1.7 note is bundled. This pins the context-line +
-// single-relevant-note contract (no cumulative-path overclaim).
-func TestHelpMigrate_NoArgWithLineage(t *testing.T) {
-	root := t.TempDir()
-	seamInstallInto(t, root)
-	// Force the lineage content-origin ref to an older release (v0.1.7) so the
-	// adopted-version detector has something concrete to report.
-	lin, err := lineage.Read(root)
-	if err != nil || lin == nil {
-		t.Fatalf("read lineage after seam install: %v (lin=%v)", err, lin)
+	// A usage error must not dump any note body.
+	if strings.Contains(out, migrateDelim) {
+		t.Errorf("usage error must not print a migration note body\n--- output ---\n%s", out)
 	}
-	lin.Template.Ref = "harness/v0.1.7"
-	if err := lin.Write(root); err != nil {
-		t.Fatalf("write lineage ref: %v", err)
-	}
-
-	out, err := executeCaptureCwd(t, root, []string{"help", "migrate"})
-	if err != nil {
-		t.Fatalf("no-arg with-lineage: want nil error, got %v", err)
-	}
-	// Context line carries both the adopted and binary versions.
-	if !strings.Contains(out, "Local adopted version: v0.1.7") {
-		t.Errorf("want 'Local adopted version: v0.1.7'\n--- output ---\n%s", out)
-	}
-	wantBin := "Binary version:       " + normalizeVersion(Version)
-	if !strings.Contains(out, wantBin) {
-		t.Errorf("want %q\n--- output ---\n%s", wantBin, out)
-	}
-	// No exact v0.1.7 note exists → explicit fallback message, not a silent swap.
-	if !strings.Contains(out, "showing the latest available note") {
-		t.Errorf("want fallback-to-latest framing\n--- output ---\n%s", out)
+	if strings.Contains(out, "# Migration:") {
+		t.Errorf("usage error must not print a migration note body\n--- output ---\n%s", out)
 	}
 }
 
-// TestHelpMigrate_NoArgAdoptsReleaseRef locks in the normalization-on-detection
-// fix. The seam records the lineage ref as "harness/<Version>" where Version
-// carries NO leading "v" (e.g. "harness/0.1.8", the real release shape). The
-// detector must normalize that to "v0.1.8" so the context line displays
-// consistently AND the note lookup actually matches the embedded "v0.1.8" key.
-// Without normalization the lookup silently misses and falls back to latest.
-func TestHelpMigrate_NoArgAdoptsReleaseRef(t *testing.T) {
-	root := t.TempDir()
-	seamInstallInto(t, root)
-	lin, err := lineage.Read(root)
-	if err != nil || lin == nil {
-		t.Fatalf("read lineage after seam install: %v (lin=%v)", err, lin)
-	}
-	// Real release-ref shape: NO leading "v" (exactly how seam.go writes it).
-	lin.Template.Ref = "harness/0.1.8"
-	if err := lin.Write(root); err != nil {
-		t.Fatalf("write lineage ref: %v", err)
-	}
+// --- help migrate (no version): bounded forward path (adopted, binary] --------
 
-	out, err := executeCaptureCwd(t, root, []string{"help", "migrate"})
+// migrateNoArg is the table helper for the no-arg form. It installs a seam with
+// the given adopted version (lineage ref) into a temp dir — or, when adopted is
+// empty, leaves a bare temp dir with no install — optionally overrides the
+// package var Version (binary endpoint), runs `help migrate` from that dir, and
+// returns the merged output + error. binary="" leaves the real (dev) Version.
+func migrateNoArg(t *testing.T, adopted, binary string) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	if adopted != "" {
+		seamInstallInto(t, dir)
+		lin, err := lineage.Read(dir)
+		if err != nil || lin == nil {
+			t.Fatalf("read lineage after seam install: %v (lin=%v)", err, lin)
+		}
+		// Real release-ref shape: "harness/<Version>" with NO leading "v".
+		lin.Template.Ref = "harness/" + adopted
+		if err := lin.Write(dir); err != nil {
+			t.Fatalf("write lineage ref: %v", err)
+		}
+	}
+	saved := Version
+	if binary != "" {
+		Version = binary
+	}
+	defer func() { Version = saved }()
+	return executeCaptureCwd(t, dir, []string{"help", "migrate"})
+}
+
+// TestHelpMigrate_NoArgRange is the table-driven contract for the no-arg bounded
+// forward path. Each row pins one edge of the five-case matrix plus the
+// cumulative selection, the context header, exit code, and the delimiter shape.
+func TestHelpMigrate_NoArgRange(t *testing.T) {
+	tests := []struct {
+		name       string
+		adopted    string // lineage ref version; "" = no install (no-lineage)
+		binary     string // binary Version override; "" = leave the real dev Version
+		wantErr    bool
+		delimCount int // expected count of "--- Migration target:" lines; -1 = skip
+		wants      []string
+		notWants   []string
+		orderCheck []string // delimiters that must appear in ascending index order
+	}{
+		{
+			// Case 5a: a single note in (adopted, binary]. v0.1.7 has no bundled
+			// note (it is the adopted base, not a target); the only target in
+			// (v0.1.7, v0.1.8] is v0.1.8.
+			name: "single_note_in_range", adopted: "0.1.7", binary: "0.1.8", wantErr: false, delimCount: 1,
+			wants: []string{
+				"Detected adopted version: v0.1.7",
+				"Running binary version:   v0.1.8",
+				"Migration range: (v0.1.7, v0.1.8]",
+				"oldest first",
+				"Only bundled notes are shown",
+				"Output is documentation only",
+				migrateDelim + " v0.1.8 ---",
+				"# Migration: v0.1.8",
+			},
+		},
+		{
+			// Case 5b: multiple notes ascending. (v0.1.7, v0.2.0] = v0.1.8, v0.1.9,
+			// v0.2.0 — printed oldest first.
+			name: "multiple_ascending", adopted: "0.1.7", binary: "0.2.0", wantErr: false, delimCount: 3,
+			wants: []string{
+				"Migration range: (v0.1.7, v0.2.0]",
+				migrateDelim + " v0.1.8 ---",
+				migrateDelim + " v0.1.9 ---",
+				migrateDelim + " v0.2.0 ---",
+			},
+			orderCheck: []string{"v0.1.8", "v0.1.9", "v0.2.0"},
+		},
+		{
+			// Case 5c: an intermediate release in range has NO bundled note
+			// (v0.15.1) — it is skipped silently; only v0.15.0 and v0.16.0 print.
+			name: "intermediate_without_note", adopted: "0.14.0", binary: "0.16.0", wantErr: false, delimCount: 2,
+			wants: []string{
+				"Migration range: (v0.14.0, v0.16.0]",
+				migrateDelim + " v0.15.0 ---",
+				migrateDelim + " v0.16.0 ---",
+			},
+			notWants:   []string{migrateDelim + " v0.15.1 ---"},
+			orderCheck: []string{"v0.15.0", "v0.16.0"},
+		},
+		{
+			// Case 5d: clean released range with NO bundled notes. (v0.15.0,
+			// v0.15.1] contains only v0.15.1, which has no note → empty message,
+			// exit 0, no delimiter.
+			name: "empty_valid_range", adopted: "0.15.0", binary: "0.15.1", wantErr: false, delimCount: 0,
+			wants: []string{
+				"Migration range: (v0.15.0, v0.15.1]",
+				"No bundled consumer-visible migration notes exist for targets in (v0.15.0, v0.15.1].",
+			},
+		},
+		{
+			// Case 3: adopted == binary → already matches, no range.
+			name: "adopted_equals_binary", adopted: "0.1.8", binary: "0.1.8", wantErr: false, delimCount: 0,
+			wants: []string{
+				"Detected adopted version: v0.1.8",
+				"Running binary version:   v0.1.8",
+				"The installation already matches the running binary. There is no forward migration range.",
+			},
+		},
+		{
+			// Case 4: adopted > binary (downgrade) → cannot infer forward.
+			name: "downgrade_adopted_newer", adopted: "0.2.0", binary: "0.1.8", wantErr: true, delimCount: 0,
+			wants: []string{
+				"Detected adopted version: v0.2.0",
+				"Running binary version:   v0.1.8",
+				"Cannot infer forward migration guidance because the adopted version is newer than the running binary.",
+			},
+		},
+		{
+			// Case 1: no adopted lineage detected (no install). Takes priority
+			// over the suffix check even when the binary is a dev string.
+			name: "no_lineage", adopted: "", binary: "", wantErr: true, delimCount: 0,
+			wants: []string{
+				"No adopted harness version was detected from local lineage.",
+				"A bounded migration path cannot be inferred.",
+				"Use vh-agent-harness help migrate <version> to inspect a specific target note.",
+				"Available migration notes: v0.1.8",
+			},
+		},
+		{
+			// Case 2: binary carries a build suffix ("+dev") → not clean released
+			// → cannot infer a released range.
+			name: "suffix_binary_cannot_infer", adopted: "0.1.8", binary: "0.6.0+dev", wantErr: true, delimCount: 0,
+			wants: []string{
+				"Detected adopted version: v0.1.8",
+				"Running binary version:   v0.6.0+dev",
+				"Cannot infer a released migration range from this binary version.",
+				"Use vh-agent-harness help migrate <version> to inspect a specific released target note.",
+			},
+		},
+		{
+			// Case 5e: binary newer than the highest bundled note still selects
+			// every note up to the binary (the upper bound is the binary, not
+			// the highest note). delimCount is skipped (-1) because the exact
+			// count drifts as notes are added each release; the orderCheck plus
+			// the v0.16.0 presence already prove the full forward selection.
+			name: "binary_newer_than_highest_note", adopted: "0.1.8", binary: "9.9.9", wantErr: false, delimCount: -1,
+			wants: []string{
+				"Migration range: (v0.1.8, v9.9.9]",
+				migrateDelim + " v0.16.0 ---",
+			},
+			orderCheck: []string{"v0.1.9", "v0.2.0", "v0.16.0"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := migrateNoArg(t, tc.adopted, tc.binary)
+			if tc.wantErr && err == nil {
+				t.Fatalf("want non-nil error, got nil\n--- output ---\n%s", out)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("want nil error, got %v\n--- output ---\n%s", err, out)
+			}
+			for _, w := range tc.wants {
+				if !strings.Contains(out, w) {
+					t.Errorf("missing %q\n--- output ---\n%s", w, out)
+				}
+			}
+			for _, nw := range tc.notWants {
+				if strings.Contains(out, nw) {
+					t.Errorf("did not want %q\n--- output ---\n%s", nw, out)
+				}
+			}
+			if tc.delimCount >= 0 {
+				if got := strings.Count(out, migrateDelim); got != tc.delimCount {
+					t.Errorf("delimiter count: want %d, got %d\n--- output ---\n%s", tc.delimCount, got, out)
+				}
+			}
+			if len(tc.orderCheck) > 1 {
+				prev := -1
+				for _, ver := range tc.orderCheck {
+					marker := migrateDelim + " " + ver + " ---"
+					idx := strings.Index(out, marker)
+					if idx < 0 {
+						t.Fatalf("orderCheck: missing delimiter %q\n--- output ---\n%s", marker, out)
+					}
+					if idx <= prev {
+						t.Errorf("delimiter %q at %d not after prev %d (ascending order broken)\n--- output ---\n%s", marker, idx, prev, out)
+					}
+					prev = idx
+				}
+			}
+		})
+	}
+}
+
+// TestHelpMigrate_NoArgReleaseRefNormalization locks in that the detected
+// release ref ("harness/0.1.8", no leading "v") is normalized to "v0.1.8" for
+// both display and the interval/header.
+func TestHelpMigrate_NoArgReleaseRefNormalization(t *testing.T) {
+	out, err := migrateNoArg(t, "0.1.7", "0.1.9")
 	if err != nil {
 		t.Fatalf("no-arg release-ref: want nil error, got %v", err)
 	}
-	// Display normalizes the detected ref to the canonical "vX.Y.Z" form.
-	if !strings.Contains(out, "Local adopted version: v0.1.8") {
-		t.Errorf("want 'Local adopted version: v0.1.8' (normalized)\n--- output ---\n%s", out)
-	}
-	// The note for the adopted version IS bundled → it is printed directly, NOT
-	// the latest-fallback path.
-	if !strings.Contains(out, "# Migration: v0.1.8") {
-		t.Errorf("want the v0.1.8 note body printed\n--- output ---\n%s", out)
-	}
-	if strings.Contains(out, "showing the latest available note") {
-		t.Errorf("adopted release ref must resolve to its own note, not the latest fallback\n--- output ---\n%s", out)
+	if !strings.Contains(out, "Detected adopted version: v0.1.7") {
+		t.Errorf("want 'Detected adopted version: v0.1.7' (normalized)\n--- output ---\n%s", out)
 	}
 }
 
@@ -182,8 +340,6 @@ func TestHelpMigrate_NoArgAdoptsReleaseRef(t *testing.T) {
 // path (HelpFunc) on those subcommands.
 func TestHelpMigrate_RegressionDefaultTopics(t *testing.T) {
 	// `help guide` → runDefaultHelp → rootCmd.Find("guide") → guideCmd.Help().
-	// guide has a Long, so its help prints the Long ("Orient yourself …"), not
-	// the Short; anchor on stable Long text + the guide usage line.
 	out, err := executeCapture(t, []string{"help", "guide"})
 	if err != nil {
 		t.Fatalf("help guide: want nil error, got %v", err)

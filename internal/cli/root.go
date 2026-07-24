@@ -93,8 +93,8 @@ Upgrade loop (after a new binary or config change):
   vh-agent-harness doctor
 
 Inspect migration notes for a release:
-  vh-agent-harness help migrate            # the note for the locally adopted version
-  vh-agent-harness help migrate vX.Y.Z     # a specific release's note
+  vh-agent-harness help migrate            # the bounded forward path (adopted, binary], oldest first
+  vh-agent-harness help migrate vX.Y.Z     # a specific release's note (documentation only)
 
 Runtime verbs (exec, exec-ro, exec-sandbox, shell, up, down, logs, ps) resolve
 the backend by reading the S4 run-shape (.vh-agent-harness/run-shape.yml) first,

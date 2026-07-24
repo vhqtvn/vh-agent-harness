@@ -38,7 +38,17 @@ develop the harness.
 
 `.vh-agent-harness/` holds this repo's own profile / run-shape / AGENTS sources;
 `.opencode/` is the rendered corpus. Edit `templates/core/` (the source),
-rebuild, then `vh-agent-harness update` (or `make update`) to regenerate.
+rebuild, then `make update` to regenerate.
+
+**Prefer `make update`, not a bare `vh-agent-harness update`.** `update` renders
+only from the corpus embedded in the running binary, never from the working tree,
+so the `Makefile` target builds first. In this dev/dogfood repo the on-disk
+`templates/core/` is often newer than the PATH binary's baked-in copy; a bare
+`vh-agent-harness update` will silently overwrite in-progress `.opencode/` edits
+with those older bytes, and `doctor` does not detect the revert (it re-renders
+from the same stale embedded corpus and byte-compares, reporting "in sync"). The
+footgun is specific to a repo that edits `templates/core/`; consumers whose binary
+embeds the same corpus they run with are unaffected.
 
 ## Runtime
 

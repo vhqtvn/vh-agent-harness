@@ -122,12 +122,17 @@ the runtime backend, `exec-ro` is a host-side read-only classifier, and
 `exec-sandbox` is a host-local trampoline. See `README.agent.md` (the exec-family
 / "two execution planes" section) for when to reach for each.
 
-`help migrate [version]` prints the per-release migration note. With no version
-it shows the note for the locally adopted harness version (detected from
-lineage), or the latest bundled note when none matches; an explicit `vX.Y.Z`
-(or `X.Y.Z`) prints that release's note. It is **documentation only** — it never
-modifies files. The notes are embedded in the binary (under
-`templates/migrations/`) and are not rendered into consumer repos.
+`help migrate [version]` prints the per-release migration note(s). With no
+version it prints the **bounded forward path** — every bundled note whose target
+falls in the half-open interval `(adopted, binary]`, oldest first, where
+`adopted` is the locally installed harness version (detected from lineage) and
+`binary` is the running binary. A strict released-version gate is applied to
+both endpoints (a `-dev`/`+meta` binary is honestly rejected as "cannot infer a
+released range" rather than silently stripped); releases inside the interval
+that have no consumer-visible note (e.g. a patch) are skipped silently. With an
+explicit `vX.Y.Z` (or `X.Y.Z`) it prints that single release's note. It is
+**documentation only** — it never modifies files. The notes are embedded in the
+binary (under `templates/migrations/`) and are not rendered into consumer repos.
 
 `--dry-run` on `install`/`update` prints the full per-file plan
 (would-overwrite / seed / preserve / reconcile / conflict) **without writing

@@ -813,11 +813,25 @@ export default function transform({ context }) {
 - **Refresh after a new binary or config change:** `vh-agent-harness update`
   (preview with `--dry-run`). Armed-file conflicts are recorded — list them with
   `vh-agent-harness proposals`.
+- **In a dev/dogfood repo that edits `templates/core/` (this one), prefer
+  `make update` over a bare `vh-agent-harness update`.** `update` renders only
+  from the corpus embedded in the running binary, never from the working tree; the
+  `Makefile` target rebuilds first so it picks up current source. A bare
+  `vh-agent-harness update` uses the PATH binary's embedded corpus, which may be
+  older than your in-tree source and will silently overwrite in-progress
+  `.opencode/` edits with older bytes. `doctor` does not detect this revert (it
+  re-renders from the same stale embedded corpus and byte-compares). Consumers
+  whose binary embeds the same corpus they run with are unaffected.
 - **Inspect migration notes for a release:** `vh-agent-harness help migrate`
-  (the note for the locally adopted harness version, detected from lineage) or
-  `vh-agent-harness help migrate vX.Y.Z` (a specific release). With no version
-  and no local install, it prints the latest bundled note. It is **documentation
-  only** — it never modifies files.
+  (the **bounded forward path** — every bundled note whose target falls in the
+  half-open interval `(adopted, binary]`, oldest first, where `adopted` is the
+  locally installed version detected from lineage and `binary` is the running
+  binary; releases in the interval with no consumer-visible note are skipped
+  silently) or `vh-agent-harness help migrate vX.Y.Z` (a specific release's
+  note). When no adopted version is detected, or either endpoint is not a clean
+  released version (e.g. a `-dev`/`+meta` build), it honestly reports that a
+  range cannot be inferred rather than guessing. It is **documentation only** —
+  it never modifies files.
 
 ### Docs & prompts
 
