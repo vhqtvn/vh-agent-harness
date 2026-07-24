@@ -379,6 +379,40 @@ declarations), and everything **synchronous** (no background runtime).
 behavioral completion ≠ defer-not-drop (debt survival) ≠ HEAD-progress
 (landed-state) ≠ motivation-satisfaction ≠ findings-retention.
 
+### Operator-visibility controls → three UNION families (2026-07-25)
+**Basis:** commit `9dbab50` Decision 1 (S2-a, HIGH confidence, no contradictions)
+— see
+[`./2026-07-25-f1-synthesis-family-and-s2a-topology.md`](./2026-07-25-f1-synthesis-family-and-s2a-topology.md).
+The seven operator-visibility controls (R1, R3, P-a, R5, P-b, P-c, DAY-0) resolve
+into **three UNION families** under the same-property→MERGE /
+different-property→UNION rule. The family-defining axis is **data-role** (producer
+vs renderer); **authority** is an orthogonal constraint that isolates DAY-0. Each
+family is property-distinct — no pair shares a full property identity that forces
+MERGE (S1 REJECTED), and authority does not collapse the producer-vs-renderer
+split (S2-b REJECTED); the topology is settled, so the falsifying matrix is not
+re-litigated here (see basis memo).
+
+- **F1 — synthesis-producing (producer axis, load-bearing, the demonstrated
+  bottleneck):** **R1** (cross-lane join), **R3** (redesign fork), **P-a**
+  (counter-evidence). All three **INFORM.** This is the synthesis act the
+  2026-07-24 operator-visibility evidence study found absent.
+- **F2 — rendering / persistence (renderer/consumer axis,
+  necessary-but-insufficient):** **R5** (operator-synthesis durability), **P-b**
+  (evidence-grade visual slot), **P-c** (salience discipline). All three
+  **INFORM.** Pure renderers/consumers of F1 output — they persist/render what the
+  producer axis authored, never recompute it.
+- **F3 — design-gate (pre-code cadence, separate family):** **DAY-0** (adversarial
+  BUILD-READY refusal). The only control whose authority is **BLOCKS** and whose
+  cadence is pre-code / BUILD-READY — a safety-layer gate, not coordinator
+  authority.
+
+**MIXED resolution (load-bearing):** R1 and P-a are **declared ONCE in F1** (their
+canonical identity is the producer act) and **DERIVED into F2** under
+declare-once-derive-everywhere — they are NOT duplicated as second F1 entries.
+DAY-0 is placed in F3 explicitly (distinct on BLOCKS authority AND pre-code cadence
+simultaneously), not parked — silence on DAY-0 reproduces the §4.3-errata-card
+failure.
+
 ### Load-bearing caveat — the token does NOT prove reality
 The verdict/crux token makes a completion **declaration honest and non-droppable**;
 it does **not** prove the crux path was actually exercised. A structural validator

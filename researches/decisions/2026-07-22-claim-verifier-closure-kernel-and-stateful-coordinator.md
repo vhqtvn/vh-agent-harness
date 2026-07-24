@@ -125,6 +125,7 @@ them.
 | Edit/revert a *released* migration note | blocked by test | `TestMigrationNotes_ReleasedImmutable` (the rule that became a gate at commit `e929149`) |
 | Block a release | release-readiness gate | §4.3 defer-liveness (FAIL on open-defer↔released-claim contradiction) |
 | Block a commit | commit-gate + commit-reviewer | `.opencode/scripts/commit-gate.sh` + `/commit-review` (gated-commit protocol) |
+| Block a BUILD-READY | safety-layer gate (F3 design-gate) | pre-code / BUILD-READY crossing — FAIL on named ownership hazard unresolved (coordinator INFORMS only; the gate BLOCKS; basis: commit `9dbab50` Decision 2 authority-line audit) |
 | Edit code / docs / skills | delegated specialist | `build` / `docs-steward` via task delegation (coordinator is read-only) |
 | Promote a DEFER → backlog row | promoter under DoR | `.local/coordinator/tasks/` → `docs/planning/backlog.md` (trigger fired + DoR met) |
 
