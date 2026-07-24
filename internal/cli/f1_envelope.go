@@ -79,6 +79,21 @@ var f1ValidTriggered = map[string]struct{}{
 	F1TriggeredNotApplicable: {},
 }
 
+// F1R1JoinDisposition — how lanes joined into a conclusion (Slice 2). A MERGE
+// conclusion joins >=2 lanes that addressed the SAME property into one finding;
+// a UNION conclusion stands alone (one lane, distinct property) and is never
+// merged with another lane's conclusion. Distinct properties are always an
+// independent UNION — they are never collapsed.
+const (
+	F1R1JoinMerge = "merge"
+	F1R1JoinUnion = "union"
+)
+
+var f1ValidR1JoinDispositions = map[string]struct{}{
+	F1R1JoinMerge: {},
+	F1R1JoinUnion: {},
+}
+
 // F1R3OptionMode — the two materially-distinct R3 option modes. A redesign
 // candidate that merely renames, delays, or subdivides the same repair is
 // INVALID (enforced by the R3 producer/gate in Slice 3, not here).
@@ -198,20 +213,83 @@ type F1FamilyEntry struct {
 	PA         *F1PAProbeSummary `json:"pa,omitempty"`
 }
 
-// F1R1JoinSummary is the R1 cross-lane join slot. Slice 1 carries the
+// F1R1JoinSummary is the R1 cross-lane join slot. Slice 1 carried the
 // conclusion graph (stable conclusion IDs that R3 options and P-a probes
 // reference); Slice 2 adds the full join/lane/ancestry/hazard mechanics.
 type F1R1JoinSummary struct {
 	Conclusions []F1R1Conclusion `json:"conclusions,omitempty"`
 }
 
-// F1R1Conclusion is one material R1 finding with a stable conclusion ID and
-// the property it concerns. SourceRefs are ancestry-bearing (Slice 2 enforces
-// shared-ancestry non-double-counting).
+// F1R1Conclusion is one material joined R1 finding: the deterministic join of
+// every lane that addressed PropertyID. A MERGE conclusion joins >=2 lanes on
+// the same property; a UNION conclusion stands alone (one lane, distinct
+// property). Sources are ancestry-bearing: two sources sharing an ancestry
+// root are NOT independent and the producer collapses them. Hazards carry the
+// explicit survival chain (hazard_ref -> symptom_refs -> source_refs ->
+// ancestry -> contradiction/gap -> consuming R3 option IDs -> consuming P-a
+// probe IDs); survival is NOT inferred.
 type F1R1Conclusion struct {
-	ConclusionID string   `json:"conclusion_id"`
-	PropertyID   string   `json:"property_id"`
-	SourceRefs   []string `json:"source_refs,omitempty"`
+	ConclusionID    string              `json:"conclusion_id"`
+	PropertyID      string              `json:"property_id"`
+	JoinDisposition string              `json:"join_disposition"`
+	Lanes           []F1R1LaneContrib   `json:"lanes,omitempty"`
+	Sources         []F1R1Source        `json:"sources,omitempty"`
+	Agreements      []string            `json:"agreements,omitempty"`
+	Contradictions  []F1R1Contradiction `json:"contradictions,omitempty"`
+	Gaps            []F1R1Gap           `json:"gaps,omitempty"`
+	Hazards         []F1R1HazardLink    `json:"hazards,omitempty"`
+}
+
+// F1R1LaneContrib is one lane's (producer-act's) contribution to a conclusion.
+type F1R1LaneContrib struct {
+	LaneID   string `json:"lane_id"`
+	ActID    string `json:"act_id,omitempty"`
+	Position string `json:"position,omitempty"`
+}
+
+// F1R1Source is a source locator with its ancestry roots. AncestryRoots name
+// the primordial sources this source descends from; two sources that share an
+// ancestry root (or share a locator) are NOT independent and the producer
+// collapses them into one (recording the shared root). An empty Locator is
+// invalid on an evidence-bearing conclusion.
+type F1R1Source struct {
+	Locator       string   `json:"locator"`
+	AncestryRoots []string `json:"ancestry_roots,omitempty"`
+}
+
+// F1R1Contradiction records that two lanes disagree on the property. It
+// carries a stable ContradictionID so an F1R1HazardLink.ContradictionRef can
+// resolve to it (a hazard survives via an explicit contradiction/gap leg).
+type F1R1Contradiction struct {
+	ContradictionID string `json:"contradiction_id"`
+	LaneA           string `json:"lane_a"`
+	LaneB           string `json:"lane_b"`
+	Detail          string `json:"detail"`
+}
+
+// F1R1Gap records an unresolved aspect of a property. It carries a stable
+// GapID so an F1R1HazardLink.GapRef can resolve to it.
+type F1R1Gap struct {
+	GapID  string `json:"gap_id"`
+	Aspect string `json:"aspect"`
+	Detail string `json:"detail"`
+}
+
+// F1R1HazardLink is a hazard<->symptom link with the explicit survival chain.
+// The chain hazard_ref -> symptom_refs -> source_refs -> ancestry ->
+// contradiction/gap -> consuming R3 option IDs -> consuming P-a probe IDs must
+// be intact for the hazard to survive; survival is NOT inferred. A hazard link
+// whose source locators do not resolve to the conclusion's declared sources, or
+// whose consuming R3/P-a refs dangle, is a structural inconsistency.
+type F1R1HazardLink struct {
+	HazardRef            string   `json:"hazard_ref"`
+	SymptomRefs          []string `json:"symptom_refs,omitempty"`
+	SourceLocators       []string `json:"source_locators,omitempty"`
+	AncestryRoots        []string `json:"ancestry_roots,omitempty"`
+	ContradictionRef     string   `json:"contradiction_ref,omitempty"`
+	GapRef               string   `json:"gap_ref,omitempty"`
+	ConsumingR3OptionIDs []string `json:"consuming_r3_option_ids,omitempty"`
+	ConsumingPAProbeIDs  []string `json:"consuming_pa_probe_ids,omitempty"`
 }
 
 // F1R3ForkSummary is the R3 repair-routing fork slot. TriggerRecognized must

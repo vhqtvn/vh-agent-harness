@@ -250,6 +250,7 @@ func validateR1Summary(pe string, r1 *F1R1JoinSummary) []string {
 	}
 	var errs []string
 	cids := map[string]int{}
+	pids := map[string]int{} // property_id uniqueness: two conclusions on the same property = an un-merged join
 	for i := range r1.Conclusions {
 		c := &r1.Conclusions[i]
 		cep := fmt.Sprintf("%s.r1.conclusions[%d]", pe, i)
@@ -262,9 +263,123 @@ func validateR1Summary(pe string, r1 *F1R1JoinSummary) []string {
 		}
 		if c.PropertyID == "" {
 			errs = append(errs, cep+": empty property_id")
+		} else if prev, dup := pids[c.PropertyID]; dup {
+			errs = append(errs, fmt.Sprintf("%s: duplicate property_id %q (also at conclusions[%d]) — two conclusions on the same property should be one MERGE join", cep, c.PropertyID, prev))
+		} else {
+			pids[c.PropertyID] = i
 		}
-		if dup := firstDuplicate(c.SourceRefs); dup != "" {
-			errs = append(errs, fmt.Sprintf("%s: duplicate source_ref %q", cep, dup))
+		// Join disposition enum.
+		if _, ok := f1ValidR1JoinDispositions[c.JoinDisposition]; !ok {
+			errs = append(errs, fmt.Sprintf("%s: unknown join_disposition %q (want one of %s)", cep, c.JoinDisposition, f1SortedKeys(f1ValidR1JoinDispositions)))
+		}
+		// MERGE requires >=2 lanes; UNION must not carry >1 lane.
+		if c.JoinDisposition == F1R1JoinMerge && len(c.Lanes) < 2 {
+			errs = append(errs, fmt.Sprintf("%s: join_disposition=merge but %d lane(s) (merge requires >=2 lanes on the same property)", cep, len(c.Lanes)))
+		}
+		if c.JoinDisposition == F1R1JoinUnion && len(c.Lanes) > 1 {
+			errs = append(errs, fmt.Sprintf("%s: join_disposition=union but %d lane(s) (use merge for >=2 lanes on the same property)", cep, len(c.Lanes)))
+		}
+		// Evidence-bearing conclusions require real source locators. A gap-only
+		// conclusion (no lanes/agreements/contradictions/hazards) may omit them.
+		evidenceBearing := len(c.Lanes) > 0 || len(c.Agreements) > 0 || len(c.Contradictions) > 0 || len(c.Hazards) > 0
+		if evidenceBearing {
+			if len(c.Sources) == 0 {
+				errs = append(errs, cep+": evidence-bearing conclusion has no sources (missing source locators)")
+			}
+			for j := range c.Sources {
+				if c.Sources[j].Locator == "" {
+					errs = append(errs, fmt.Sprintf("%s.sources[%d]: empty locator (evidence-bearing conclusion requires real source locators)", cep, j))
+				}
+			}
+		}
+		// Shared-ancestry double-count: two sources sharing a locator or an
+		// ancestry root are NOT independent and must have been collapsed.
+		for j := 0; j < len(c.Sources); j++ {
+			for k := j + 1; k < len(c.Sources); k++ {
+				if c.Sources[j].Locator != "" && c.Sources[j].Locator == c.Sources[k].Locator {
+					errs = append(errs, fmt.Sprintf("%s.sources[%d,%d]: duplicate locator %q (shared source double-counted as independent)", cep, j, k, c.Sources[j].Locator))
+				}
+				for _, ar := range c.Sources[j].AncestryRoots {
+					if ar != "" && containsString(c.Sources[k].AncestryRoots, ar) {
+						errs = append(errs, fmt.Sprintf("%s.sources[%d,%d]: shared ancestry root %q (sources not independent; should be collapsed)", cep, j, k, ar))
+					}
+				}
+			}
+		}
+		// Hazard survival-chain integrity (within the conclusion). Cross-family
+		// refs (consuming R3 option / P-a probe IDs) are resolved in
+		// resolveF1CrossRefs so they cover both producer and doctor paths.
+		declaredLocators := map[string]struct{}{}
+		declaredAncestry := map[string]struct{}{}
+		for _, s := range c.Sources {
+			if s.Locator != "" {
+				declaredLocators[s.Locator] = struct{}{}
+			}
+			for _, ar := range s.AncestryRoots {
+				if ar != "" {
+					declaredAncestry[ar] = struct{}{}
+				}
+			}
+		}
+		declaredContradictionIDs := map[string]struct{}{}
+		for _, ct := range c.Contradictions {
+			if ct.ContradictionID != "" {
+				declaredContradictionIDs[ct.ContradictionID] = struct{}{}
+			}
+		}
+		declaredGapIDs := map[string]struct{}{}
+		for _, g := range c.Gaps {
+			if g.GapID != "" {
+				declaredGapIDs[g.GapID] = struct{}{}
+			}
+		}
+		for j := range c.Hazards {
+			h := &c.Hazards[j]
+			hpep := fmt.Sprintf("%s.hazards[%d]", cep, j)
+			// Leg 1: hazard_ref.
+			if h.HazardRef == "" {
+				errs = append(errs, hpep+": empty hazard_ref")
+			}
+			// Leg 2: symptom_refs (>=1; survival chain starts here).
+			if len(h.SymptomRefs) == 0 {
+				errs = append(errs, hpep+": hazard has no symptom_refs (survival chain starts at hazard_ref -> symptom_refs)")
+			}
+			// Leg 3: source_refs (>=1 mandatory; each resolves to a declared
+			// source locator on this conclusion). A hazard with no source
+			// locators is rootless and cannot survive.
+			if len(h.SourceLocators) == 0 {
+				errs = append(errs, hpep+": hazard has no source_locators (survival chain requires source_refs -> ancestry)")
+			}
+			for _, loc := range h.SourceLocators {
+				if loc == "" {
+					errs = append(errs, hpep+": empty source_locator (fabricated/locator-free evidence invalid)")
+				} else if _, ok := declaredLocators[loc]; !ok {
+					errs = append(errs, fmt.Sprintf("%s: source_locator %q does not resolve to any declared source on this conclusion", hpep, loc))
+				}
+			}
+			// Leg 4: ancestry (a non-empty hazard ancestry root must ALWAYS
+			// resolve to a declared source's ancestry root — there is no
+			// "no declared ancestry => anything passes" escape. Survival is
+			// NOT inferred from fabricated ancestry.)
+			for _, ar := range h.AncestryRoots {
+				if ar == "" {
+					errs = append(errs, hpep+": empty ancestry_root")
+				} else if _, ok := declaredAncestry[ar]; !ok {
+					errs = append(errs, fmt.Sprintf("%s: ancestry_root %q does not resolve to any declared source ancestry on this conclusion", hpep, ar))
+				}
+			}
+			// Leg 5: contradiction/gap (optional, but if present must resolve to
+			// a declared contradiction_id / gap_id on this conclusion).
+			if h.ContradictionRef != "" {
+				if _, ok := declaredContradictionIDs[h.ContradictionRef]; !ok {
+					errs = append(errs, fmt.Sprintf("%s: contradiction_ref %q does not resolve to any declared contradiction_id on this conclusion", hpep, h.ContradictionRef))
+				}
+			}
+			if h.GapRef != "" {
+				if _, ok := declaredGapIDs[h.GapRef]; !ok {
+					errs = append(errs, fmt.Sprintf("%s: gap_ref %q does not resolve to any declared gap_id on this conclusion", hpep, h.GapRef))
+				}
+			}
 		}
 	}
 	return errs
@@ -411,6 +526,32 @@ func resolveF1CrossRefs(env *F1SynthesisEnvelope) []string {
 				_, isR3 := r3Options[p.TargetRef]
 				if !isR1 && !isR3 {
 					errs = append(errs, fmt.Sprintf("%s: target_ref %q does not resolve to any r1 conclusion_id or r3 option_id", ppep, p.TargetRef))
+				}
+			}
+		case F1FamilyR1CrossLaneJoin:
+			// R1 hazard survival chain — cross-family leg: each hazard's
+			// consuming R3 option IDs must resolve to a declared r3 option_id,
+			// and each consuming P-a probe ID must resolve to a declared pa
+			// probe_id. The within-conclusion leg (source locators resolve to
+			// the conclusion's own sources) is checked in validateR1Summary.
+			if e.R1 == nil {
+				continue
+			}
+			for cj := range e.R1.Conclusions {
+				c := &e.R1.Conclusions[cj]
+				for hj := range c.Hazards {
+					h := &c.Hazards[hj]
+					hpep := fmt.Sprintf("entries[%d].r1.conclusions[%d].hazards[%d]", i, cj, hj)
+					for _, ref := range h.ConsumingR3OptionIDs {
+						if _, ok := r3Options[ref]; !ok {
+							errs = append(errs, fmt.Sprintf("%s: consuming_r3_option_id %q does not resolve to any r3 option_id", hpep, ref))
+						}
+					}
+					for _, ref := range h.ConsumingPAProbeIDs {
+						if _, ok := paProbes[ref]; !ok {
+							errs = append(errs, fmt.Sprintf("%s: consuming_pa_probe_id %q does not resolve to any pa probe_id", hpep, ref))
+						}
+					}
 				}
 			}
 		}

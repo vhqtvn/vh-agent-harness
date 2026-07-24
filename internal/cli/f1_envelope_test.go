@@ -36,7 +36,9 @@ func canonicalF1Fixture() *F1SynthesisEnvelope {
 				Triggered: F1TriggeredTriggered,
 				EntryID:   "entry-r1",
 				R1: &F1R1JoinSummary{Conclusions: []F1R1Conclusion{
-					{ConclusionID: "R1C1", PropertyID: "R1P1", SourceRefs: []string{"src-a"}},
+					{ConclusionID: "R1C1", PropertyID: "R1P1", JoinDisposition: F1R1JoinUnion,
+						Lanes:   []F1R1LaneContrib{{LaneID: "lane-a"}},
+						Sources: []F1R1Source{{Locator: "src-a"}}},
 				}},
 			},
 			{
