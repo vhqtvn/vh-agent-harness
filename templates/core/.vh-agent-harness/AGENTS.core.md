@@ -214,6 +214,18 @@ outcome).
 - The `vh-agent-harness doctor` health check rejects an internally-inconsistent
   declaration (e.g. `verdict: proven` without a proven crux). This is the
   safety layer acting; it does not gate a verdict it cannot verify.
+- Verifier-infeasible outcome: when the verified seam cannot observe the
+  load-bearing outcome (the fixture is too small, there is no prior surface,
+  no real scale, or no render available), declare `result: not-demonstrable`
+  (NOT `proven`) → `verdict: inconclusive`. This blocks a `completed` closeout
+  and routes to defer. Never record the infeasibility as silent prose, and
+  never claim `proven` for an outcome the seam could not observe — translate it
+  into the shipped `not-demonstrable` crux state.
+- Outcome-observed vs mechanism-asserted: for a behavior whose value is
+  user-visible, `proven` must cite an observation of the OUTCOME (the behavior
+  occurred), not an assertion of the MECHANISM (a flag is set, a record exists,
+  a code path ran). Asserting the mechanism without observing the outcome is
+  `result: skipped`, not `proven`.
 
 
 ## Output expectations for agents

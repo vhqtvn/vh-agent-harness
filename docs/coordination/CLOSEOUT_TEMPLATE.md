@@ -34,6 +34,16 @@ result: proven               # proven | skipped | not-demonstrable (the crux out
   verdict MUST be inconclusive, failed, or abandoned.
 - The declaration is a declaration, not a proof: a consistent token does not
   prove the path executed — that needs the repo-specific live verification.
+- Verifier-infeasible: if the verified seam cannot observe the load-bearing
+  outcome (fixture too small, no prior surface, no real scale, no render),
+  declare `result: not-demonstrable` → `verdict: inconclusive`. This blocks a
+  `completed` closeout and routes to defer — never record the infeasibility as
+  silent prose, and never claim `proven` for an outcome the seam could not
+  observe.
+- Outcome vs mechanism: for a user-visible behavior, `proven` must cite an
+  OUTCOME observation (the behavior occurred), not a MECHANISM assertion (a
+  flag is set, a record exists, a code path ran). Mechanism-without-outcome is
+  `result: skipped`, not `proven`.
 
 ## Motivation check (advisory, distinct property)
 
