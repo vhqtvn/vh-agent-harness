@@ -194,6 +194,28 @@ localization, not from generic defaults in this managed core.
   localization and make it defer to the localization rather than declaring a
   competing test taxonomy.
 
+### Behavioral closure (crux / load-bearing path)
+
+A behavior change that touches a **load-bearing path** — a codepath whose
+end-to-end execution is the actual proof the behavior works — must, at
+closeout, declare a **crux**: the path, the verifier, the command, and whether
+that path was actually exercised. The declaration is a fenced
+`behavioral-closure` token carrying `verdict` (proven | inconclusive | failed |
+abandoned) and `result` (proven | skipped | not-demonstrable, the crux
+outcome).
+
+- The consistency rule: `verdict: proven` is honest only when `result: proven`
+  (the load-bearing path was demonstrated). Otherwise the verdict MUST be
+  inconclusive, failed, or abandoned.
+- Honesty caveat: the token makes the declaration **non-droppable and
+  internally consistent**; it does NOT prove the cited path executed. Proving
+  the crux needs the repo-specific live verification this section already
+  requires (the verified seam). The token is a declaration, not a proof.
+- The `vh-agent-harness doctor` health check rejects an internally-inconsistent
+  declaration (e.g. `verdict: proven` without a proven crux). This is the
+  safety layer acting; it does not gate a verdict it cannot verify.
+
+
 ## Output expectations for agents
 
 When making changes:

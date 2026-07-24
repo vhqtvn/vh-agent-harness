@@ -63,6 +63,7 @@ var doctorCmd = &cobra.Command{
   subagent-depth  effective merged subagent_depth >= delegation minimum  WARN if unset/too low
   defer-liveness  open defer/errata cards contradict no released claim     FAIL if open card contradicts a present note
   staged-errata-content staged errata correction present in release note   FAIL if staged card content missing from the about-to-release note
+  behavioral-closure closeout declarations internally consistent  FAIL if verdict:proven claimed without a proven crux result
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -238,6 +239,23 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	secr := checkStagedErrataContent(abs)
 	fmt.Fprintln(out, "    "+secr.String())
 	applyTier(secr.tier, &problems, &warns)
+
+	// 14. Behavioral-closure (the load-bearing-path declaration gate). Scans
+	//     durable closeout artifacts (.local/coordinator/reports/**/*.md and
+	//     docs/checkpoints/*.md) for the fenced `behavioral-closure`
+	//     declaration token and FAILs only on an INTERNALLY INCONSISTENT
+	//     declaration — `verdict: proven` claimed without a proven crux
+	//     `result:`. This is the safety-layer ACT on the behavioral-completion
+	//     pilot: the token makes a declaration honest and non-droppable; it
+	//     does NOT prove the cited path executed (docker-gold). Absent token =
+	//     PASS (the pilot does not force adoption). Hosted here in doctor
+	//     (NOT release_gate.go) so it covers closeouts that never reach a
+	//     release; it is independent of the claims kernel. This is the SAFETY
+	//     LAYER acting (gates act; coordinator informs).
+	fmt.Fprintln(out, "  behavioral-closure:")
+	bcr := checkBehavioralClosure(abs)
+	fmt.Fprintln(out, "    "+bcr.String())
+	applyTier(bcr.tier, &problems, &warns)
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)

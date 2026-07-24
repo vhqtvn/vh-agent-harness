@@ -25,6 +25,7 @@ Workflow:
   - completion checklist
   - files likely to change (from user or inferred)
   - durable vs tmp output rules
+  - the task's stated motivation, when one is given (a user-given reason or success motivation): capture it so the closeout can state whether it was satisfied. This is an advisory motivation check — a DISTINCT property from any behavioral verdict/crux gate; never blend the two into a combined "closure passed" verdict.
 - preserve the user's requested closeout headings, numbering, and item wording when they materially constrain the final answer
 - do not copy volatile progress notes into the contract
 - do not add a skill requirement unless the user asked for it or the workflow clearly depends on it for correctness, cost control, or operational safety

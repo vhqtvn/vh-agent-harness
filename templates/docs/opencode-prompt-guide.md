@@ -93,6 +93,17 @@ receiving session's own (post-compression) context, which is the
 structurally-hardest lossy surface. The field reduces stale-premise
 re-assertion only insofar as the receiver actually runs the re-derivation.
 
+### Recommended for prompts that claim a behavior is complete
+
+Two DISTINCT properties — keep them separate. A behavioral verdict/crux
+(gate-shaped, machine-checked for internal consistency) and a motivation check
+(advisory prose). Never blend them into a single "closure passed" verdict.
+
+| Field | Agent rule & processing instruction |
+| --- | --- |
+| **Behavioral closure (verdict/crux)** | When the task touches a load-bearing path (a codepath whose end-to-end execution is the actual proof), require the closeout to carry a fenced `behavioral-closure` token: `verdict` (proven \| inconclusive \| failed \| abandoned) and `result` (proven \| skipped \| not-demonstrable, the crux outcome), plus the crux path/verifier/command. `verdict: proven` is honest only when `result: proven`. **The token declares consistency; it does NOT prove the path executed** — proving the crux needs the repo-specific live verification (the verified seam). State this honestly in the closeout. |
+| **Motivation check** | When the task is driven by a stated motivation, require the closeout to state in plain prose whether that motivation is now satisfied. This is advisory and is a SEPARATE property from the verdict/crux gate — never fold motivation-satisfaction into the behavioral verdict or a combined verdict. |
+
 ### Verification fields for checkpoints and handoffs
 
 All non-trivial checkpoints and handoffs MUST include these structured sections:
@@ -398,6 +409,8 @@ Return:
 7. **Missing scope fences** - Long tasks without `In scope`, `Out of scope`, or `Constraints` tend to sprawl into adjacent repo work.
 8. **No bootstrap block for long tasks** - Omitting the must-read list or checkpoint/workstream reopen steps forces the agent to infer too much repo state.
 9. **No acceptance standard** - Evaluation prompts that omit match/beat/tolerance rules invite overclaiming even when the evidence tier is named.
+10. **Token-as-proof (behavioral closure)** - Treating a syntactically-consistent `behavioral-closure` token as proof the cited path executed. The token makes a declaration honest and non-droppable; it does NOT prove the crux ran. Proving the crux needs the repo-specific live verification.
+11. **Blended closure verdict** - Folding a motivation-satisfaction check into the behavioral verdict/crux gate, producing a combined "closure passed" verdict. Keep the verdict/crux gate and the advisory motivation check as two distinct properties.
 
 ## Integration with session workflow
 
