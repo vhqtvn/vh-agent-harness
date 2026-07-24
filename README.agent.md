@@ -1430,8 +1430,8 @@ operator release-prep. The ceremony produces THREE sequential single-path
 (manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`.
 The release-tag wrapper's deterministic gates refuse the tag unless each
 commit binds to its predecessor exactly. The wrapper also runs **G0c**
-(`vh-agent-harness doctor` — all 14 checks, including #12 defer-liveness,
-  #13 staged-errata-content, and #14 behavioral-closure) as a hard machine gate AFTER the clean-worktree
+(`vh-agent-harness doctor` — all 15 checks, including #12 defer-liveness,
+  #13 staged-errata-content, #14 behavioral-closure, and #15 dev-stale-embed) as a hard machine gate AFTER the clean-worktree
 gate (G0b) and BEFORE the readiness-pass artifact gate (G1-G5). A
 non-HEALTHY doctor refuses the tag. This makes doctor a HARD ceremony stop,
 not a human-remembered pre-flight. Push-only mode exits before G0c (the tag
