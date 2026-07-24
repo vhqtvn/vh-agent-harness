@@ -844,7 +844,7 @@ export default function transform({ context }) {
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   overlay-perm, environment, config-refs, gitignore, auto-classifier,
   auto-gate-ignore, skills, subagent-depth, defer-liveness,
-  staged-errata-content). The `auto-classifier` check lints the shape (field
+  staged-errata-content, behavioral-closure). The `auto-classifier` check lints the shape (field
   set + types + enums) of the auto-classifier-pilot overlay's config files when
   present — a present-but-invalid `auto-gate-config.json` / `auto-gate-llm.json`
   FAILs; absent configs are never failures (defaults apply). The `auto-gate-ignore`
@@ -869,6 +869,14 @@ export default function transform({ context }) {
   about-to-release (untagged) migration note exists AND any errata card with
   `status: staged` has correction content NOT present in that note — this turns
   the "staged erratum never actually injected" failure mode into a hard stop.
+  The `behavioral-closure` check FAILs when a durable closeout artifact
+  (`.local/coordinator/reports` or `docs/checkpoints`) carries a
+  `behavioral-closure` declaration that is internally inconsistent —
+  specifically a `verdict: proven` claimed WITHOUT a proven crux `result:` —
+  and is fail-closed on unknown/malformed declarations; an absent token PASSES
+  (the pilot does not force adoption, so pre-pilot closeouts stay HEALTHY). The
+  token declares consistency; it does NOT prove the cited crux path executed
+  (proving that needs the repo-specific live verification).
   `vh-agent-harness diff` shows drift vs. the corpus.
 - **Inspect / validate skills:** `vh-agent-harness skill list` prints every skill
   (core, overlay-pack, and rendered) with its source, whether it is rendered to
@@ -1333,8 +1341,8 @@ operator release-prep. The ceremony produces THREE sequential single-path
 (manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`.
 The release-tag wrapper's deterministic gates refuse the tag unless each
 commit binds to its predecessor exactly. The wrapper also runs **G0c**
-(`vh-agent-harness doctor` — all 13 checks, including #12 defer-liveness and
-#13 staged-errata-content) as a hard machine gate AFTER the clean-worktree
+(`vh-agent-harness doctor` — all 14 checks, including #12 defer-liveness,
+  #13 staged-errata-content, and #14 behavioral-closure) as a hard machine gate AFTER the clean-worktree
 gate (G0b) and BEFORE the readiness-pass artifact gate (G1-G5). A
 non-HEALTHY doctor refuses the tag. This makes doctor a HARD ceremony stop,
 not a human-remembered pre-flight. Push-only mode exits before G0c (the tag
