@@ -71,6 +71,14 @@ type F2IngestResult struct {
 	// table, R5 binding, R1 streak) relies on: every rendered ref traces to a
 	// canonical entry.
 	ResolvedRefs F2ResolvedRefGraph
+
+	// R5Binding is the optional operator-synthesis durable binding (Slice 6).
+	// nil when no operator-source descriptor was provided (the common case —
+	// most cycles have no operator-authored synthesis to bind). Set via
+	// BuildF2R5Binding AFTER ingest, BEFORE persistence. Carried into the
+	// canonical sidecar as F2-derived metadata. NOT part of the canonical
+	// fingerprint (it is F2-derived, not F1-canonical evidence).
+	R5Binding *F2R5Binding
 }
 
 // F2ResolvedRefGraph records the canonical ID sets F2 verified at ingest. It

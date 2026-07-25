@@ -107,6 +107,16 @@ func RenderF2MarkdownProjection(sidecar *F2CanonicalSidecar, dir string) ([]byte
 		return nil, fmt.Errorf("f2 render: sidecar carries no synthesis_cycle_id")
 	}
 
+	// R5 binding validation gate (defense-in-depth): if the sidecar carries an
+	// R5 binding, its SourceLocators must EXACTLY match the canonical entry's
+	// SourceRefs. A hand-constructed sidecar with a tampered binding is rejected
+	// here — it never reaches the rendered MD projection.
+	if sidecar.R5Binding != nil {
+		if vErr := ValidateF2R5BindingAgainstEnvelope(sidecar.R5Binding, env); vErr != nil {
+			return nil, fmt.Errorf("f2 render: R5 binding validation failed (render-path gate): %w", vErr)
+		}
+	}
+
 	canonPath := F2CanonicalSidecarPath(dir, cycle)
 
 	// Build the MD-specific view metadata: a copy of the canonical sidecar's
@@ -144,6 +154,11 @@ func RenderF2MarkdownProjection(sidecar *F2CanonicalSidecar, dir string) ([]byte
 	// P-a probes. A second salience layer after the headline, before the
 	// detailed envelope projection.
 	renderF2PATable(&b, env)
+
+	// --- R5 operator-synthesis durable binding (memo L155-182) ---
+	// Addressable binding section. nil binding → bounded "(no operator-source
+	// synthesis bound)" notice (F2 does NOT infer a binding from narrative).
+	renderF2R5Binding(&b, sidecar.R5Binding)
 
 	// --- Canonical envelope (projected) ---
 	b.WriteString("## Canonical Envelope (projected)\n\n")
@@ -824,6 +839,16 @@ func PersistF2Pair(ingest *F2IngestResult, dir string, now time.Time) (F2PairOut
 	}
 	if ingest.SynthesisCycleID == "" {
 		return F2PairNotAttempted, fmt.Errorf("f2 pair: ingest result carries no synthesis_cycle_id")
+	}
+
+	// R5 binding validation gate (defense-in-depth): if the ingest carries an
+	// R5 binding, its SourceLocators must EXACTLY match the canonical entry's
+	// SourceRefs. A hand-constructed binding with arbitrary strings is rejected
+	// here — it never reaches the durable pair.
+	if ingest.R5Binding != nil {
+		if vErr := ValidateF2R5BindingAgainstEnvelope(ingest.R5Binding, ingest.CanonicalEnvelope); vErr != nil {
+			return F2PairNotAttempted, fmt.Errorf("f2 pair: R5 binding validation failed (durable-path gate): %w", vErr)
+		}
 	}
 
 	// Build the sidecar + serialize both artifacts (pure, before any I/O).

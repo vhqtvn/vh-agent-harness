@@ -113,6 +113,12 @@ type F2CanonicalSidecar struct {
 	// These fields NEVER enter the F1 semantic digest (memo L66-69: "F2 view
 	// metadata, not canonical F1 evidence").
 	F2ViewMetadata F2ArtifactViewMeta `json:"f2_view_metadata"`
+
+	// R5Binding is the optional operator-synthesis durable binding (Slice 6).
+	// nil when no operator-source was bound. F2-derived metadata — NOT part of
+	// the canonical fingerprint (the collision key is the envelope content
+	// alone). Carried here so the binding is durable (persisted with the pair).
+	R5Binding *F2R5Binding `json:"r5_binding,omitempty"`
 }
 
 // F2ArtifactViewMeta is the F2 bookkeeping carried on BOTH the canonical
@@ -250,6 +256,7 @@ func buildF2CanonicalSidecar(ingest *F2IngestResult, dir string, now time.Time) 
 			ReciprocalLocator:              filepath.Join(dir, cycle+".md"),
 			WriteTimestamp:                 now.UTC().Format(time.RFC3339),
 		},
+		R5Binding: ingest.R5Binding,
 	}
 }
 
@@ -295,6 +302,16 @@ func PersistF2CanonicalSidecar(ingest *F2IngestResult, dir string, now time.Time
 	}
 	if ingest.SynthesisCycleID == "" {
 		return F2PersistNotAttempted, fmt.Errorf("f2 persist: ingest result carries no synthesis_cycle_id (cannot derive sidecar path)")
+	}
+
+	// R5 binding validation gate (defense-in-depth): if the ingest carries an
+	// R5 binding, its SourceLocators must EXACTLY match the canonical entry's
+	// SourceRefs. A hand-constructed binding with arbitrary strings is rejected
+	// here — it never reaches the durable artifact.
+	if ingest.R5Binding != nil {
+		if vErr := ValidateF2R5BindingAgainstEnvelope(ingest.R5Binding, ingest.CanonicalEnvelope); vErr != nil {
+			return F2PersistNotAttempted, fmt.Errorf("f2 persist: R5 binding validation failed (durable-path gate): %w", vErr)
+		}
 	}
 
 	sidecar := buildF2CanonicalSidecar(ingest, dir, now)
