@@ -2594,6 +2594,48 @@ function resolvePlan(sessionID, selector, options = {}) {
             `Resolved plan file is missing on disk: ${targetPath}`,
         );
     }
+    const body = fs.readFileSync(targetPath, "utf8");
+
+    // F3 dispatch backstop (Slice 4). When a caller resolves an APPROVED plan
+    // FOR DISPATCH (options.dispatchFreshnessCheck), re-verify the plan's F3
+    // envelope is still bound to the current design before handing the body
+    // to an executor. Catches:
+    // (a) post-approval design drift — the plan body was edited after
+    //     approval, invalidating the design digest the envelope was bound to;
+    // (b) bypassed approval states — an approved plan whose envelope was
+    //     stripped or never copied through.
+    // BACKSTOP, not the primary gate — the primary gate is at approveDraft
+    // (draft -> approved). Informational reads (session-context builder, plan
+    // listing) pass no dispatchFreshnessCheck and are exempt: a stale plan
+    // surfaces as a dispatch refusal only when an agent actually tries to
+    // execute it, not when it is merely listed.
+    if (
+        options.dispatchFreshnessCheck &&
+        resolved.plan.status === "approved"
+    ) {
+        const parsed = parseFrontmatter(body);
+        const dispatchEnvelope = decodeEnvelopeFromFrontmatter(
+            parsed.frontmatter.f3_design_readiness,
+        );
+        const dispatchDigest = computePlanDesignDigest(parsed.body);
+        const dispatchF3 = validateF3DesignReadiness({
+            envelope: dispatchEnvelope,
+            currentDesignDigest: dispatchDigest,
+            transitionKind: "plan_dispatch",
+        });
+        if (!dispatchF3.passed) {
+            throw new StateError(
+                `F3 dispatch backstop refused plan dispatch ` +
+                    `for plan ${resolved.plan.id} ` +
+                    `(reason: ${dispatchF3.reasonCode}). ` +
+                    `${dispatchF3.detail} ` +
+                    `The approved plan's design-readiness envelope is stale, ` +
+                    `incomplete, or missing relative to the current plan body. ` +
+                    `Re-approve with a current envelope before dispatch.`,
+            );
+        }
+    }
+
     return {
         session_id: sessionID,
         session_name: sessionName,
@@ -2601,7 +2643,7 @@ function resolvePlan(sessionID, selector, options = {}) {
         resolved_via: resolved.resolvedVia,
         plan: resolved.plan,
         path: targetPath,
-        body: fs.readFileSync(targetPath, "utf8"),
+        body,
     };
 }
 
@@ -4010,6 +4052,41 @@ function activateCoordinationTask(sessionID, taskIDRaw, options = {}) {
         );
     }
     throwCollectedErrors(errors);
+
+    // F3 dispatch backstop (Slice 4). Re-verify the design-readiness envelope
+    // is still current before ready -> working dispatch. This catches:
+    // (a) post-crossing design drift — the design changed after draft -> ready
+    //     but before the task is activated for execution; and
+    // (b) bypassed ready states — e.g. a task created-as-ready via
+    //     saveCoordinationTask (which skips readyCoordinationTask's primary
+    //     F3 gate) lands at ready without an envelope.
+    // BACKSTOP, not the primary gate — the primary gate is at
+    // readyCoordinationTask (draft -> ready, inside the updateCoordinationTask
+    // lock). A working -> working resume/reclaim/takeover is already past
+    // dispatch and is exempt from the freshness re-check. This backstop runs
+    // outside the lock: the worst-case race is a design change between this
+    // check and the locked write, which only delays catching the staleness
+    // until the next activation — acceptable for a backstop.
+    if (loaded.payload.status === "ready") {
+        const dispatchDigest = computeTaskDesignDigest(loaded.payload, {});
+        const dispatchF3 = validateF3DesignReadiness({
+            envelope: loaded.payload.f3_design_readiness,
+            currentDesignDigest: dispatchDigest,
+            transitionKind: "task_dispatch",
+        });
+        if (!dispatchF3.passed) {
+            throw new StateError(
+                `F3 dispatch backstop refused ready -> working ` +
+                    `for task ${loaded.payload.task_id} ` +
+                    `(reason: ${dispatchF3.reasonCode}). ` +
+                    `${dispatchF3.detail} ` +
+                    `The task's design-readiness envelope is stale, incomplete, ` +
+                    `or missing relative to the current design. Re-ready the ` +
+                    `task with a current envelope before dispatch.`,
+            );
+        }
+    }
+
     const isReclaim =
         loaded.payload.status === "working" && !currentOwner;
     const recommendedSessionName = normalizeSessionName(loaded.payload.task_id);
