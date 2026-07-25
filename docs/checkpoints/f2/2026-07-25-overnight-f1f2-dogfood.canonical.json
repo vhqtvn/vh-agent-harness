@@ -1,0 +1,209 @@
+{
+  "kind": "f2_canonical_sidecar",
+  "canonical_envelope": {
+    "schema_version": "1",
+    "synthesis_cycle_id": "2026-07-25-overnight-f1f2-dogfood",
+    "applicability": "required",
+    "entries": [
+      {
+        "family": "r1_cross_lane_join",
+        "triggered": "triggered",
+        "entry_id": "entry-r1",
+        "r1": {
+          "conclusions": [
+            {
+              "conclusion_id": "R1C-c1-distillation-hazard",
+              "property_id": "c1-distillation-hazard",
+              "join_disposition": "union",
+              "lanes": [
+                {
+                  "lane_id": "lane-f1-build",
+                  "act_id": "slice0-stop",
+                  "position": "field-level-schema-drop-during-distillation"
+                }
+              ],
+              "sources": [
+                {
+                  "locator": "researches/decisions/2026-07-25-f1-synthesis-family-and-s2a-topology.md@15ddd54"
+                },
+                {
+                  "locator": "tmp/agent-runs/f1-build/SLICE-0-STOP.md"
+                }
+              ],
+              "hazards": [
+                {
+                  "hazard_ref": "field-level-schema-drop-during-distillation",
+                  "symptom_refs": [
+                    "f1-track-stopped",
+                    "f2-slice0-c1-gate-fail"
+                  ],
+                  "source_locators": [
+                    "researches/decisions/2026-07-25-f1-synthesis-family-and-s2a-topology.md@15ddd54",
+                    "tmp/agent-runs/f1-build/SLICE-0-STOP.md"
+                  ],
+                  "consuming_pa_probe_ids": [
+                    "PA-P1"
+                  ]
+                }
+              ]
+            },
+            {
+              "conclusion_id": "R1C-synthesis-failure-is-bottleneck",
+              "property_id": "synthesis-failure-is-bottleneck",
+              "join_disposition": "merge",
+              "lanes": [
+                {
+                  "lane_id": "lane-evidence-study",
+                  "act_id": "history-visibility-study",
+                  "position": "synthesis-is-the-demonstrated-bottleneck"
+                },
+                {
+                  "lane_id": "lane-property-map",
+                  "act_id": "seven-controls-property-map",
+                  "position": "synthesis-is-the-demonstrated-bottleneck"
+                }
+              ],
+              "sources": [
+                {
+                  "locator": "researches/sources/2026-07-24-opencode-history-visibility-study.md@8600fc8"
+                },
+                {
+                  "locator": "researches/sources/2026-07-25-seven-controls-property-map.md@9dbab50"
+                }
+              ],
+              "hazards": [
+                {
+                  "hazard_ref": "named-but-unresolved-synthesis-hazard",
+                  "symptom_refs": [
+                    "proceeded-as-if-moot"
+                  ],
+                  "source_locators": [
+                    "researches/sources/2026-07-24-opencode-history-visibility-study.md@8600fc8",
+                    "researches/sources/2026-07-25-seven-controls-property-map.md@9dbab50"
+                  ],
+                  "consuming_pa_probe_ids": [
+                    "PA-P2"
+                  ]
+                }
+              ]
+            },
+            {
+              "conclusion_id": "R1C-three-family-topology-data-role-axis",
+              "property_id": "three-family-topology-data-role-axis",
+              "join_disposition": "merge",
+              "lanes": [
+                {
+                  "lane_id": "lane-canon-promotion",
+                  "act_id": "family-boundaries-canon",
+                  "position": "data-role-is-the-family-defining-axis"
+                },
+                {
+                  "lane_id": "lane-s2a-decision",
+                  "act_id": "s2a-topology-verdict",
+                  "position": "data-role-is-the-family-defining-axis"
+                }
+              ],
+              "sources": [
+                {
+                  "locator": "researches/decisions/2026-07-23-vh-solara-orchestration-field-report-disposition.md@68a8fc4"
+                },
+                {
+                  "locator": "researches/decisions/2026-07-25-f1-synthesis-family-and-s2a-topology.md@9dbab50"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "family": "r3_redesign_fork",
+        "triggered": "triggered",
+        "entry_id": "entry-r3",
+        "r3": {
+          "trigger_recognized": false,
+          "disposition": "pending"
+        }
+      },
+      {
+        "family": "pa_counter_evidence",
+        "triggered": "triggered",
+        "entry_id": "entry-pa",
+        "pa": {
+          "probes": [
+            {
+              "probe_id": "PA-P1",
+              "target_ref": "R1C-c1-distillation-hazard",
+              "falsification_question": "Is the C1 field-level-schema-drop -\u003e F2-Slice-0-gate-fail link actually evidenced in run artifacts?",
+              "result": "found",
+              "method": "read the F1 memo amendment (C1 incident note) + the F1-build Slice-0 stop note",
+              "evidence_refs": [
+                "researches/decisions/2026-07-25-f1-synthesis-family-and-s2a-topology.md@15ddd54",
+                "tmp/agent-runs/f1-build/SLICE-0-STOP.md"
+              ],
+              "weakest_claim": "the C1 hazard\u003c-\u003esymptom link is documented in two run artifacts; the distillation house-rule was added, but no second occurrence was checked for (bounded to this run)",
+              "confidence": "high"
+            },
+            {
+              "probe_id": "PA-P2",
+              "target_ref": "R1C-synthesis-failure-is-bottleneck",
+              "falsification_question": "Is F1's producer-\u003eemit-\u003econsume crux proven by a real repo-lifecycle transition refusal, or only the in-process producer-\u003eemit path?",
+              "result": "not_found_in_checked_scope",
+              "method": "read the F1 crux test + the F1 build operator-owned-seam notes",
+              "checked_scope": [
+                "internal/cli/f1_emit_test.go",
+                "internal/cli/f1_f2_consumer.go"
+              ],
+              "weakest_claim": "F1's producer-\u003eemit crux is proven at the unit/integration level (TestEmitF1_Crux_ProducerToValidatorToEmitEndToEnd); the real-transition-refusal is deferred (operator-owned seam #6)",
+              "confidence": "high-on-substring-medium-on-full-crux"
+            },
+            {
+              "probe_id": "PA-P3",
+              "target_ref": "R1C-three-family-topology-data-role-axis",
+              "falsification_question": "Is F3's design settled (committed, self-adjudicated ACCEPT)?",
+              "result": "found",
+              "method": "read the F3 design-gate mechanism memo",
+              "evidence_refs": [
+                "researches/decisions/2026-07-25-f3-design-gate-mechanism.md@135aa16"
+              ],
+              "weakest_claim": "F3's design is committed + self-adjudicated ACCEPT; F3 is NOT implemented (JS-side, separate track, not in this run)",
+              "confidence": "high"
+            },
+            {
+              "probe_id": "PA-P4",
+              "target_ref": "R1C-three-family-topology-data-role-axis",
+              "falsification_question": "Has F2 rendering been proven on real (non-fixture) F1 content before this dogfood?",
+              "result": "not_found_in_checked_scope",
+              "method": "grepped the F2 test files for fixture-only inputs",
+              "checked_scope": [
+                "internal/cli/f2_ingest_test.go",
+                "internal/cli/f2_persist_test.go",
+                "internal/cli/f2_projection_test.go"
+              ],
+              "weakest_claim": "F2 is live + unit/integration-tested on fixtures; this dogfood is its first real-content cycle (pending this run's result)",
+              "confidence": "medium-high"
+            }
+          ]
+        }
+      }
+    ],
+    "semantic_digest": "1880898adb32ac69e689ea8bb2bcf669b3e07780470f87ceff2d58f1d9bdb600",
+    "validation": {
+      "disposition": "complete"
+    }
+  },
+  "f2_view_metadata": {
+    "synthesis_cycle_id": "2026-07-25-overnight-f1f2-dogfood",
+    "entry_ids": [
+      "entry-pa",
+      "entry-r1",
+      "entry-r3"
+    ],
+    "source_semantic_digest": "1880898adb32ac69e689ea8bb2bcf669b3e07780470f87ceff2d58f1d9bdb600",
+    "canonical_representation_version": "1",
+    "schema_version": "1",
+    "projection_version": "1",
+    "renderer_version": "1",
+    "reciprocal_locator": "docs/checkpoints/f2/2026-07-25-overnight-f1f2-dogfood.md",
+    "write_timestamp": "2026-07-25T12:56:26Z"
+  }
+}
