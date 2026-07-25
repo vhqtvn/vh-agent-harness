@@ -323,6 +323,23 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	fmt.Fprintln(out, "    "+f1f2r.String())
 	applyTier(f1f2r.tier, &problems, &warns)
 
+	// 18. f2-pairs (the F2 canonical+MD pair STRUCTURAL-CONSISTENCY audit).
+	//     Scans docs/checkpoints/f2/ for <cycle>.canonical.json + <cycle>.md
+	//     pairs and FAILs when a pair is internally inconsistent: incomplete
+	//     pair (one member missing), digest mismatch (canonical content
+	//     drifted under the same digest), stale projection (MD doesn't match
+	//     the deterministic re-render from the canonical sidecar), missing
+	//     P-c structure, unverified P-b media, unknown P-a enum, or broken
+	//     R5 binding. This is the safety-layer ACT on the F2 pair boundary:
+	//     structural consistency, NOT semantic truth (a passing pair is
+	//     internally consistent; it is not thereby proven true). SKIPs cleanly
+	//     when no F2 pairs exist (nothing to audit — F2 rendering is a
+	//     separate track and may not have produced pairs yet).
+	fmt.Fprintln(out, "  f2-pairs:")
+	f2pr := checkF2PairConsistency(abs)
+	fmt.Fprintln(out, "    "+f2pr.String())
+	applyTier(f2pr.tier, &problems, &warns)
+
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)
 	if problems > 0 {

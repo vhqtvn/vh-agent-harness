@@ -878,7 +878,8 @@ export default function transform({ context }) {
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   overlay-perm, environment, config-refs, gitignore, auto-classifier,
   auto-gate-ignore, skills, subagent-depth, defer-liveness,
-  staged-errata-content, behavioral-closure, f1-envelope, f1-f2-consistency). The `auto-classifier` check lints the shape (field
+  staged-errata-content, behavioral-closure, f1-envelope, f1-f2-consistency,
+  f2-pairs). The `auto-classifier` check lints the shape (field
   set + types + enums) of the auto-classifier-pilot overlay's config files when
   present — a present-but-invalid `auto-gate-config.json` / `auto-gate-llm.json`
   FAILs; absent configs are never failures (defaults apply). The `auto-gate-ignore`
@@ -1452,9 +1453,9 @@ operator release-prep. The ceremony produces THREE sequential single-path
 (manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`.
 The release-tag wrapper's deterministic gates refuse the tag unless each
 commit binds to its predecessor exactly. The wrapper also runs **G0c**
-(`vh-agent-harness doctor` — all 17 checks, including #12 defer-liveness,
+  (`vh-agent-harness doctor` — all 18 checks, including #12 defer-liveness,
   #13 staged-errata-content, #14 behavioral-closure, #15 dev-stale-embed,
-  #16 f1-envelope, and #17 f1-f2-consistency) as a hard machine gate AFTER the clean-worktree
+  #16 f1-envelope, #17 f1-f2-consistency, and #18 f2-pairs) as a hard machine gate AFTER the clean-worktree
 gate (G0b) and BEFORE the readiness-pass artifact gate (G1-G5). A
 non-HEALTHY doctor refuses the tag. This makes doctor a HARD ceremony stop,
 not a human-remembered pre-flight. Push-only mode exits before G0c (the tag
