@@ -374,21 +374,53 @@ type F1R3Option struct {
 	CheapestValidation       string   `json:"cheapest_validation,omitempty"`
 }
 
-// F1PAProbeSummary is the P-a counter-evidence slot. Slice 1 carries the
-// probe graph (probe IDs + target refs the validator resolves); Slice 4 adds
-// falsification-question/scope/method/limitation/weakest-claim mechanics.
+// F1PAProbeSummary is the P-a counter-evidence slot. Slice 1 carried the
+// probe graph (probe IDs + target refs); Slice 4 adds the per-probe
+// falsification-question / method / checked-scope / limitation / weakest-claim
+// mechanics and the coverage gate.
 type F1PAProbeSummary struct {
 	Probes []F1PAProbe `json:"probes,omitempty"`
 }
 
 // F1PAProbe is one counter-evidence probe. TargetRef points at an R1
-// conclusion ID or an R3 option ID. EvidenceRefs are real evidence locators
-// (fabricated/locator-free evidence is invalid under any result — Slice 4).
+// conclusion ID or an R3 option ID.
+//
+// Per-result requirements (memo L201-206; enforced by validatePAProbeRequirements
+// in f1_validator.go and the standalone gate in f1_pa_gate.go):
+//   - found                      : EvidenceRefs MUST carry >=1 real locator.
+//   - not_found_in_checked_scope : Method + CheckedScope MUST be present. This
+//     is BOUNDED absence (the scope that was
+//     checked); it is NEVER converted to global
+//     absence — the validator/gate must not treat
+//     it as proof the target is globally absent.
+//   - unavailable                : Limitation MUST be present (the explicit
+//     reason evidence could not be obtained).
+//     Structurally valid coverage, but CANNOT
+//     support a strong/proven claim (memo L309).
+//   - not_run                    : cannot satisfy a coverage requirement (a
+//     target whose only probe is not_run is
+//     UNCOVERED; memo L206, L307).
+//
+// Fabricated / locator-free evidence is invalid under ANY result. Structurally
+// this means an empty/blank EvidenceRef does not count as evidence; a well-
+// formed but fabricated locator passes the structural check (truth is the
+// federated verifier's job, NOT a structural gate — memo L276). This is the
+// honesty caveat stated explicitly wherever the probe is documented.
+//
+// Confidence is a producer-set informational field carried as canonical
+// content; it is NOT structurally gated (confidence-adequacy is a federated /
+// quality concern, memo L193 completeness-not-quality).
 type F1PAProbe struct {
-	ProbeID      string   `json:"probe_id"`
-	TargetRef    string   `json:"target_ref"`
-	Result       string   `json:"result"`
-	EvidenceRefs []string `json:"evidence_refs,omitempty"`
+	ProbeID               string   `json:"probe_id"`
+	TargetRef             string   `json:"target_ref"`
+	FalsificationQuestion string   `json:"falsification_question,omitempty"`
+	Result                string   `json:"result"`
+	Method                string   `json:"method,omitempty"`
+	CheckedScope          []string `json:"checked_scope,omitempty"`
+	EvidenceRefs          []string `json:"evidence_refs,omitempty"`
+	Limitation            string   `json:"limitation,omitempty"`
+	WeakestClaim          string   `json:"weakest_claim,omitempty"`
+	Confidence            string   `json:"confidence,omitempty"`
 }
 
 // --- Canonical serialization + semantic digest -----------------------------

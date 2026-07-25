@@ -53,7 +53,7 @@ func canonicalF1Fixture() *F1SynthesisEnvelope {
 							OptionID: "opt-continue", Mode: F1R3ModeContinueRepair, Mechanism: "apply the queued repair",
 							AffectedProperties:       []string{"R1P1"},
 							SupportRefs:              []string{"R1C1"},
-							CounterEvidenceProbeRefs: []string{"PA-P1"},
+							CounterEvidenceProbeRefs: []string{"PA-P2"},
 							Costs:                    []string{"eng-hours"},
 							Risks:                    []string{"recurrence"},
 							ReversalCost:             "low",
@@ -63,7 +63,7 @@ func canonicalF1Fixture() *F1SynthesisEnvelope {
 							OptionID: "opt-redesign", Mode: F1R3ModeRedesign, Mechanism: "redesign the boundary so the hazard cannot recur",
 							AffectedProperties:       []string{"R1P1"},
 							SupportRefs:              []string{"R1C1"},
-							CounterEvidenceProbeRefs: []string{"PA-P2"},
+							CounterEvidenceProbeRefs: []string{"PA-P3"},
 							Costs:                    []string{"eng-weeks"},
 							Risks:                    []string{"schedule-slip"},
 							ReversalCost:             "high",
@@ -77,8 +77,17 @@ func canonicalF1Fixture() *F1SynthesisEnvelope {
 				Triggered: F1TriggeredTriggered,
 				EntryID:   "entry-pa",
 				PA: &F1PAProbeSummary{Probes: []F1PAProbe{
-					{ProbeID: "PA-P1", TargetRef: "R1C1", Result: F1PAResultNotRun},
-					{ProbeID: "PA-P2", TargetRef: "opt-redesign", Result: F1PAResultNotRun},
+					{ProbeID: "PA-P1", TargetRef: "R1C1", Result: F1PAResultFound,
+						FalsificationQuestion: "does conclusion R1C1 actually hold?",
+						EvidenceRefs:          []string{"pa-ref-1"},
+						WeakestClaim:          "R1C1 rests on a single ancestry-bearing source"},
+					{ProbeID: "PA-P2", TargetRef: "opt-continue", Result: F1PAResultNotFoundInCheckedScope,
+						FalsificationQuestion: "is there a materially cheaper continue-repair path?",
+						Method:                "repo grep over repair-routing seams",
+						CheckedScope:          []string{"internal/cli/f1_r3.go"}},
+					{ProbeID: "PA-P3", TargetRef: "opt-redesign", Result: F1PAResultUnavailable,
+						FalsificationQuestion: "does a prior materially-distinct redesign exist?",
+						Limitation:            "no design archive indexed for this boundary"},
 				}},
 			},
 		},
@@ -568,7 +577,7 @@ func TestValidateF1Envelope_NotApplicableEntryPasses(t *testing.T) {
 	env.Entries[1].Triggered = F1TriggeredNotApplicable
 	env.Entries[1].R3 = nil
 	env.Entries[2].PA.Probes = []F1PAProbe{
-		{ProbeID: "PA-P1", TargetRef: "R1C1", Result: F1PAResultNotRun},
+		{ProbeID: "PA-P1", TargetRef: "R1C1", Result: F1PAResultFound, EvidenceRefs: []string{"ref-1"}},
 	}
 	d, err := env.ComputeDigest()
 	if err != nil {

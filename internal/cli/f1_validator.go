@@ -16,6 +16,7 @@ package cli
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // ValidateF1Envelope returns the structural-consistency errors for env AS
@@ -136,7 +137,16 @@ func validateF1EnvelopeContent(env *F1SynthesisEnvelope) []string {
 	//    exists), not semantic (the link is meaningful).
 	errs = append(errs, resolveF1CrossRefs(env)...)
 
-	// 5. Semantic-digest re-derivation. If a digest is stored, recompute the
+	// 5. P-a target coverage (memo L211-213, L274 — require-P-a-target-
+	//    coverage). When the envelope is applicable, every material R1
+	//    conclusion + every declared R3 option must have >=1 coverage-
+	//    satisfying probe (result != not_run). This is the envelope-level
+	//    instance of the gate; the standalone gate lives in f1_pa_gate.go.
+	//    not_run does NOT satisfy coverage (memo L206); unavailable is
+	//    structurally valid coverage but cannot support proven (memo L309).
+	errs = append(errs, validateEnvelopePACoverage(env)...)
+
+	// 6. Semantic-digest re-derivation. If a digest is stored, recompute the
 	//    canonical digest and require equality. An empty digest is itself an
 	//    error (the producer must populate it before emit).
 	if env.SemanticDigest == "" {
@@ -451,11 +461,182 @@ func validatePASummary(pe string, pa *F1PAProbeSummary) []string {
 		if p.TargetRef == "" {
 			errs = append(errs, ppep+": empty target_ref")
 		}
+		if dup := firstDuplicate(p.CheckedScope); dup != "" {
+			errs = append(errs, fmt.Sprintf("%s: duplicate checked_scope %q", ppep, dup))
+		}
 		if dup := firstDuplicate(p.EvidenceRefs); dup != "" {
 			errs = append(errs, fmt.Sprintf("%s: duplicate evidence_ref %q", ppep, dup))
 		}
 	}
+	// Per-result requirements (memo L201-206): found needs real refs;
+	// not_found_in_checked_scope needs method+scope (BOUNDED, never global);
+	// unavailable needs a limitation; not_run needs nothing (but cannot
+	// satisfy coverage — enforced by validateEnvelopePACoverage / the gate).
+	errs = append(errs, validatePAProbeRequirements(pe, pa)...)
 	return errs
+}
+
+// validatePAProbeRequirements enforces the per-result evidence-honesty rules.
+// It is factored out so BOTH the envelope validator (validatePASummary) AND
+// the standalone coverage gate (f1_pa_gate.go) apply the same rules — the gate
+// cannot assume the envelope validator ran upstream (defense-in-depth).
+//
+// Structural, not truth: a well-formed but fabricated locator passes (proving
+// truth is the federated verifier's job, memo L276). An empty/blank locator
+// does NOT count as evidence.
+func validatePAProbeRequirements(pe string, pa *F1PAProbeSummary) []string {
+	if pa == nil {
+		return nil
+	}
+	var errs []string
+	for i := range pa.Probes {
+		p := &pa.Probes[i]
+		ppep := fmt.Sprintf("%s.pa.probes[%d]", pe, i)
+		switch p.Result {
+		case F1PAResultFound:
+			// found REQUIRES >=1 non-empty (trimmed) real evidence locator.
+			if countNonEmpty(p.EvidenceRefs) == 0 {
+				errs = append(errs, ppep+": result=found requires >=1 non-empty evidence_ref (real locator; fabricated/locator-free evidence is invalid under any result)")
+			}
+		case F1PAResultNotFoundInCheckedScope:
+			// BOUNDED absence: requires method + checked scope. This is NEVER
+			// global absence — the result is scoped to CheckedScope, and the
+			// validator/gate must not convert it to a global-absence claim.
+			if strings.TrimSpace(p.Method) == "" {
+				errs = append(errs, ppep+": result=not_found_in_checked_scope requires a non-empty method")
+			}
+			if countNonEmpty(p.CheckedScope) == 0 {
+				errs = append(errs, ppep+": result=not_found_in_checked_scope requires >=1 non-empty checked_scope (BOUNDED absence, never global)")
+			}
+		case F1PAResultUnavailable:
+			// unavailable REQUIRES an explicit limitation. Structurally valid
+			// coverage, but cannot support proven (memo L309).
+			if strings.TrimSpace(p.Limitation) == "" {
+				errs = append(errs, ppep+": result=unavailable requires a non-empty limitation")
+			}
+		case F1PAResultNotRun:
+			// not_run: no per-probe requirement, but does NOT satisfy coverage
+			// (validateEnvelopePACoverage / the gate enforce that separately).
+		}
+	}
+	return errs
+}
+
+// --- P-a target coverage ---------------------------------------------------
+
+// paCoverageSatisfies reports whether a probe result satisfies the target-
+// coverage requirement. Only the three bounded-result values satisfy
+// coverage: found / not_found_in_checked_scope / unavailable (a probe was
+// attempted and produced a bounded result). not_run does NOT (memo L206).
+// unavailable satisfies coverage structurally but cannot support proven
+// (memo L309) — the high-risk-release-seam policy that would ALSO block on
+// unavailable is operator-owned (open-question #5) and is NOT enforced here.
+//
+// This is an EXPLICIT ALLOWLIST (not `!= not_run`) so that an UNKNOWN result
+// string is treated as non-coverage-satisfying rather than silently accepted
+// — F1PAResult is a closed enum, and the coverage predicate must not widen it.
+// The standalone gate (f1_pa_gate.go) additionally rejects unknown results
+// explicitly (defense-in-depth); this allowlist is the backstop.
+func paCoverageSatisfies(result string) bool {
+	switch result {
+	case F1PAResultFound, F1PAResultNotFoundInCheckedScope, F1PAResultUnavailable:
+		return true
+	}
+	return false
+}
+
+// paTargetSet computes the set of targets that require P-a coverage: every
+// declared R1 conclusion ID (all declared conclusions are treated as material
+// — the producer decides materiality by what it declares) + every declared R3
+// option ID (when an R3 summary is present). Sorted for deterministic output.
+func paTargetSet(r1 *F1R1JoinSummary, r3 *F1R3ForkSummary) []string {
+	seen := map[string]struct{}{}
+	var targets []string
+	add := func(id string) {
+		if id == "" {
+			return
+		}
+		if _, dup := seen[id]; dup {
+			return
+		}
+		seen[id] = struct{}{}
+		targets = append(targets, id)
+	}
+	if r1 != nil {
+		for _, c := range r1.Conclusions {
+			add(c.ConclusionID)
+		}
+	}
+	if r3 != nil {
+		for _, o := range r3.Options {
+			add(o.OptionID)
+		}
+	}
+	sort.Strings(targets)
+	return targets
+}
+
+// validatePACoverageSet checks that every target in targets has >=1 coverage-
+// satisfying probe in pa (result != not_run). Shared between the envelope
+// validator and the standalone gate so both apply the identical rule.
+func validatePACoverageSet(prefix string, targets []string, pa *F1PAProbeSummary) []string {
+	covered := map[string]struct{}{}
+	if pa != nil {
+		for _, p := range pa.Probes {
+			if paCoverageSatisfies(p.Result) && p.TargetRef != "" {
+				covered[p.TargetRef] = struct{}{}
+			}
+		}
+	}
+	var errs []string
+	for _, t := range targets {
+		if _, ok := covered[t]; !ok {
+			errs = append(errs, fmt.Sprintf("%s: target %q has no coverage-satisfying probe (needs >=1 probe with result in {found, not_found_in_checked_scope, unavailable}; not_run does not satisfy coverage)", prefix, t))
+		}
+	}
+	return errs
+}
+
+// validateEnvelopePACoverage is the envelope-level instance of the require-P-
+// a-target-coverage gate (memo L274). Coverage is required only when the
+// envelope is applicable (applicability==required); a not_triggered envelope
+// is N/A as a whole and has no coverage requirement. When applicable, every
+// material R1 conclusion + every declared R3 option must be covered.
+func validateEnvelopePACoverage(env *F1SynthesisEnvelope) []string {
+	if env.Applicability != F1ApplicabilityRequired {
+		return nil
+	}
+	var r1 *F1R1JoinSummary
+	var r3 *F1R3ForkSummary
+	var pa *F1PAProbeSummary
+	for i := range env.Entries {
+		e := &env.Entries[i]
+		switch e.Family {
+		case F1FamilyR1CrossLaneJoin:
+			r1 = e.R1
+		case F1FamilyR3RedesignFork:
+			r3 = e.R3
+		case F1FamilyPACounterEvidence:
+			pa = e.PA
+		}
+	}
+	targets := paTargetSet(r1, r3)
+	if len(targets) == 0 {
+		return nil // no material conclusions/options -> no coverage required
+	}
+	return validatePACoverageSet("pa-coverage", targets, pa)
+}
+
+// countNonEmpty returns the number of non-empty (trimmed) strings in s.
+// Empty/blank evidence refs and checked-scope entries do not count.
+func countNonEmpty(s []string) int {
+	n := 0
+	for _, v := range s {
+		if strings.TrimSpace(v) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // --- cross-reference resolution --------------------------------------------

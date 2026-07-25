@@ -432,7 +432,22 @@ func deepCopyPA(pa *F1PAProbeSummary) *F1PAProbeSummary {
 	}
 	out := &F1PAProbeSummary{Probes: make([]F1PAProbe, len(pa.Probes))}
 	for i, p := range pa.Probes {
-		out.Probes[i] = F1PAProbe{ProbeID: p.ProbeID, TargetRef: p.TargetRef, Result: p.Result, EvidenceRefs: copyStrings(p.EvidenceRefs)}
+		// Explicit field list: every F1PAProbe field must appear here. A new
+		// DTO field that is not listed would be silently dropped across an
+		// R1-cycle change (the Slice-3 deepCopyR3/Selection trap). When adding
+		// a field to F1PAProbe, add it here too — slice fields via copyStrings.
+		out.Probes[i] = F1PAProbe{
+			ProbeID:               p.ProbeID,
+			TargetRef:             p.TargetRef,
+			FalsificationQuestion: p.FalsificationQuestion,
+			Result:                p.Result,
+			Method:                p.Method,
+			CheckedScope:          copyStrings(p.CheckedScope),
+			EvidenceRefs:          copyStrings(p.EvidenceRefs),
+			Limitation:            p.Limitation,
+			WeakestClaim:          p.WeakestClaim,
+			Confidence:            p.Confidence,
+		}
 	}
 	return out
 }
