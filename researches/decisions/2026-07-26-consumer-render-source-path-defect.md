@@ -167,3 +167,92 @@ House style: this memo follows the `2026-07-23` / `2026-07-25` convention
 (bolded-metadata frontmatter; Framing → instances → fix rationale → recurrence
 → decision → closure → Evidence), matching the disposition and F2 memos'
 granularity at decision level.
+
+---
+
+## Addendum (2026-07-26): render-time check BUILT — DEFER superseded
+
+**Status update.** The operator re-adjudicated the trigger named in this memo
+("a 4th instance, OR a release-boundary audit") as **fired** on the strength of
+the three already-confirmed instances (TA-1/TA-2/TA-3) via an overnight
+directive: the recurrence pattern is established, so the false-positive cost of
+the render-time check is worth paying NOW rather than after a 4th instance. The
+render-time check recorded above as DEFER is therefore **BUILT**, superseding
+the DEFER. This addendum is append-only — the original DEFER rationale and its
+false-positive analysis are preserved above unchanged for the record.
+
+**Built as** a standalone verify-script (not a render-pipeline change — the
+detection is a static scan of rendered files, exactly within the operator's
+contingency: "you may design AND build it IF it lands as a verify-script /
+doctor-check").
+`templates/core/.opencode/scripts/verify-no-source-tree-only-paths.js`
+(rendered mirror at `.opencode/scripts/verify-no-source-tree-only-paths.js`),
+landed in commit `c13fdaa` (code); this addendum lands in a separate docs
+commit (code/docs split-commit discipline).
+
+**Detection rule (consumer-render mode only; `isHarnessSourceCheckout === false`;
+in source-checkout mode the guard is a no-op, exit 0):**
+
+- **Part A** — flags a literal `templates/core` reference in a shipped
+  `.opencode/` file unless it is (1) on a comment line of a code file
+  (`//` `*` `/*` `#` — comments are definitionally non-load-bearing), or
+  (2) in the explicit CORE-only allowlist of legitimate non-comment refs
+  (render-location guard messages, recovery hints, the `init_skill.py`
+  source-tree-exclusion detector, descriptive CORE skill-doc prose). The
+  allowlist references ONLY files that ship via `templates/core/`, so the
+  shipped core verifier stays domain-free and self-contained.
+- **Part B** — flags a script under `.opencode/scripts/` whose CODE
+  (non-comment lines) references the Go-specific manifest `go.mod` without a
+  `.git` polyglot anchor (the exact TA-2 regression shape; comment-only
+  `.git` mentions do not count as the anchor).
+
+The guard reuses the `b69fb1f` primitives verbatim (`isHarnessSourceCheckout`
+from `internal/cli/corpus_freshness.go::isSourceCheckout`; polyglot
+`findRepoRoot` anchored on `.git`) without reinventing them.
+
+**Behavioral closure (both directions exercised with real `node` against a
+synthetic non-Go base-consumer render):**
+
+- source-checkout mode + a clean base-consumer render → exit 0 (no false
+  positives on the legitimate CORE refs);
+- an injected TA-3 `templates/core/...` citation + a TA-2 go.mod-only
+  `findRepoRoot` → exit 1 at the correct file:line for both Part A and Part B;
+  comment-only `.git` mentions correctly do not defeat Part B.
+
+```behavioral-closure
+verdict: proven
+path: the synthetic non-Go base-consumer render (tmp/repro/consumer-sim — built
+  from templates/core/.opencode/, carrying .git + pyproject.toml and NO
+  corpus.go/templates/core/) running verify-no-source-tree-only-paths.js in BOTH
+  directions
+verifier: clean render exits 0; an injected TA-3 citation (Part A) and a TA-2
+  go.mod-only findRepoRoot (Part B) exit 1 at the correct file:line
+command: node tmp/repro/consumer-sim/.opencode/scripts/verify-no-source-tree-only-paths.js
+  (clean → exit 0; after injecting a TA-3 citation + a TA-2 go.mod-only root
+  walk → exit 1)
+result: proven
+```
+
+**Known limitation (documented in-script).** The allowlist is CORE-only
+(domain-free), so an overlay-contributed file that carries a descriptive
+`templates/core` ref (e.g. the shipped `release` overlay's `releaser.md`) is a
+false-positive surface for consumers selecting that overlay. Base consumers
+(no overlays) are false-positive-free. Resolution belongs to the overlay
+(rewrite the ref to a non-literal form) or to a future overlay-aware allowlist
+mechanism — not to core.
+
+**Follow-ups (NOT this slice):**
+- wiring the guard into `doctor` or a pre-release check (the standalone script
+  is consistent with the sibling verifier pattern; `doctor` validates its
+  existence/frontmatter but does not execute it);
+- the cheaper complement recorded above — the F1 CI regression fixture running
+  BOTH verifiers against a synthetic non-Go consumer tree — remains valuable and
+  is complementary: the render-time check catches the class statically at author
+  time; the CI fixture reproduces the consumer environment dynamically. Both
+  should land (captured separately as an F1 follow-up card, not this memo's
+  deliverable).
+
+**Generic naming discipline (unchanged).** No adopter/overlay identifier
+appears in the guard's source, its rendered mirror, or the code/docs commits;
+references remain generic ("consumer render", "non-Go consumer", "source
+checkout").
