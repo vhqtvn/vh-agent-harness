@@ -417,6 +417,15 @@ func validateR3Summary(pe string, r3 *F1R3ForkSummary) []string {
 			errs = append(errs, fmt.Sprintf("%s: duplicate counter_evidence_probe_ref %q", oep, dup))
 		}
 	}
+	// Fork-completeness (trigger ⇒ both options + material difference +
+	// P-a coverage + R1 basis). Shared with the R3 transition gate so a
+	// committed projection and a transition decision see the same rule.
+	errs = append(errs, validateR3ForkCompleteness(pe+".r3", r3)...)
+	// Selection record (when disposition==selected): shared with the gate so a
+	// committed projection cannot carry selected-without-selection.
+	if r3.Disposition == F1R3DispositionSelected {
+		errs = append(errs, validateR3Selection(pe+".r3", r3)...)
+	}
 	return errs
 }
 

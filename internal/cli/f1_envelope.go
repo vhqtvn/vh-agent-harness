@@ -123,6 +123,43 @@ var f1ValidR3Dispositions = map[string]struct{}{
 	F1R3DispositionDeferred: {},
 }
 
+// F1R3RepairIntent — closed enum for the R3 fork-trigger input
+// `repair_intent`. The R3 producer takes this as a typed input (no narrative
+// inference). This is HALF of the closed-set contract the amended memo (L152-
+// 155) requires: the trigger input is an explicit typed value, never parsed
+// from prose.
+const (
+	F1R3RepairIntentPresent = "present"
+	F1R3RepairIntentAbsent  = "absent"
+)
+
+var f1ValidR3RepairIntents = map[string]struct{}{
+	F1R3RepairIntentPresent: {},
+	F1R3RepairIntentAbsent:  {},
+}
+
+// F1R3StructuralReviewOutcome — closed enum for the R3 fork-trigger input
+// `structural_review_outcome`. The trigger fires on `non_pass`. The R3 producer
+// takes this as a typed input.
+//
+// OPERATOR-OWNED SEAM (memo open-question #4, L305-306): the MAPPING from a
+// specific repo verdict/source object (e.g. a commit-reviewer result, a
+// release-readiness gate verdict, a doctor FAIL tier) to {pass, non_pass} is
+// an operator-owned taxonomy decision and is NOT implemented in this slice.
+// This slice defines the closed enum and the trigger over it; callers supply
+// the already-classified value. Building the repo-verdict→enum converter would
+// decide an operator-owned question, so it is deferred (stub-with-contract:
+// the enum is the contract; the mapping is the operator's).
+const (
+	F1R3StructuralReviewPass    = "pass"
+	F1R3StructuralReviewNonPass = "non_pass"
+)
+
+var f1ValidR3StructuralReviewOutcomes = map[string]struct{}{
+	F1R3StructuralReviewPass:    {},
+	F1R3StructuralReviewNonPass: {},
+}
+
 // F1PAResult — the P-a counter-evidence probe result enum. Declared here as
 // closed vocabulary so the Slice 1 envelope/validator can resolve P-a entries
 // structurally; the P-a producer logic lives in Slice 4.
@@ -292,14 +329,32 @@ type F1R1HazardLink struct {
 	ConsumingPAProbeIDs  []string `json:"consuming_pa_probe_ids,omitempty"`
 }
 
-// F1R3ForkSummary is the R3 repair-routing fork slot. TriggerRecognized must
-// be set by the producer when repair_intent==present AND
-// structural_review_outcome==non_pass (the closed-set mapping is Slice 3).
-// Disposition is the operator disposition recorded before route transition.
+// F1R3ForkSummary is the R3 repair-routing fork slot. TriggerRecognized is
+// set by the producer (f1_r3.go GenerateR3Fork) when repair_intent==present
+// AND structural_review_outcome==non_pass — both closed-enum inputs (the
+// repo-verdict→enum mapping is an operator-owned seam, not implemented here).
+// When TriggerRecognized, both a continue_repair and a materially-distinct
+// redesign option are required. Disposition is the operator disposition
+// recorded before any route transition (the gate f1_r3_gate.go enforces
+// disposition-before-transition). When Disposition==selected, Selection
+// records which option was chosen and (if the continue_repair was chosen) the
+// rationale for rejecting the redesign — the gate requires this so an operator
+// cannot silently pick the repair without engaging the redesign.
 type F1R3ForkSummary struct {
-	TriggerRecognized bool         `json:"trigger_recognized"`
-	Options           []F1R3Option `json:"options,omitempty"`
-	Disposition       string       `json:"disposition"`
+	TriggerRecognized bool           `json:"trigger_recognized"`
+	Options           []F1R3Option   `json:"options,omitempty"`
+	Disposition       string         `json:"disposition"`
+	Selection         *F1R3Selection `json:"selection,omitempty"`
+}
+
+// F1R3Selection is the operator's recorded option choice. It is fork-level
+// metadata (NOT part of the canonical option record). When the selected option
+// is the continue_repair, RedesignRejectionRationale must be non-empty (the
+// operator engaged the redesign and stated why it was not taken). Selecting the
+// redesign option needs no rejection rationale.
+type F1R3Selection struct {
+	SelectedOptionID           string `json:"selected_option_id"`
+	RedesignRejectionRationale string `json:"redesign_rejection_rationale,omitempty"`
 }
 
 // F1R3Option is one repair-routing option. Each carries the canonical R3

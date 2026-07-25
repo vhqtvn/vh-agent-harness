@@ -590,14 +590,13 @@ func TestValidateF1Envelope_NotApplicableAccepted(t *testing.T) {
 	env := canonicalF1Fixture()
 	env.Entries[0].Triggered = F1TriggeredNotApplicable
 	env.Entries[0].R1 = nil // not_applicable => no summary
-	// r1 now has no conclusions and pa has no probes, so clear the r3
-	// support/probe refs that pointed at them (this envelope is about the
-	// not_applicable acceptance, not cross-ref resolution).
+	// r1 now has no conclusions and pa has no probes, so the r3 fork has no
+	// basis — make it non-triggered (no options) rather than leaving a
+	// triggered-but-incomplete fork. This keeps the envelope structurally
+	// valid while the test's focus (not_applicable acceptance) is exercised.
 	env.Entries[2].PA.Probes = nil
-	for i := range env.Entries[1].R3.Options {
-		env.Entries[1].R3.Options[i].SupportRefs = nil
-		env.Entries[1].R3.Options[i].CounterEvidenceProbeRefs = nil
-	}
+	env.Entries[1].R3.TriggerRecognized = false
+	env.Entries[1].R3.Options = nil
 	d, err := env.ComputeDigest()
 	if err != nil {
 		t.Fatal(err)

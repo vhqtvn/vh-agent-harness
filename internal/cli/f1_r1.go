@@ -197,7 +197,7 @@ func WithNewR1Cycle(prior *F1SynthesisEnvelope, newCycleID string, newJoin *F1R1
 			// Deep-copy the family summary so the new envelope owns its content
 			// and the prior envelope's pointers are not shared into the new one.
 			ec.R1 = deepCopyR1(e.R1)
-			ec.R3 = deepCopyR3(e.R3)
+			ec.R3 = deepCopyR3Fork(e.R3)
 			ec.PA = deepCopyPA(e.PA)
 		}
 		next.Entries = append(next.Entries, ec)
@@ -421,26 +421,6 @@ func deepCopyR1(r1 *F1R1JoinSummary) *F1R1JoinSummary {
 			Contradictions:  copyContradictions(c.Contradictions),
 			Gaps:            copyGaps(c.Gaps),
 			Hazards:         copyHazards(c.Hazards),
-		}
-	}
-	return out
-}
-
-func deepCopyR3(r3 *F1R3ForkSummary) *F1R3ForkSummary {
-	if r3 == nil {
-		return nil
-	}
-	out := &F1R3ForkSummary{TriggerRecognized: r3.TriggerRecognized, Disposition: r3.Disposition, Options: make([]F1R3Option, len(r3.Options))}
-	for i, o := range r3.Options {
-		out.Options[i] = F1R3Option{
-			OptionID: o.OptionID, Mode: o.Mode, Mechanism: o.Mechanism,
-			AffectedProperties:       copyStrings(o.AffectedProperties),
-			SupportRefs:              copyStrings(o.SupportRefs),
-			CounterEvidenceProbeRefs: copyStrings(o.CounterEvidenceProbeRefs),
-			Costs:                    copyStrings(o.Costs),
-			Risks:                    copyStrings(o.Risks),
-			ReversalCost:             o.ReversalCost,
-			CheapestValidation:       o.CheapestValidation,
 		}
 	}
 	return out
