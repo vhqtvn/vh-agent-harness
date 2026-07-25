@@ -4,6 +4,7 @@ import {
     StateError,
     activateCoordinationTask,
     bindSessionName,
+    computeTaskDesignDigest,
     listCoordinationTasks,
     repairCoordinationTask,
     readyCoordinationTask,
@@ -413,22 +414,27 @@ function main() {
             "Use /task-ready for drafts",
         );
 
+        const readyPayload = {
+            files_in_scope: [
+                "tests/fixtures/example-pkg/",
+                "docs/planning/backlog.md",
+            ],
+            success_criteria: [
+                "Draft task can be promoted into execution-ready state.",
+            ],
+            validation_plan: [
+                "Run verify-task-registry.js end to end.",
+            ],
+            next_action: "Resume the promoted task in a subagent session.",
+        };
+        readyPayload.f3_design_readiness = {
+            ownership_hazards: [],
+            design_digest: computeTaskDesignDigest(draft.task, readyPayload),
+        };
         const readied = readyCoordinationTask(
             coordinatorSessionID,
             draft.task.task_id,
-            {
-                files_in_scope: [
-                    "tests/fixtures/example-pkg/",
-                    "docs/planning/backlog.md",
-                ],
-                success_criteria: [
-                    "Draft task can be promoted into execution-ready state.",
-                ],
-                validation_plan: [
-                    "Run verify-task-registry.js end to end.",
-                ],
-                next_action: "Resume the promoted task in a subagent session.",
-            },
+            readyPayload,
             {
                 cwd: "/verification",
             },

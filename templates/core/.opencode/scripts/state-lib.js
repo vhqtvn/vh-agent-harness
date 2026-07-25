@@ -1,6 +1,10 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import {
+    validateF3DesignReadiness,
+    computeDesignDigest,
+} from "./f3-design-readiness.js";
 
 const SCHEMA_VERSION = 1;
 const LOCK_TIMEOUT_MS = 5000;
@@ -783,6 +787,7 @@ function defaultCoordinationTaskPayload(taskID = "") {
         report_paths: [],
         review_paths: [],
         latest_report: null,
+        f3_design_readiness: null,
         next_action: "",
         predicted_impact: null,
         measured_outcome: null,
@@ -1550,6 +1555,14 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
                       ),
                   }
                 : null,
+        f3_design_readiness:
+            source.f3_design_readiness === null ||
+            source.f3_design_readiness === undefined
+                ? null
+                : typeof source.f3_design_readiness === "object" &&
+                    !Array.isArray(source.f3_design_readiness)
+                  ? source.f3_design_readiness
+                  : null,
         next_action: String(source.next_action || "").trim(),
         predicted_impact: normalizeOptionalText(source.predicted_impact),
         measured_outcome: normalizeOptionalText(source.measured_outcome),
@@ -4011,6 +4024,54 @@ function activateCoordinationTask(sessionID, taskIDRaw, options = {}) {
     };
 }
 
+function resolveTaskDesignFields(currentPayload, incomingChanges) {
+    const p =
+        incomingChanges && typeof incomingChanges === "object"
+            ? incomingChanges
+            : {};
+    return {
+        task_id: currentPayload.task_id,
+        title:
+            p.title !== undefined
+                ? String(p.title || "").trim()
+                : currentPayload.title,
+        task_type:
+            p.task_type !== undefined
+                ? String(p.task_type || "").trim().toLowerCase()
+                : currentPayload.task_type,
+        primary_lane:
+            p.primary_lane !== undefined
+                ? String(p.primary_lane || "").trim()
+                : currentPayload.primary_lane,
+        files_in_scope:
+            p.files_in_scope !== undefined
+                ? normalizeFileScope(p.files_in_scope)
+                : currentPayload.files_in_scope,
+        success_criteria:
+            p.success_criteria !== undefined
+                ? normalizeStringList(p.success_criteria)
+                : currentPayload.success_criteria,
+        constraints:
+            p.constraints !== undefined
+                ? normalizeStringList(p.constraints)
+                : currentPayload.constraints,
+        non_goals:
+            p.non_goals !== undefined
+                ? normalizeStringList(p.non_goals)
+                : currentPayload.non_goals,
+        validation_plan:
+            p.validation_plan !== undefined
+                ? normalizeStringList(p.validation_plan)
+                : currentPayload.validation_plan,
+    };
+}
+
+function computeTaskDesignDigest(currentPayload, incomingChanges) {
+    return computeDesignDigest(
+        resolveTaskDesignFields(currentPayload, incomingChanges),
+    );
+}
+
 function readyCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) {
     const actor = coordinationActorContext(sessionID, options);
     const loaded = loadCoordinationTask(taskIDRaw);
@@ -4024,8 +4085,58 @@ function readyCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) {
         payload.next_action !== undefined
             ? String(payload.next_action || "").trim()
             : null;
-    const wasDraft = loaded.payload.status === "draft";
+
     const saved = updateCoordinationTask(loaded.payload.task_id, (current) => {
+        // Locked lifecycle re-check: the pre-lock status guard above read
+        // loaded.payload.status. Between that read and this locked callback,
+        // a concurrent caller may have transitioned the task (e.g.,
+        // activated it to "working"). Re-check current.status before writing
+        // to prevent a stale ready request from silently downgrading an
+        // active worker's lifecycle claim.
+        if (!["draft", "ready"].includes(current.status)) {
+            throw new StateError(
+                `Task ${current.task_id} is ${current.status} and cannot be prepared for execution.`,
+            );
+        }
+
+        const wasDraft = current.status === "draft";
+
+        // F3 design-readiness gate (sole BLOCKS family). Fires only at the
+        // draft -> ready BUILD-READY crossing. A ready -> ready metadata
+        // refresh does not cross BUILD-READY and is exempt. Fail-closed: a
+        // task whose design names an ownership hazard but lacks a complete,
+        // current-digest-bound resolution package is refused — the task
+        // stays draft and no task_readied event is emitted.
+        //
+        // Runs INSIDE the updateCoordinationTask lock so the digest is
+        // computed from the locked `current` record, not a pre-load
+        // snapshot. This prevents a TOCTOU race where a concurrent draft
+        // metadata update changes a digest-bearing design field between
+        // the check and the locked write.
+        if (wasDraft) {
+            const f3Envelope =
+                payload.f3_design_readiness !== undefined
+                    ? payload.f3_design_readiness
+                    : current.f3_design_readiness;
+            const designDigest = computeTaskDesignDigest(current, payload);
+            const f3Result = validateF3DesignReadiness({
+                envelope: f3Envelope,
+                currentDesignDigest: designDigest,
+                transitionKind: "task_ready",
+            });
+            if (!f3Result.passed) {
+                throw new StateError(
+                    `F3 design-readiness gate refused draft -> ready ` +
+                        `(reason: ${f3Result.reasonCode}). ` +
+                        `${f3Result.detail} ` +
+                        `The task remains draft. Supply a complete ` +
+                        `f3_design_readiness envelope bound to the current ` +
+                        `design digest, or declare ownership_hazards: [] if ` +
+                        `no hazard was named.`,
+                );
+            }
+        }
+
         // Collect every enum-validation problem before throwing so a payload
         // with several bad enum fields reports all of them at once.
         const errors = [];
@@ -4141,6 +4252,10 @@ function readyCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) {
                 payload.predicted_impact !== undefined
                     ? normalizeOptionalText(payload.predicted_impact)
                     : current.predicted_impact,
+            f3_design_readiness:
+                payload.f3_design_readiness !== undefined
+                    ? payload.f3_design_readiness
+                    : current.f3_design_readiness,
             status: "ready",
             next_action:
                 explicitNextAction !== null
@@ -5399,6 +5514,7 @@ export {
     parseClearedAssumptionsYaml,
     loadClearedAssumptions,
     mergeClearedAssumptions,
+    computeTaskDesignDigest,
 };
 
 export default {
@@ -5462,4 +5578,5 @@ export default {
     parseClearedAssumptionsYaml,
     loadClearedAssumptions,
     mergeClearedAssumptions,
+    computeTaskDesignDigest,
 };

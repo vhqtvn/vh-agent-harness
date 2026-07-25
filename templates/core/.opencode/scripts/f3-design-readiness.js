@@ -642,12 +642,35 @@ export function validateF3DesignReadiness({
         );
     }
 
+    // --- envelope-level design_digest binding (F3_PASS clause 2: "design_digest
+    // matches current design"). This binds the WHOLE envelope to the current
+    // design — the freshness binding for the explicit-empty case (which carries
+    // no per-hazard digests), and a defense-in-depth re-binding for the
+    // hazard-bearing case (per-hazard resolution.design_digest +
+    // adversarial.design_digest bind the hazard paths; this clause re-binds the
+    // survey itself). Fires BEFORE the explicit-empty early-return so both paths
+    // are covered. (b-F1 resolution: an explicit-empty envelope authored against
+    // design v1 must NOT survive a transition to design v2 — the new design may
+    // have introduced a hazard the v1 survey did not cover.)
+    if (!isNonEmptyString(envelope.design_digest)) {
+        return block(
+            "malformed_envelope",
+            `F3 envelope is missing the top-level design_digest field${transitionLabel(transitionKind)}. The envelope design_digest binds the whole package (resolution records, adversarial records, and the explicit-empty "no hazard named" survey) to the current design; an envelope without it cannot be freshness-checked. (Author must supply design_digest = the digest over the current design-bearing fields at authoring time.)`,
+        );
+    }
+    if (envelope.design_digest !== currentDesignDigest) {
+        return block(
+            "stale_design_digest",
+            `F3 envelope is bound to a stale design digest${transitionLabel(transitionKind)}: envelope.design_digest does not match the current design. A design change requires a fresh envelope re-bound to the current digest — the prior survey (including an explicit-empty "no hazard named" survey) was against the prior design and must be re-adjudicated against the new one.`,
+        );
+    }
+
     // --- explicit-empty inventory: the honesty-caveated pass ---
     if (envelope.ownership_hazards.length === 0) {
         return {
             passed: true,
             detail:
-                `F3 design-readiness envelope present with an explicit-empty ownership_hazards inventory${transitionLabel(transitionKind)}: the design author surveyed and named no ownership hazard at this crossing. The required F3 resolution process is structurally satisfied. CAVEAT: this records "no hazard named," not "no hazard exists" — completeness of hazard discovery is outside F3's structural ceiling (an empty inventory is an author attestation, not a gate-derived guarantee).`,
+                `F3 design-readiness envelope present with an explicit-empty ownership_hazards inventory${transitionLabel(transitionKind)}: the design author surveyed the current design (envelope design_digest verified current) and named no ownership hazard at this crossing. The required F3 resolution process is structurally satisfied. CAVEAT: this records "no hazard named," not "no hazard exists" — completeness of hazard discovery is outside F3's structural ceiling (an empty inventory is an author attestation, not a gate-derived guarantee).`,
         };
     }
 

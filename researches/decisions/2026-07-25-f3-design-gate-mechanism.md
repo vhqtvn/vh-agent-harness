@@ -146,8 +146,17 @@ split the 2026-07-22 memo fixes for every transition.)
 ## Named-hazard input schema
 
 An `f3_design_readiness` envelope per applicable readiness crossing. The envelope
-contains an explicit `ownership_hazards[]` inventory. Each hazard carries three
-records:
+carries a top-level `design_digest` that binds the WHOLE package (the resolution
+records, the adversarial records, AND the explicit-empty "no hazard named"
+survey) to the current design, plus an explicit `ownership_hazards[]` inventory.
+Each hazard carries three records:
+
+### Envelope (top-level)
+
+| Field | Notes |
+|---|---|
+| `design_digest` | binds the WHOLE envelope to the **current** design — the F3_PASS clause `design_digest matches current design` is enforced at this level; this is the freshness binding for the explicit-empty case (which carries no per-hazard digests), and a defense-in-depth re-binding for the non-empty case (per-hazard digests in resolution + adversarial records bind the hazard-bearing paths) |
+| `ownership_hazards[]` | the explicit inventory; `[]` is the explicit-empty pass ("author surveyed, named nothing"), distinct from a missing field (omission fails closed) |
 
 ### Hazard declaration
 
@@ -208,6 +217,13 @@ never from this field.
 - **Empty inventory does NOT prove no unnamed hazard exists.** It records that the
   author named none; it does not establish completeness of hazard discovery. The
   honesty ceiling carries this explicitly.
+- **Empty inventory is STILL freshness-bound.** An explicit-empty envelope is
+  invalidated by a design-digest change just like a hazard-bearing envelope: the
+  top-level `envelope.design_digest` (see the Envelope schema above) must match
+  the current design. An explicit-empty survey authored against design v1 does
+  NOT survive a transition to design v2 — the new design may have introduced a
+  hazard the v1 survey did not cover. The dispatch backstops re-check this
+  binding the same way they re-check per-hazard digests.
 
 ## Who declares what (the authority split, made concrete)
 
@@ -250,10 +266,12 @@ counter_case {
 }
 ```
 
-**Cadence:** generated + reviewed **before every BUILD-READY attempt** when
-hazards exist. **Invalidated on design-digest change** — a new digest requires a
-new minimum counter-case + a new adversarial verdict. **Freshness rechecked at
-dispatch** by the backstops (Decision 2).
+**Cadence:** generated + reviewed **before every BUILD-READY attempt**.
+**Invalidated on design-digest change** — a new digest requires a new envelope
+`design_digest`, a new minimum counter-case, and a new adversarial verdict
+(for hazard-bearing envelopes; for explicit-empty envelopes, a new
+`design_digest` re-bind is the minimum). **Freshness rechecked at dispatch** by
+the backstops (Decision 2).
 
 ## The F3_PASS predicate
 
@@ -511,3 +529,51 @@ House style: this memo follows the `2026-07-25` (F1/F2) / `2026-07-22` /
 `2026-07-23` convention (bolded-metadata frontmatter; Framing → Decision →
 Mechanism → Authority → Contradictions → Evidence), matching the F1 and F2
 memos' granularity exactly — decision granularity, not the per-slice build plan.
+
+## Addendum (2026-07-25): envelope top-level `design_digest` restoration (b-F1 resolution)
+
+> **b-F1 incident (2026-07-25):** During F3 Slice 2's first full 4-leaf
+> commit-review (leaf-a having been repointed by the operator after a prior
+> empty-output infra block), tier1_b returned a BLOCK on a real contract
+> drift: the explicit-empty `ownership_hazards: []` pass path in the Slice 1
+> validator (`validateF3DesignReadiness`) returned `{passed: true}` without
+> verifying `envelope.design_digest` against the locked `currentDesignDigest`.
+> An explicit-empty envelope authored against design v1 could cross
+> `draft → ready` against design v2 with a stale "no hazard named" survey —
+> the new design might have introduced a hazard the v1 survey did not cover.
+> The 1-vs-3 split (tier1_a/c/d approving by incorrectly generalizing from
+> the non-empty stale-digest coverage to the explicit-empty case) was
+> adjudicated by the build agent: tier1_b was correct (no existing test
+> exercised explicit-empty + stale digest; the per-hazard digest checks
+> cover only the non-empty path).
+
+> **Root cause:** the F3_PASS predicate already carried the envelope-level
+> clause `design_digest matches current design` (separate from the per-hazard
+> `F3_HAZARD_RESOLVED` clauses that bind `resolution.design_digest` +
+> `adversarial.design_digest`). The schema tables in the original memo,
+> however, documented `design_digest` only at the resolution-record and
+> adversarial-record level — NOT at the envelope top level. This was the
+> same class of defect as the F1 C1 distillation incident: a field-level
+> schema dropped during brief→memo distillation, leaving the F3_PASS
+> predicate's envelope-level clause without a documented schema home.
+
+> **Resolution (operator-approved, 2026-07-25):** A top-level
+> `envelope.design_digest` field is restored to the schema (see the new
+> "Envelope (top-level)" table under "Named-hazard input schema" above), the
+> Inventory discipline section now states that explicit-empty is still
+> freshness-bound, and the Cadence section's "when hazards exist" qualifier
+> (which had left the explicit-empty case ambiguous) is removed. The Slice 1
+> validator gains a top-level `envelope.design_digest` check that fires for
+> ALL envelopes before the explicit-empty early-return; the test fixtures
+> (which had already anticipated the field — see
+> `verify-f3-task-ready.js` Crux 4 line 391) are ratified, and a pinned
+> regression assertion for the stale-explicit-empty case is added.
+
+> **House rule (evidence: 2026-07-25 F1 C1 incident via `15ddd54`; reaffirmed
+> by 2026-07-25 F3 b-F1 incident):** Field-level schemas that downstream
+> briefs consume are carried VERBATIM in decision memos, never summarized. A
+> decision memo may distill rationale and decisions, but field-level contracts
+> that a downstream brief maps to — including envelope-level fields a
+> predicate clause references — must be reproduced verbatim. The b-F1
+> incident is the second occurrence of this defect class; the house rule
+> originally promulgated at `15ddd54` applies unchanged.

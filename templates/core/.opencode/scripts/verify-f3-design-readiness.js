@@ -127,6 +127,7 @@ function completeHazard(overrides = {}) {
 
 function completeEnvelope(overrides = {}) {
     return {
+        design_digest: CURRENT_DIGEST,
         ownership_hazards: [completeHazard()],
         ...overrides,
     };
@@ -230,11 +231,62 @@ function runCases() {
     // --- Explicit-empty inventory: the honesty-caveated pass ---
 
     expectPass(
-        "explicit-empty inventory passes",
+        "explicit-empty inventory passes (current design_digest)",
+        validateF3DesignReadiness({
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [] },
+            currentDesignDigest: CURRENT_DIGEST,
+        }),
+    );
+
+    // --- b-F1 pinned regression: explicit-empty + STALE design_digest FAILS ---
+    // An explicit-empty envelope authored against design v1 must NOT survive a
+    // transition to design v2 — the new design may have introduced a hazard the
+    // v1 survey did not cover. The top-level envelope.design_digest is the
+    // freshness binding for this case (there are no per-hazard digests to bind).
+    expectBlock(
+        "b-F1 regression: explicit-empty + stale design_digest FAILS",
+        validateF3DesignReadiness({
+            envelope: {
+                design_digest: computeDesignDigest({ ...CURRENT_DESIGN, title: "design v2 (changed)" }),
+                ownership_hazards: [],
+            },
+            currentDesignDigest: CURRENT_DIGEST,
+        }),
+        "stale_design_digest",
+    );
+
+    // --- b-F1 companion: explicit-empty + MISSING top-level design_digest FAILS ---
+    expectBlock(
+        "b-F1 regression: explicit-empty + missing design_digest FAILS",
         validateF3DesignReadiness({
             envelope: { ownership_hazards: [] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
+        "malformed_envelope",
+    );
+
+    // --- b-F1 companion: non-empty + MISSING top-level design_digest FAILS ---
+    expectBlock(
+        "non-empty envelope + missing top-level design_digest FAILS",
+        validateF3DesignReadiness({
+            envelope: { ownership_hazards: [completeHazard()] },
+            currentDesignDigest: CURRENT_DIGEST,
+        }),
+        "malformed_envelope",
+    );
+
+    // --- b-F1 companion: non-empty + STALE top-level design_digest FAILS ---
+    // Defense-in-depth: even if per-hazard digests were current, a stale
+    // top-level digest fails closed (F3_PASS clause 2 is enforced at this level).
+    expectBlock(
+        "non-empty envelope + stale top-level design_digest FAILS",
+        validateF3DesignReadiness({
+            envelope: completeEnvelope({
+                design_digest: computeDesignDigest({ ...CURRENT_DESIGN, title: "stale top-level" }),
+            }),
+            currentDesignDigest: CURRENT_DIGEST,
+        }),
+        "stale_design_digest",
     );
 
     // --- The crux fixture: named hazard + authority/HIGH self-assertion + NO resolution ---
@@ -246,6 +298,7 @@ function runCases() {
     // author `status: resolved` (or HIGH confidence) does NOT control the
     // transition.
     const namedButUnresolvedEnvelope = {
+        design_digest: CURRENT_DIGEST,
         ownership_hazards: [
             {
                 hazard_id: "hazard-named-but-unresolved",
@@ -295,7 +348,7 @@ function runCases() {
     expectBlock(
         "sense (a) authority-mark alone",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [authorityMarkOnly] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [authorityMarkOnly] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "missing_resolution",
@@ -313,7 +366,7 @@ function runCases() {
     expectBlock(
         "sense (b) evidence alone (no counter-case, no adversarial)",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [evidenceOnly] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [evidenceOnly] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "missing_counter_case",
@@ -328,7 +381,7 @@ function runCases() {
     expectBlock(
         "sense (c) adversarial alone (no resolution)",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [adversarialOnly] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [adversarialOnly] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "missing_resolution",
@@ -347,7 +400,7 @@ function runCases() {
     expectBlock(
         "stale design digest (resolution + adversarial bound to old design)",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [staleDigestHazard] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [staleDigestHazard] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "stale_design_digest",
@@ -362,7 +415,7 @@ function runCases() {
     expectBlock(
         "adversarial stale while resolution current",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [halfStaleHazard] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [halfStaleHazard] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "stale_design_digest",
@@ -376,7 +429,7 @@ function runCases() {
     expectBlock(
         "hazard source_record without provenance",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [unprovenancedSource] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [unprovenancedSource] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "invalid_provenance",
@@ -390,7 +443,7 @@ function runCases() {
     expectBlock(
         "resolution evidence_record without provenance",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [unprovenancedEvidence] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [unprovenancedEvidence] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "invalid_provenance",
@@ -400,7 +453,7 @@ function runCases() {
     expectBlock(
         "hazard with no source_records",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [noSourceRecords] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [noSourceRecords] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "invalid_provenance",
@@ -414,7 +467,7 @@ function runCases() {
     expectBlock(
         "resolution missing minimum_counter_case",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [missingMinimumCounterCase] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [missingMinimumCounterCase] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "missing_counter_case",
@@ -430,7 +483,7 @@ function runCases() {
     expectBlock(
         "minimum_counter_case missing required field",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [malformedMinimumCounterCase] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [malformedMinimumCounterCase] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "missing_counter_case",
@@ -442,7 +495,7 @@ function runCases() {
     expectBlock(
         "adversarial with no counter_cases",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [adversarialNoCounterCases] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [adversarialNoCounterCases] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "missing_counter_case",
@@ -458,7 +511,7 @@ function runCases() {
     expectBlock(
         "reviewer identity collides with resolution producer",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [identityCollision] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [identityCollision] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "reviewer_identity_collision",
@@ -472,7 +525,7 @@ function runCases() {
     expectBlock(
         "adversarial verdict refuted",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [refutedVerdict] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [refutedVerdict] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "review_refuted",
@@ -484,7 +537,7 @@ function runCases() {
     expectBlock(
         "adversarial verdict inconclusive",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [inconclusiveVerdict] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [inconclusiveVerdict] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "review_inconclusive",
@@ -500,7 +553,7 @@ function runCases() {
     expectBlock(
         "resolution carries blocking_limitations",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [resolutionBlockingLimitation] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [resolutionBlockingLimitation] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "blocking_limitation",
@@ -517,7 +570,7 @@ function runCases() {
     expectBlock(
         "adversarial carries a blocking limitation",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [adversarialBlockingLimitation] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [adversarialBlockingLimitation] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "blocking_limitation",
@@ -535,7 +588,7 @@ function runCases() {
     expectPass(
         "adversarial non-blocking limitations do not block",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [adversarialNonBlockingLimitation] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [adversarialNonBlockingLimitation] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
     );
@@ -553,7 +606,7 @@ function runCases() {
     expectBlock(
         "non-array resolution.blocking_limitations fails closed (not silent pass)",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [nonArrayResolutionBlocking] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [nonArrayResolutionBlocking] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "malformed_envelope",
@@ -567,7 +620,7 @@ function runCases() {
     expectBlock(
         "non-array adversarial.limitations fails closed (not silent pass)",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [nonArrayAdversarialLimitations] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [nonArrayAdversarialLimitations] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "malformed_envelope",
@@ -584,7 +637,7 @@ function runCases() {
     expectPass(
         "absent resolution.blocking_limitations passes (default none)",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [absentBlockingResolution] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [absentBlockingResolution] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
     );
@@ -600,7 +653,7 @@ function runCases() {
     expectBlock(
         "non-array evidence_refs on minimum counter-case fails closed",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [nonArrayEvidenceRefsMinimum] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [nonArrayEvidenceRefsMinimum] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "missing_counter_case",
@@ -616,7 +669,7 @@ function runCases() {
     expectBlock(
         "non-array evidence_refs on adversarial counter-case fails closed",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [nonArrayEvidenceRefsAdversarial] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [nonArrayEvidenceRefsAdversarial] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "missing_counter_case",
@@ -630,7 +683,7 @@ function runCases() {
     expectBlock(
         "empty evidence_refs on minimum counter-case fails closed",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [emptyEvidenceRefsMinimum] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [emptyEvidenceRefsMinimum] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "missing_counter_case",
@@ -649,7 +702,7 @@ function runCases() {
     expectBlock(
         "absent adversarial evidence_checked fails closed",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [absentEvidenceChecked] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [absentEvidenceChecked] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "malformed_envelope",
@@ -661,7 +714,7 @@ function runCases() {
     expectBlock(
         "empty adversarial evidence_checked fails closed",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [emptyEvidenceChecked] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [emptyEvidenceChecked] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "malformed_envelope",
@@ -673,7 +726,7 @@ function runCases() {
     expectBlock(
         "non-array adversarial evidence_checked fails closed",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [nonArrayEvidenceChecked] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [nonArrayEvidenceChecked] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "malformed_envelope",
@@ -685,7 +738,7 @@ function runCases() {
     expectBlock(
         "unknown hazard_class fails closed",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [unknownHazardClass] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [unknownHazardClass] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "malformed_envelope",
@@ -699,7 +752,7 @@ function runCases() {
     expectBlock(
         "unknown secondary_authority_disposition fails closed",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [unknownDisposition] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [unknownDisposition] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "malformed_envelope",
@@ -711,7 +764,7 @@ function runCases() {
     expectBlock(
         "unknown adversarial verdict fails closed",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [unknownVerdict] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [unknownVerdict] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "malformed_envelope",
@@ -723,7 +776,7 @@ function runCases() {
     expectBlock(
         "hazard declaration missing failure_mode",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [missingFailureMode] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [missingFailureMode] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "malformed_envelope",
@@ -736,7 +789,7 @@ function runCases() {
     expectBlock(
         "hazard with no competing_authorities",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [missingCompetingAuthorities] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [missingCompetingAuthorities] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "malformed_envelope",
@@ -764,6 +817,7 @@ function runCases() {
 
     // Multiple hazards: first failure short-circuits.
     const multiHazardEnvelope = {
+        design_digest: CURRENT_DIGEST,
         ownership_hazards: [
             completeHazard({ hazard_id: "hazard-ok" }),
             completeHazard({
@@ -785,6 +839,7 @@ function runCases() {
     );
 
     const multiHazardAllResolved = {
+        design_digest: CURRENT_DIGEST,
         ownership_hazards: [
             completeHazard({ hazard_id: "hazard-a" }),
             completeHazard({
@@ -813,7 +868,7 @@ function runCases() {
     expectBlock(
         "adversarial bound to a different hazard_id (cross-binding) blocks",
         validateF3DesignReadiness({
-            envelope: { ownership_hazards: [crossBoundAdversarial] },
+            envelope: { design_digest: CURRENT_DIGEST, ownership_hazards: [crossBoundAdversarial] },
             currentDesignDigest: CURRENT_DIGEST,
         }),
         "malformed_envelope",
