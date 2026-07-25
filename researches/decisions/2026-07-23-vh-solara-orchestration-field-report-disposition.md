@@ -581,3 +581,157 @@ This addendum NARROWS (does not supersede) the committed disposition. No defer-c
 triggers change except: rec-1 discipline + rec-2 parity contract captured as new
 defer cards; rec-3 evidence merged into the existing recurrence-detector card. The
 builds of rec 1 and rec 2 are separate operator-approved slices (not this slice).
+
+## Addendum (2026-07-26) — adoption-disposition reconciliation: P0-B status, P2-B→R5 cross-ref, §5 softening
+
+> **append-only; narrows, does not supersede.** This addendum records four
+> reconciliation items surfaced by a v0.16.0 adopter peer-review of this
+> disposition (the same vh-solara reporter whose 2026-07-23 field report and
+> 2026-07-24 visual-parity addendum this disposition already engages). It does
+> not rewrite prior content; it appends decisions, corrects one attribution,
+> and cross-references one gap. No §4 verdict changes; no §6 defer-card
+> triggers change.
+
+### Item 1 — P0-B status: NEVER STARTED + F1-class untracked adoption
+
+A re-derivation against current canon confirms the disposition's **§4.2
+ADOPTED-gate-shaped** P0-B (HEAD-progress / `no_head_progress` /
+`could_not_land` commit-failure surfacing) was **NEVER STARTED**. The
+disposition is the ONLY place the corrective machinery is named: the new
+signal vocabulary appears in exactly two lines of this memo (§4.2 L201 and
+the §5 authority-table row L284) and **0 matches anywhere in code** (`internal/`,
+`templates/core/`, `.opencode/scripts/`). By contrast the sibling P0-A
+(verdict token + crux gate) both shipped (`7f95f29` + `4d8d725`, see the
+2026-07-24b addendum L465) AND got a follow-up defer card
+(`defer-p0a-crux-discipline-extension`); P0-B got neither.
+
+This is a textbook **F1-class** failure (an adopted decision that produced no
+durable artifact — no card, no code, no checkpoint). It is the F1 instance
+the 2026-07-22 case study names: a decision crossed the release boundary into
+a "done" state without a traceable follow-up.
+
+**Corrective action (recorded in this slice, separate backlog commit):** a
+backlog row `P1-GATE-002` (status `todo`, section `Next`) carries the three
+adopted sub-items verbatim from §4.2:
+
+1. committer closeout records post-commit HEAD alongside the existing
+   per-session `head_at_acquire`;
+2. `doctor` synchronous HEAD-staleness check WARNing when N successful
+   committer closeouts precede an unchanged HEAD;
+3. extend commit-gate status vocabulary with `no_head_progress` /
+   `could_not_land`.
+
+The gate/doctor **ACT**; the coordinator **reads** (per §5). Provenance Notes:
+`source:adopted-disposition · disposition:§4.2 · rc:RC3 · studied:2026-07-26`.
+Files: `.opencode/scripts/commit-gate.sh`, `internal/cli/doctor.go`, templates
+core closeout/contract templates. This is a near-term mitigation for the
+~6h commit-freeze symptom the reporter documented; it does NOT address the
+root cause (P1-A worktree/G1/lease, long-term).
+
+**ACCURATE evidence phrasing (load-bearing — do not over-claim).** The
+disposition's RC3 evidence line (L49) is correct: `head_at_acquire` is
+**per-session only**. `head_at_acquire` EXISTS and is load-bearing in
+`.opencode/scripts/commit-gate.sh:698-952` (per-session acquire record, the
+CAS-conflict prerequisite P0-B sub-item 1 extends). What is genuinely 0
+matches in code is the **NEW** P0-B vocabulary (`no_head_progress`,
+`could_not_land`, `could_not_progress`) — that is the unshipped signal set.
+State the gap as: *"0 matches for the NEW P0-B vocabulary; `head_at_acquire`
+already exists as the per-session prerequisite P0-B extends."* Do not echo
+the looser "0 matches for `head_at_acquire`" phrasing — it is inaccurate.
+
+**Pattern numbering note.** The reporter labels the ~6h freeze "Pattern-3"
+(silent commit-gate failures); this disposition's canonical numbering is
+**Pattern 4 (same-file tangle)** — the freeze is a *symptom* of Pattern 4,
+mitigated cheaply by P0-B (§4.2 L204-206). The disposition's numbering stands
+and is the canonical reference; the reporter's numbering maps to it. State
+the mapping where useful, do not relabel.
+
+[^P0-B-collision]: **Disambiguation footnote.** A DIFFERENT, unrelated
+**"P0-B"** appears in the 2026-07-24 visual-parity source packet
+(`researches/sources/2026-07-24-tree2-rewrite-visual-parity-addendum.md`)
+as a UI visual-parity item in the operator's forced 7-item parity batch
+(P0-A = indentation/tree-guides, P0-B = a sibling visual item, …). That
+"P0-B" is a consuming-repo parity label, NOT this disposition's P0-B
+(HEAD-progress / commit-failure surfacing). They share an ID prefix by
+coincidence; they are in different namespaces. Where the two contexts could
+be confused, qualify which P0-B is meant.
+
+### Item 2 — P2-B→R5 cross-reference: gap closed
+
+The 2026-07-25 F2 rendering-family mechanism memo
+(`researches/decisions/2026-07-25-f2-rendering-family-mechanism.md`) **C4
+RESOLVED** (L325-332) re-adjudicated the P2-B→R5 relationship this
+disposition left open at §4.6 (L254-262):
+
+- `findings_delta` (P2-B) remains **memo-only / unshipped** — `(?i)findings.?delta`
+  returns 0 matches in `internal/` and 0 matches in `templates/core/`. The
+  only occurrences are this disposition's L257 proposal ("ADOPT a
+  `findings_delta` closeout field") and C4-discussion references.
+- **R5 is declared a NEW UNION property independent of P2-B** — built fresh
+  (`internal/cli/f2_r5.go:11` "R5 is a NEW UNION property — NOT a P2-B
+  extension"), no phantom seam to extend.
+
+That re-adjudication was **recorded in the F2 memo but not cross-referenced
+from this disposition.** This addendum closes that gap: §4.6's "ADOPT the
+field, defer the auto-load" verdict for P2-B stands unchanged, but the
+property-identity refinement (P2-B's `findings_delta` did NOT become R5's
+substrate; R5 is a separate union member) is now reachable from both memos.
+The P2-B auto-load defer card stands unchanged.
+
+### Item 3 — §5 softening: recorded as explicit decision, gate NOT hardened
+
+The §5 authority-table row for P2 reads, in its gate-shaped-conversion cell
+(L283): *"a closeout/commit-gate check that refuses a closeout artifact
+lacking a valid `VERDICT:` token."* That literal wording describes a gate
+that **refuses** on an absent token. The **shipped** behavior is softer and
+is now recorded here as authoritative:
+
+- **Shipped behavior (authoritative):** absent token entirely = **PASS**;
+  refuse ONLY on internal inconsistency (`verdict: proven` claimed WITHOUT a
+  proven crux `result:`); fail-closed on garbage/malformed. Source of truth:
+  `internal/cli/doctor_behavioral_closure.go:33-46` (the gate's file-level
+  comment block), specifically `:33-38`: *"Absent token entirely => PASS
+  (the pilot does NOT require every closeout to carry one; forcing adoption
+  would mark every pre-pilot closeout UNHEALTHY. The token makes a
+  declaration honest, it does not force one.)"*
+
+- **§5's literal wording (reconciled):** the "refuses a closeout lacking a
+  valid VERDICT token" phrasing is **aspirational** — it describes the
+  enforcement posture the disposition's authority-line argument was pointing
+  at, not the mechanism the pilot shipped. The reconciliation is: the
+  shipped softened mechanism IS the authoritative reading; §5's wording is
+  read as "the gate acts on closeouts that CARRY a declaration; a missing
+  declaration is not a violation" rather than "the gate demands a
+  declaration."
+
+- **Decision (recorded, NOT a gate change):** the shipped softened behavior
+  is correct and intentional. This addendum does **NOT** harden the gate.
+  Hardening would retroactively mark every pre-pilot closeout UNHEALTHY and
+  contradict two prior decisions: (a) pilot-memo decision 1
+  (`researches/decisions/2026-07-24-behavioral-closure-pilot.md` — "Absent
+  token = PASS (the pilot does NOT force adoption)"), and (b) this
+  disposition's own §4.1 caveat (L168) that the verdict token is *"a
+  §4.2-style softened mechanism at the compression boundary, not a hard
+  gate."* Softening is the design; §5's wording was over-literal. The
+  authority line is held either way — the gate acts, the coordinator reads.
+
+### VS-1 accuracy note (brief)
+
+The peer-review sub-claim "0 matches for `head_at_acquire`" is **inaccurate**.
+`head_at_acquire` EXISTS and is load-bearing (`commit-gate.sh:698-952`,
+per-session acquire record, CAS-conflict detection — RC3 cites it correctly
+at L49). The peer-review's CONCLUSION (P0-B never shipped) **holds** — the
+NEW P0-B vocabulary (`no_head_progress`/`could_not_land`) is genuinely
+0 matches in code — but one evidence clause was over-broad. Refinement is
+recorded under Item 1 above; this note prevents the inaccuracy from
+propagating. The net effect on the P0-B verdict is **none**.
+
+### Status
+
+This addendum NARROWS (does not supersede) the committed disposition + the
+prior addenda. No §4 verdict changes. The only durable new state is: (a)
+backlog row `P1-GATE-002` carrying the adopted-but-unstarted P0-B work, (b)
+the P2-B→R5 cross-reference gap closed, (c) the §5 softening recorded as an
+explicit decision with the gate NOT hardened, and (d) the VS-1 evidence
+clause refined. All of (a)-(d) are reversible documentation; none changes
+shipped gate behavior.

@@ -1,7 +1,11 @@
 # 2026-07-24 — Behavioral-closure pilot (verdict/crux gate, motivation-check fold)
 
 - **Status:** DECIDED + implemented (pilot). Both gates cleared: plan
-  `/approve`-d and the v0.15.1 release tag landed.
+  `/approve`-d and the v0.16.0 release tag landed. [corrected 2026-07-26:
+  `7f95f29` (this pilot's shipped content) is v0.16.0 content, not reachable
+  from v0.15.1/`b58d7c0`. The original "v0.15.1" attribution mis-stated the
+  release the pilot's content shipped in; v0.16.0 is the correct tag. A
+  2026-07-26 disposition addendum records this correction.]
 - **Supersedes / extends:** `2026-07-23-vh-solara-orchestration-field-report-disposition.md`
   (the disposition canon, commit `94afbc0`; HYBRID reframe addendum, commit
   `cddac9c`). This memo resolves the two design decisions the disposition left
