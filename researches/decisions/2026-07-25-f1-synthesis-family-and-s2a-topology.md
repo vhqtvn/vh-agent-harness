@@ -354,3 +354,38 @@ Contradictions → Evidence), not the YAML-frontmatter convention, per the
 > summarized. A decision memo may distill rationale and decisions, but
 > field-level contracts that a downstream brief maps to must be reproduced
 > verbatim.
+
+## Governance (operator ruling, 2026-07-26): standing-policy scope of the `15ddd54` house rule
+
+The house rule promulgated above (commit `15ddd54`, the C1 addendum) is
+**STANDING POLICY for exactly its class — schema-omission-vs-predicate
+defects** — under four conditions:
+
+1. **The amendment cites both the house rule AND the predicate clause proving
+   the design intent already existed** (i.e., the omitted field was already
+   referenced by a predicate/contract clause — the amendment restores
+   documented intent, never invents new design).
+2. **It lands as its own commit** (not bundled into a feature/build commit).
+3. **It is flagged in the closeout for operator post-review** (apply-then-
+   report, NOT ask-first).
+4. **Anything outside that narrow class still requires pre-approval.**
+
+**Rationale:** the rule exists to make this class mechanical, and requiring
+pre-approval each time recreates the operator-bottleneck the operator-
+visibility study named — but post-hoc review keeps the authority line intact
+(the operator reviews after the fact; the authority line is not bypassed).
+
+This ruling was triggered by the F3 memo's **b-F1 amendment** (`074001c`),
+which was the same class: the F3 memo had omitted the top-level
+`envelope.design_digest` field that `F3_PASS` clause 2 (`design_digest
+matches current design`) already referenced. The b-F1 amendment **met
+conditions 1, 3, and 4** (cited the house rule + the predicate clause; was
+flagged in the closeout for post-review; was within the narrow class) but
+**did NOT meet condition 2** — it was bundled into the Slice-2 feature commit
+`074001c`, not landed as its own commit. This is noted honestly; going
+forward, condition 2 (own commit) applies to same-class amendments. The
+ruling is forward-looking — the b-F1 bundling was a reasonable judgment call
+that the ruling now formalizes, not a defect to retroactively relitigate.
+
+The F3 memo's b-F1 addendum points here for the canonical ruling rather than
+carrying its own copy.

@@ -569,11 +569,10 @@ memos' granularity exactly — decision granularity, not the per-slice build pla
 > `verify-f3-task-ready.js` Crux 4 line 391) are ratified, and a pinned
 > regression assertion for the stale-explicit-empty case is added.
 
-> **House rule (evidence: 2026-07-25 F1 C1 incident via `15ddd54`; reaffirmed
-> by 2026-07-25 F3 b-F1 incident):** Field-level schemas that downstream
-> briefs consume are carried VERBATIM in decision memos, never summarized. A
-> decision memo may distill rationale and decisions, but field-level contracts
-> that a downstream brief maps to — including envelope-level fields a
-> predicate clause references — must be reproduced verbatim. The b-F1
-> incident is the second occurrence of this defect class; the house rule
-> originally promulgated at `15ddd54` applies unchanged.
+> **House rule:** the canonical text and the operator governance ruling
+> (standing policy for schema-omission-vs-predicate defects — four conditions
+> + rationale + the b-F1 precedent note) live in the F1 memo's Governance
+> section ([`./2026-07-25-f1-synthesis-family-and-s2a-topology.md`](./2026-07-25-f1-synthesis-family-and-s2a-topology.md),
+> "Governance (operator ruling, 2026-07-26)"). The b-F1 incident is the
+> validating precedent recorded there; this addendum points to the canonical
+> ruling rather than carrying its own copy.
