@@ -133,6 +133,12 @@ func RenderF2MarkdownProjection(sidecar *F2CanonicalSidecar, dir string) ([]byte
 	b.WriteString("## F2 View Metadata\n\n")
 	fmt.Fprintf(&b, "```f2-view-metadata\n%s\n```\n\n", string(metaJSON))
 
+	// --- P-c headline (FIRST DISCLOSURE LAYER — memo L240-264) ---
+	// The P-c section surfaces decision-relevant salience BEFORE the detailed
+	// envelope projection. Counter-evidence and weakest claim MUST appear in
+	// this first layer, not buried in the details below.
+	renderF2PCHeadline(&b, env, mdMeta)
+
 	// --- Canonical envelope (projected) ---
 	b.WriteString("## Canonical Envelope (projected)\n\n")
 	fmt.Fprintf(&b, "- **Schema version:** `%s`\n", env.SchemaVersion)
@@ -153,6 +159,152 @@ func RenderF2MarkdownProjection(sidecar *F2CanonicalSidecar, dir string) ([]byte
 	}
 
 	return []byte(b.String()), nil
+}
+
+// renderF2PCHeadline renders the P-c headline-layer salience section (memo
+// L235-264). This is the FIRST DISCLOSURE LAYER of the MD projection: it
+// surfaces decision-relevant salience before the detailed envelope sections.
+//
+// The section contains, IN ORDER (memo L243-248):
+//  1. Decision frame (R3 trigger + options);
+//  2. Current disposition/verdict (R3 disposition, VERBATIM from canonical);
+//  3. Counter-evidence (all P-a probes with their result enum preserved EXACTLY);
+//  4. Weakest claim (P-a probes' WeakestClaim field);
+//  5. Unresolved gaps (R1 conclusions' Gaps field);
+//  6. Canonical binding metadata (cycle, entries, digest).
+//
+// Counter-evidence and weakest claim MUST be in this first layer, not merely
+// linked or appendiced (memo L250-251).
+//
+// NO SEMANTIC SUMMARIZATION (memo L261-264): every value is a verbatim
+// projection of a canonical field. The renderer NEVER asks a model to
+// "summarize for the headline." All values trace to canonical entry IDs.
+//
+// DISPLAYED DISPOSITION == CANONICAL DISPOSITION (memo L255): the R3
+// disposition is rendered exactly as carried — a pending decision stays
+// pending, never upgraded to "approved" or "resolved."
+//
+// STRUCTURAL MARKERS: the section uses fenced HTML comments
+// (f2-pc-headline:begin / :end) so the doctor (Slice 9) can reliably locate
+// the P-c layer and verify its required sub-sections.
+func renderF2PCHeadline(b *strings.Builder, env *F1SynthesisEnvelope, meta F2ArtifactViewMeta) {
+	// Find the R3, P-a, and R1 entries by family name (do NOT assume order).
+	var r3Entry, paEntry, r1Entry *F1FamilyEntry
+	for i := range env.Entries {
+		switch env.Entries[i].Family {
+		case F1FamilyR3RedesignFork:
+			r3Entry = &env.Entries[i]
+		case F1FamilyPACounterEvidence:
+			paEntry = &env.Entries[i]
+		case F1FamilyR1CrossLaneJoin:
+			r1Entry = &env.Entries[i]
+		}
+	}
+
+	b.WriteString("<!-- f2-pc-headline:begin -->\n")
+	b.WriteString("## P-c Headline — Decision Salience Layer\n\n")
+	b.WriteString("> First disclosure layer. Counter-evidence and weakest claim surface here, before the detailed sections. Values are deterministic projections of canonical entries — no model summarization.\n\n")
+
+	// --- 1. Decision frame ---
+	b.WriteString("### Decision Frame\n")
+	if r3Entry != nil && r3Entry.R3 != nil {
+		r3 := r3Entry.R3
+		fmt.Fprintf(b, "- **Trigger recognized:** `%t`\n", r3.TriggerRecognized)
+		if len(r3.Options) > 0 {
+			b.WriteString("- **Options:**")
+			for i, opt := range r3.Options {
+				if i == 0 {
+					fmt.Fprintf(b, " `%s` (%s)", opt.OptionID, opt.Mode)
+				} else {
+					fmt.Fprintf(b, ", `%s` (%s)", opt.OptionID, opt.Mode)
+				}
+			}
+			b.WriteString("\n")
+		}
+	} else {
+		b.WriteString("- No R3 redesign fork in this synthesis cycle.\n")
+	}
+	b.WriteString("\n")
+
+	// --- 2. Current disposition/verdict (VERBATIM from canonical R3) ---
+	b.WriteString("### Current Disposition\n")
+	if r3Entry != nil && r3Entry.R3 != nil {
+		// Displayed disposition == canonical disposition (memo L255).
+		// NEVER upgrade, downgrade, or paraphrase.
+		fmt.Fprintf(b, "- **R3 disposition:** `%s`\n", r3Entry.R3.Disposition)
+		if r3Entry.R3.Selection != nil {
+			fmt.Fprintf(b, "- **Selected option:** `%s`\n", r3Entry.R3.Selection.SelectedOptionID)
+		}
+	} else {
+		b.WriteString("- No R3 disposition (no redesign fork triggered).\n")
+	}
+	b.WriteString("\n")
+
+	// --- 3. Counter-evidence (all P-a probes, result enum preserved EXACTLY) ---
+	b.WriteString("### Counter-evidence\n")
+	if paEntry != nil && paEntry.PA != nil && len(paEntry.PA.Probes) > 0 {
+		for _, p := range paEntry.PA.Probes {
+			// The result enum is rendered EXACTLY — never collapsed or
+			// paraphrased (memo L295-301). not_found_in_checked_scope NEVER
+			// renders as "none exists."
+			fmt.Fprintf(b, "- Probe `%s` (target `%s`): `%s`", p.ProbeID, p.TargetRef, p.Result)
+			if len(p.EvidenceRefs) > 0 {
+				fmt.Fprintf(b, " — evidence: %s", f2RenderStringList(p.EvidenceRefs))
+			}
+			if p.Limitation != "" {
+				fmt.Fprintf(b, " — limitation: %s", p.Limitation)
+			}
+			b.WriteString("\n")
+		}
+	} else {
+		b.WriteString("- No counter-evidence probes in this synthesis cycle.\n")
+	}
+	b.WriteString("\n")
+
+	// --- 4. Weakest claim (P-a probes' WeakestClaim field) ---
+	b.WriteString("### Weakest Claim\n")
+	weakestFound := false
+	if paEntry != nil && paEntry.PA != nil {
+		for _, p := range paEntry.PA.Probes {
+			if p.WeakestClaim != "" {
+				fmt.Fprintf(b, "- Probe `%s`: %s\n", p.ProbeID, p.WeakestClaim)
+				weakestFound = true
+			}
+		}
+	}
+	if !weakestFound {
+		b.WriteString("- (none declared in canonical P-a probes)\n")
+	}
+	b.WriteString("\n")
+
+	// --- 5. Unresolved gaps (R1 conclusions' Gaps field) ---
+	b.WriteString("### Unresolved Gaps\n")
+	gapsFound := false
+	if r1Entry != nil && r1Entry.R1 != nil {
+		for _, c := range r1Entry.R1.Conclusions {
+			for _, g := range c.Gaps {
+				fmt.Fprintf(b, "- Conclusion `%s` gap `%s` (%s): %s\n", c.ConclusionID, g.GapID, g.Aspect, g.Detail)
+				gapsFound = true
+			}
+		}
+	}
+	if !gapsFound {
+		b.WriteString("- (none declared in canonical R1 conclusions)\n")
+	}
+	b.WriteString("\n")
+
+	// --- 6. Canonical binding metadata ---
+	b.WriteString("### Canonical Binding Metadata\n")
+	fmt.Fprintf(b, "- **Cycle:** `%s`\n", meta.SynthesisCycleID)
+	if len(meta.EntryIDs) > 0 {
+		fmt.Fprintf(b, "- **Entry IDs:** %s\n", f2RenderStringList(meta.EntryIDs))
+	}
+	if meta.SourceSemanticDigest != "" {
+		fmt.Fprintf(b, "- **Source digest:** `%s`\n", meta.SourceSemanticDigest)
+	}
+	b.WriteString("\n")
+
+	b.WriteString("<!-- f2-pc-headline:end -->\n\n")
 }
 
 // renderF2EntrySection renders one family entry. Deterministic: walks the
@@ -442,18 +594,23 @@ func (o F2PairOutcome) String() string {
 //     auto-complete the pair.
 //
 // The canonical collision key is the full envelope content
-// (f2CanonicalContentFingerprint); the MD collision key is the
-// source_semantic_digest carried in the MD's f2-view-metadata block. These
-// agree transitively: if the canonical matches (envelope identical) and the MD
-// matches (digest identical), the pair is internally consistent.
+// (f2CanonicalContentFingerprint). The MD collision check is a byte-level
+// re-render comparison: the stored canonical sidecar is re-rendered into the
+// expected MD bytes (using the sidecar's own timestamp) and compared
+// byte-for-byte against the stored MD bytes. This enforces the memo's "byte-
+// identical pair" contract (L137) and detects ANY tampering of the MD prose,
+// not just a changed digest. For the MD-only incomplete case (no canonical to
+// re-render from), the source_semantic_digest from the metadata block is used
+// as the collision key instead.
 //
 // `now` is injected (not time.Now()) so tests are deterministic. Both files
 // share the same write timestamp (the pair is atomic in intent: both written
 // in the same call with the same `now`).
 //
-// Returns (outcome, nil) on a handled result (written, idempotent, or
-// incomplete-pair detection), or (F2PairNotAttempted, error) on an I/O or
-// serialization failure. A refused overwrite returns (F2PairRefused, error).
+// Returns (outcome, nil) on a handled result (written or idempotent), or
+// (outcome, error) for a refused overwrite or an incomplete-pair detection
+// (the error describes the issue), or (F2PairNotAttempted, error) on an I/O
+// or serialization failure.
 //
 // F2 NEVER repairs, normalizes, or silently updates. The only recovery from a
 // refused overwrite or an incomplete pair is a new F1 emit under a new cycle
