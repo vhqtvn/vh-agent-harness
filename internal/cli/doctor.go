@@ -304,6 +304,25 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	fmt.Fprintln(out, "    "+f1r.String())
 	applyTier(f1r.tier, &problems, &warns)
 
+	// 17. f1-f2-consistency (the F1→F2 emit-boundary consistency audit).
+	//     Scans the same durable closeout surfaces as #16 for fenced
+	//     ```f1-synthesis-envelope projections that carry F2-DERIVED view
+	//     metadata (an F2-bearing projection) and FAILs when the F1→F2
+	//     digest-binding contract is violated: a semantic_digest that no
+	//     longer binds the canonical content (F2 drifted it in place),
+	//     a missing binding reference (synthesis_cycle_id / entry_ids /
+	//     digest), or a foreign field on the f2_view object (content
+	//     smuggled past the derived-field allow-list). This is the
+	//     safety-layer ACT on the F1→F2 boundary: structural consistency,
+	//     NOT semantic truth (a passing F2 view is internally consistent;
+	//     it is not thereby proven true). SKIPs cleanly when no projection
+	//     carries an f2_view (nothing to audit — F2 rendering is a separate
+	//     track and may not have attached view metadata yet).
+	fmt.Fprintln(out, "  f1-f2-consistency:")
+	f1f2r := checkF1F2Consistency(abs)
+	fmt.Fprintln(out, "    "+f1f2r.String())
+	applyTier(f1f2r.tier, &problems, &warns)
+
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)
 	if problems > 0 {
