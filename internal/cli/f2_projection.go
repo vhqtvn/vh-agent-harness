@@ -1,0 +1,679 @@
+package cli
+
+// f2_projection.go — deterministic Markdown projection + pair-level
+// persistence coordination (Slice 3 of the F2 rendering/persistence family).
+//
+// DESIGN AUTHORITY: researches/decisions/2026-07-25-f2-rendering-family-
+// mechanism.md (commit 605f406, amended 4029e42), Decision 1 (L52-89) +
+// ingest steps 4-5 (L135-139).
+//
+// ARCHITECTURE (Decision 1):
+//   docs/checkpoints/f2/<synthesis_cycle_id>.canonical.json   # Slice 2
+//   docs/checkpoints/f2/<synthesis_cycle_id>.md               # THIS FILE
+//
+// The Markdown projection is "how F2 displays it" — derived ONLY from the
+// canonical sidecar, never an independent source of semantic content. It is
+// regenerable: given the canonical sidecar, the MD can always be reproduced
+// byte-for-byte by the same deterministic code path.
+//
+// STANDING NOTICE (memo L71-73): the MD self-identifies as "Derived,
+// informational, and non-authoritative. Canonical meaning remains in the
+// digest-bound F1 emit."
+//
+// NO FREE-FORM MODEL SUMMARIZATION (memo L261-264): the renderer is pure
+// deterministic code that walks the canonical envelope struct and emits
+// formatted Markdown. It NEVER calls a model, generates narrative, or produces
+// an independent summary. Every byte is derivable from the canonical sidecar
+// by the same deterministic code path. This is the load-bearing fence for the
+// rendering layer: F2 formats; it does NOT synthesize.
+//
+// PAIR COORDINATION (memo L135-139, the collision contract for the PAIR):
+//   - neither canonical.json nor .md exists  → write both;
+//   - both exist and both match the ingest     → idempotent no-op;
+//   - either exists with different content     → refuse (new cycle required);
+//   - only one exists                          → report an incomplete pair
+//     (do NOT auto-complete — the operator investigates why one is missing).
+//
+// F2 RENDERING IS INFORM-ONLY (memo L373: "Markdown projection — INFORM —
+// Deterministic display only"). It may refuse to produce/overwrite an artifact
+// (artifact integrity); it cannot block another system transition.
+//
+// HONESTY CEILING (memo L362-382): a successfully-rendered projection is a
+// faithful, deterministic display of the canonical content; it is NOT thereby
+// proven to describe conclusions that are actually true. Rendering is
+// structural display, not semantic verification.
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+)
+
+// --- MD path ---------------------------------------------------------------
+
+// F2MarkdownProjectionPath returns the MD projection file path for a cycle
+// within a directory. Exported so the doctor (Slice 9) and the streak scanner
+// (Slice 8) use the same path convention as the renderer.
+func F2MarkdownProjectionPath(dir, cycleID string) string {
+	return filepath.Join(dir, cycleID+".md")
+}
+
+// f2ViewMetadataRe matches a fenced code block whose info string begins with
+// "f2-view-metadata" and captures the block body (JSON of F2ArtifactViewMeta).
+// Used by the pair-consistency check and the doctor (Slice 9) to extract the
+// projection's view metadata without re-rendering the full file.
+//
+// Deliberately a double-quoted string (the pattern contains literal backticks),
+// matching the F1 pattern (f1EnvelopeRe in doctor_f1.go).
+var f2ViewMetadataRe = regexp.MustCompile("(?s)```f2-view-metadata[ \\t]*\\n(.*?)\\n```")
+
+// --- MD rendering (pure, deterministic) -------------------------------------
+
+// RenderF2MarkdownProjection produces the deterministic Markdown bytes for the
+// MD projection of a canonical sidecar. Pure: no filesystem access, no model
+// calls, no narrative generation. Every byte is derivable from the sidecar by
+// this same code path.
+//
+// The projection contains:
+//  1. A standing notice identifying the MD as derived/non-authoritative.
+//  2. A fenced f2-view-metadata JSON block (the F2ArtifactViewMeta for this
+//     projection, with its reciprocal locator pointing back to the canonical
+//     sidecar — distinct from the canonical sidecar's own reciprocal locator
+//     which points forward to the MD).
+//  3. A faithful, deterministic rendering of every canonical envelope field:
+//     schema version, cycle ID, applicability, digest, validation, and every
+//     entry (R1/R3/P-a) with all its sub-fields.
+//
+// Two calls with the same sidecar + dir produce identical bytes (deterministic
+// rendering — required for byte-stable reruns and collision detection). The
+// renderer walks slices in declaration order and uses no map iteration on data
+// fields, so Go's non-deterministic map ordering cannot affect the output.
+func RenderF2MarkdownProjection(sidecar *F2CanonicalSidecar, dir string) ([]byte, error) {
+	if sidecar == nil {
+		return nil, fmt.Errorf("f2 render: sidecar is nil")
+	}
+	if sidecar.CanonicalEnvelope == nil {
+		return nil, fmt.Errorf("f2 render: canonical envelope is nil")
+	}
+
+	env := sidecar.CanonicalEnvelope
+	cycle := sidecar.F2ViewMetadata.SynthesisCycleID
+	if cycle == "" {
+		return nil, fmt.Errorf("f2 render: sidecar carries no synthesis_cycle_id")
+	}
+
+	canonPath := F2CanonicalSidecarPath(dir, cycle)
+
+	// Build the MD-specific view metadata: a copy of the canonical sidecar's
+	// metadata, with the reciprocal locator repointed to the canonical sidecar
+	// (the canonical's own reciprocal locator points forward to this MD; the
+	// MD's reciprocal locator points back to the canonical — they are a pair).
+	mdMeta := sidecar.F2ViewMetadata
+	mdMeta.ReciprocalLocator = canonPath
+
+	metaJSON, err := json.MarshalIndent(mdMeta, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("f2 render: cannot serialize view metadata: %w", err)
+	}
+
+	var b strings.Builder
+
+	// --- Title ---
+	fmt.Fprintf(&b, "# F2 Projection — Synthesis Cycle `%s`\n\n", cycle)
+
+	// --- Standing notice (exact wording from memo L71-73) ---
+	fmt.Fprintf(&b, "> **Derived, informational, and non-authoritative.** Canonical meaning remains in the digest-bound F1 emit at `%s`.\n\n", canonPath)
+
+	// --- F2 view metadata block (fenced JSON for doctor parsing) ---
+	b.WriteString("## F2 View Metadata\n\n")
+	fmt.Fprintf(&b, "```f2-view-metadata\n%s\n```\n\n", string(metaJSON))
+
+	// --- Canonical envelope (projected) ---
+	b.WriteString("## Canonical Envelope (projected)\n\n")
+	fmt.Fprintf(&b, "- **Schema version:** `%s`\n", env.SchemaVersion)
+	fmt.Fprintf(&b, "- **Synthesis cycle ID:** `%s`\n", env.SynthesisCycleID)
+	fmt.Fprintf(&b, "- **Applicability:** `%s`\n", env.Applicability)
+	if env.SemanticDigest != "" {
+		fmt.Fprintf(&b, "- **Semantic digest:** `%s`\n", env.SemanticDigest)
+	}
+	fmt.Fprintf(&b, "- **Validation disposition:** `%s`\n", env.Validation.Disposition)
+	b.WriteString("\n")
+
+	// --- Entries ---
+	if len(env.Entries) > 0 {
+		b.WriteString("### Entries\n\n")
+		for _, entry := range env.Entries {
+			renderF2EntrySection(&b, entry)
+		}
+	}
+
+	return []byte(b.String()), nil
+}
+
+// renderF2EntrySection renders one family entry. Deterministic: walks the
+// entry struct in field-declaration order. If the family is not triggered,
+// only the header + triggered status is rendered (no family summary to
+// project — a not_triggered/not_applicable entry carries none).
+func renderF2EntrySection(b *strings.Builder, entry F1FamilyEntry) {
+	fmt.Fprintf(b, "#### Family `%s` — Entry `%s`\n\n", entry.Family, entry.EntryID)
+	fmt.Fprintf(b, "- **Triggered:** `%s`\n", entry.Triggered)
+	if len(entry.SourceRefs) > 0 {
+		fmt.Fprintf(b, "- **Source refs:** %s\n", f2RenderStringList(entry.SourceRefs))
+	}
+	b.WriteString("\n")
+
+	switch entry.Family {
+	case F1FamilyR1CrossLaneJoin:
+		if entry.R1 != nil {
+			renderF2R1Summary(b, entry.R1)
+		}
+	case F1FamilyR3RedesignFork:
+		if entry.R3 != nil {
+			renderF2R3Summary(b, entry.R3)
+		}
+	case F1FamilyPACounterEvidence:
+		if entry.PA != nil {
+			renderF2PASummary(b, entry.PA)
+		}
+	}
+	b.WriteString("\n")
+}
+
+// renderF2R1Summary renders the R1 cross-lane join conclusions. Each
+// conclusion carries the full join graph: disposition, lanes, sources,
+// agreements, contradictions, gaps, and hazard links — all as declared by F1
+// (F2 never infers a relationship or creates a new link).
+func renderF2R1Summary(b *strings.Builder, r1 *F1R1JoinSummary) {
+	if len(r1.Conclusions) == 0 {
+		b.WriteString("(no R1 conclusions)\n\n")
+		return
+	}
+	b.WriteString("##### R1 Conclusions\n\n")
+	for _, c := range r1.Conclusions {
+		fmt.Fprintf(b, "###### Conclusion `%s` — Property `%s`\n\n", c.ConclusionID, c.PropertyID)
+		fmt.Fprintf(b, "- **Join disposition:** `%s`\n", c.JoinDisposition)
+
+		if len(c.Lanes) > 0 {
+			b.WriteString("- **Lanes:**\n")
+			for _, lane := range c.Lanes {
+				fmt.Fprintf(b, "  - `%s`", lane.LaneID)
+				if lane.ActID != "" {
+					fmt.Fprintf(b, " (act: `%s`", lane.ActID)
+					if lane.Position != "" {
+						fmt.Fprintf(b, ", position: `%s`", lane.Position)
+					}
+					b.WriteString(")")
+				} else if lane.Position != "" {
+					fmt.Fprintf(b, " (position: `%s`)", lane.Position)
+				}
+				b.WriteString("\n")
+			}
+		}
+
+		if len(c.Sources) > 0 {
+			b.WriteString("- **Sources:**\n")
+			for _, src := range c.Sources {
+				fmt.Fprintf(b, "  - `%s`", src.Locator)
+				if len(src.AncestryRoots) > 0 {
+					fmt.Fprintf(b, " (ancestry: %s)", f2RenderStringList(src.AncestryRoots))
+				}
+				b.WriteString("\n")
+			}
+		}
+
+		if len(c.Agreements) > 0 {
+			fmt.Fprintf(b, "- **Agreements refs:** %s\n", f2RenderStringList(c.Agreements))
+		}
+
+		if len(c.Contradictions) > 0 {
+			b.WriteString("- **Contradictions:**\n")
+			for _, con := range c.Contradictions {
+				fmt.Fprintf(b, "  - `%s` (`%s` vs `%s`): %s\n", con.ContradictionID, con.LaneA, con.LaneB, con.Detail)
+			}
+		}
+
+		if len(c.Gaps) > 0 {
+			b.WriteString("- **Gaps:**\n")
+			for _, g := range c.Gaps {
+				fmt.Fprintf(b, "  - `%s` (%s): %s\n", g.GapID, g.Aspect, g.Detail)
+			}
+		}
+
+		if len(c.Hazards) > 0 {
+			b.WriteString("- **Hazard links:**\n")
+			for _, h := range c.Hazards {
+				renderF2HazardLink(b, h)
+			}
+		}
+
+		b.WriteString("\n")
+	}
+}
+
+// renderF2HazardLink renders one hazard<->symptom link with its explicit
+// survival chain (memo: survival is NOT inferred — every leg is declared).
+func renderF2HazardLink(b *strings.Builder, h F1R1HazardLink) {
+	fmt.Fprintf(b, "  - Hazard `%s`", h.HazardRef)
+	if len(h.SymptomRefs) > 0 {
+		fmt.Fprintf(b, " → symptoms %s", f2RenderStringList(h.SymptomRefs))
+	}
+	if len(h.SourceLocators) > 0 {
+		fmt.Fprintf(b, " → sources %s", f2RenderStringList(h.SourceLocators))
+	}
+	if len(h.AncestryRoots) > 0 {
+		fmt.Fprintf(b, " → ancestry %s", f2RenderStringList(h.AncestryRoots))
+	}
+	if h.ContradictionRef != "" {
+		fmt.Fprintf(b, " → contradiction `%s`", h.ContradictionRef)
+	}
+	if h.GapRef != "" {
+		fmt.Fprintf(b, " → gap `%s`", h.GapRef)
+	}
+	if len(h.ConsumingR3OptionIDs) > 0 {
+		fmt.Fprintf(b, " → consuming R3 options %s", f2RenderStringList(h.ConsumingR3OptionIDs))
+	}
+	if len(h.ConsumingPAProbeIDs) > 0 {
+		fmt.Fprintf(b, " → consuming P-a probes %s", f2RenderStringList(h.ConsumingPAProbeIDs))
+	}
+	b.WriteString("\n")
+}
+
+// renderF2R3Summary renders the R3 redesign fork: trigger, options (each with
+// all canonical fields including costs/risks/reversal_cost/cheapest_validation
+// per the C1 resolution), disposition, and selection.
+func renderF2R3Summary(b *strings.Builder, r3 *F1R3ForkSummary) {
+	fmt.Fprintf(b, "- **Trigger recognized:** `%t`\n\n", r3.TriggerRecognized)
+
+	if len(r3.Options) > 0 {
+		b.WriteString("##### R3 Options\n\n")
+		for _, opt := range r3.Options {
+			fmt.Fprintf(b, "###### Option `%s` — Mode `%s`\n\n", opt.OptionID, opt.Mode)
+			fmt.Fprintf(b, "- **Mechanism:** %s\n", opt.Mechanism)
+			if len(opt.AffectedProperties) > 0 {
+				fmt.Fprintf(b, "- **Affected properties:** %s\n", f2RenderStringList(opt.AffectedProperties))
+			}
+			if len(opt.SupportRefs) > 0 {
+				fmt.Fprintf(b, "- **Support refs (R1 conclusions):** %s\n", f2RenderStringList(opt.SupportRefs))
+			}
+			if len(opt.CounterEvidenceProbeRefs) > 0 {
+				fmt.Fprintf(b, "- **Counter-evidence probe refs (P-a):** %s\n", f2RenderStringList(opt.CounterEvidenceProbeRefs))
+			}
+			if len(opt.Costs) > 0 {
+				fmt.Fprintf(b, "- **Costs:** %s\n", f2RenderStringList(opt.Costs))
+			}
+			if len(opt.Risks) > 0 {
+				fmt.Fprintf(b, "- **Risks:** %s\n", f2RenderStringList(opt.Risks))
+			}
+			if opt.ReversalCost != "" {
+				fmt.Fprintf(b, "- **Reversal cost:** %s\n", opt.ReversalCost)
+			}
+			if opt.CheapestValidation != "" {
+				fmt.Fprintf(b, "- **Cheapest validation:** %s\n", opt.CheapestValidation)
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	fmt.Fprintf(b, "- **Disposition:** `%s`\n", r3.Disposition)
+	if r3.Selection != nil {
+		fmt.Fprintf(b, "- **Selected option:** `%s`\n", r3.Selection.SelectedOptionID)
+		if r3.Selection.RedesignRejectionRationale != "" {
+			fmt.Fprintf(b, "- **Redesign rejection rationale:** %s\n", r3.Selection.RedesignRejectionRationale)
+		}
+	}
+}
+
+// renderF2PASummary renders the P-a counter-evidence probes. The Result enum
+// is preserved EXACTLY (found / not_found_in_checked_scope / unavailable /
+// not_run) — it is NEVER collapsed, paraphrased, or reinterpreted.
+// not_found_in_checked_scope NEVER renders as "none exists" (memo L298-301).
+func renderF2PASummary(b *strings.Builder, pa *F1PAProbeSummary) {
+	if len(pa.Probes) == 0 {
+		b.WriteString("(no P-a probes)\n\n")
+		return
+	}
+	b.WriteString("##### P-a Probes\n\n")
+	for _, p := range pa.Probes {
+		fmt.Fprintf(b, "###### Probe `%s` — Target `%s`\n\n", p.ProbeID, p.TargetRef)
+		// The Result enum is rendered EXACTLY — no reinterpretation.
+		fmt.Fprintf(b, "- **Result:** `%s`\n", p.Result)
+		if p.FalsificationQuestion != "" {
+			fmt.Fprintf(b, "- **Falsification question:** %s\n", p.FalsificationQuestion)
+		}
+		if p.Method != "" {
+			fmt.Fprintf(b, "- **Method:** %s\n", p.Method)
+		}
+		if len(p.CheckedScope) > 0 {
+			fmt.Fprintf(b, "- **Checked scope:** %s\n", f2RenderStringList(p.CheckedScope))
+		}
+		if len(p.EvidenceRefs) > 0 {
+			fmt.Fprintf(b, "- **Evidence refs:** %s\n", f2RenderStringList(p.EvidenceRefs))
+		}
+		if p.Limitation != "" {
+			fmt.Fprintf(b, "- **Limitation:** %s\n", p.Limitation)
+		}
+		if p.WeakestClaim != "" {
+			fmt.Fprintf(b, "- **Weakest claim:** %s\n", p.WeakestClaim)
+		}
+		if p.Confidence != "" {
+			fmt.Fprintf(b, "- **Confidence:** %s\n", p.Confidence)
+		}
+		b.WriteString("\n")
+	}
+}
+
+// f2RenderStringList formats a string slice as a comma-separated list of
+// backtick-quoted values. Returns "(none)" for an empty slice (should not
+// appear in practice — callers guard with len > 0).
+func f2RenderStringList(ss []string) string {
+	if len(ss) == 0 {
+		return "(none)"
+	}
+	quoted := make([]string, len(ss))
+	for i, s := range ss {
+		quoted[i] = "`" + s + "`"
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// --- Pair-level persistence coordination -----------------------------------
+
+// F2PairOutcome reports what PersistF2Pair did.
+type F2PairOutcome int
+
+const (
+	// F2PairNotAttempted is the zero value (should not appear in practice).
+	F2PairNotAttempted F2PairOutcome = iota
+
+	// F2PairWritten means neither file existed and both were freshly written.
+	F2PairWritten
+
+	// F2PairIdempotent means both files existed and both matched the ingest's
+	// canonical content. No file was modified (original bytes preserved).
+	F2PairIdempotent
+
+	// F2PairRefused means at least one file existed with DIFFERENT canonical
+	// content. Neither file was modified. A new synthesis cycle is required.
+	F2PairRefused
+
+	// F2PairIncompleteCanonicalOnly means only the canonical sidecar existed
+	// (and it matched the ingest). The MD is missing. F2 did NOT auto-complete
+	// the pair — the operator investigates why the MD is absent.
+	F2PairIncompleteCanonicalOnly
+
+	// F2PairIncompleteMDOnly means only the MD existed (and it matched the
+	// ingest). The canonical sidecar is missing. F2 did NOT auto-complete.
+	F2PairIncompleteMDOnly
+)
+
+// String returns a human-readable outcome name for diagnostics and tests.
+func (o F2PairOutcome) String() string {
+	switch o {
+	case F2PairWritten:
+		return "written"
+	case F2PairIdempotent:
+		return "idempotent"
+	case F2PairRefused:
+		return "refused"
+	case F2PairIncompleteCanonicalOnly:
+		return "incomplete_canonical_only"
+	case F2PairIncompleteMDOnly:
+		return "incomplete_md_only"
+	default:
+		return "not_attempted"
+	}
+}
+
+// PersistF2Pair writes BOTH the canonical sidecar and the MD projection for the
+// ingest result's synthesis cycle, enforcing the pair-level collision contract
+// (memo L137-139):
+//
+//   - neither canonical.json nor .md exists → write both (F2PairWritten);
+//   - both exist and both match               → idempotent no-op (F2PairIdempotent);
+//   - either exists with different content    → refuse, do NOT overwrite
+//     (F2PairRefused). A new synthesis cycle is required.
+//   - only one exists (and it matches)        → report an incomplete pair
+//     (F2PairIncompleteCanonicalOnly or F2PairIncompleteMDOnly). F2 does NOT
+//     auto-complete the pair.
+//
+// The canonical collision key is the full envelope content
+// (f2CanonicalContentFingerprint); the MD collision key is the
+// source_semantic_digest carried in the MD's f2-view-metadata block. These
+// agree transitively: if the canonical matches (envelope identical) and the MD
+// matches (digest identical), the pair is internally consistent.
+//
+// `now` is injected (not time.Now()) so tests are deterministic. Both files
+// share the same write timestamp (the pair is atomic in intent: both written
+// in the same call with the same `now`).
+//
+// Returns (outcome, nil) on a handled result (written, idempotent, or
+// incomplete-pair detection), or (F2PairNotAttempted, error) on an I/O or
+// serialization failure. A refused overwrite returns (F2PairRefused, error).
+//
+// F2 NEVER repairs, normalizes, or silently updates. The only recovery from a
+// refused overwrite or an incomplete pair is a new F1 emit under a new cycle
+// ID (for refused) or operator investigation (for incomplete).
+func PersistF2Pair(ingest *F2IngestResult, dir string, now time.Time) (F2PairOutcome, error) {
+	if ingest == nil {
+		return F2PairNotAttempted, fmt.Errorf("f2 pair: ingest result is nil (nothing to persist)")
+	}
+	if ingest.CanonicalEnvelope == nil {
+		return F2PairNotAttempted, fmt.Errorf("f2 pair: ingest result carries no canonical envelope")
+	}
+	if ingest.SynthesisCycleID == "" {
+		return F2PairNotAttempted, fmt.Errorf("f2 pair: ingest result carries no synthesis_cycle_id")
+	}
+
+	// Build the sidecar + serialize both artifacts (pure, before any I/O).
+	sidecar := buildF2CanonicalSidecar(ingest, dir, now)
+	canonBytes, err := SerializeF2CanonicalSidecar(sidecar)
+	if err != nil {
+		return F2PairNotAttempted, fmt.Errorf("f2 pair: cannot serialize canonical sidecar: %w", err)
+	}
+	mdBytes, err := RenderF2MarkdownProjection(sidecar, dir)
+	if err != nil {
+		return F2PairNotAttempted, fmt.Errorf("f2 pair: cannot render MD projection: %w", err)
+	}
+
+	newFP, err := f2CanonicalContentFingerprint(sidecar.CanonicalEnvelope)
+	if err != nil {
+		return F2PairNotAttempted, fmt.Errorf("f2 pair: cannot compute canonical fingerprint: %w", err)
+	}
+
+	cycle := ingest.SynthesisCycleID
+	canonPath := F2CanonicalSidecarPath(dir, cycle)
+	mdPath := F2MarkdownProjectionPath(dir, cycle)
+
+	canonExists := f2FileExists(canonPath)
+	mdExists := f2FileExists(mdPath)
+
+	// --- Case 1: neither exists → write both ---
+	if !canonExists && !mdExists {
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+			return F2PairNotAttempted, fmt.Errorf("f2 pair: cannot create pair directory %q: %w", dir, mkErr)
+		}
+		// Write canonical first (O_EXCL — atomic create).
+		if err := f2AtomicWrite(canonPath, canonBytes); err != nil {
+			return F2PairNotAttempted, fmt.Errorf("f2 pair: canonical write failed: %w", err)
+		}
+		// Write MD (O_EXCL). If this fails, the canonical was already written
+		// — the pair is now incomplete (CanonicalOnly). Report it honestly.
+		if err := f2AtomicWrite(mdPath, mdBytes); err != nil {
+			return F2PairIncompleteCanonicalOnly, fmt.Errorf(
+				"f2 pair: canonical sidecar written at %q but MD write at %q failed (pair is now incomplete — investigate before retrying): %w",
+				canonPath, mdPath, err)
+		}
+		return F2PairWritten, nil
+	}
+
+	// --- Case 2: both exist → check both for idempotency / refusal ---
+	if canonExists && mdExists {
+		// Check canonical content.
+		existingCanon, cErr := readF2SidecarOrReject(canonPath)
+		if cErr != nil {
+			return F2PairRefused, cErr
+		}
+		existingFP, fpErr := f2CanonicalContentFingerprint(existingCanon.CanonicalEnvelope)
+		if fpErr != nil {
+			return F2PairNotAttempted, fmt.Errorf("f2 pair: cannot fingerprint existing canonical at %q: %w", canonPath, fpErr)
+		}
+		if !bytes.Equal(existingFP, newFP) {
+			return F2PairRefused, fmt.Errorf(
+				"f2 pair: canonical content for cycle %q differs from the existing sidecar at %q (immutability: a changed canonical field requires a new F1 emit + synthesis cycle)",
+				cycle, canonPath)
+		}
+		// Check MD content: re-render the MD from the STORED canonical sidecar
+		// (using its own timestamp) and compare byte-for-byte against the
+		// stored MD bytes. This is the "byte-identical pair" contract (memo
+		// L137: "both exist byte-identical → idempotent no-op"). It detects
+		// ANY tampering of the MD prose outside the metadata block — not just
+		// a changed digest. A digest-only check would miss prose edits that
+		// leave source_semantic_digest intact.
+		//
+		// The re-render uses the STORED sidecar (not the new one) so the
+		// timestamp in the metadata block matches: two pairs written at
+		// different times for the same canonical content are idempotent
+		// (the canonical content match governs, not the timestamp).
+		expectedMD, rErr := RenderF2MarkdownProjection(existingCanon, dir)
+		if rErr != nil {
+			return F2PairNotAttempted, fmt.Errorf("f2 pair: cannot re-render MD from stored canonical at %q: %w", canonPath, rErr)
+		}
+		storedMD, sErr := os.ReadFile(mdPath)
+		if sErr != nil {
+			return F2PairNotAttempted, fmt.Errorf("f2 pair: cannot read stored MD at %q: %w", mdPath, sErr)
+		}
+		if !bytes.Equal(expectedMD, storedMD) {
+			return F2PairRefused, fmt.Errorf(
+				"f2 pair: MD projection for cycle %q at %q does not match a deterministic re-render from the canonical sidecar (the MD was tampered or drifted — immutability: a changed projection requires investigation; F2 does not repair in place; a new F1 emit + synthesis cycle is required if the projection must change)",
+				cycle, mdPath)
+		}
+		return F2PairIdempotent, nil
+	}
+
+	// --- Case 3: only canonical exists → check + report incomplete pair ---
+	if canonExists && !mdExists {
+		existingCanon, cErr := readF2SidecarOrReject(canonPath)
+		if cErr != nil {
+			return F2PairRefused, cErr
+		}
+		existingFP, fpErr := f2CanonicalContentFingerprint(existingCanon.CanonicalEnvelope)
+		if fpErr != nil {
+			return F2PairNotAttempted, fmt.Errorf("f2 pair: cannot fingerprint existing canonical at %q: %w", canonPath, fpErr)
+		}
+		if !bytes.Equal(existingFP, newFP) {
+			return F2PairRefused, fmt.Errorf(
+				"f2 pair: canonical content for cycle %q differs from the existing sidecar at %q (immutability: a changed canonical field requires a new F1 emit + synthesis cycle)",
+				cycle, canonPath)
+		}
+		// Canonical matches but MD is missing → incomplete pair. Do NOT
+		// auto-complete — the operator investigates why the MD is absent.
+		return F2PairIncompleteCanonicalOnly, fmt.Errorf(
+			"f2 pair: incomplete pair for cycle %q — canonical sidecar exists at %q but MD projection is missing at %q (investigate before completing; F2 does not auto-complete an incomplete pair)",
+			cycle, canonPath, mdPath)
+	}
+
+	// --- Case 4: only MD exists → check + report incomplete pair ---
+	// (canonExists == false, mdExists == true)
+	storedDigest, dErr := extractSourceDigestFromMD(mdPath)
+	if dErr != nil {
+		return F2PairRefused, fmt.Errorf("f2 pair: cannot extract digest from existing MD at %q (refusing to overwrite): %w", mdPath, dErr)
+	}
+	if storedDigest != ingest.SemanticDigest {
+		return F2PairRefused, fmt.Errorf(
+			"f2 pair: MD projection for cycle %q carries digest %q but ingest digest is %q (immutability: content differs — a new F1 emit + synthesis cycle is required)",
+			cycle, storedDigest, ingest.SemanticDigest)
+	}
+	// MD matches but canonical is missing → incomplete pair. Do NOT
+	// auto-complete.
+	return F2PairIncompleteMDOnly, fmt.Errorf(
+		"f2 pair: incomplete pair for cycle %q — MD projection exists at %q but canonical sidecar is missing at %q (investigate before completing; F2 does not auto-complete an incomplete pair)",
+		cycle, mdPath, canonPath)
+}
+
+// --- Pair helpers ----------------------------------------------------------
+
+// f2FileExists reports whether a path exists (file or otherwise). Used by the
+// pair coordinator to assess the on-disk pair state.
+func f2FileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// f2AtomicWrite creates a file exclusively (O_EXCL) and writes the given bytes.
+// If the file already exists, it returns an error (the caller decides what to
+// do — typically a collision check). This is the same atomic-create pattern as
+// Slice 2's PersistF2CanonicalSidecar.
+func f2AtomicWrite(path string, data []byte) error {
+	fd, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, wErr := fd.Write(data); wErr != nil {
+		fd.Close()
+		return wErr
+	}
+	if cErr := fd.Close(); cErr != nil {
+		return cErr
+	}
+	return nil
+}
+
+// readF2SidecarOrReject reads and parses a canonical sidecar. If the file is
+// unreadable or not valid JSON, it returns a refusal error (the caller reports
+// F2PairRefused — immutability forbids overwriting a corrupt artifact).
+func readF2SidecarOrReject(path string) (*F2CanonicalSidecar, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("f2 pair: cannot read existing canonical sidecar at %q (refusing to overwrite an unreadable artifact): %w", path, err)
+	}
+	var sidecar F2CanonicalSidecar
+	if jErr := json.Unmarshal(raw, &sidecar); jErr != nil {
+		return nil, fmt.Errorf("f2 pair: existing canonical sidecar at %q is not valid JSON (refusing to overwrite a corrupt artifact — investigate or use a new cycle): %w", path, jErr)
+	}
+	return &sidecar, nil
+}
+
+// extractSourceDigestFromMD reads an MD projection file, parses its
+// f2-view-metadata fenced block, and returns the source_semantic_digest value.
+// This is the MD collision key: if it matches the ingest's digest, the MD was
+// rendered from the same canonical content. Returns an error if the file is
+// unreadable, the metadata block is absent, or the digest field is empty.
+func extractSourceDigestFromMD(mdPath string) (string, error) {
+	raw, err := os.ReadFile(mdPath)
+	if err != nil {
+		return "", fmt.Errorf("cannot read MD projection at %q: %w", mdPath, err)
+	}
+	matches := f2ViewMetadataRe.FindStringSubmatch(string(raw))
+	if len(matches) < 2 {
+		return "", fmt.Errorf("no f2-view-metadata fenced block found in MD at %q", mdPath)
+	}
+	var meta F2ArtifactViewMeta
+	if jErr := json.Unmarshal([]byte(matches[1]), &meta); jErr != nil {
+		return "", fmt.Errorf("cannot parse f2-view-metadata JSON in MD at %q: %w", mdPath, jErr)
+	}
+	if meta.SourceSemanticDigest == "" {
+		return "", fmt.Errorf("f2-view-metadata in MD at %q carries no source_semantic_digest", mdPath)
+	}
+	return meta.SourceSemanticDigest, nil
+}
+
+// ExtractF2ViewMetadataFromMDBytes parses an MD projection's raw bytes and
+// returns the F2ArtifactViewMeta from its fenced metadata block. Exported so
+// the doctor (Slice 9) can inspect a projection's metadata without re-rendering.
+// Returns an error if the metadata block is absent or unparseable.
+func ExtractF2ViewMetadataFromMDBytes(mdBytes []byte) (*F2ArtifactViewMeta, error) {
+	matches := f2ViewMetadataRe.FindStringSubmatch(string(mdBytes))
+	if len(matches) < 2 {
+		return nil, fmt.Errorf("no f2-view-metadata fenced block found")
+	}
+	var meta F2ArtifactViewMeta
+	if err := json.Unmarshal([]byte(matches[1]), &meta); err != nil {
+		return nil, fmt.Errorf("cannot parse f2-view-metadata JSON: %w", err)
+	}
+	return &meta, nil
+}
