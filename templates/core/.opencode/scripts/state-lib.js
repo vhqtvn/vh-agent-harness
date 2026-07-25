@@ -13,6 +13,49 @@ const STALE_LOCK_MS = 30000;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Render-location guard (regression: F3 Slice-7 dogfood once ran THIS file
+// from templates/core/.opencode/scripts/ — the unrendered SOURCE copy). The
+// source copy still carries the literal coordinator-directory template token
+// (resolved only at render time) and resolves repoRoot() to templates/core/,
+// so running it wrote stray runtime artifacts into the template tree
+// (the unresolved coordinator dir under .local/, plus
+// .vh-agent-harness/coordinator-adoption.json) — and a template copy shipping
+// adopted:true would break greenfield installs (dir-absent + marker-valid =
+// FAIL). A rendered copy contains NO unrendered tokens; refuse to load an
+// unrendered one so the wrong invocation fails loudly instead of silently
+// corrupting the template tree. Run the RENDERED copy at
+// <repo>/.opencode/scripts/state-lib.js instead.
+//
+// The token delimiter is built at runtime (not written literally in source)
+// so the renderer never resolves it INSIDE this guard — otherwise the guard's
+// own condition would be transformed by rendering and misfire on the very copy
+// it protects. Char codes: 123 = open-brace, 125 = close-brace.
+(function assertRenderedNotSource() {
+    let selfSrc = "";
+    try {
+        selfSrc = fs.readFileSync(__filename, "utf8");
+    } catch {
+        return; // unreadable self — let the downstream error surface.
+    }
+    const OPEN = String.fromCharCode(123, 123); // open-brace, open-brace
+    const CLOSE = String.fromCharCode(125, 125); // close-brace, close-brace
+    const TOKEN = OPEN + "COORDINATOR_DIR" + CLOSE;
+    if (selfSrc.includes(TOKEN)) {
+        throw new Error(
+            "REFUSING to load state-lib.js from an UNRENDERED templates/core/ " +
+                "source copy (its bytes still contain the literal " +
+                "coordinator-directory template token, which is resolved only " +
+                "at render time). Running the source copy resolves repoRoot() " +
+                "to templates/core/ and writes stray runtime artifacts (the " +
+                "unresolved coordinator dir under .local/, plus " +
+                ".vh-agent-harness/coordinator-adoption.json) into the " +
+                "template tree. Run the RENDERED copy at " +
+                "<repo>/.opencode/scripts/state-lib.js instead.",
+        );
+    }
+})();
+
 const MEMORY_TARGETS = Object.freeze({
     brief: {
         filename: "brief.md",

@@ -29,7 +29,14 @@
 // Fail signal: process.exit(1) with the failing assertion label on stderr.
 //
 // Invocation:
-//   vh-agent-harness exec node templates/core/.opencode/scripts/verify-f3-authoring-surfaces.js
+//   vh-agent-harness exec node .opencode/scripts/verify-f3-authoring-surfaces.js
+//
+// NOTE: always run the RENDERED copy at .opencode/scripts/ (tokens resolved).
+// Never run the templates/core/.opencode/scripts/ source copy directly — its
+// repoRoot() resolves to templates/core/ and (for state-writing scripts) it
+// produces stray runtime artifacts in the template tree. state-lib.js refuses
+// to load from an unrendered source copy; this text-contract verifier is
+// read-only but follows the same convention for consistency.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
