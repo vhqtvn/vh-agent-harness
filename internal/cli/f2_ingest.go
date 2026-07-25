@@ -79,6 +79,13 @@ type F2IngestResult struct {
 	// canonical sidecar as F2-derived metadata. NOT part of the canonical
 	// fingerprint (it is F2-derived, not F1-canonical evidence).
 	R5Binding *F2R5Binding
+
+	// MediaAttachments are the optional P-b evidence-grade media provenance
+	// slots (Slice 7). nil/empty when no media attachments were provided (the
+	// common case). Set via BuildF2MediaAttachment AFTER ingest, BEFORE
+	// persistence. Carried into the canonical sidecar as F2-derived metadata.
+	// NOT part of the canonical fingerprint.
+	MediaAttachments []F2MediaAttachment
 }
 
 // F2ResolvedRefGraph records the canonical ID sets F2 verified at ingest. It

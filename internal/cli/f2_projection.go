@@ -117,6 +117,16 @@ func RenderF2MarkdownProjection(sidecar *F2CanonicalSidecar, dir string) ([]byte
 		}
 	}
 
+	// P-b media attachment validation gate (defense-in-depth): if the sidecar
+	// carries media attachments, each is structurally validated against the
+	// canonical envelope. A hand-constructed sidecar with tampered attachments
+	// is rejected here — they never reach the rendered MD projection.
+	for i := range sidecar.MediaAttachments {
+		if vErr := ValidateF2MediaAttachmentAgainstEnvelope(&sidecar.MediaAttachments[i], env); vErr != nil {
+			return nil, fmt.Errorf("f2 render: media attachment[%d] validation failed (render-path gate): %w", i, vErr)
+		}
+	}
+
 	canonPath := F2CanonicalSidecarPath(dir, cycle)
 
 	// Build the MD-specific view metadata: a copy of the canonical sidecar's
@@ -159,6 +169,12 @@ func RenderF2MarkdownProjection(sidecar *F2CanonicalSidecar, dir string) ([]byte
 	// Addressable binding section. nil binding → bounded "(no operator-source
 	// synthesis bound)" notice (F2 does NOT infer a binding from narrative).
 	renderF2R5Binding(&b, sidecar.R5Binding)
+
+	// --- P-b evidence-grade media provenance (memo L184-233) ---
+	// Domain-free capability-class slot. Empty → bounded "(no evidence-grade
+	// media attachments)" notice. All provenance is structurally present but
+	// content truth is NOT verified (honesty ceiling).
+	renderF2MediaAttachments(&b, sidecar.MediaAttachments)
 
 	// --- Canonical envelope (projected) ---
 	b.WriteString("## Canonical Envelope (projected)\n\n")
@@ -848,6 +864,16 @@ func PersistF2Pair(ingest *F2IngestResult, dir string, now time.Time) (F2PairOut
 	if ingest.R5Binding != nil {
 		if vErr := ValidateF2R5BindingAgainstEnvelope(ingest.R5Binding, ingest.CanonicalEnvelope); vErr != nil {
 			return F2PairNotAttempted, fmt.Errorf("f2 pair: R5 binding validation failed (durable-path gate): %w", vErr)
+		}
+	}
+
+	// P-b media attachment validation gate (defense-in-depth): if the ingest
+	// carries media attachments, each is structurally validated against the
+	// canonical envelope. A hand-constructed attachment with arbitrary strings
+	// is rejected here — it never reaches the durable pair.
+	for i := range ingest.MediaAttachments {
+		if vErr := ValidateF2MediaAttachmentAgainstEnvelope(&ingest.MediaAttachments[i], ingest.CanonicalEnvelope); vErr != nil {
+			return F2PairNotAttempted, fmt.Errorf("f2 pair: media attachment[%d] validation failed (durable-path gate): %w", i, vErr)
 		}
 	}
 

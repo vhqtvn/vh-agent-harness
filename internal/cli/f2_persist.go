@@ -119,6 +119,12 @@ type F2CanonicalSidecar struct {
 	// the canonical fingerprint (the collision key is the envelope content
 	// alone). Carried here so the binding is durable (persisted with the pair).
 	R5Binding *F2R5Binding `json:"r5_binding,omitempty"`
+
+	// MediaAttachments are the optional P-b evidence-grade media provenance
+	// slots (Slice 7). nil/empty when no attachments were declared. F2-derived
+	// metadata — NOT part of the canonical fingerprint. Carried here so the
+	// attachments are durable (persisted with the pair).
+	MediaAttachments []F2MediaAttachment `json:"media_attachments,omitempty"`
 }
 
 // F2ArtifactViewMeta is the F2 bookkeeping carried on BOTH the canonical
@@ -256,7 +262,8 @@ func buildF2CanonicalSidecar(ingest *F2IngestResult, dir string, now time.Time) 
 			ReciprocalLocator:              filepath.Join(dir, cycle+".md"),
 			WriteTimestamp:                 now.UTC().Format(time.RFC3339),
 		},
-		R5Binding: ingest.R5Binding,
+		R5Binding:        ingest.R5Binding,
+		MediaAttachments: ingest.MediaAttachments,
 	}
 }
 
@@ -311,6 +318,16 @@ func PersistF2CanonicalSidecar(ingest *F2IngestResult, dir string, now time.Time
 	if ingest.R5Binding != nil {
 		if vErr := ValidateF2R5BindingAgainstEnvelope(ingest.R5Binding, ingest.CanonicalEnvelope); vErr != nil {
 			return F2PersistNotAttempted, fmt.Errorf("f2 persist: R5 binding validation failed (durable-path gate): %w", vErr)
+		}
+	}
+
+	// P-b media attachment validation gate (defense-in-depth): if the ingest
+	// carries media attachments, each is structurally validated against the
+	// canonical envelope. A hand-constructed attachment with arbitrary strings
+	// is rejected here — it never reaches the durable artifact.
+	for i := range ingest.MediaAttachments {
+		if vErr := ValidateF2MediaAttachmentAgainstEnvelope(&ingest.MediaAttachments[i], ingest.CanonicalEnvelope); vErr != nil {
+			return F2PersistNotAttempted, fmt.Errorf("f2 persist: media attachment[%d] validation failed (durable-path gate): %w", i, vErr)
 		}
 	}
 
