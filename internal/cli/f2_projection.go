@@ -139,6 +139,12 @@ func RenderF2MarkdownProjection(sidecar *F2CanonicalSidecar, dir string) ([]byte
 	// this first layer, not buried in the details below.
 	renderF2PCHeadline(&b, env, mdMeta)
 
+	// --- P-a decision-request table (memo L289-301) ---
+	// Structured per-option decision matrix from canonical R3 option records +
+	// P-a probes. A second salience layer after the headline, before the
+	// detailed envelope projection.
+	renderF2PATable(&b, env)
+
 	// --- Canonical envelope (projected) ---
 	b.WriteString("## Canonical Envelope (projected)\n\n")
 	fmt.Fprintf(&b, "- **Schema version:** `%s`\n", env.SchemaVersion)
@@ -305,6 +311,200 @@ func renderF2PCHeadline(b *strings.Builder, env *F1SynthesisEnvelope, meta F2Art
 	b.WriteString("\n")
 
 	b.WriteString("<!-- f2-pc-headline:end -->\n\n")
+}
+
+// renderF2PATable renders the P-a decision-request table (memo L289-301).
+// This is a structured per-option decision matrix rendered from canonical R3
+// option records + P-a probes. It is a SALIENCE LAYER (second, after the P-c
+// headline) that organizes the same canonical data into a per-option view.
+//
+// Required columns (memo L291-292): Option | Costs | Evidence against |
+// Weakest claim | Reversal cost.
+//
+// CANONICAL SOURCE MAPPING (C1 build gate, resolved):
+//   - Option         : F1R3Option.OptionID + Mode
+//   - Costs          : F1R3Option.Costs (canonical R3 field — NOT invented)
+//   - Evidence against: P-a probes referenced by the option's
+//     CounterEvidenceProbeRefs, result enum preserved EXACTLY
+//   - Weakest claim   : those same probes' WeakestClaim field
+//   - Reversal cost   : F1R3Option.ReversalCost (canonical R3 field)
+//
+// PROBE-RESULT SEMANTICS PRESERVED EXACTLY (memo L295-301):
+//   - found / not_found_in_checked_scope / unavailable / not_run.
+//   - not_found_in_checked_scope NEVER renders as "none exists."
+//   - unavailable stays distinct from a negative result.
+//   - not_run stays visibly unperformed.
+//   - Blank cells must not silently collapse these states.
+//
+// BOUNDED ABSENCE (memo L335): if a canonical field is absent (empty Costs,
+// empty ReversalCost, no CounterEvidenceProbeRefs, etc.), the cell renders a
+// bounded-absence marker — NEVER a fabricated value and NEVER a global
+// "none exists" claim.
+//
+// MISSING CANONICAL SOURCE (memo L335): if no R3 entry exists at all, the
+// entire section renders an incomplete-surface diagnostic — NOT a fabricated
+// table with invented rows.
+//
+// STRUCTURAL MARKERS: the section uses fenced HTML comments
+// (f2-pa-table:begin / :end) so the doctor (Slice 9) can locate it.
+//
+// NO SEMANTIC SUMMARIZATION: every value is a verbatim projection. The
+// renderer NEVER generates alternatives, joins evidence, or produces an
+// independent conclusion.
+func renderF2PATable(b *strings.Builder, env *F1SynthesisEnvelope) {
+	// Find the R3 and P-a entries by family name (do NOT assume order).
+	var r3Entry, paEntry *F1FamilyEntry
+	for i := range env.Entries {
+		switch env.Entries[i].Family {
+		case F1FamilyR3RedesignFork:
+			r3Entry = &env.Entries[i]
+		case F1FamilyPACounterEvidence:
+			paEntry = &env.Entries[i]
+		}
+	}
+
+	b.WriteString("<!-- f2-pa-table:begin -->\n")
+	b.WriteString("## P-a Decision-Request Table\n\n")
+	b.WriteString("> Deterministic per-option decision matrix from canonical R3 option records + P-a probes. Probe-result semantics preserved EXACTLY. No model summarization.\n\n")
+
+	// Missing canonical source → incomplete-surface diagnostic (not a
+	// fabricated table with invented rows — memo L335).
+	if r3Entry == nil || r3Entry.R3 == nil || len(r3Entry.R3.Options) == 0 {
+		b.WriteString("- (no R3 redesign fork with options in canonical emit — decision-request table not applicable)\n\n")
+		b.WriteString("<!-- f2-pa-table:end -->\n\n")
+		return
+	}
+
+	// Build a probe lookup index from the P-a entry (if present) so the
+	// option's CounterEvidenceProbeRefs can be resolved to probe records.
+	// This is a pure rendering helper — no new state is introduced.
+	probeIndex := make(map[string]*F1PAProbe)
+	if paEntry != nil && paEntry.PA != nil {
+		for i := range paEntry.PA.Probes {
+			probeIndex[paEntry.PA.Probes[i].ProbeID] = &paEntry.PA.Probes[i]
+		}
+	}
+
+	// Render the table header.
+	b.WriteString("| Option | Costs | Evidence against | Weakest claim | Reversal cost |\n")
+	b.WriteString("|--------|-------|-----------------|---------------|---------------|\n")
+
+	for _, opt := range r3Entry.R3.Options {
+		optionCell := fmt.Sprintf("`%s` (%s)", opt.OptionID, opt.Mode)
+		costsCell := f2PATableCostsCell(opt.Costs)
+		evidenceCell := f2PATableEvidenceCell(opt.CounterEvidenceProbeRefs, probeIndex)
+		weakestCell := f2PATableWeakestCell(opt.CounterEvidenceProbeRefs, probeIndex)
+		reversalCell := f2PATableReversalCell(opt.ReversalCost)
+
+		fmt.Fprintf(b, "| %s | %s | %s | %s | %s |\n",
+			optionCell, costsCell, evidenceCell, weakestCell, reversalCell)
+	}
+	b.WriteString("\n")
+
+	b.WriteString("<!-- f2-pa-table:end -->\n\n")
+}
+
+// f2PATableCostsCell renders the Costs column from the canonical R3 option's
+// Costs field. Bounded absence if empty — NEVER fabricated.
+func f2PATableCostsCell(costs []string) string {
+	if len(costs) == 0 {
+		return "(no costs declared in canonical R3 option)"
+	}
+	return f2RenderStringList(costs)
+}
+
+// f2PATableReversalCell renders the Reversal-cost column from the canonical R3
+// option's ReversalCost field. Bounded absence if empty — NEVER fabricated.
+func f2PATableReversalCell(reversalCost string) string {
+	if reversalCost == "" {
+		return "(no reversal cost declared in canonical R3 option)"
+	}
+	return "`" + reversalCost + "`"
+}
+
+// f2PATableEvidenceCell renders the Evidence-against column from the P-a probes
+// referenced by the option's CounterEvidenceProbeRefs. The probe-result enum is
+// preserved EXACTLY (memo L295-301):
+//   - found                     : includes evidence refs;
+//   - not_found_in_checked_scope: includes checked scope, NEVER "none exists";
+//   - unavailable               : includes limitation, stays distinct from negative;
+//   - not_run                   : stays visibly unperformed.
+//
+// Bounded absence if no probes are bound. Unresolved probe refs render an
+// incomplete-surface diagnostic (not a fabricated cell).
+func f2PATableEvidenceCell(probeRefs []string, probeIndex map[string]*F1PAProbe) string {
+	if len(probeRefs) == 0 {
+		return "(no counter-evidence probe bound to this option)"
+	}
+	parts := make([]string, 0, len(probeRefs))
+	for _, ref := range probeRefs {
+		probe, ok := probeIndex[ref]
+		if !ok {
+			parts = append(parts, fmt.Sprintf("probe `%s` referenced but not found in canonical P-a entry", ref))
+			continue
+		}
+		// The result enum is rendered EXACTLY — never collapsed or
+		// paraphrased (memo L295-301).
+		switch probe.Result {
+		case F1PAResultFound:
+			if len(probe.EvidenceRefs) > 0 {
+				parts = append(parts, fmt.Sprintf("probe `%s`: `%s` (evidence: %s)",
+					probe.ProbeID, probe.Result, f2RenderStringList(probe.EvidenceRefs)))
+			} else {
+				parts = append(parts, fmt.Sprintf("probe `%s`: `%s`", probe.ProbeID, probe.Result))
+			}
+		case F1PAResultNotFoundInCheckedScope:
+			// NEVER renders as "none exists" (memo L298). This is
+			// BOUNDED absence — the scope that was checked.
+			if len(probe.CheckedScope) > 0 {
+				parts = append(parts, fmt.Sprintf("probe `%s`: `%s` (checked scope: %s)",
+					probe.ProbeID, probe.Result, f2RenderStringList(probe.CheckedScope)))
+			} else {
+				parts = append(parts, fmt.Sprintf("probe `%s`: `%s` (scope not declared in canonical probe)",
+					probe.ProbeID, probe.Result))
+			}
+		case F1PAResultUnavailable:
+			// Stays distinct from a negative result (memo L299).
+			if probe.Limitation != "" {
+				parts = append(parts, fmt.Sprintf("probe `%s`: `%s` (limitation: %s)",
+					probe.ProbeID, probe.Result, probe.Limitation))
+			} else {
+				parts = append(parts, fmt.Sprintf("probe `%s`: `%s` (limitation not declared in canonical probe)",
+					probe.ProbeID, probe.Result))
+			}
+		case F1PAResultNotRun:
+			// Stays visibly unperformed (memo L300).
+			parts = append(parts, fmt.Sprintf("probe `%s`: `%s` (not performed)", probe.ProbeID, probe.Result))
+		default:
+			// Unknown enum — render it verbatim (the F1 validator should
+			// have caught this, but F2 does not reinterpret).
+			parts = append(parts, fmt.Sprintf("probe `%s`: `%s` (unknown result enum)", probe.ProbeID, probe.Result))
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+// f2PATableWeakestCell renders the Weakest-claim column from the P-a probes
+// referenced by the option's CounterEvidenceProbeRefs. Only probes that carry a
+// non-empty WeakestClaim are listed. Bounded absence if none declare one.
+func f2PATableWeakestCell(probeRefs []string, probeIndex map[string]*F1PAProbe) string {
+	if len(probeRefs) == 0 {
+		return "(no weakest claim — no probe bound to this option)"
+	}
+	parts := make([]string, 0, len(probeRefs))
+	for _, ref := range probeRefs {
+		probe, ok := probeIndex[ref]
+		if !ok {
+			continue // unresolved probe already diagnosed in the evidence cell
+		}
+		if probe.WeakestClaim != "" {
+			parts = append(parts, fmt.Sprintf("probe `%s`: %s", probe.ProbeID, probe.WeakestClaim))
+		}
+	}
+	if len(parts) == 0 {
+		return "(no weakest claim declared by bound probes)"
+	}
+	return strings.Join(parts, "; ")
 }
 
 // renderF2EntrySection renders one family entry. Deterministic: walks the
