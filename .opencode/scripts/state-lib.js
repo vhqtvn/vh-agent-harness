@@ -1,6 +1,10 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import {
+    validateF3DesignReadiness,
+    computeDesignDigest,
+} from "./f3-design-readiness.js";
 
 const SCHEMA_VERSION = 1;
 const LOCK_TIMEOUT_MS = 5000;
@@ -783,6 +787,7 @@ function defaultCoordinationTaskPayload(taskID = "") {
         report_paths: [],
         review_paths: [],
         latest_report: null,
+        f3_design_readiness: null,
         next_action: "",
         predicted_impact: null,
         measured_outcome: null,
@@ -1550,6 +1555,14 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
                       ),
                   }
                 : null,
+        f3_design_readiness:
+            source.f3_design_readiness === null ||
+            source.f3_design_readiness === undefined
+                ? null
+                : typeof source.f3_design_readiness === "object" &&
+                    !Array.isArray(source.f3_design_readiness)
+                  ? source.f3_design_readiness
+                  : null,
         next_action: String(source.next_action || "").trim(),
         predicted_impact: normalizeOptionalText(source.predicted_impact),
         measured_outcome: normalizeOptionalText(source.measured_outcome),
@@ -2394,6 +2407,7 @@ function formatPlanMarkdown({
     cwd,
     sessionID,
     body,
+    f3DesignReadiness,
 }) {
     const normalizedBody = String(body || "").trim();
     if (!normalizedBody) {
@@ -2401,7 +2415,7 @@ function formatPlanMarkdown({
             "Plan body is empty. Refuse to save an empty plan.",
         );
     }
-    return [
+    const lines = [
         "---",
         `id: ${yamlScalar(planId)}`,
         `title: ${yamlScalar(title)}`,
@@ -2410,11 +2424,24 @@ function formatPlanMarkdown({
         `created_at: ${yamlScalar(createdAt)}`,
         `cwd: ${yamlScalar(cwd)}`,
         `session_id: ${yamlScalar(sessionID)}`,
-        "---",
-        "",
-        normalizedBody,
-        "",
-    ].join("\n");
+    ];
+    // F3 design-readiness envelope (copied from the draft on approval so the
+    // dispatch backstop can re-read it without going back to the draft).
+    // Double-JSON-encoded: the outer JSON.stringify wraps the value in quotes
+    // + escapes inner quotes so parseFrontmatter's `"..."`-quote auto-unquote
+    // path produces the JSON string; the reader JSON.parses once more to
+    // recover the object. See readDraft's decodeEnvelopeFromFrontmatter.
+    if (
+        f3DesignReadiness !== null &&
+        f3DesignReadiness !== undefined &&
+        typeof f3DesignReadiness === "object"
+    ) {
+        lines.push(
+            `f3_design_readiness: ${JSON.stringify(JSON.stringify(f3DesignReadiness))}`,
+        );
+    }
+    lines.push("---", "", normalizedBody, "");
+    return lines.join("\n");
 }
 
 function planRecordPath(planRecord) {
@@ -2428,6 +2455,10 @@ function savePlan(sessionID, slugOrTitle, body, title, options = {}) {
     const planTitle = String(title || "").trim() || titleFromSlug(slug);
     const createdAt = isoZ();
     const cwd = options.cwd || binding.cwd || hostCwd();
+    const f3DesignReadiness =
+        options.f3DesignReadiness !== undefined
+            ? options.f3DesignReadiness
+            : null;
     let savedPlan = null;
 
     const index = updateSessionIndex(sessionName, (current) => {
@@ -2448,6 +2479,7 @@ function savePlan(sessionID, slugOrTitle, body, title, options = {}) {
             cwd,
             sessionID,
             body,
+            f3DesignReadiness,
         });
         atomicWriteText(planPath, markdown);
         savedPlan = {
@@ -2562,6 +2594,48 @@ function resolvePlan(sessionID, selector, options = {}) {
             `Resolved plan file is missing on disk: ${targetPath}`,
         );
     }
+    const body = fs.readFileSync(targetPath, "utf8");
+
+    // F3 dispatch backstop (Slice 4). When a caller resolves an APPROVED plan
+    // FOR DISPATCH (options.dispatchFreshnessCheck), re-verify the plan's F3
+    // envelope is still bound to the current design before handing the body
+    // to an executor. Catches:
+    // (a) post-approval design drift — the plan body was edited after
+    //     approval, invalidating the design digest the envelope was bound to;
+    // (b) bypassed approval states — an approved plan whose envelope was
+    //     stripped or never copied through.
+    // BACKSTOP, not the primary gate — the primary gate is at approveDraft
+    // (draft -> approved). Informational reads (session-context builder, plan
+    // listing) pass no dispatchFreshnessCheck and are exempt: a stale plan
+    // surfaces as a dispatch refusal only when an agent actually tries to
+    // execute it, not when it is merely listed.
+    if (
+        options.dispatchFreshnessCheck &&
+        resolved.plan.status === "approved"
+    ) {
+        const parsed = parseFrontmatter(body);
+        const dispatchEnvelope = decodeEnvelopeFromFrontmatter(
+            parsed.frontmatter.f3_design_readiness,
+        );
+        const dispatchDigest = computePlanDesignDigest(parsed.body);
+        const dispatchF3 = validateF3DesignReadiness({
+            envelope: dispatchEnvelope,
+            currentDesignDigest: dispatchDigest,
+            transitionKind: "plan_dispatch",
+        });
+        if (!dispatchF3.passed) {
+            throw new StateError(
+                `F3 dispatch backstop refused plan dispatch ` +
+                    `for plan ${resolved.plan.id} ` +
+                    `(reason: ${dispatchF3.reasonCode}). ` +
+                    `${dispatchF3.detail} ` +
+                    `The approved plan's design-readiness envelope is stale, ` +
+                    `incomplete, or missing relative to the current plan body. ` +
+                    `Re-approve with a current envelope before dispatch.`,
+            );
+        }
+    }
+
     return {
         session_id: sessionID,
         session_name: sessionName,
@@ -2569,7 +2643,7 @@ function resolvePlan(sessionID, selector, options = {}) {
         resolved_via: resolved.resolvedVia,
         plan: resolved.plan,
         path: targetPath,
-        body: fs.readFileSync(targetPath, "utf8"),
+        body,
     };
 }
 
@@ -2649,6 +2723,25 @@ function parseFrontmatter(markdown) {
             .join("\n")
             .trim(),
     };
+}
+
+// Decode an F3 envelope stored as a double-JSON-encoded frontmatter value.
+// parseFrontmatter's `"..."`-quote auto-unquote path already produced a JSON
+// string; JSON.parse once more recovers the object. Returns null for missing,
+// non-string, or unparseable values (fail-closed at the crossing).
+function decodeEnvelopeFromFrontmatter(rawValue) {
+    if (typeof rawValue !== "string" || rawValue === "") {
+        return null;
+    }
+    try {
+        const parsed = JSON.parse(rawValue);
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+            return parsed;
+        }
+        return null;
+    } catch (error) {
+        return null;
+    }
 }
 
 function summarizePlanBody(markdown, maxLines = 16) {
@@ -3959,6 +4052,41 @@ function activateCoordinationTask(sessionID, taskIDRaw, options = {}) {
         );
     }
     throwCollectedErrors(errors);
+
+    // F3 dispatch backstop (Slice 4). Re-verify the design-readiness envelope
+    // is still current before ready -> working dispatch. This catches:
+    // (a) post-crossing design drift — the design changed after draft -> ready
+    //     but before the task is activated for execution; and
+    // (b) bypassed ready states — e.g. a task created-as-ready via
+    //     saveCoordinationTask (which skips readyCoordinationTask's primary
+    //     F3 gate) lands at ready without an envelope.
+    // BACKSTOP, not the primary gate — the primary gate is at
+    // readyCoordinationTask (draft -> ready, inside the updateCoordinationTask
+    // lock). A working -> working resume/reclaim/takeover is already past
+    // dispatch and is exempt from the freshness re-check. This backstop runs
+    // outside the lock: the worst-case race is a design change between this
+    // check and the locked write, which only delays catching the staleness
+    // until the next activation — acceptable for a backstop.
+    if (loaded.payload.status === "ready") {
+        const dispatchDigest = computeTaskDesignDigest(loaded.payload, {});
+        const dispatchF3 = validateF3DesignReadiness({
+            envelope: loaded.payload.f3_design_readiness,
+            currentDesignDigest: dispatchDigest,
+            transitionKind: "task_dispatch",
+        });
+        if (!dispatchF3.passed) {
+            throw new StateError(
+                `F3 dispatch backstop refused ready -> working ` +
+                    `for task ${loaded.payload.task_id} ` +
+                    `(reason: ${dispatchF3.reasonCode}). ` +
+                    `${dispatchF3.detail} ` +
+                    `The task's design-readiness envelope is stale, incomplete, ` +
+                    `or missing relative to the current design. Re-ready the ` +
+                    `task with a current envelope before dispatch.`,
+            );
+        }
+    }
+
     const isReclaim =
         loaded.payload.status === "working" && !currentOwner;
     const recommendedSessionName = normalizeSessionName(loaded.payload.task_id);
@@ -4011,6 +4139,54 @@ function activateCoordinationTask(sessionID, taskIDRaw, options = {}) {
     };
 }
 
+function resolveTaskDesignFields(currentPayload, incomingChanges) {
+    const p =
+        incomingChanges && typeof incomingChanges === "object"
+            ? incomingChanges
+            : {};
+    return {
+        task_id: currentPayload.task_id,
+        title:
+            p.title !== undefined
+                ? String(p.title || "").trim()
+                : currentPayload.title,
+        task_type:
+            p.task_type !== undefined
+                ? String(p.task_type || "").trim().toLowerCase()
+                : currentPayload.task_type,
+        primary_lane:
+            p.primary_lane !== undefined
+                ? String(p.primary_lane || "").trim()
+                : currentPayload.primary_lane,
+        files_in_scope:
+            p.files_in_scope !== undefined
+                ? normalizeFileScope(p.files_in_scope)
+                : currentPayload.files_in_scope,
+        success_criteria:
+            p.success_criteria !== undefined
+                ? normalizeStringList(p.success_criteria)
+                : currentPayload.success_criteria,
+        constraints:
+            p.constraints !== undefined
+                ? normalizeStringList(p.constraints)
+                : currentPayload.constraints,
+        non_goals:
+            p.non_goals !== undefined
+                ? normalizeStringList(p.non_goals)
+                : currentPayload.non_goals,
+        validation_plan:
+            p.validation_plan !== undefined
+                ? normalizeStringList(p.validation_plan)
+                : currentPayload.validation_plan,
+    };
+}
+
+function computeTaskDesignDigest(currentPayload, incomingChanges) {
+    return computeDesignDigest(
+        resolveTaskDesignFields(currentPayload, incomingChanges),
+    );
+}
+
 function readyCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) {
     const actor = coordinationActorContext(sessionID, options);
     const loaded = loadCoordinationTask(taskIDRaw);
@@ -4024,8 +4200,58 @@ function readyCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) {
         payload.next_action !== undefined
             ? String(payload.next_action || "").trim()
             : null;
-    const wasDraft = loaded.payload.status === "draft";
+
     const saved = updateCoordinationTask(loaded.payload.task_id, (current) => {
+        // Locked lifecycle re-check: the pre-lock status guard above read
+        // loaded.payload.status. Between that read and this locked callback,
+        // a concurrent caller may have transitioned the task (e.g.,
+        // activated it to "working"). Re-check current.status before writing
+        // to prevent a stale ready request from silently downgrading an
+        // active worker's lifecycle claim.
+        if (!["draft", "ready"].includes(current.status)) {
+            throw new StateError(
+                `Task ${current.task_id} is ${current.status} and cannot be prepared for execution.`,
+            );
+        }
+
+        const wasDraft = current.status === "draft";
+
+        // F3 design-readiness gate (sole BLOCKS family). Fires only at the
+        // draft -> ready BUILD-READY crossing. A ready -> ready metadata
+        // refresh does not cross BUILD-READY and is exempt. Fail-closed: a
+        // task whose design names an ownership hazard but lacks a complete,
+        // current-digest-bound resolution package is refused — the task
+        // stays draft and no task_readied event is emitted.
+        //
+        // Runs INSIDE the updateCoordinationTask lock so the digest is
+        // computed from the locked `current` record, not a pre-load
+        // snapshot. This prevents a TOCTOU race where a concurrent draft
+        // metadata update changes a digest-bearing design field between
+        // the check and the locked write.
+        if (wasDraft) {
+            const f3Envelope =
+                payload.f3_design_readiness !== undefined
+                    ? payload.f3_design_readiness
+                    : current.f3_design_readiness;
+            const designDigest = computeTaskDesignDigest(current, payload);
+            const f3Result = validateF3DesignReadiness({
+                envelope: f3Envelope,
+                currentDesignDigest: designDigest,
+                transitionKind: "task_ready",
+            });
+            if (!f3Result.passed) {
+                throw new StateError(
+                    `F3 design-readiness gate refused draft -> ready ` +
+                        `(reason: ${f3Result.reasonCode}). ` +
+                        `${f3Result.detail} ` +
+                        `The task remains draft. Supply a complete ` +
+                        `f3_design_readiness envelope bound to the current ` +
+                        `design digest, or declare ownership_hazards: [] if ` +
+                        `no hazard was named.`,
+                );
+            }
+        }
+
         // Collect every enum-validation problem before throwing so a payload
         // with several bad enum fields reports all of them at once.
         const errors = [];
@@ -4141,6 +4367,10 @@ function readyCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) {
                 payload.predicted_impact !== undefined
                     ? normalizeOptionalText(payload.predicted_impact)
                     : current.predicted_impact,
+            f3_design_readiness:
+                payload.f3_design_readiness !== undefined
+                    ? payload.f3_design_readiness
+                    : current.f3_design_readiness,
             status: "ready",
             next_action:
                 explicitNextAction !== null
@@ -5061,6 +5291,7 @@ function formatDraftMarkdown({
     cwd,
     sessionID,
     body,
+    f3DesignReadiness,
 }) {
     const normalizedBody = String(body || "").trim();
     if (!normalizedBody) {
@@ -5068,7 +5299,7 @@ function formatDraftMarkdown({
             "Draft body is empty. Refuse to save an empty draft.",
         );
     }
-    return [
+    const lines = [
         "---",
         `slug: ${yamlScalar(slug)}`,
         `title: ${yamlScalar(title)}`,
@@ -5078,11 +5309,20 @@ function formatDraftMarkdown({
         `updated_at: ${yamlScalar(updatedAt)}`,
         `cwd: ${yamlScalar(cwd)}`,
         `session_id: ${yamlScalar(sessionID)}`,
-        "---",
-        "",
-        normalizedBody,
-        "",
-    ].join("\n");
+    ];
+    // F3 design-readiness envelope (authored by the design lane per Slice 5).
+    // Double-JSON-encoded; see formatPlanMarkdown + decodeEnvelopeFromFrontmatter.
+    if (
+        f3DesignReadiness !== null &&
+        f3DesignReadiness !== undefined &&
+        typeof f3DesignReadiness === "object"
+    ) {
+        lines.push(
+            `f3_design_readiness: ${JSON.stringify(JSON.stringify(f3DesignReadiness))}`,
+        );
+    }
+    lines.push("---", "", normalizedBody, "");
+    return lines.join("\n");
 }
 
 function saveDraft(sessionID, slugOrTitle, body, title, options = {}) {
@@ -5097,6 +5337,12 @@ function saveDraft(sessionID, slugOrTitle, body, title, options = {}) {
         : null;
     const createdAt = (existing && existing.frontmatter.created_at) || isoZ();
     const updatedAt = isoZ();
+    const f3DesignReadiness =
+        options.f3DesignReadiness !== undefined
+            ? options.f3DesignReadiness
+            : existing
+              ? decodeEnvelopeFromFrontmatter(existing.frontmatter.f3_design_readiness)
+              : null;
     const markdown = formatDraftMarkdown({
         slug,
         title: draftTitle,
@@ -5106,6 +5352,7 @@ function saveDraft(sessionID, slugOrTitle, body, title, options = {}) {
         cwd: options.cwd || binding.cwd || hostCwd(),
         sessionID,
         body,
+        f3DesignReadiness,
     });
     atomicWriteText(targetPath, markdown);
     return {
@@ -5140,17 +5387,56 @@ function readDraft(sessionID, slugOrTitle, options = {}) {
         created_at: parsed.frontmatter.created_at || null,
         updated_at: parsed.frontmatter.updated_at || null,
         body: parsed.body,
+        f3_design_readiness: decodeEnvelopeFromFrontmatter(
+            parsed.frontmatter.f3_design_readiness,
+        ),
     };
+}
+
+// Compute the design digest for a draft/approved plan. Per the Slice-0 digest
+// scope, the design prose IS the design: the digest is over the
+// frontmatter-stripped, trimmed plan body. Title/slug are excluded (identity,
+// not design). The caller passes the already-stripped body that readDraft /
+// parseFrontmatter produce.
+function computePlanDesignDigest(planBody) {
+    return computeDesignDigest(String(planBody || "").trim());
 }
 
 function approveDraft(sessionID, slugOrTitle, options = {}) {
     const draft = readDraft(sessionID, slugOrTitle, options);
+
+    // F3 design-readiness gate (sole BLOCKS family). This is the SECOND
+    // BUILD-READY crossing (draft-plan → approved) and uses the SAME shared
+    // validator as the task-card route (Slice 2). The gate fires between
+    // readDraft and savePlan: on block, the approved-plan artifact is NEVER
+    // created (savePlan is not called) and the session index is untouched.
+    //
+    // The design digest is over the draft's frontmatter-stripped body (the
+    // design prose). The envelope is loaded from the draft's frontmatter
+    // (authored by the design lane per Slice 5).
+    const designDigest = computePlanDesignDigest(draft.body);
+    const f3Result = validateF3DesignReadiness({
+        envelope: draft.f3_design_readiness,
+        currentDesignDigest: designDigest,
+        transitionKind: "plan_approve",
+    });
+    if (!f3Result.passed) {
+        throw new StateError(
+            `F3 design-readiness gate refused draft-plan -> approved ` +
+                `(reason: ${f3Result.reasonCode}). ` +
+                `${f3Result.detail} ` +
+                `The plan remains a draft. Supply a complete ` +
+                `f3_design_readiness envelope bound to the current design ` +
+                `digest, or declare ownership_hazards: [] if no hazard was named.`,
+        );
+    }
+
     const saved = savePlan(
         sessionID,
         draft.slug,
         draft.body,
         draft.title,
-        options,
+        { ...options, f3DesignReadiness: draft.f3_design_readiness },
     );
     return {
         ...saved,
@@ -5399,6 +5685,8 @@ export {
     parseClearedAssumptionsYaml,
     loadClearedAssumptions,
     mergeClearedAssumptions,
+    computeTaskDesignDigest,
+    computePlanDesignDigest,
 };
 
 export default {
@@ -5462,4 +5750,6 @@ export default {
     parseClearedAssumptionsYaml,
     loadClearedAssumptions,
     mergeClearedAssumptions,
+    computeTaskDesignDigest,
+    computePlanDesignDigest,
 };
