@@ -2407,6 +2407,7 @@ function formatPlanMarkdown({
     cwd,
     sessionID,
     body,
+    f3DesignReadiness,
 }) {
     const normalizedBody = String(body || "").trim();
     if (!normalizedBody) {
@@ -2414,7 +2415,7 @@ function formatPlanMarkdown({
             "Plan body is empty. Refuse to save an empty plan.",
         );
     }
-    return [
+    const lines = [
         "---",
         `id: ${yamlScalar(planId)}`,
         `title: ${yamlScalar(title)}`,
@@ -2423,11 +2424,24 @@ function formatPlanMarkdown({
         `created_at: ${yamlScalar(createdAt)}`,
         `cwd: ${yamlScalar(cwd)}`,
         `session_id: ${yamlScalar(sessionID)}`,
-        "---",
-        "",
-        normalizedBody,
-        "",
-    ].join("\n");
+    ];
+    // F3 design-readiness envelope (copied from the draft on approval so the
+    // dispatch backstop can re-read it without going back to the draft).
+    // Double-JSON-encoded: the outer JSON.stringify wraps the value in quotes
+    // + escapes inner quotes so parseFrontmatter's `"..."`-quote auto-unquote
+    // path produces the JSON string; the reader JSON.parses once more to
+    // recover the object. See readDraft's decodeEnvelopeFromFrontmatter.
+    if (
+        f3DesignReadiness !== null &&
+        f3DesignReadiness !== undefined &&
+        typeof f3DesignReadiness === "object"
+    ) {
+        lines.push(
+            `f3_design_readiness: ${JSON.stringify(JSON.stringify(f3DesignReadiness))}`,
+        );
+    }
+    lines.push("---", "", normalizedBody, "");
+    return lines.join("\n");
 }
 
 function planRecordPath(planRecord) {
@@ -2441,6 +2455,10 @@ function savePlan(sessionID, slugOrTitle, body, title, options = {}) {
     const planTitle = String(title || "").trim() || titleFromSlug(slug);
     const createdAt = isoZ();
     const cwd = options.cwd || binding.cwd || hostCwd();
+    const f3DesignReadiness =
+        options.f3DesignReadiness !== undefined
+            ? options.f3DesignReadiness
+            : null;
     let savedPlan = null;
 
     const index = updateSessionIndex(sessionName, (current) => {
@@ -2461,6 +2479,7 @@ function savePlan(sessionID, slugOrTitle, body, title, options = {}) {
             cwd,
             sessionID,
             body,
+            f3DesignReadiness,
         });
         atomicWriteText(planPath, markdown);
         savedPlan = {
@@ -2662,6 +2681,25 @@ function parseFrontmatter(markdown) {
             .join("\n")
             .trim(),
     };
+}
+
+// Decode an F3 envelope stored as a double-JSON-encoded frontmatter value.
+// parseFrontmatter's `"..."`-quote auto-unquote path already produced a JSON
+// string; JSON.parse once more recovers the object. Returns null for missing,
+// non-string, or unparseable values (fail-closed at the crossing).
+function decodeEnvelopeFromFrontmatter(rawValue) {
+    if (typeof rawValue !== "string" || rawValue === "") {
+        return null;
+    }
+    try {
+        const parsed = JSON.parse(rawValue);
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+            return parsed;
+        }
+        return null;
+    } catch (error) {
+        return null;
+    }
 }
 
 function summarizePlanBody(markdown, maxLines = 16) {
@@ -5176,6 +5214,7 @@ function formatDraftMarkdown({
     cwd,
     sessionID,
     body,
+    f3DesignReadiness,
 }) {
     const normalizedBody = String(body || "").trim();
     if (!normalizedBody) {
@@ -5183,7 +5222,7 @@ function formatDraftMarkdown({
             "Draft body is empty. Refuse to save an empty draft.",
         );
     }
-    return [
+    const lines = [
         "---",
         `slug: ${yamlScalar(slug)}`,
         `title: ${yamlScalar(title)}`,
@@ -5193,11 +5232,20 @@ function formatDraftMarkdown({
         `updated_at: ${yamlScalar(updatedAt)}`,
         `cwd: ${yamlScalar(cwd)}`,
         `session_id: ${yamlScalar(sessionID)}`,
-        "---",
-        "",
-        normalizedBody,
-        "",
-    ].join("\n");
+    ];
+    // F3 design-readiness envelope (authored by the design lane per Slice 5).
+    // Double-JSON-encoded; see formatPlanMarkdown + decodeEnvelopeFromFrontmatter.
+    if (
+        f3DesignReadiness !== null &&
+        f3DesignReadiness !== undefined &&
+        typeof f3DesignReadiness === "object"
+    ) {
+        lines.push(
+            `f3_design_readiness: ${JSON.stringify(JSON.stringify(f3DesignReadiness))}`,
+        );
+    }
+    lines.push("---", "", normalizedBody, "");
+    return lines.join("\n");
 }
 
 function saveDraft(sessionID, slugOrTitle, body, title, options = {}) {
@@ -5212,6 +5260,12 @@ function saveDraft(sessionID, slugOrTitle, body, title, options = {}) {
         : null;
     const createdAt = (existing && existing.frontmatter.created_at) || isoZ();
     const updatedAt = isoZ();
+    const f3DesignReadiness =
+        options.f3DesignReadiness !== undefined
+            ? options.f3DesignReadiness
+            : existing
+              ? decodeEnvelopeFromFrontmatter(existing.frontmatter.f3_design_readiness)
+              : null;
     const markdown = formatDraftMarkdown({
         slug,
         title: draftTitle,
@@ -5221,6 +5275,7 @@ function saveDraft(sessionID, slugOrTitle, body, title, options = {}) {
         cwd: options.cwd || binding.cwd || hostCwd(),
         sessionID,
         body,
+        f3DesignReadiness,
     });
     atomicWriteText(targetPath, markdown);
     return {
@@ -5255,17 +5310,56 @@ function readDraft(sessionID, slugOrTitle, options = {}) {
         created_at: parsed.frontmatter.created_at || null,
         updated_at: parsed.frontmatter.updated_at || null,
         body: parsed.body,
+        f3_design_readiness: decodeEnvelopeFromFrontmatter(
+            parsed.frontmatter.f3_design_readiness,
+        ),
     };
+}
+
+// Compute the design digest for a draft/approved plan. Per the Slice-0 digest
+// scope, the design prose IS the design: the digest is over the
+// frontmatter-stripped, trimmed plan body. Title/slug are excluded (identity,
+// not design). The caller passes the already-stripped body that readDraft /
+// parseFrontmatter produce.
+function computePlanDesignDigest(planBody) {
+    return computeDesignDigest(String(planBody || "").trim());
 }
 
 function approveDraft(sessionID, slugOrTitle, options = {}) {
     const draft = readDraft(sessionID, slugOrTitle, options);
+
+    // F3 design-readiness gate (sole BLOCKS family). This is the SECOND
+    // BUILD-READY crossing (draft-plan → approved) and uses the SAME shared
+    // validator as the task-card route (Slice 2). The gate fires between
+    // readDraft and savePlan: on block, the approved-plan artifact is NEVER
+    // created (savePlan is not called) and the session index is untouched.
+    //
+    // The design digest is over the draft's frontmatter-stripped body (the
+    // design prose). The envelope is loaded from the draft's frontmatter
+    // (authored by the design lane per Slice 5).
+    const designDigest = computePlanDesignDigest(draft.body);
+    const f3Result = validateF3DesignReadiness({
+        envelope: draft.f3_design_readiness,
+        currentDesignDigest: designDigest,
+        transitionKind: "plan_approve",
+    });
+    if (!f3Result.passed) {
+        throw new StateError(
+            `F3 design-readiness gate refused draft-plan -> approved ` +
+                `(reason: ${f3Result.reasonCode}). ` +
+                `${f3Result.detail} ` +
+                `The plan remains a draft. Supply a complete ` +
+                `f3_design_readiness envelope bound to the current design ` +
+                `digest, or declare ownership_hazards: [] if no hazard was named.`,
+        );
+    }
+
     const saved = savePlan(
         sessionID,
         draft.slug,
         draft.body,
         draft.title,
-        options,
+        { ...options, f3DesignReadiness: draft.f3_design_readiness },
     );
     return {
         ...saved,
@@ -5515,6 +5609,7 @@ export {
     loadClearedAssumptions,
     mergeClearedAssumptions,
     computeTaskDesignDigest,
+    computePlanDesignDigest,
 };
 
 export default {
@@ -5579,4 +5674,5 @@ export default {
     loadClearedAssumptions,
     mergeClearedAssumptions,
     computeTaskDesignDigest,
+    computePlanDesignDigest,
 };
