@@ -19,10 +19,12 @@ permission.task map.)
 
 ### Outbound — handoff
 
-- `harness-release-readiness` → `releaser` (HANDOFF, only when `ready: yes` AND
-  a human explicitly approves). The readiness reporter does NOT create the tag;
+- `harness-release-readiness` → `releaser` (HANDOFF, only when `ready: yes` —
+  operator initiation IS the authorization; see releaser Invariant 8 and the
+  operator-interaction contract). The readiness reporter does NOT create the tag;
   it populates its `handoff_to_releaser` field with `(version_hint, last_tag,
-  commit_range)` and the human + `releaser` act on it. The report's
+  commit_range)` bound to `authorized_by:"operator-initiation"` and does NOT run
+  a confirmation round — the operator + `releaser` act on the hint. The report's
   `migration_note_coverage` may hand off an `expected_at_cut` state (note absent
   but determinable — the releaser authors it at cut time) or a
   `resumable_existing_note` state (exact-version canonical note already
