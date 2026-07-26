@@ -66,6 +66,9 @@ var doctorCmd = &cobra.Command{
   behavioral-closure closeout declarations internally consistent  FAIL if verdict:proven claimed without a proven crux result
   dev-stale-embed binary's embedded corpus vs checkout's templates/core  WARN if differs (source checkout only; consumers see nothing)
   f1-envelope     committed f1-synthesis-envelope projections structurally consistent  FAIL if unknown enum / missing family / dangling cross-ref / digest mismatch
+  f1-f2-consistency F1→F2 emit-boundary digest-binding consistent  FAIL if F2 view drifted / missing binding / foreign field
+  f2-pairs        F2 canonical+MD pairs structurally consistent  FAIL if pair incomplete / digest mismatch / stale projection
+  head-progress   last N successful closeouts advanced HEAD  WARN if post_commit_head flatlined across N closeouts (Pattern 4); SKIP greenfield
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -339,6 +342,24 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	f2pr := checkF2PairConsistency(abs)
 	fmt.Fprintln(out, "    "+f2pr.String())
 	applyTier(f2pr.tier, &problems, &warns)
+
+	// 19. head-progress (the synchronous HEAD-staleness WARN, disposition §4.2
+	//     sub-item 2). Reads the durable commit-gate closeout ledger
+	//     (.git/commit-gate/closeouts.log) the gate appends to on each closeout
+	//     (sub-item 1) and WARNs when the last N successful closeouts all
+	//     recorded the SAME post_commit_head (a flatline — closeouts are
+	//     "succeeding" but HEAD is not advancing — the canary for the ~6h
+	//     commit-freeze symptom, Pattern 4 same-file tangle). WARN-only by
+	//     construction: never changes the exit code, never gives the coordinator
+	//     authority (§5: gate/doctor act, coordinator reads). Greenfield (not a
+	//     git work tree, ledger missing, or < N successful closeouts) is SKIP —
+	//     fail-open-safe, exactly like dev-stale-embed #15 (consumers/fresh
+	//     checkouts see nothing). This is the SAFETY LAYER INFORMing (doctor
+	//     WARNs; it does not block).
+	fmt.Fprintln(out, "  head-progress:")
+	hpr := checkHeadProgress(abs)
+	fmt.Fprintln(out, "    "+hpr.String())
+	applyTier(hpr.tier, &problems, &warns)
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)
