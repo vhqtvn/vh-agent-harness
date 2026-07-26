@@ -65,11 +65,22 @@ This is dogfood-local by design: it references real paths in this repo
    an unresolved migration-note content decision, an irreversible-and-non-standard
    action, or anything blocking the ceremony cannot resolve itself) — those are
    the legitimate reasons to keep the handoff null, NOT a "shall I cut now?"
-   round run after `ready: yes`. When you do populate `handoff_to_releaser`, you
-   signal the handoff (the hint the operator + `releaser` act on) — you do NOT
-   spawn the `releaser` via the task surface (your `task: {"*":"deny"}` refuses
-   all downstream delegations), do not invoke a release-tag wrapper, do not call
-   `commit-gate.sh`, do not run `git tag`.
+   round run after `ready: yes`. **AUTO-RECOVER complement (closed recipe list,
+   see the operator-interaction contract in `README.agent.md` and the releaser's
+   Invariant 8):** a red gate whose recovery is mechanical, known-safe, and named
+   in the closed recipe list is NOT a STOP-AND-ASK — the `releaser` auto-recovers
+   it (apply recipe, retry once, log). The sole seeded recipe is `stale/missing
+   ceremony binary` doctor red (G0c) → `make build` + retry via
+   `./bin/vh-agent-harness`. This reporter does NOT apply recipes (it is
+   read-only and the wrapper is denied to it); when it surfaces a red that is
+   recipe-listed, it notes the recipe-list membership in `warnings` (not
+   `blockers`) and the handoff can still fire `ready: yes`, because the
+   `releaser` will auto-recover the red downstream. A red NOT in the recipe list
+   remains a hard `ready: no` blocker as before. When you do populate
+   `handoff_to_releaser`, you signal the handoff (the hint the operator +
+   `releaser` act on) — you do NOT spawn the `releaser` via the task surface
+   (your `task: {"*":"deny"}` refuses all downstream delegations), do not invoke
+   a release-tag wrapper, do not call `commit-gate.sh`, do not run `git tag`.
 5. **Refuse rather than guess.** If a check is ambiguous (unclear arc scope,
    uncertain whether a change is consumer-facing, conflicting version signals),
    STOP, mark the report `ready: no`, and list the ambiguity under

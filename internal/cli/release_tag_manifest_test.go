@@ -104,6 +104,12 @@ func setupReleaseTagManifestRepo(t *testing.T, spec manifestSpec) (scratch, wrap
 	// Seed a buildable, gofmt-stable Go module so the wrapper's G0
 	// green-tree gate (go test/vet/build/gofmt) passes by default. The
 	// package name is non-main so no `func main()` is required.
+	//
+	// Seed .gitignore with `bin/` (mirrors the real repo) so a ceremony-local
+	// binary at ./bin/vh-agent-harness (the path G0c resolves after the Layer 1
+	// pin) is invisible to the G0b clean-worktree gate. Initial (pre-tag)
+	// commit, so NOT in the release arc.
+	writeFile(".gitignore", "bin/\n")
 	writeFile("go.mod", "module scratch\n\ngo 1.21\n")
 	writeFile("fileA.go", "package scratch\n")
 	writeFile("fileB.go", "package scratch\n")
@@ -1442,6 +1448,12 @@ func TestReleaseTag_G0c_DoctorUnhealthyRefuses(t *testing.T) {
 	linBody := "lineage_version: \"1\"\ntemplate:\n    source: templates/core\n    commit: \"\"\n    ref: test\nrender:\n    rendered_by: test\n"
 	commitScratchFile(t, scratch, ".vh-agent-harness/lineage.yml", linBody, "lineage for G0c test")
 	restampManifest(t, scratch, manifestSpecForReadiness())
+
+	// Place the ceremony-local binary at ./bin/vh-agent-harness — after the
+	// Layer 1 pin, G0c resolves this path deterministically (NEVER PATH). Without
+	// it, G0c would refuse with "ceremony binary missing" before reaching doctor,
+	// and this test could no longer exercise the doctor-unhealthy refuse.
+	copyHarnessBinaryToCeremony(t, scratch)
 
 	msgFile := filepath.Join(t.TempDir(), "msg.txt")
 	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {

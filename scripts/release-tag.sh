@@ -552,11 +552,11 @@ if [ -n "$G0B_OUTPUT" ]; then
   exit 1
 fi
 
-# G0c — vh-agent-harness doctor HEALTHY (all 14 checks). This is the mandatory
+# G0c — vh-agent-harness doctor HEALTHY (all 15 checks). This is the mandatory
 # machine gate that makes `vh-agent-harness doctor` a HARD ceremony stop: any
 # problem-tier or fail-tier check (including #12 defer-liveness, #13
-# staged-errata-content, and #14 behavioral-closure) refuses the tag BEFORE the
-# readiness-pass artifact gate or any tag mutation.
+# staged-errata-content, #14 behavioral-closure, and #15 dev-stale-embed)
+# refuses the tag BEFORE the readiness-pass artifact gate or any tag mutation.
 #
 # This kills the "human-remembered pre-flight" anti-pattern: doctor is no longer
 # a step the releaser agent might forget — it is a non-zero-exit gate the wrapper
@@ -578,21 +578,47 @@ fi
 # doctor problem. Push-only mode exits before reaching this gate (the tag
 # already passed it at creation).
 #
-# STALENESS GUARD: the binary on PATH could predate check #13
-# (staged-errata-content) and report HEALTHY while lacking the enforcement this
-# gate exists to provide. The canary `vh-agent-harness release inject-errata
-# --help` exits 0 only on a binary that has the new subcommand; a stale binary
-# fails it and G0c refuses with a clear "rebuild" message.
+# CEREMONY-BINARY RESOLUTION (Layer 1 of the stale-PATH-binary recurrence fix,
+# §4.7 correction-as-specification): the release ceremony already requires
+# `make build` at start, so ./bin/vh-agent-harness EXISTS and is the
+# authoritative ceremony binary. G0c resolves it DETERMINISTICALLY and NEVER
+# from PATH. A stale PATH-resolved binary (e.g. an older installed copy at
+# ~/.local/bin/ or ~/go/bin/) is the defect class that halted THREE consecutive
+# releases — v0.15.0 (dev-stale-binary: PATH 0.15.1 predated f2-pairs #18, so
+# doctor on PATH did not run #18), v0.17.0 (residual "reinstall PATH binary"
+# for stale b4fccab), and v0.18.0 (STOP-AND-ASK #1: doctor UNHEALTHY on the
+# stale PATH binary, recovered via PATH="$PWD/bin:$PATH") — all for a
+# mechanical, decision-free recovery. After this pin, PATH staleness is at most
+# an informational closeout note ("your installed binary is older than the
+# release — run your install step"), never a gate input.
+#
+# If ./bin/vh-agent-harness is missing (the ceremony skipped `make build`),
+# G0c refuses with a clear "run `make build` first" message. This is a
+# recipe-list red (the operator-interaction contract's AUTO-RECOVER class: the
+# releaser applies the recipe — `make build` + retry via ./bin/vh-agent-harness
+# — and retries once, logging the recovery), NOT a PATH staleness.
+HARNESS_BIN="./bin/vh-agent-harness"
 if [ -f ".vh-agent-harness/lineage.yml" ]; then
-  if ! vh-agent-harness release inject-errata --help >/dev/null 2>&1; then
+  if [ ! -x "$HARNESS_BIN" ]; then
     emit false "$VERSION" "" false \
-      "release-readiness-gate: G0c staleness guard — the vh-agent-harness binary on PATH predates the staged-errata-content enforcement (no \`release inject-errata\` subcommand); run \`make build\` so doctor reflects the current source, then retry" \
+      "release-readiness-gate: G0c ceremony binary missing — $HARNESS_BIN not found or not executable; run \`make build\` first (the ceremony-local binary is authoritative, never a PATH-resolved copy)" \
       "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
     exit 1
   fi
-  if ! G0C_OUTPUT=$(vh-agent-harness doctor 2>&1); then
+  # STALENESS GUARD: the ceremony binary could predate check #13
+  # (staged-errata-content) and report HEALTHY while lacking the enforcement
+  # this gate exists to provide. The canary `$HARNESS_BIN release inject-errata
+  # --help` exits 0 only on a binary that has the new subcommand; a stale
+  # ceremony binary fails it and G0c refuses with a clear "rebuild" message.
+  if ! "$HARNESS_BIN" release inject-errata --help >/dev/null 2>&1; then
     emit false "$VERSION" "" false \
-      "release-readiness-gate: G0c doctor not HEALTHY (a machine check FAILED — run \`vh-agent-harness doctor\` for the full report). Doctor output: $G0C_OUTPUT" \
+      "release-readiness-gate: G0c staleness guard — the ceremony binary $HARNESS_BIN predates the staged-errata-content enforcement (no \`release inject-errata\` subcommand); run \`make build\` so it reflects the current source, then retry" \
+      "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+    exit 1
+  fi
+  if ! G0C_OUTPUT=$("$HARNESS_BIN" doctor 2>&1); then
+    emit false "$VERSION" "" false \
+      "release-readiness-gate: G0c doctor not HEALTHY (a machine check FAILED — run \`$HARNESS_BIN doctor\` for the full report). Doctor output: $G0C_OUTPUT" \
       "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
     exit 1
   fi

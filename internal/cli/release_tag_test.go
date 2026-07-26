@@ -29,11 +29,16 @@ import (
 
 // harnessBinaryOnce builds the vh-agent-harness binary at most once per test
 // process and prepends its directory to PATH. This lets scripts/release-tag.sh's
-// G0c gate (`vh-agent-harness doctor`) resolve the binary when run from scratch
-// test fixtures. Because os.Setenv modifies the process environment, ALL
-// subsequent os.Environ() calls (used to build cmd.Env) inherit the binary.
+// G0c gate resolve the binary when run from scratch test fixtures. Because
+// os.Setenv modifies the process environment, ALL subsequent os.Environ() calls
+// (used to build cmd.Env) inherit the binary.
+//
+// After the Layer 1 ceremony-binary pin, G0c resolves ./bin/vh-agent-harness
+// (NEVER PATH); copyHarnessBinaryToCeremony places the built binary at that
+// ceremony-local path inside a scratch fixture.
 var (
 	harnessBinaryOnce sync.Once
+	harnessBinaryPath string
 	harnessBinaryErr  error
 )
 
@@ -53,14 +58,39 @@ func ensureHarnessBinaryOnPath(t *testing.T) {
 			harnessBinaryErr = fmt.Errorf("go build harness binary: %w\n%s", err, out)
 			return
 		}
+		harnessBinaryPath = binPath
 		os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 		// G0c gates doctor on seam-installation (lineage.yml presence); scratch
 		// fixtures lack lineage.yml, so G0c skips there naturally — no env-var
 		// bypass is needed or shipped. The binary-on-PATH is still required for
-		// the dedicated G0c test whose fixture DOES write a lineage.yml.
+		// the dedicated G0c test whose fixture DOES write a lineage.yml AND
+		// copies the binary to ./bin/vh-agent-harness (the ceremony-local path
+		// G0c resolves after the Layer 1 pin).
 	})
 	if harnessBinaryErr != nil {
 		t.Fatalf("ensure harness binary on PATH: %v", harnessBinaryErr)
+	}
+}
+
+// copyHarnessBinaryToCeremony copies the once-built harness binary to
+// <destDir>/bin/vh-agent-harness — the ceremony-local path scripts/release-tag.sh
+// G0c resolves after the Layer 1 stale-PATH-binary fix (the wrapper NEVER
+// resolves PATH for G0c). Tests that force G0c to run (by writing a lineage.yml)
+// MUST place the ceremony binary via this helper, otherwise G0c refuses with the
+// "ceremony binary missing" recipe-list red before reaching doctor.
+func copyHarnessBinaryToCeremony(t *testing.T, destDir string) {
+	t.Helper()
+	ensureHarnessBinaryOnPath(t)
+	dst := filepath.Join(destDir, "bin", "vh-agent-harness")
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatalf("mkdir ceremony bin: %v", err)
+	}
+	data, err := os.ReadFile(harnessBinaryPath)
+	if err != nil {
+		t.Fatalf("read built harness binary: %v", err)
+	}
+	if err := os.WriteFile(dst, data, 0o755); err != nil {
+		t.Fatalf("write ceremony binary: %v", err)
 	}
 }
 
@@ -152,6 +182,14 @@ func setupReleaseTagRepo(t *testing.T) (scratch, wrapper, tasksDir, msgFile stri
 	// Seed a buildable, gofmt-stable Go module so the wrapper's G0
 	// green-tree gate (go test/vet/build/gofmt) passes by default. The
 	// package name is non-main so no `func main()` is required.
+	//
+	// Seed .gitignore with `bin/` (mirrors the real repo) so a ceremony-local
+	// binary placed at ./bin/vh-agent-harness (the path G0c resolves after the
+	// Layer 1 pin) is invisible to the G0b clean-worktree gate. Without this,
+	// the untracked ceremony binary would dirty `git status --short` and refuse
+	// the tag at G0b before G0c ever runs. The .gitignore is in the INITIAL
+	// (pre-tag) commit, so it is NOT in the release arc (fileA.go + dir/fileC.go).
+	writeFile(".gitignore", "bin/\n")
 	writeFile("go.mod", "module scratch\n\ngo 1.21\n")
 	writeFile("fileA.go", "package scratch\n")
 	writeFile("fileB.go", "package scratch\n")

@@ -1394,8 +1394,33 @@ the operator's initiating instruction was itself the authorization.
 - bundled secondary tasks in the initiating instruction (e.g. "release then
   delete X") — these are pre-authorized in order; no per-step re-confirmation.
 
+**AUTO-RECOVER (self-recoverable red gates — the complement to STOP-AND-ASK
+#1):** a red gate whose recovery is (a) **mechanical** (no decision), (b)
+**known-safe** (the recipe cannot weaken a gate or mutate state outside its
+named scope), and (c) **named in the closed recipe list below** is
+AUTO-RECOVERED, not escalated to the operator: apply the recipe, retry the gate
+ONCE, and log the recovery in the closeout. STOP-AND-ASK fires only on a
+**recipe-miss** (the red is not in the list) or a **retry failure** (the recipe
+was applied but the gate is still red on retry). This is a whitelist of boring
+recoveries, NOT a general workaround license — the agent CANNOT extend the list
+at runtime.
+
+**Closed recipe list (exhaustive — a red not named here is a STOP-AND-ASK):**
+1. **`stale/missing ceremony binary` doctor red (G0c).** Symptom: the
+   release-tag wrapper's G0c gate refuses with "ceremony binary missing —
+   ./bin/vh-agent-harness not found" or "G0c staleness guard — the ceremony
+   binary ... predates the staged-errata-content enforcement". Recipe: run
+   `make build` (produces `./bin/vh-agent-harness` from current source), then
+   retry the ceremony via the wrapper — G0c resolves `./bin/vh-agent-harness`
+   deterministically and never PATH, so the retry exercises the freshly-built
+   binary. Known-safe: `make build` writes only `bin/vh-agent-harness` (a build
+   artifact); it touches no gate, no manifest, no tag, no ref. Log:
+   "AUTO-RECOVER recipe #1 applied (make build + retry via
+   ./bin/vh-agent-harness); G0c green on retry."
+
 **Core rule:** operator initiation of a release IS the authorization for the
-standard end-to-end ceremony. Green gate = proceed.
+standard end-to-end ceremony. Green gate = proceed. A recipe-listed red gate
+auto-recovers; every other red is a STOP-AND-ASK.
 
 ### Single release-authority model (committed manifest)
 
