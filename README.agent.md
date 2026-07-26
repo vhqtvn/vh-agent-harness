@@ -1337,6 +1337,36 @@ and `git push` of release tags are forbidden to every agent (shell-guard's
 `git-mutation-bypass` rule). The wrapper invokes the DEFER evaluator before any
 tag mutation and refuses on any blocker / evaluator-error.
 
+### Operator-interaction contract (release ceremony)
+
+Operator initiation of a release IS the authorization for the standard
+end-to-end ceremony. Once the operator instructs a release, the ceremony runs
+end-to-end WITHOUT a confirmation round: a green gate means PROCEED. The
+anti-pattern this contract kills is a "shall I cut now?" go/no-go round run
+AFTER the readiness verdict was already `ready: yes` and every gate was green —
+the operator's initiating instruction was itself the authorization.
+
+**STOP AND ASK the operator only when:**
+1. any gate is RED or the release-tag wrapper refuses (never work around it);
+2. the DEFER evaluator returns `refuse` / `override-required` (`disclose` =
+   PROCEED — do not ask);
+3. version derivation is ambiguous (two defensible versions with different
+   consumer impact);
+4. the migration note requires a content decision the arc doesn't answer;
+5. an action is irreversible AND non-standard (force-push, history rewrite, tag
+   deletion — the standard tag+push of a green ceremony is NOT in this class);
+6. anything pending/blocking that the ceremony cannot resolve itself.
+
+**NEVER ask to confirm:**
+- the standard next ceremony step;
+- post-release cleanup already named in the initiating instruction;
+- anything a green gate already authorized;
+- bundled secondary tasks in the initiating instruction (e.g. "release then
+  delete X") — these are pre-authorized in order; no per-step re-confirmation.
+
+**Core rule:** operator initiation of a release IS the authorization for the
+standard end-to-end ceremony. Green gate = proceed.
+
 ### Single release-authority model (committed manifest)
 
 The release DEFER gate has exactly ONE input mode: the evaluator reads the

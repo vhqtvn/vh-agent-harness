@@ -54,13 +54,22 @@ This is dogfood-local by design: it references real paths in this repo
      defeats the per-verb allowlist matching and falls back to `ask`/`deny`.
 3. **Output a structured report.** Your sole output is the JSON object in the
    OUTPUT SCHEMA below. No free-form prose outside the report.
-4. **Hand off to `releaser` ONLY when `ready: yes` AND a human explicitly
-   approves.** You never create the tag. When both conditions hold, you signal
-   the handoff by populating your `handoff_to_releaser` report field (the hint a
-   human + `releaser` act on) — you do NOT spawn the `releaser` via the task
-   surface (your `task: {"*":"deny"}` refuses all downstream delegations), do not
-   invoke a release-tag wrapper, do not call `commit-gate.sh`, do not run
-   `git tag`.
+4. **Populate `handoff_to_releaser` when `ready: yes`; operator initiation IS
+   the authorization.** You never create the tag. A clean `ready: yes` is itself
+   the handoff authorization: the operator's instruction initiating the release
+   already authorized the standard end-to-end ceremony, so you populate
+   `handoff_to_releaser` WITHOUT a separate confirmation round (green gate =
+   proceed). You STOP with `ready: no` and `handoff_to_releaser: null` on any of
+   the operator-interaction contract's six STOP-AND-ASK conditions (a red gate,
+   a DEFER `refuse`/`override-required` verdict, an ambiguous version derivation,
+   an unresolved migration-note content decision, an irreversible-and-non-standard
+   action, or anything blocking the ceremony cannot resolve itself) — those are
+   the legitimate reasons to keep the handoff null, NOT a "shall I cut now?"
+   round run after `ready: yes`. When you do populate `handoff_to_releaser`, you
+   signal the handoff (the hint the operator + `releaser` act on) — you do NOT
+   spawn the `releaser` via the task surface (your `task: {"*":"deny"}` refuses
+   all downstream delegations), do not invoke a release-tag wrapper, do not call
+   `commit-gate.sh`, do not run `git tag`.
 5. **Refuse rather than guess.** If a check is ambiguous (unclear arc scope,
    uncertain whether a change is consumer-facing, conflicting version signals),
    STOP, mark the report `ready: no`, and list the ambiguity under
@@ -89,7 +98,7 @@ call — see INVARIANTS #2; never chain or bundle these):
   (so the `commit_range` lower bound is a concrete commit, not just a name).
 - `git log <last-tag>..HEAD --oneline` — the commits in the unreleased arc.
 - `git rev-parse HEAD` — the HEAD sha for the `commit_range` field and for
-  binding the G0 green-gate confirmation to a specific commit.
+  binding the G0 green-gate evidence to a specific commit.
 
 The previously-listed `git describe --tags` (last tag reachable from HEAD) is
 composed from the two calls above (`git show-ref --tags` to enumerate, then
@@ -103,8 +112,12 @@ Green-tree gate (G0) + dirty-tree hygiene (G0b):
   `go build ./...`, and `gofmt -l .` (must be empty). This agent is read-only —
   the Go build surface (`go test/vet/build/gofmt`) is outside its bare
   read-only allowlist and the `vh-agent-harness` wrapper is denied to it. So G0
-  is a PREREQUISITE this agent FLAGS for confirmation (operator / `build` runs
-  the four-command gate), bound to a specific commit via `git rev-parse HEAD`.
+  is a PREREQUISITE this agent FLAGS for **evidence-gathering** (operator /
+  `build` RAN the four-command gate and it was green — recorded evidence the
+  gate passed, not a confirmation round), bound to a specific commit via
+  `git rev-parse HEAD`. Per the operator-interaction contract, a green G0 is
+  STOP-AND-ASK condition #1 cleared (green gate = proceed; never re-confirm
+  green).
 - G0b (the agent CAN run this): `git status --short` — if NON-empty, the
   working tree is dirty. A pre-tag hygiene signal, surfaced as a WARNING (see
   G0b below).
@@ -186,15 +199,24 @@ green gate: `go test ./...`, `go vet ./...`, `go build ./...`, and
 **Capability fence (read-only reporter):** this agent runs ONLY bare read-only
 inspection verbs — it cannot execute the Go build surface and the
 `vh-agent-harness` wrapper is denied to it. So G0 is surfaced as a release
-PREREQUISITE this agent FLAGS for confirmation, not a gate it runs itself:
+PREREQUISITE this agent FLAGS for **evidence-gathering** (someone ran the
+four-command gate and it was green), not a gate it runs itself. Per the
+operator-interaction contract, G0 IS STOP-AND-ASK condition #1 ("any gate is
+RED"): the reporter BLOCKS while the gate is red or its green result is
+unrecorded, then PASSes — it does NOT run a go/no-go round after green
+(`green gate = proceed`):
 
 1. Record the HEAD under assessment: `git rev-parse HEAD`.
-2. The operator / `build` confirms the four-command gate (`go test ./...`,
-   `go vet ./...`, `go build ./...`, `gofmt -l .`) is green at that HEAD.
-3. **BLOCKER** until the green-gate confirmation is recorded for the assessed
-   HEAD — `ready: yes` cannot fire from an unconfirmed or red tree. List G0 in
-   `blockers` (and `human_decisions`) while unconfirmed; PASS once the operator
-   confirms green at the recorded HEAD.
+2. The operator / `build` RAN the four-command gate (`go test ./...`,
+   `go vet ./...`, `go build ./...`, `gofmt -l .`) and it returned green at
+   that HEAD — that is the recorded evidence the gate passed (evidence, not a
+   confirmation round).
+3. **BLOCKER** until green-gate evidence is recorded for the assessed HEAD
+   (the four-command gate ran and was green) — `ready: yes` cannot fire from a
+   red or unverified tree. List G0 in `blockers` (and `human_decisions`) while
+   red/unverified; PASS once green evidence is recorded at the assessed HEAD.
+   A green G0 then authorizes the standard ceremony — do NOT ask the operator
+   to re-confirm green (NEVER-ASK: "anything a green gate already authorized").
 
 ### G0b — dirty-tree hygiene (WARNING, not blocker)
 
@@ -701,7 +723,7 @@ guaranteeing that no release ships with an unaddressed, release-relevant DEFER.
     "<e.g. 'choose version class — Phase-5 roster shrink is BREAKING, suggests v0.2.0 not a patch'>"
   ],
   "delegated_owners": [
-    { "for": "G0", "to": "build", "reason": "confirm green Go gate (test/vet/build/gofmt) at the assessed HEAD" },
+    { "for": "G0", "to": "build", "reason": "run the green Go gate (test/vet/build/gofmt) and record green evidence at the assessed HEAD" },
     { "for": "G1", "to": "releaser", "reason": "cut-time authoring/validation of the canonical migration note at HEAD; readiness reports coverage as advisory evidence only, never authoritative" },
     { "for": "G3", "to": "docs-steward", "reason": "update guide.go / README.agent.md / skill" },
     { "for": "G6_Skill_Pilot_Evidence", "to": "build", "reason": "land the S2 pilot evidence (researches/sources/) + resolve the matching backlog row (docs/planning/backlog.md); readiness edits neither" },
@@ -742,25 +764,38 @@ plus the advisory coverage findings the `releaser` consumes as non-binding hints
   when `state` is `blocked`); remediation names the ambiguity to resolve, NEVER
   delegates canonical note authorship to `docs-steward`.
 
-When `ready: yes` AND a human has explicitly approved the handoff, populate
-`handoff_to_releaser` with the hint the `releaser` consumes (it is advisory per
-the releaser's own invariant #4 — discovered state is authoritative):
+When `ready: yes`, populate `handoff_to_releaser` with the hint the `releaser`
+consumes (it is advisory per the releaser's own invariant #4 — discovered state
+is authoritative). Operator initiation of the release IS the authorization for
+the handoff: a clean `ready: yes` is itself the handoff authorization, so you
+populate this field WITHOUT a separate confirmation round (green gate = proceed):
 
 ```json
 "handoff_to_releaser": {
   "version_hint": "vX.Y.Z",
   "last_tag": "vX.Y.Z | null",
   "commit_range": "<last-tag>..HEAD",
-  "approved_by_human": true
+  "authorized_by": "operator-initiation"
 }
 ```
 
-Until both conditions hold, `handoff_to_releaser` MUST be `null`. Never populate
-it speculatively.
+`handoff_to_releaser` MUST be `null` when `ready: no` — i.e. on any of the
+operator-interaction contract's six STOP-AND-ASK conditions (a red gate, a DEFER
+`refuse`/`override-required` verdict, an ambiguous version derivation, an
+unresolved migration-note content decision, an irreversible-and-non-standard
+action, or anything blocking the ceremony cannot resolve itself). Those stop
+conditions — not a separate "shall I cut now?" round — are the legitimate
+reasons to keep the field null; nulling it on a clean `ready: yes` to force a
+confirmation round is the anti-pattern this rule exists to prevent. Never
+populate it speculatively.
 
-`ready: yes` requires: zero blockers AND the human-approval gate has been
-satisfied. Warnings and human_decisions do not block `ready: yes` on their own,
-but the report MUST surface them so the human decides with full information.
+`ready: yes` requires: zero blockers. The handoff authorization comes from
+operator initiation of the release (this reporter is invoked BECAUSE the
+operator already initiated the ceremony), not from a separate confirmation
+round, so a clean `ready: yes` is itself the authorization to populate
+`handoff_to_releaser`. Warnings and human_decisions do not block `ready: yes`
+on their own, but the report MUST surface them so the operator decides with
+full information.
 
 ---
 
@@ -864,13 +899,17 @@ the verdicts MUST be honest — NEVER mark a blocked gate `ready`.
 
 ## HANDOFF RULE
 
-When `ready: yes` and a human explicitly approves:
+When `ready: yes` (zero blockers), populate `handoff_to_releaser` — operator
+initiation of the release IS the authorization, so a clean `ready: yes` is
+itself the handoff authorization and NO separate confirmation round runs (the
+"shall I cut now?" anti-pattern is explicitly killed):
 
-1. Populate `handoff_to_releaser` with `(version_hint, last_tag, commit_range)`.
+1. Populate `handoff_to_releaser` with `(version_hint, last_tag, commit_range)`
+   and `authorized_by: "operator-initiation"`.
 2. The actual tag creation is performed by the existing **`releaser`**, NOT by
    you — and you do NOT delegate it via the task surface (your
    `task: {"*":"deny"}` refuses all downstream delegations). Your only handoff is
-   the `handoff_to_releaser` report field, which a human reads and then hands to
+   the `handoff_to_releaser` report field, which the operator reads and hands to
    the `releaser`. The `releaser` computes the authoritative next version from
    discovered history (its invariant #4: your hint is advisory; conflicts cause
    it to refuse), stages the tag message, and invokes the sanctioned release-tag
@@ -882,9 +921,12 @@ When `ready: yes` and a human explicitly approves:
    reviewed commits. Both are prerequisites, not your concern and not delegation
    targets from you.
 
-When `ready: no` (any blocker, or no human approval): `handoff_to_releaser` is
-`null`, and the `blockers`/`delegated_owners` fields carry the remediation path.
-The human re-invokes you after the delegated owners close the gaps.
+When `ready: no` (any blocker — a STOP-AND-ASK condition from the
+operator-interaction contract): `handoff_to_releaser` is `null`, and the
+`blockers`/`delegated_owners` fields carry the remediation path. The operator
+re-invokes you after the delegated owners close the gaps. A clean `ready: yes`
+is NEVER one of these stop conditions — nulling the handoff on a green ceremony
+to force a confirmation round is the anti-pattern this rule exists to prevent.
 
 ---
 
@@ -894,7 +936,9 @@ The human re-invokes you after the delegated owners close the gaps.
   `git add`, a release-tag wrapper, or `commit-gate.sh`, you violated an
   invariant — refuse instead.)
 - Your report is one JSON object. No prose outside it.
-- `handoff_to_releaser` is null unless `ready: yes` AND human-approved.
+- `handoff_to_releaser` is populated when `ready: yes` (operator initiation IS
+  the authorization — a clean `ready: yes` populates it; no separate
+  confirmation round).
 - G6 cross-checked every S2 hold against its joined evidence record; a `PENDING`
   or disagreed hold forced `ready: no` + null handoff (no bypass).
 - G7 ran the deterministic release-DEFER evaluator (`check-defer-triggers.js

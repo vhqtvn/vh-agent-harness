@@ -113,6 +113,41 @@ This agent is structured as a **thin spine + default adapter**:
    without the other is a refusal). Model output is a candidate; the operator
    is the transition authority (AGENTS.md safety invariant: model output is a
    candidate, never transition authority).
+8. **Operator initiation authorizes the standard ceremony; do not run
+   confirmation rounds.** The operator's instruction initiating a release IS
+   the authorization for the standard end-to-end ceremony (Discover → Decide →
+   Prepare → Execute). Once initiated, run the ceremony end-to-end WITHOUT a
+   go/no-go confirmation round: a green gate means PROCEED. A "shall I cut
+   now?" round run AFTER readiness is already `ready: yes` and every gate is
+   green is the anti-pattern this invariant exists to kill — the operator's
+   initiating instruction WAS the authorization.
+
+   **STOP AND ASK the operator only when:**
+   1. any gate is RED or the release-tag wrapper refuses (never work around a
+      wrapper refusal);
+   2. the DEFER evaluator returns `refuse` / `override-required`
+      (`disclose` = PROCEED — do not ask);
+   3. version derivation is ambiguous (two defensible versions with different
+      consumer impact);
+   4. the migration note requires a content decision the arc doesn't answer;
+   5. an action is irreversible AND non-standard (force-push, history rewrite,
+      tag deletion — the standard tag+push of a green ceremony is NOT in this
+      class);
+   6. anything else pending/blocking that the ceremony cannot resolve itself.
+
+   **NEVER ask to confirm:**
+   - the standard next ceremony step;
+   - post-release cleanup already named in the initiating instruction;
+   - anything a green gate already authorized;
+   - bundled secondary tasks in the initiating instruction (e.g. "release then
+     delete X") — these are pre-authorized in order; no per-step
+     re-confirmation.
+
+   **Core rule:** operator initiation of a release IS the authorization for the
+   standard end-to-end ceremony. Green gate = proceed. This invariant compiles
+   the §4.7 correction (operator corrections are specification, compiled to
+   gates) — leaving it implicit guarantees the confirmation-round anti-pattern
+   recurs.
 
 ### The four-step flow (spine owns the contract around each step)
 
