@@ -287,3 +287,16 @@ The `15ddd54` house rule ("Field-level schemas that downstream briefs consume ar
 - (b) the carrier-side O1 private conformance audit (operator-initiated separately) — **PENDING**.
 - Slice 2 (scrub-gate extension) remains the riskiest slice per Caveat 1 and still must not begin before gate (b) clears.
 - The "memo lands" condition is satisfied (commit `2ecefaf`).
+
+---
+
+## Addendum (2026-07-27): O1 conformance audit VIABLE — HOLD gate (b) cleared
+
+> **[VERBATIM — operator requirement: O1 gate-verdict record]**
+> "O1 conformance audit — VIABLE (carrier-side, 2026-07-27). 8/9 critical properties CONFORM; the 9th (channel-scoped directional authorization) is not present in the carrier today but was confirmed ADDABLE (not blocking) — a carrier-side implementation task, tracked carrier-side. no protocol/schema change required; the publishable contract stands. Non-Actuation and E2E-confidentiality both CONFORM at the carrier. Evidence resides in the carrier repo and is not re-derivable here; this record carries the gate verdict only."
+
+This flips Decision 1's O1-conditional clause to SATISFIED — O1 is confirmed as primary; O2 need not be promoted. No protocol/schema change is required; the publishable contract stands.
+
+**HOLD — fully lifted.** Both conditions are now satisfied: (a) operator post-review CLEARED 2026-07-26; (b) carrier-side O1 conformance audit CLEARED 2026-07-27 (VIABLE). Slice 2 (fail-closed egress gate + domain-free matcher extension — the riskiest slice per Caveat 1) is unblocked to begin against committed canon.
+
+**Persistence discipline (supersession):** the full 9-property audit matrix is intentionally NOT persisted in this repo — carrier file:line citations are verifiable only from the carrier repo and would rot as a stale copy. This record carries only what the harness consumes: the gate verdict. No cross-repo file, absolute paths, or carrier citations enter this repo's canon.
