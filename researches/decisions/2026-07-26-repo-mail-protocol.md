@@ -229,7 +229,7 @@ flowchart LR
 - **Slice 1 — Publishable schema + boundary (composition root).** Four-kind envelope; Non-Actuation delivery-rule schema; capability-class adapter contract; publishable/private boundary; conformance-property requirements without claiming an implementation. Placement: `templates/core/.opencode/` source path + corpus manifest registration if needed; tests at the verified schema/render seam. Dependency: none.
 - **Slice 2 — Fail-closed client egress gate.** Single mandatory post-canonicalization/pre-adapter gate; reuse `forbidden-patterns` + scrub helpers; reject on mutation/unknown-field/uncertain; bind digest+authenticator to canonical bytes; local-only diagnostics. **THIS IS THE RISKIEST SLICE (see Caveat 1): likely needs a domain-free matcher extension to validate arbitrary message scalars, not just command strings; must build against committed canon.** Placement: generic gate under `templates/core/.opencode/`; integration under `templates/overlays/<pack>/`. Dependency: Slice 1.
 - **Slice 3 — Adapter-neutral conformance suite + O3 adapter #0.** One conformance suite for all adapters; filesystem adapter as local reference; atomic writes, immutability, duplicate/replay/expiry/tamper, deterministic terminal projection; path mappings private. Placement: conformance fixtures at the verified test seam; optional adapter under `templates/overlays/<repo-mail-pack>/`; runtime fixtures under `tmp/`. Dependency: Slices 1–2.
-- **Slice 4 — Read-only private O1 conformance audit (DECISION GATE; carrier-side, operator-initiated).** Property-by-property conformance matrix (`pass` / `adaptable gap` / `critical failure`) against the published adapter contract: channel-scoped auth, exact-byte preservation, digest/authenticator support, replay/expiry/idempotency, channel isolation, terminal-only projection, no hidden work-bearing integration. No repo files. Dependency: Slice 1 (+ Slices 2–3 supply gate requirements and reusable tests).
+- **Slice 4 — Read-only private O1 conformance audit (DECISION GATE; carrier-side, operator-initiated).** Property-by-property conformance matrix (`pass` / `adaptable gap` / `critical failure`) against the published adapter contract: channel-scoped auth, exact-byte preservation, digest/authenticator support, replay/expiry/idempotency, channel isolation, terminal-only projection, no hidden work-bearing integration, content confidentiality (E2E body encryption). No repo files. Dependency: Slice 1 (+ Slices 2–3 supply gate requirements and reusable tests).
 - **Slice 5 — Terminal operator projection.** Deterministic notification/inbox/digest/priority; non-authoritative local dedup/presentation caches; claims-to-verify labels; freshness/auth/contradictions/limitations/premise tuples visible; manual operator bridging preserved. Placement: optional protocol overlay; `.local/repo-mail/` for cache/diagnostics (do NOT reuse `.local/coordinator/` task transport); private rule instances in deployment config. Dependency: Slices 1–3.
 - **Slice 6 — Private O1 integration (CONDITIONAL on Slice 4 pass).** Private module + channel bindings; registry/credentials/endpoints/directional-auth/replay-state/delivery-rules off-repo; same adapter conformance suite as O3. Placement: private deployment config + service module only; no participant-specific values in `templates/core` or publishable overlay. Dependency: Slice 4 all critical properties pass; Slices 2, 3, 5 complete.
 - **Slice 7 — O2 fallback (only if O1 fails critically).** Standalone generic relay conforming to the same adapter contract; reuse canonical schema + client gate + conformance suite + terminal projection unchanged; credentials/endpoints/registry/storage/policy private. Placement: optional generic relay adapter under overlay if publishable; private relay deployment off-repo. Dependency: Slice 4 records a non-adaptable critical O1 failure; Slices 1–3 and 5 complete.
@@ -245,7 +245,7 @@ flowchart LR
 
 ## Open question for build (decision-level, not an invitation to reopen)
 
-**Confidentiality is not settled.** The binding prompt fixes authentication + integrity; it does not state whether message-body confidentiality (encryption) is mandatory. If required, it becomes an end-to-end transport conformance property without changing the information-only model. Operator to decide before Slice 1 locks the integrity properties.
+**Confidentiality — DECIDED 2026-07-26 (see Addendum, Decision 3):** E2E body encryption is MANDATORY. It is a transport conformance property; the information-only model and the Non-Actuation spine are unchanged. (Originally flagged here as unsettled; resolved before Slice 1 locks integrity properties.)
 
 ## Evidence / Provenance
 
@@ -267,3 +267,23 @@ This memo follows the `2026-07-25` / `2026-07-22` / `2026-07-23` convention (bol
 ## Governance
 
 The `15ddd54` house rule ("Field-level schemas that downstream briefs consume are carried VERBATIM in decision memos, never summarized…") and the `71efe4e` standing-policy ruling (four conditions for schema-omission-vs-predicate defects) are canonically recorded in [`./2026-07-25-f1-synthesis-family-and-s2a-topology.md`](./2026-07-25-f1-synthesis-family-and-s2a-topology.md) "Governance (operator ruling, 2026-07-26)". This memo's Contract A (envelope field schema) and the two VERBATIM caveat blocks follow that rule; they point to the F1 Governance section rather than carrying a duplicate copy.
+
+## Addendum (2026-07-26): post-review APPROVED + confidentiality decision (E2E mandatory)
+
+**Post-review:** operator APPROVED this memo as canon — no changes. The boundary table, verbatim contracts, and Non-Actuation spine all hold.
+
+**Decision 3 — Content confidentiality (E2E body encryption) is MANDATORY** (operator decision 2026-07-26, recorded before Slice 1 locks integrity properties). This is an APPEND to the record-of-decision; it does not reopen Decisions 1–2 or Contract A.
+
+> **[VERBATIM — operator requirement: why E2E body encryption is mandatory]**
+> "the channel's entire purpose is carrying information about a repo whose identity and features must not leak; an untrusted relay that can observe cleartext content/metadata defeats that even with channel-id anonymization intact, since report BODIES (paths, symptoms, code) can re-identify a repo where the scrub gate cannot reach. encryption is the second defense layer for exactly the scrub-miss case. it stays a transport conformance property — information-only model unchanged."
+
+**Consequences:**
+- Content confidentiality (E2E) is a TRANSPORT CONFORMANCE PROPERTY — not a new envelope field, not a change to the information-only model, and not a change to the Non-Actuation spine (Decision 2). No actuation vocabulary is introduced.
+- It is added to the O1 audit's conformance checklist (Slice 4 — see Edit applied above) and applies equally to O2/O3 via the same capability-class adapter contract.
+- It is the second defense layer for the scrub-miss case: even when the client-side egress gate (Contract C) cannot reach a re-identifying fragment in a report body, the relay sees ciphertext only. Metadata exposure remains a named residual risk (failure-mode table).
+
+**HOLD — restated with current status:**
+- (a) operator post-review of this memo — **CLEARED 2026-07-26**.
+- (b) the carrier-side O1 private conformance audit (operator-initiated separately) — **PENDING**.
+- Slice 2 (scrub-gate extension) remains the riskiest slice per Caveat 1 and still must not begin before gate (b) clears.
+- The "memo lands" condition is satisfied (commit `2ecefaf`).
