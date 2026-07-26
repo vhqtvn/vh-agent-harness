@@ -875,6 +875,29 @@ export default function transform({ context }) {
 
 ### Diagnostics & verification
 
+- **Commit-gate closeout status vocabulary.** Each commit-gate closeout records
+  its outcome to a durable, append-only JSON-lines ledger at
+  `.git/commit-gate/closeouts.log` (gitignored runtime state; never committed)
+  that survives the transient per-session metadata cleanup. The ledger is the
+  substrate for the `head-progress` doctor check (the HEAD-staleness WARN).
+  Recorded `status` values:
+  - `committed` — the closeout landed and advanced HEAD (the normal success).
+  - `no_head_progress` — the closeout landed but HEAD did **not** advance past
+    the reference it was built on (the pre/post-HEAD-equal canary from the
+    vh-solara field report). Structurally unreachable via a normal
+    acquire→commit (a `commit-tree` always produces a new object, and the
+    `no_changes` guard blocks no-op trees); it emits on the genuine post==pre
+    edge / fault condition. **Distinct from `cas_conflict`** (concurrent HEAD
+    movement the CAS retry loop handles) and from `error` (gate-internal
+    failure).
+  - `could_not_land` — the closeout could not land at all due to a content
+    tangle (the same-file conflict the CAS 3-way merge cannot reconcile). Also
+    **distinct from `cas_conflict`**: `cas_conflict` is transient (retryable);
+    `could_not_land` is terminal (reason `merge_failed`/`write_tree_failed`).
+  The durable ledger is the cheap near-term surfacing mitigation for the ~6h
+  commit-freeze symptom (Pattern 4 same-file tangle); it does not address the
+  root cause (worktree/lease isolation — long-term).
+
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   overlay-perm, environment, config-refs, gitignore, auto-classifier,
   auto-gate-ignore, skills, subagent-depth, defer-liveness,

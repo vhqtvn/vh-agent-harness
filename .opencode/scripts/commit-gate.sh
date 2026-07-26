@@ -1042,7 +1042,17 @@ cmd_commit() {
       # 3-way merge: base (original HEAD), theirs (new HEAD), ours (reviewed tree)
       if ! GIT_INDEX_FILE="$merge_index" git read-tree -m -i "$base_tree" "$new_head_tree" "$tree_hash" 2>/dev/null; then
         rm -f "$merge_index" 2>/dev/null || true
-        json_out "{\"status\":\"cas_conflict\",\"reason\":\"merge_failed\",\"original_head\":\"${head_at_acquire}\",\"current_head\":\"${current_head}\"}"
+        # Content tangle: the 3-way merge could not reconcile the reviewed tree
+        # with the concurrent winner's HEAD. Distinct from cas_conflict (which is
+        # concurrent HEAD MOVEMENT the retry loop handles) — this is a terminal
+        # could-not-land (disposition §4.2: reason "tangle"). Record it durably
+        # so doctor's stall/flatline surfacing can see it. post_commit_head is
+        # current_head (the branch did not move — no commit landed).
+        _closeout_append "$lock_uuid" \
+          "$(_field_str "$lock_content" "acquired_at")" \
+          "$(_field_str "$lock_content" "head_at_acquire")" \
+          "$current_head" "could_not_land" "$branch"
+        json_out "{\"status\":\"could_not_land\",\"reason\":\"merge_failed\",\"original_head\":\"${head_at_acquire}\",\"current_head\":\"${current_head}\"}"
         return 1
       fi
 
@@ -1051,7 +1061,12 @@ cmd_commit() {
       rm -f "$merge_index" 2>/dev/null || true
 
       if [[ -z "$new_tree" ]]; then
-        json_out "{\"status\":\"cas_conflict\",\"reason\":\"write_tree_failed\",\"original_head\":\"${head_at_acquire}\",\"current_head\":\"${current_head}\"}"
+        # Same content-tangle class as merge_failed above (could_not_land).
+        _closeout_append "$lock_uuid" \
+          "$(_field_str "$lock_content" "acquired_at")" \
+          "$(_field_str "$lock_content" "head_at_acquire")" \
+          "$current_head" "could_not_land" "$branch"
+        json_out "{\"status\":\"could_not_land\",\"reason\":\"write_tree_failed\",\"original_head\":\"${head_at_acquire}\",\"current_head\":\"${current_head}\"}"
         return 1
       fi
 
@@ -1075,16 +1090,25 @@ cmd_commit() {
     # Update branch ref WITH CAS (old-oid = current_head)
     if [[ -n "$current_head" ]]; then
       if git update-ref "refs/heads/${branch}" "$commit_hash" "$current_head" 2>/dev/null; then
+        # Closeout status (sub-item 3, disposition §4.2): no_head_progress if the
+        # branch did not advance past the reference this commit was built on
+        # (the P3 "pre/post HEAD equal" canary). A normal commit-tree always
+        # produces a new object on top of current_head, so this is structurally
+        # unreachable via the normal acquire→commit flow (the no_changes guard
+        # also blocks no-op trees); it emits on the genuine post==pre edge /
+        # fault condition. Otherwise committed.
+        local closeout_status="committed"
+        if [[ -n "$current_head" && "$commit_hash" == "$current_head" ]]; then
+          closeout_status="no_head_progress"
+        fi
         # Record post-commit HEAD to the durable closeout ledger (sub-item 1,
-        # disposition §4.2). head_at_acquire read from lock_content is the
-        # ORIGINAL acquire-time HEAD (mirrors the per-session field); the
-        # in-scope `head_at_acquire` variable may have been mutated by the CAS
-        # rebase loop to the concurrent winner's HEAD. post_commit_head is where
-        # the branch actually landed. Slice B refines the status token.
+        # disposition §4.2). head_at_acquire from lock_content is the ORIGINAL
+        # acquire-time HEAD (mirrors the per-session field); post_commit_head is
+        # where the branch actually landed.
         _closeout_append "$lock_uuid" \
           "$(_field_str "$lock_content" "acquired_at")" \
           "$(_field_str "$lock_content" "head_at_acquire")" \
-          "$commit_hash" "committed" "$branch"
+          "$commit_hash" "$closeout_status" "$branch"
         # Success — clean up
         rm -f "$private_index_path" 2>/dev/null || true
         rm -f "$(_session_meta_path "$lock_uuid")" 2>/dev/null || true
@@ -1096,7 +1120,7 @@ cmd_commit() {
         if [[ "$tree_hash" != "$original_tree" ]]; then
           rebased_flag=",\"rebased\":true,\"original_tree\":\"${original_tree}\""
         fi
-        json_out "{\"status\":\"committed\",\"commit_hash\":\"${commit_hash}\",\"tree_hash\":\"${tree_hash}\",\"branch\":\"${branch}\",\"cas_attempts\":${cas_attempt}${rebased_flag}}"
+        json_out "{\"status\":\"${closeout_status}\",\"commit_hash\":\"${commit_hash}\",\"tree_hash\":\"${tree_hash}\",\"branch\":\"${branch}\",\"cas_attempts\":${cas_attempt}${rebased_flag}}"
         return 0
       else
         # CAS failed — HEAD moved under us

@@ -520,6 +520,87 @@ func TestCommitGate_CloseoutLedger(t *testing.T) {
 			t.Errorf("ledger count %d exceeds cap+%d slack; trim not running", len(records), n)
 		}
 	})
+
+	// -----------------------------------------------------------------
+	// Subtest 6: could_not_land on a genuine same-line merge conflict (the
+	// Pattern-4 same-file tangle). This is the REAL gate-status crux for
+	// sub-item 3 (disposition §4.2): a closeout that could not land because of
+	// a content conflict, distinct from cas_conflict (concurrent HEAD movement
+	// the CAS retry loop handles) and from error (gate-internal failure).
+	// -----------------------------------------------------------------
+	t.Run("could_not_land_on_merge_conflict", func(t *testing.T) {
+		dir, dstScripts := setupScratchRepo(t)
+		seedAndCommit(t, dir, "base\n") // single-line file; same-line edits conflict
+
+		// Acquire A: working tree file.txt = "A\n", staged into A's private index.
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("A\n"), 0o644); err != nil {
+			t.Fatalf("write A: %v", err)
+		}
+		uuidAa := genUUID(t, dstScripts)
+		msgA := writeAgentMsg(t, dir, uuidAa)
+		acqA := runGate(t, dstScripts, dir, nil, "acquire",
+			"--paths", `["file.txt"]`, "--message-file", msgA, "--session-alias", "conflict-a")
+		uuidAg, _ := acqA["uuid"].(string)
+		treeA, _ := acqA["tree_hash"].(string)
+		if status, _ := acqA["status"].(string); status != "acquired" {
+			t.Fatalf("A acquire: %v", acqA)
+		}
+
+		// Acquire B at the SAME HEAD: working tree file.txt = "B\n" (conflicting
+		// same-line edit), staged into B's private index. Both sessions hold H0.
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("B\n"), 0o644); err != nil {
+			t.Fatalf("write B: %v", err)
+		}
+		uuidBa := genUUID(t, dstScripts)
+		msgB := writeAgentMsg(t, dir, uuidBa)
+		acqB := runGate(t, dstScripts, dir, nil, "acquire",
+			"--paths", `["file.txt"]`, "--message-file", msgB, "--session-alias", "conflict-b")
+		uuidBg, _ := acqB["uuid"].(string)
+		treeB, _ := acqB["tree_hash"].(string)
+		if status, _ := acqB["status"].(string); status != "acquired" {
+			t.Fatalf("B acquire: %v", acqB)
+		}
+
+		// A commits first: lands on H0 (no movement yet) -> H1.
+		commA := runGate(t, dstScripts, dir, nil, "commit",
+			"--uuid", uuidAg, "--tree-hash", treeA, "--message-file", msgA)
+		if status, _ := commA["status"].(string); status != "committed" {
+			t.Fatalf("A commit should land first; got %v", commA)
+		}
+
+		// B commits: current_head=H1 (moved), CAS rebase 3-way merge CONFLICTS
+		// (base="base", ours="B", theirs="A") -> could_not_land. Non-zero exit is
+		// expected for a failure status; parse the JSON line regardless.
+		commB, combinedB, errB := runGateE(dstScripts, dir, nil, "commit",
+			"--uuid", uuidBg, "--tree-hash", treeB, "--message-file", msgB)
+		if commB == nil {
+			t.Fatalf("B commit produced no status JSON; err=%v\n%s", errB, combinedB)
+		}
+		if got := commB["status"]; got != "could_not_land" {
+			t.Errorf("B commit status = %v, want could_not_land (same-line merge conflict)\n%s", got, combinedB)
+		}
+		// read-tree -m -i exits 0 on a content conflict (it leaves unmerged
+		// stages); write-tree then fails on the unmerged index -> write_tree_failed.
+		// Either merge_failed or write_tree_failed is an acceptable could_not_land
+		// reason (both are the content-tangle class).
+		if got := commB["reason"]; got != "write_tree_failed" && got != "merge_failed" {
+			t.Errorf("B commit reason = %v, want write_tree_failed or merge_failed", got)
+		}
+
+		// The could_not_land closeout MUST be recorded into the durable ledger
+		// so doctor's stall surfacing can see it.
+		records := readLedger(t, dir)
+		var foundB bool
+		for _, r := range records {
+			if r["uuid"] == uuidBg && r["status"] == "could_not_land" {
+				foundB = true
+				break
+			}
+		}
+		if !foundB {
+			t.Errorf("could_not_land closeout for B (uuid %s) not recorded in ledger; records: %v", uuidBg, records)
+		}
+	})
 }
 
 // itoa avoids fmt.Sprintf import noise in the seed loop above.
