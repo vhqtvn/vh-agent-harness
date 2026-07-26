@@ -646,6 +646,27 @@ mitigated cheaply by P0-B (§4.2 L204-206). The disposition's numbering stands
 and is the canonical reference; the reporter's numbering maps to it. State
 the mapping where useful, do not relabel.
 
+**Post-implementation shape note (2026-07-26b, post P1-GATE-002 landing).** The
+two §4.2 statuses shipped but are **asymmetric** in the shipped shape.
+`could_not_land` is **live + tested**: emitted at the 3-way-merge content-tangle
+sites (replacing the prior `cas_conflict` at `merge_failed`/`write_tree_failed`),
+cruxed by `TestCommitGate_CloseoutLedger/could_not_land_on_merge_conflict`. By
+contrast `no_head_progress` is **structurally unreachable on a successful
+commit** (`git commit-tree` always mints a new OID; the `no_changes` guard
+already blocks no-op trees), so it stays as **reserved forward-compatible vocab**
+— a future gate path that could produce a success-without-HEAD-advancement
+outcome can emit it, and `defer-012-no-head-progress-status-logic-test` stands as
+filed for that conditional/unexercised logic. The §4.2 invariant ("N successful
+commit-closeouts precede an unchanged HEAD") is therefore enforced at the
+**sequence layer**, not per-invocation: by the durable closeout ledger
+(`.git/commit-gate/closeouts.log`) + doctor check **#19 `head-progress`** (WARN
+on N=3 `post_commit_head` flatline, env `COMMIT_GATE_STALE_HEAD_THRESHOLD`, SKIP
+greenfield). **This is where the original vh-solara symptom actually lives** —
+the freeze is a cross-closeout sequence signal, not a per-invocation emission; a
+per-invocation `no_head_progress` on a successful commit would be structurally
+impossible. Landed across `a4afe6e8` (ledger) + `6f524bdb` (vocab) + `5495a9e`
+(doctor check #19).
+
 [^P0-B-collision]: **Disambiguation footnote.** A DIFFERENT, unrelated
 **"P0-B"** appears in the 2026-07-24 visual-parity source packet
 (`researches/sources/2026-07-24-tree2-rewrite-visual-parity-addendum.md`)
@@ -733,5 +754,7 @@ prior addenda. No §4 verdict changes. The only durable new state is: (a)
 backlog row `P1-GATE-002` carrying the adopted-but-unstarted P0-B work, (b)
 the P2-B→R5 cross-reference gap closed, (c) the §5 softening recorded as an
 explicit decision with the gate NOT hardened, and (d) the VS-1 evidence
-clause refined. All of (a)-(d) are reversible documentation; none changes
+clause refined, and (e) the post-implementation P0-B vocab asymmetry recorded
+under Item 1 (`could_not_land` live+tested; `no_head_progress` reserved
+forward-compatible). All of (a)-(e) are reversible documentation; none changes
 shipped gate behavior.
