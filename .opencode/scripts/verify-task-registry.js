@@ -1345,6 +1345,342 @@ function main() {
             );
         }
 
+        // ------------------------------------------------------------------
+        // Quarantine reporting: degraded cards (bad stored enum or missing
+        // core field) must be surfaced in a structured quarantine[] field,
+        // excluded from healthy counts, refused at the action boundary, and
+        // kept out of overlap detection — NOT silently coerced into a
+        // plausible healthy state. This is the report-and-continue contract:
+        // list still returns degraded cards in tasks[] (compat) but marks
+        // them degraded:true and routes them into quarantine[]; the
+        // safeguard is the action-boundary refusal + projection exclusion.
+        // ------------------------------------------------------------------
+        const quarantineScope = "tests/fixtures/quarantine-scope/";
+
+        // Healthy sentinel — must stay out of quarantine and in healthy counts.
+        const quarantineSentinel = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Quarantine sentinel healthy card",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "quarantine",
+                files_in_scope: [quarantineScope],
+                constraints: ["Quarantine fixture only."],
+                non_goals: ["No implementation work."],
+                success_criteria: [
+                    "Healthy sentinel lists and reads while siblings are degraded.",
+                ],
+                validation_plan: [
+                    "Corrupt sibling cards on disk and re-list + re-read.",
+                ],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(quarantineSentinel.task.task_id);
+
+        // Case 1: invalid stored status (otherwise valid) → quarantine.
+        const quarantineBadStatus = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Quarantine bad-status card",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "quarantine",
+                files_in_scope: [quarantineScope],
+                constraints: ["Quarantine fixture only."],
+                non_goals: ["No implementation work."],
+                success_criteria: ["Bad stored status surfaces in quarantine."],
+                validation_plan: ["Mutate status on disk and re-list."],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(quarantineBadStatus.task.task_id);
+        const qBadStatusPath = taskCardPath(quarantineBadStatus.task.task_id);
+        const qBadStatusPayload = JSON.parse(
+            fs.readFileSync(qBadStatusPath, "utf8"),
+        );
+        qBadStatusPayload.status = "totally-bogus-status";
+        fs.writeFileSync(
+            qBadStatusPath,
+            JSON.stringify(qBadStatusPayload, null, 2),
+        );
+
+        // Case 2: missing required core field → quarantine.
+        const quarantineMissingField = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Quarantine missing-field card",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "quarantine",
+                files_in_scope: [quarantineScope],
+                constraints: ["Quarantine fixture only."],
+                non_goals: ["No implementation work."],
+                success_criteria: ["Missing core field surfaces in quarantine."],
+                validation_plan: ["Delete primary_lane on disk and re-list."],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(quarantineMissingField.task.task_id);
+        const qMissingPath = taskCardPath(quarantineMissingField.task.task_id);
+        const qMissingPayload = JSON.parse(
+            fs.readFileSync(qMissingPath, "utf8"),
+        );
+        delete qMissingPayload.primary_lane;
+        fs.writeFileSync(qMissingPath, JSON.stringify(qMissingPayload, null, 2));
+
+        // Case 3: multiple bad fields → ONE combined quarantine entry.
+        const quarantineMultiBad = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Quarantine multi-bad card",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "quarantine",
+                files_in_scope: [quarantineScope],
+                constraints: ["Quarantine fixture only."],
+                non_goals: ["No implementation work."],
+                success_criteria: ["Multiple bad fields → one combined entry."],
+                validation_plan: ["Mutate status+task_type on disk and re-list."],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(quarantineMultiBad.task.task_id);
+        const qMultiPath = taskCardPath(quarantineMultiBad.task.task_id);
+        const qMultiPayload = JSON.parse(fs.readFileSync(qMultiPath, "utf8"));
+        qMultiPayload.status = "bogus";
+        qMultiPayload.task_type = "bogus";
+        fs.writeFileSync(qMultiPath, JSON.stringify(qMultiPayload, null, 2));
+
+        // ------------------------------------------------------------------
+        // List and assert the quarantine contract.
+        // ------------------------------------------------------------------
+        const quarantineList = listCoordinationTasks(coordinatorSessionID, {
+            cwd: "/verification",
+        });
+
+        // Case 1: bad-status card in quarantine with correct shape.
+        const qBadStatusEntry = quarantineList.quarantine.find(
+            (entry) => entry.card_id === quarantineBadStatus.task.task_id,
+        );
+        if (!qBadStatusEntry) {
+            throw new StateError(
+                "Case 1: expected bad-status card to appear in quarantine[].",
+            );
+        }
+        if (qBadStatusEntry.error_type !== "semantic") {
+            throw new StateError(
+                `Case 1: expected error_type "semantic", got "${qBadStatusEntry.error_type}".`,
+            );
+        }
+        if (!qBadStatusEntry.offending_fields.includes("status")) {
+            throw new StateError(
+                `Case 1: expected offending_fields to include "status", got [${qBadStatusEntry.offending_fields.join(", ")}].`,
+            );
+        }
+        if (!qBadStatusEntry.problems.length) {
+            throw new StateError(
+                "Case 1: expected at least one deterministic problem message.",
+            );
+        }
+        if (
+            !qBadStatusEntry.path ||
+            qBadStatusEntry.path.startsWith("/")
+        ) {
+            throw new StateError(
+                "Case 1: expected repo-relative path (not absolute) in quarantine entry.",
+            );
+        }
+
+        // Case 1 compat: degraded card still in tasks[] with degraded flag.
+        const qBadStatusInTasks = quarantineList.tasks.find(
+            (task) => task.task_id === quarantineBadStatus.task.task_id,
+        );
+        if (!qBadStatusInTasks) {
+            throw new StateError(
+                "Case 1 compat: expected degraded card to remain in tasks[].",
+            );
+        }
+        if (!qBadStatusInTasks.degraded) {
+            throw new StateError(
+                "Case 1 compat: expected degraded card to carry degraded:true in tasks[].",
+            );
+        }
+
+        // Case 2: missing-field card in quarantine.
+        const qMissingEntry = quarantineList.quarantine.find(
+            (entry) => entry.card_id === quarantineMissingField.task.task_id,
+        );
+        if (!qMissingEntry) {
+            throw new StateError(
+                "Case 2: expected missing-field card to appear in quarantine[].",
+            );
+        }
+        if (!qMissingEntry.offending_fields.includes("primary_lane")) {
+            throw new StateError(
+                `Case 2: expected offending_fields to include "primary_lane", got [${qMissingEntry.offending_fields.join(", ")}].`,
+            );
+        }
+
+        // Case 3: multiple bad fields → exactly ONE combined entry.
+        const qMultiEntries = quarantineList.quarantine.filter(
+            (entry) => entry.card_id === quarantineMultiBad.task.task_id,
+        );
+        if (qMultiEntries.length !== 1) {
+            throw new StateError(
+                `Case 3: expected exactly ONE quarantine entry for multi-bad card, got ${qMultiEntries.length}.`,
+            );
+        }
+        if (
+            !qMultiEntries[0].offending_fields.includes("status") ||
+            !qMultiEntries[0].offending_fields.includes("task_type")
+        ) {
+            throw new StateError(
+                `Case 3: expected combined offending_fields to include both status and task_type, got [${qMultiEntries[0].offending_fields.join(", ")}].`,
+            );
+        }
+
+        // Case 4: valid sentinel in tasks + healthy counts, NOT degraded, NOT quarantined.
+        const qSentinelInTasks = quarantineList.tasks.find(
+            (task) => task.task_id === quarantineSentinel.task.task_id,
+        );
+        if (!qSentinelInTasks) {
+            throw new StateError(
+                "Case 4: expected healthy sentinel to remain in tasks[].",
+            );
+        }
+        if (qSentinelInTasks.degraded) {
+            throw new StateError(
+                "Case 4: expected healthy sentinel to NOT be degraded.",
+            );
+        }
+        const qSentinelInQuarantine = quarantineList.quarantine.find(
+            (entry) => entry.card_id === quarantineSentinel.task.task_id,
+        );
+        if (qSentinelInQuarantine) {
+            throw new StateError(
+                "Case 4: expected healthy sentinel to NOT appear in quarantine[].",
+            );
+        }
+
+        // Case 4: degraded_count invariant.
+        if (
+            quarantineList.degraded_count !== quarantineList.quarantine.length
+        ) {
+            throw new StateError(
+                `Case 4: expected degraded_count === quarantine.length, got ${quarantineList.degraded_count} vs ${quarantineList.quarantine.length}.`,
+            );
+        }
+
+        // Case 4: healthy_total is a positive number (sentinel exists).
+        if (
+            typeof quarantineList.healthy_total !== "number" ||
+            quarantineList.healthy_total < 1
+        ) {
+            throw new StateError(
+                `Case 4: expected healthy_total >= 1, got ${quarantineList.healthy_total}.`,
+            );
+        }
+        if (typeof quarantineList.healthy_status_counts !== "object") {
+            throw new StateError(
+                "Case 4: expected healthy_status_counts to be an object.",
+            );
+        }
+
+        // Case 6: degraded card gets NO /task-ready recommendation.
+        if (
+            qBadStatusInTasks.next_recommended_command ===
+            `/task-ready ${quarantineBadStatus.task.task_id}`
+        ) {
+            throw new StateError(
+                "Case 6: expected degraded card to NOT recommend /task-ready.",
+            );
+        }
+
+        // Case 6: degraded card excluded from overlap detection. The sentinel
+        // shares quarantineScope with all three degraded cards; if overlap
+        // detection ran on degraded cards, the sentinel's overlaps would list
+        // them. After the fix, listCoordinationTaskCards returns healthy-only
+        // and the degraded siblings must NOT appear.
+        const sentinelRead = readCoordinationTask(
+            coordinatorSessionID,
+            quarantineSentinel.task.task_id,
+            { cwd: "/verification" },
+        );
+        const degradedIDs = new Set([
+            quarantineBadStatus.task.task_id,
+            quarantineMissingField.task.task_id,
+            quarantineMultiBad.task.task_id,
+        ]);
+        for (const overlap of sentinelRead.overlaps) {
+            if (degradedIDs.has(overlap.task_id)) {
+                throw new StateError(
+                    `Case 6: expected degraded card ${overlap.task_id} to be EXCLUDED from overlap detection.`,
+                );
+            }
+        }
+
+        // Case 7: CRUX — readyCoordinationTask REFUSES a degraded card at the
+        // action boundary. This is the load-bearing safety assertion: even
+        // though the degraded status coerced to "draft" (which would normally
+        // pass the status guard), the action-boundary refusal fires first.
+        let readyRefusalError = null;
+        try {
+            readyCoordinationTask(
+                coordinatorSessionID,
+                quarantineBadStatus.task.task_id,
+                {},
+                { cwd: "/verification" },
+            );
+        } catch (error) {
+            readyRefusalError = error;
+        }
+        if (!readyRefusalError) {
+            throw new StateError(
+                "Case 7 CRUX: expected readyCoordinationTask to REFUSE a degraded card (action boundary must close).",
+            );
+        }
+        const readyRefusalMsg =
+            readyRefusalError instanceof Error
+                ? readyRefusalError.message
+                : String(readyRefusalError);
+        if (!/degraded/i.test(readyRefusalMsg)) {
+            throw new StateError(
+                `Case 7 CRUX: expected refusal message to mention "degraded", got: ${readyRefusalMsg}`,
+            );
+        }
+
+        // Case 5: reading/operating on a valid card still succeeds when
+        // another is degraded. The sentinel read above already proves this
+        // (it returned without throwing despite three degraded siblings).
+        // Reinforce: the sentinel's single-card read also carries degraded:false.
+        if (sentinelRead.degraded) {
+            throw new StateError(
+                "Case 5: expected healthy sentinel read to carry degraded:false.",
+            );
+        }
+
+        // Case 9: a degraded card's single-card read surfaces the degradation.
+        const degradedRead = readCoordinationTask(
+            coordinatorSessionID,
+            quarantineBadStatus.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (!degradedRead.degraded) {
+            throw new StateError(
+                "Case 9: expected degraded card single-card read to carry degraded:true.",
+            );
+        }
+        if (
+            !degradedRead.diagnostics ||
+            !degradedRead.diagnostics.offending_fields.includes("status")
+        ) {
+            throw new StateError(
+                "Case 9: expected degraded card read to surface offending field 'status' in diagnostics.",
+            );
+        }
+
         console.log("verification: ok");
         console.log(`primary_task_id: ${primary.task.task_id}`);
         console.log(`overlap_task_id: ${overlap.task.task_id}`);
@@ -1354,6 +1690,12 @@ function main() {
         console.log(`latest_report_path: ${closeout.report.path}`);
         console.log(`latest_review_path: ${reviewed.review.path}`);
         console.log(`review_status: ${reviewed.task.status}`);
+        console.log(
+            `quarantine_degraded_count: ${quarantineList.degraded_count}`,
+        );
+        console.log(
+            `quarantine_healthy_total: ${quarantineList.healthy_total}`,
+        );
     } finally {
         cleanupArtifacts(createdTaskIDs);
     }

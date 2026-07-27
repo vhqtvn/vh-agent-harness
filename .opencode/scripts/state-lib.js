@@ -1399,7 +1399,11 @@ function ensureLocalCoordinatorNamespace() {
     ensureDir(localCoordinatorScratchRoot());
 }
 
-function normalizeStoredCoordinationReview(sourceLastReview, reviewPaths) {
+function normalizeStoredCoordinationReview(
+    sourceLastReview,
+    reviewPaths,
+    accumulators = {},
+) {
     const raw =
         sourceLastReview && typeof sourceLastReview === "object"
             ? sourceLastReview
@@ -1433,9 +1437,13 @@ function normalizeStoredCoordinationReview(sourceLastReview, reviewPaths) {
     // Read-path enum normalization must be fault-tolerant: a bad stored
     // last_review.status coerces to "" (then null) instead of throwing, so a
     // single degraded review block cannot brick listCoordinationTasks() or
-    // any load-based op. Collected messages are discarded; the save path
-    // remains the strict authority for INPUT.
-    const reviewEnumErrors = [];
+    // any load-based op. Collected messages flow into the caller-provided
+    // accumulators when present (so the read-path scan can surface them as
+    // quarantine diagnostics); the save path remains the strict authority
+    // for INPUT and never passes accumulators here.
+    const reviewEnumErrors = accumulators.enumErrors || [];
+    const reviewEnumInvalidFields =
+        accumulators.enumInvalidFields || new Set();
     const normalized = {
         path: storedPath,
         reviewed_at: (raw && raw.reviewed_at) || parsed?.reviewed_at || null,
@@ -1454,6 +1462,7 @@ function normalizeStoredCoordinationReview(sourceLastReview, reviewPaths) {
                 ],
                 "last_review.status",
                 reviewEnumErrors,
+                reviewEnumInvalidFields,
             ) || null,
         summary: String((raw && raw.summary) || parsed?.summary || "").trim(),
         next_action: String(
@@ -1481,7 +1490,7 @@ function normalizeStoredCoordinationReview(sourceLastReview, reviewPaths) {
     return normalized;
 }
 
-function normalizeCoordinationTaskRecord(payload, taskID = "") {
+function normalizeCoordinationTaskRecord(payload, taskID = "", accumulators = {}) {
     const source = payload && typeof payload === "object" ? payload : {};
     const normalizedTaskID = normalizeCoordinationTaskId(
         source.task_id || taskID || "",
@@ -1491,16 +1500,23 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
     // validator so a single card with a bad stored enum value cannot brick
     // listCoordinationTasks() and every load-based op that depends on it
     // (read, activate, ready, update, repair, review, saveCloseout). A bad
-    // value coerces to "" and the per-field default applies; collected
-    // messages are discarded here — the save path remains the authority
-    // that rejects bad INPUT, the read path only tolerates what is on disk.
-    const readEnumErrors = [];
+    // value coerces to "" and the per-field default applies. Collected
+    // messages and offending-field names flow into the caller-provided
+    // accumulators when present (so the read-path scan can surface them as
+    // quarantine diagnostics without re-reading the raw stored bytes); when
+    // absent (every write-path caller) they are local throwaways and the
+    // save path remains the authority that rejects bad INPUT — the read
+    // path only tolerates what is on disk.
+    const readEnumErrors = accumulators.enumErrors || [];
+    const enumInvalidFields =
+        accumulators.enumInvalidFields || new Set();
     let normalizedStatus =
         normalizeCoordinationEnumCollected(
             source.status,
             COORDINATION_TASK_STATUSES,
             "status",
             readEnumErrors,
+            enumInvalidFields,
         ) || "draft";
     const sessionAliases = uniqueStrings(
         normalizeStringList(source.session_aliases).map((value) =>
@@ -1529,6 +1545,7 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
         COORDINATION_MODES,
         "coordination_mode",
         readEnumErrors,
+        enumInvalidFields,
     );
     const reportEnvelope =
         normalizeCoordinationEnumCollected(
@@ -1536,6 +1553,7 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
             COORDINATION_REPORT_ENVELOPES,
             "report_envelope",
             readEnumErrors,
+            enumInvalidFields,
         ) || defaultReportEnvelopeForMode(coordinationMode);
     return {
         ...defaultCoordinationTaskPayload(normalizedTaskID),
@@ -1547,6 +1565,7 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
             COORDINATION_TASK_TYPES,
             "task_type",
             readEnumErrors,
+            enumInvalidFields,
         ),
         coordination_mode: coordinationMode,
         primary_lane: String(source.primary_lane || "").trim(),
@@ -1557,6 +1576,7 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
                 RESEARCH_SOURCE_POLICIES,
                 "source_policy",
                 readEnumErrors,
+                enumInvalidFields,
             ) || null,
         source_allowlist: normalizeStringList(source.source_allowlist),
         desired_artifact_type:
@@ -1565,6 +1585,7 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
                 RESEARCH_ARTIFACT_TYPES,
                 "desired_artifact_type",
                 readEnumErrors,
+                enumInvalidFields,
             ) || null,
         target_artifact_path: normalizeOptionalText(source.target_artifact_path),
         rough_scope: normalizeStringList(source.rough_scope),
@@ -1609,6 +1630,7 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
                               [...COORDINATION_CLOSEOUT_STATUSES],
                               "latest_report.status",
                               readEnumErrors,
+                              enumInvalidFields,
                           ) || null,
                       report_envelope:
                           normalizeCoordinationEnumCollected(
@@ -1616,6 +1638,7 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
                               COORDINATION_REPORT_ENVELOPES,
                               "latest_report.report_envelope",
                               readEnumErrors,
+                              enumInvalidFields,
                           ) || null,
                       created_at: source.latest_report.created_at || null,
                       summary: String(source.latest_report.summary || "").trim(),
@@ -1642,6 +1665,10 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
                     storePathForRepo(normalizeRepoPath(value)),
                 ),
             ),
+            {
+                enumErrors: readEnumErrors,
+                enumInvalidFields,
+            },
         ),
         history: Array.isArray(source.history)
             ? source.history
@@ -1667,36 +1694,60 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
  * error (the raw enum message) while multi-error aggregation still fires for
  * genuinely independent problems.
  *
+ * `options.offendingFields`, when provided, is populated (mutated in place)
+ * with the field names implicated by every problem collected here — both
+ * missing-required fields and compound-condition fields. The read-path scan
+ * uses this to build the quarantine entry's `offending_fields` list without
+ * re-parsing the message strings. The save path never passes it.
+ *
  * @param {object} task
  * @param {object} [options]
  * @param {boolean} [options.allowLegacyIncompleteResearch]
  * @param {Set<string>} [options.enumInvalidFields]
+ * @param {Set<string>} [options.offendingFields]
  * @returns {string[]} collected error messages (empty when valid)
  */
 function collectCoordinationTaskCoreFieldErrors(task, options = {}) {
     const errors = [];
     const enumInvalid = options.enumInvalidFields || new Set();
+    const offendingFields = options.offendingFields || null;
+    const markOffending = (...fieldNames) => {
+        if (!offendingFields) {
+            return;
+        }
+        for (const fieldName of fieldNames) {
+            if (fieldName && typeof offendingFields.add === "function") {
+                offendingFields.add(fieldName);
+            }
+        }
+    };
     // True when the field has NO already-collected enum error of its own, i.e.
     // a missing/blank value here is a genuine missing-value problem rather
     // than a side effect of a failed enum normalization upstream.
     const isGenuinelyMissing = (field) => !enumInvalid.has(field);
     if (!task.title && isGenuinelyMissing("title")) {
         errors.push("Task title is required.");
+        markOffending("title");
     }
     if (!task.task_type && isGenuinelyMissing("task_type")) {
         errors.push("task_type is required.");
+        markOffending("task_type");
     }
     if (!task.coordination_mode && isGenuinelyMissing("coordination_mode")) {
         errors.push("coordination_mode is required.");
+        markOffending("coordination_mode");
     }
     if (!task.primary_lane && isGenuinelyMissing("primary_lane")) {
         errors.push("primary_lane is required.");
+        markOffending("primary_lane");
     }
     if (!task.status && isGenuinelyMissing("status")) {
         errors.push("status is required.");
+        markOffending("status");
     }
     if (!task.report_envelope && isGenuinelyMissing("report_envelope")) {
         errors.push("report_envelope is required.");
+        markOffending("report_envelope");
     }
     if (task.task_type === "research") {
         const missingResearchFields = missingResearchContractFields(task);
@@ -1709,6 +1760,7 @@ function collectCoordinationTaskCoreFieldErrors(task, options = {}) {
             isGenuinelyMissing("research_question")
         ) {
             errors.push("Research tasks must define research_question.");
+            markOffending("research_question");
         }
         if (
             !tolerateLegacyResearchGap &&
@@ -1716,6 +1768,7 @@ function collectCoordinationTaskCoreFieldErrors(task, options = {}) {
             isGenuinelyMissing("source_policy")
         ) {
             errors.push("Research tasks must define source_policy.");
+            markOffending("source_policy");
         }
         if (
             !tolerateLegacyResearchGap &&
@@ -1723,6 +1776,7 @@ function collectCoordinationTaskCoreFieldErrors(task, options = {}) {
             isGenuinelyMissing("desired_artifact_type")
         ) {
             errors.push("Research tasks must define desired_artifact_type.");
+            markOffending("desired_artifact_type");
         }
         if (
             !tolerateLegacyResearchGap &&
@@ -1730,6 +1784,7 @@ function collectCoordinationTaskCoreFieldErrors(task, options = {}) {
             isGenuinelyMissing("target_artifact_path")
         ) {
             errors.push("Research tasks must define target_artifact_path.");
+            markOffending("target_artifact_path");
         }
     }
     if (task.status === "draft") {
@@ -1741,6 +1796,7 @@ function collectCoordinationTaskCoreFieldErrors(task, options = {}) {
             errors.push(
                 "Draft tasks must capture rough_scope, open_questions, or ready_criteria before they can be saved.",
             );
+            markOffending("rough_scope", "open_questions", "ready_criteria");
         }
         return errors;
     }
@@ -1749,20 +1805,24 @@ function collectCoordinationTaskCoreFieldErrors(task, options = {}) {
             errors.push(
                 "Working tasks must record active_session_alias and claimed_at.",
             );
+            markOffending("active_session_alias", "claimed_at");
         }
     }
     if (!(task.files_in_scope || []).length) {
         errors.push("files_in_scope must contain at least one path.");
+        markOffending("files_in_scope");
     }
     if (!(task.success_criteria || []).length) {
         errors.push(
             "success_criteria must contain at least one requirement.",
         );
+        markOffending("success_criteria");
     }
     if (!(task.validation_plan || []).length) {
         errors.push(
             "validation_plan must contain at least one verification step.",
         );
+        markOffending("validation_plan");
     }
     if (task.latest_report) {
         if (
@@ -1773,6 +1833,7 @@ function collectCoordinationTaskCoreFieldErrors(task, options = {}) {
             errors.push(
                 "latest_report is missing required path/status/report_envelope fields.",
             );
+            markOffending("latest_report");
         }
     }
     if (task.last_review) {
@@ -1785,6 +1846,7 @@ function collectCoordinationTaskCoreFieldErrors(task, options = {}) {
             errors.push(
                 "last_review is missing required path/reviewed_at/title/status fields.",
             );
+            markOffending("last_review");
         }
     }
     return errors;
@@ -1792,6 +1854,109 @@ function collectCoordinationTaskCoreFieldErrors(task, options = {}) {
 
 function ensureCoordinationTaskCoreFields(task, options = {}) {
     throwCollectedErrors(collectCoordinationTaskCoreFieldErrors(task, options));
+}
+
+// Canonical field-name ordering for quarantine diagnostics. Keeps the
+// offending_fields list deterministic regardless of insertion order from
+// the enum + core-field collectors, so two scans of the same degraded card
+// produce byte-identical quarantine entries.
+const COORDINATION_QUARANTINE_FIELD_ORDER = [
+    "title",
+    "task_type",
+    "coordination_mode",
+    "primary_lane",
+    "status",
+    "report_envelope",
+    "research_question",
+    "source_policy",
+    "desired_artifact_type",
+    "target_artifact_path",
+    "source_allowlist",
+    "rough_scope",
+    "open_questions",
+    "ready_criteria",
+    "files_in_scope",
+    "success_criteria",
+    "validation_plan",
+    "active_session_alias",
+    "claimed_at",
+    "latest_report",
+    "latest_report.status",
+    "latest_report.report_envelope",
+    "last_review",
+    "last_review.status",
+];
+
+function stableSortQuarantineFields(fieldNames) {
+    const seen = new Set();
+    const unique = [];
+    for (const fieldName of fieldNames) {
+        const value = String(fieldName || "");
+        if (!value || seen.has(value)) {
+            continue;
+        }
+        seen.add(value);
+        unique.push(value);
+    }
+    return unique.sort((left, right) => {
+        const leftRank = COORDINATION_QUARANTINE_FIELD_ORDER.indexOf(left);
+        const rightRank = COORDINATION_QUARANTINE_FIELD_ORDER.indexOf(right);
+        const leftIndex = leftRank === -1 ? COORDINATION_QUARANTINE_FIELD_ORDER.length : leftRank;
+        const rightIndex = rightRank === -1 ? COORDINATION_QUARANTINE_FIELD_ORDER.length : rightRank;
+        if (leftIndex !== rightIndex) {
+            return leftIndex - rightIndex;
+        }
+        return left.localeCompare(right);
+    });
+}
+
+/**
+ * Normalize a coordination-task record AND preserve the validation findings
+ * the read path used to discard. Returns a discriminated result alongside the
+ * normalized record so callers (the scan boundary, the action boundary) can
+ * surface degradation without mutating the persistent task DTO.
+ *
+ * `problems` is the deterministic union of enum-coercion messages and
+ * core-field messages (enum first, in declaration order, then core-field in
+ * validator order). `offendingFields` is the deduped, stably-sorted field-name
+ * list a quarantine entry publishes. `degraded` is true iff `problems` is
+ * non-empty.
+ *
+ * The fallback/coercion behavior of `normalizeCoordinationTaskRecord` is
+ * UNCHANGED — a bad stored enum still coerces to "" (and the per-field default
+ * applies) so read resilience is identical to before. This helper only stops
+ * throwing away the evidence of the coercion.
+ *
+ * @param {object} payload - raw stored record (already JSON-parsed)
+ * @param {string} [taskID]
+ * @returns {{task: object, diagnostics: {problems: string[], offendingFields: string[], degraded: boolean}}}
+ */
+function normalizeCoordinationTaskRecordWithDiagnostics(payload, taskID = "") {
+    const enumErrors = [];
+    const enumInvalidFields = new Set();
+    const task = normalizeCoordinationTaskRecord(payload, taskID, {
+        enumErrors,
+        enumInvalidFields,
+    });
+    const coreOffendingFields = new Set();
+    const coreErrors = collectCoordinationTaskCoreFieldErrors(task, {
+        allowLegacyIncompleteResearch: true,
+        enumInvalidFields,
+        offendingFields: coreOffendingFields,
+    });
+    const problems = [...enumErrors, ...coreErrors];
+    const offendingFields = stableSortQuarantineFields([
+        ...enumInvalidFields,
+        ...coreOffendingFields,
+    ]);
+    return {
+        task,
+        diagnostics: {
+            problems,
+            offendingFields,
+            degraded: problems.length > 0,
+        },
+    };
 }
 
 function coordinationActorContext(sessionID, options = {}) {
@@ -1988,7 +2153,25 @@ function defaultCoordinationTaskNextAction(taskIDRaw, status) {
     }
 }
 
-function coordinationTaskRecommendation(task, actorSessionName = null) {
+function coordinationTaskRecommendation(
+    task,
+    actorSessionName = null,
+    options = {},
+) {
+    // Degraded cards are quarantined: they are surfaced in listCoordinationTasks
+    // with a diagnostics block and refused at the action boundary
+    // (readyCoordinationTask). Recommend inspection/repair instead of any
+    // lifecycle transition, so a degraded card (e.g. a bad stored status that
+    // coerced to "draft") cannot be routed toward /task-ready through guidance.
+    // The action-boundary refusal in readyCoordinationTask is the hard gate;
+    // this is the soft (guidance) layer that keeps the coordinator from ever
+    // proposing the transition in the first place.
+    if (options.degraded) {
+        return {
+            command: `/task-open ${task.task_id}`,
+            note: "This coordination-task card is degraded (a stored field failed validation). Inspect or repair it before any lifecycle transition — see the quarantine entry.",
+        };
+    }
     const missingResearchFields = missingResearchContractFields(task);
     if (missingResearchFields.length) {
         return {
@@ -2037,8 +2220,16 @@ function coordinationTaskRecommendation(task, actorSessionName = null) {
     }
 }
 
-function recommendedCoordinationTaskFields(task, actorSessionName = null) {
-    const recommendation = coordinationTaskRecommendation(task, actorSessionName);
+function recommendedCoordinationTaskFields(
+    task,
+    actorSessionName = null,
+    options = {},
+) {
+    const recommendation = coordinationTaskRecommendation(
+        task,
+        actorSessionName,
+        options,
+    );
     return {
         next_recommended_command: recommendation.command,
         next_recommended_note: recommendation.note,
@@ -3503,52 +3694,90 @@ function loadCoordinationTask(taskIDRaw, options = {}) {
                 path: targetPath,
                 payload: defaultCoordinationTaskPayload(taskID),
                 exists: false,
+                diagnostics: {
+                    problems: [],
+                    offendingFields: [],
+                    degraded: false,
+                },
             };
         }
         throw new StateError(
             `Coordination task does not exist: ${relativeToRepo(targetPath)}`,
         );
     }
-    const payload = normalizeCoordinationTaskRecord(
-        readJson(targetPath, defaultCoordinationTaskPayload(taskID)),
-        taskID,
-    );
-    // Read-path fault tolerance: COLLECT (do not throw) core-field problems
-    // so a degraded card — a bad stored enum coerced to "" upstream, or a
-    // legacy-incomplete record — does not brick listCoordinationTasks() and
-    // every load-based op. The collected problems are intentionally not
-    // surfaced here; the save path (updateCoordinationTask and friends)
-    // keeps the strict throwing ensureCoordinationTaskCoreFields call, so
-    // only the read path tolerates already-stored data. This closes the
-    // read/write asymmetry: writes reject bad INPUT, reads tolerate bad
-    // STORED data.
-    collectCoordinationTaskCoreFieldErrors(payload, {
-        allowLegacyIncompleteResearch: true,
-    });
+    // Read-path fault tolerance: COLLECT (do not throw) every validation
+    // problem so a degraded card — a bad stored enum coerced to "" upstream,
+    // or a legacy-incomplete record — does not brick listCoordinationTasks()
+    // and every load-based op. The collected problems are now SURFACED as
+    // `diagnostics` (previously discarded) so the scan boundary can route
+    // degraded cards into `quarantine[]` and the action boundary
+    // (readyCoordinationTask) can refuse them. The save path
+    // (updateCoordinationTask and friends) keeps the strict throwing
+    // ensureCoordinationTaskCoreFields call, so only the read path tolerates
+    // already-stored data. This closes the read/write asymmetry: writes
+    // reject bad INPUT, reads tolerate bad STORED data — and now REPORT it.
+    const { task: payload, diagnostics } =
+        normalizeCoordinationTaskRecordWithDiagnostics(
+            readJson(targetPath, defaultCoordinationTaskPayload(taskID)),
+            taskID,
+        );
     return {
         task_id: taskID,
         path: targetPath,
         payload,
         exists: true,
+        diagnostics,
     };
 }
 
-function listCoordinationTaskCards() {
+// Internal scan boundary: read every card in the registry and preserve the
+// per-card diagnostics (degradation evidence) alongside the normalized task.
+// This is the single read-path point that knows a card is degraded; the
+// public listCoordinationTasks() publishes it as `quarantine[]` and the
+// action boundary (readyCoordinationTask) refuses degraded cards. Each entry
+// carries the repo-relative path so a quarantine row is safe to display
+// without leaking absolute operator-local paths.
+function scanCoordinationTaskCards() {
     ensureLocalCoordinatorNamespace();
     const files = fs.existsSync(localCoordinatorTasksRoot())
         ? fs.readdirSync(localCoordinatorTasksRoot())
         : [];
-    return files
+    const scanned = files
         .filter((name) => name.endsWith(".json"))
         .map((name) => {
             const taskID = name.replace(/\.json$/, "");
-            return loadCoordinationTask(taskID).payload;
-        })
-        .sort((left, right) => {
-            const leftUpdated = String(left.updated_at || left.created_at || "");
-            const rightUpdated = String(right.updated_at || right.created_at || "");
-            return rightUpdated.localeCompare(leftUpdated);
+            const loaded = loadCoordinationTask(taskID);
+            return {
+                taskID,
+                path: relativeToRepo(loaded.path),
+                task: loaded.payload,
+                diagnostics: loaded.diagnostics,
+                degraded: Boolean(loaded.diagnostics && loaded.diagnostics.degraded),
+            };
         });
+    return scanned.sort((left, right) => {
+        const leftUpdated = String(
+            left.task.updated_at || left.task.created_at || "",
+        );
+        const rightUpdated = String(
+            right.task.updated_at || right.task.created_at || "",
+        );
+        return rightUpdated.localeCompare(leftUpdated);
+    });
+}
+
+// Trusted projection: every NON-degraded card's normalized task. Degraded
+// cards are excluded so a defaulted/empty status or core field cannot
+// produce false overlap findings or otherwise contaminate a consumer that
+// trusts the listed cards as healthy. The two pre-slice consumers were
+// detectCoordinationTaskOverlaps (wants healthy only) and listCoordinationTasks
+// (now uses scanCoordinationTaskCards directly so it can keep degraded cards
+// in tasks[] for compat while still excluding them from healthy_* counts).
+// Callers that need degraded cards MUST use scanCoordinationTaskCards.
+function listCoordinationTaskCards() {
+    return scanCoordinationTaskCards()
+        .filter((entry) => !entry.degraded)
+        .map((entry) => entry.task);
 }
 
 function updateCoordinationTask(taskIDRaw, updateFn) {
@@ -4046,11 +4275,28 @@ function readCoordinationTask(sessionID, taskIDRaw, options = {}) {
               includeBody: Boolean(options.includeBody),
           })
         : null;
+    const degraded = Boolean(loaded.diagnostics && loaded.diagnostics.degraded);
+    // Map internal diagnostics to public-facing field names so the
+    // single-card read is consistent with the quarantine entries in
+    // listCoordinationTasks (offending_fields, problems — snake_case).
+    const diagnostics = loaded.diagnostics
+        ? {
+              degraded: loaded.diagnostics.degraded,
+              offending_fields: [...loaded.diagnostics.offendingFields],
+              problems: [...loaded.diagnostics.problems],
+          }
+        : {
+              degraded: false,
+              offending_fields: [],
+              problems: [],
+          };
     return {
         ...actor,
         path: relativeToRepo(loaded.path),
         task: loaded.payload,
         summary: summarizeCoordinationTask(loaded.payload),
+        degraded,
+        diagnostics,
         latest_report: latestReport,
         last_review: lastReview,
         overlaps: detectCoordinationTaskOverlaps(
@@ -4060,6 +4306,7 @@ function readCoordinationTask(sessionID, taskIDRaw, options = {}) {
         ...recommendedCoordinationTaskFields(
             loaded.payload,
             actor.session_name || null,
+            { degraded },
         ),
     };
 }
@@ -4073,24 +4320,67 @@ function listCoordinationTasks(sessionID, options = {}) {
             "task_statuses",
         ),
     );
-    const tasks = listCoordinationTaskCards().filter((task) =>
-        statuses.length ? statuses.includes(task.status) : true,
+    // Scan preserves per-card degradation diagnostics. The public response
+    // keeps degraded cards in `tasks` (compat — no data disappears) while
+    // also surfacing them in `quarantine` and excluding them from the
+    // `healthy_*` counts. The status filter applies to the NORMALIZED status
+    // (a degraded status coerces to "draft"), matching the pre-slice filter
+    // semantics; the safeguard against acting on a degraded card is the
+    // action-boundary refusal in readyCoordinationTask plus the degraded flag
+    // on the task representation, not omission from the list.
+    const scanned = scanCoordinationTaskCards();
+    const filteredScanned = scanned.filter((entry) =>
+        statuses.length ? statuses.includes(entry.task.status) : true,
     );
+    const tasks = filteredScanned.map((entry) => entry.task);
     const counts = {};
     for (const task of tasks) {
         counts[task.status] = (counts[task.status] || 0) + 1;
     }
+    // Healthy (non-degraded) projection for the additive counts. Degraded
+    // cards are excluded so a dashboard reading healthy_status_counts cannot
+    // mistake a coerced-to-draft degraded card for a genuine draft.
+    const healthyTasks = filteredScanned
+        .filter((entry) => !entry.degraded)
+        .map((entry) => entry.task);
+    const healthyCounts = {};
+    for (const task of healthyTasks) {
+        healthyCounts[task.status] = (healthyCounts[task.status] || 0) + 1;
+    }
+    const quarantine = filteredScanned
+        .filter((entry) => entry.degraded)
+        .map((entry) => ({
+            // card_id comes from the parsed card when the task_id is
+            // trustworthy (it always is here — the id is derived from the
+            // filename, not from the possibly-corrupt card body); fall back
+            // to the filename stem otherwise. Both equal entry.taskID today.
+            card_id: entry.task.task_id || entry.taskID,
+            path: entry.path,
+            error_type: "semantic",
+            offending_fields: [...entry.diagnostics.offendingFields],
+            problems: [...entry.diagnostics.problems],
+        }));
     return {
         ...actor,
+        // Existing counts are UNCHANGED (compat): they cover every card that
+        // passed the status filter, degraded or not.
         total: tasks.length,
         status_counts: counts,
-        tasks: tasks.map((task) => ({
-            ...summarizeCoordinationTask(task),
-            ...recommendedCoordinationTaskFields(
-                task,
-                actor.session_name || null,
-            ),
+        tasks: filteredScanned.map((entry) => ({
+            ...summarizeCoordinationTask(entry.task),
+            degraded: entry.degraded,
+            ...recommendedCoordinationTaskFields(entry.task, actor.session_name || null, {
+                degraded: entry.degraded,
+            }),
         })),
+        // Additive quarantine fields (new). Consumers that never read them
+        // behave exactly as before; consumers that want a trusted projection
+        // read healthy_total / healthy_status_counts instead of total /
+        // status_counts.
+        quarantine,
+        degraded_count: quarantine.length,
+        healthy_total: healthyTasks.length,
+        healthy_status_counts: healthyCounts,
     };
 }
 
@@ -4268,6 +4558,30 @@ function computeTaskDesignDigest(currentPayload, incomingChanges) {
 function readyCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) {
     const actor = coordinationActorContext(sessionID, options);
     const loaded = loadCoordinationTask(taskIDRaw);
+    // ACTION BOUNDARY (load-bearing). A degraded card has at least one stored
+    // field that failed read-path validation — most dangerously a stored
+    // status that normalized to "draft" only because the original value was
+    // invalid and coerced. Letting such a card through to the status guard
+    // below would let it pass (coerced status === "draft") and promote a
+    // malformed card to "ready", reproducing the exact hazard this slice
+    // exists to close. Refuse BEFORE the status guard, regardless of the
+    // coerced status, so direct-API promotion is blocked even if a caller
+    // never reads listCoordinationTasks() guidance. The soft guidance layer
+    // (coordinationTaskRecommendation with {degraded}) keeps the coordinator
+    // from proposing the transition; this hard gate keeps every other caller
+    // honest.
+    if (loaded.diagnostics && loaded.diagnostics.degraded) {
+        const fields = loaded.diagnostics.offendingFields.length
+            ? loaded.diagnostics.offendingFields.join(", ")
+            : "(unspecified)";
+        throw new StateError(
+            `Task ${loaded.payload.task_id} is degraded ` +
+                `(offending fields: ${fields}) and cannot be prepared for ` +
+                `execution. Inspect or repair the stored card first; a ` +
+                `degraded card is refused at the action boundary regardless ` +
+                `of its normalized status.`,
+        );
+    }
     if (!["draft", "ready"].includes(loaded.payload.status)) {
         throw new StateError(
             `Task ${loaded.payload.task_id} is ${loaded.payload.status} and cannot be prepared for execution.`,
