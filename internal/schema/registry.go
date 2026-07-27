@@ -29,6 +29,16 @@ var registry = map[Type]Schema{
 		Validator:  RepoRecon{},
 		Reconciler: RepoRecon{},
 	},
+	TypeComplexityPolicy: {
+		Type:       TypeComplexityPolicy,
+		Validator:  ComplexityPolicy{},
+		Reconciler: ComplexityPolicy{},
+	},
+	TypeComplexityDispositions: {
+		Type:       TypeComplexityDispositions,
+		Validator:  ComplexityDispositions{},
+		Reconciler: ComplexityDispositions{},
+	},
 }
 
 // Lookup returns the Schema descriptor for a Type, or (zero, false) if the type
@@ -50,6 +60,8 @@ func Lookup(t Type) (Schema, bool) {
 //   - forbidden-patterns.project.js     -> TypeForbiddenPatternsProject
 //   - repo-recon-<name>.yml             -> TypeRepoRecon  (any repo-recon-* or
 //     repo-recon.* named recon data file)
+//   - .vh-agent-harness/complexity-policy.yml -> TypeComplexityPolicy
+//   - .opencode/repo-configs/complexity-dispositions.yml -> TypeComplexityDispositions
 func SchemaForPath(path string) (Schema, bool) {
 	clean := filepath.ToSlash(path)
 	base := filepath.Base(clean)
@@ -62,6 +74,10 @@ func SchemaForPath(path string) (Schema, bool) {
 		return lookup(TypeForbiddenPatternsProject)
 	case (strings.HasPrefix(base, "repo-recon-") || strings.HasPrefix(base, "repo-recon.")) && strings.HasSuffix(base, ".yml"):
 		return lookup(TypeRepoRecon)
+	case base == "complexity-policy.yml" && strings.HasPrefix(clean, ".vh-agent-harness/"):
+		return lookup(TypeComplexityPolicy)
+	case base == "complexity-dispositions.yml" && strings.HasPrefix(clean, ".opencode/repo-configs/"):
+		return lookup(TypeComplexityDispositions)
 	}
 	return Schema{}, false
 }
@@ -74,7 +90,7 @@ func lookup(t Type) (Schema, bool) {
 // All returns every registered Schema in canonical Type order. Useful for doctor
 // (validate every armed instance in the tree) and for tests.
 func All() []Schema {
-	order := []Type{TypeHarnessProfile, TypeRunShape, TypeForbiddenPatternsProject, TypeRepoRecon}
+	order := []Type{TypeHarnessProfile, TypeRunShape, TypeForbiddenPatternsProject, TypeRepoRecon, TypeComplexityPolicy, TypeComplexityDispositions}
 	out := make([]Schema, 0, len(order))
 	for _, t := range order {
 		if s, ok := registry[t]; ok {

@@ -69,6 +69,7 @@ var doctorCmd = &cobra.Command{
   f1-f2-consistency F1→F2 emit-boundary digest-binding consistent  FAIL if F2 view drifted / missing binding / foreign field
   f2-pairs        F2 canonical+MD pairs structurally consistent  FAIL if pair incomplete / digest mismatch / stale projection
   head-progress   last N successful closeouts advanced HEAD  WARN if post_commit_head flatlined across N closeouts (Pattern 4); SKIP greenfield
+  complexity-advisory repo-snapshot scan of nominated files    WARN if candidates above threshold (advisory only; NEVER FAIL)
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -360,6 +361,20 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	hpr := checkHeadProgress(abs)
 	fmt.Fprintln(out, "    "+hpr.String())
 	applyTier(hpr.tier, &problems, &warns)
+
+	// 20. complexity-advisory (staged advisory hybrid — the SAFETY LAYER INFORMs).
+	//     Loads the platform_armed complexity-policy.yml, runs the repo-snapshot
+	//     scanner over the target, and surfaces nominated candidates (observed >
+	//     configured threshold) as a WARNING-ONLY advisory. This is the sacred
+	//     invariant: a complexity threshold breach is NEVER a FAIL; it never
+	//     increments the problem count and never authorizes a transition. The
+	//     check returns tierWarn when candidates exist (advisory surfaced),
+	//     tierPass when none, or tierSkip when the policy is absent/disabled.
+	//     Greenfield (no policy file) is SKIP, not FAIL.
+	fmt.Fprintln(out, "  complexity-advisory:")
+	car := checkComplexityAdvisory(abs)
+	fmt.Fprintln(out, "    "+car.String())
+	applyTier(car.tier, &problems, &warns)
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)
@@ -667,13 +682,14 @@ func checkSeamLineage(target string) checkResult {
 
 // checkArmedSchema lints every schema'd file the seam owns. Slice 2/5.2:
 //
-//  1. Every core platform_armed file (vh-harness-profile.yml): validate the live
-//     instance (schema-invalid => FAIL); missing => WARN (re-seeded on update).
-//  2. The other three schema'd authorities — run-shape.yml, repo-recon-data.yml,
-//     and forbidden-patterns.project.js — when present in the live tree
-//     (Slice 5.2 full-registry wiring). These are project_owned /
-//     external_generated, so absence is NOT a warn; only a present-but-invalid
-//     instance is a FAIL.
+//  1. Every core platform_armed file (vh-harness-profile.yml,
+//     complexity-policy.yml): validate the live instance (schema-invalid =>
+//     FAIL); missing => WARN (re-seeded on update).
+//  2. The other four schema'd authorities — run-shape.yml, repo-recon-data.yml,
+//     forbidden-patterns.project.js, and complexity-dispositions.yml — when
+//     present in the live tree (Slice 5.2 full-registry wiring). These are
+//     project_owned / external_generated, so absence is NOT a warn; only a
+//     present-but-invalid instance is a FAIL.
 //
 // This is the authoritative lint surface: update reconciles (armed files),
 // doctor lints (all schema'd files). The reconcile path already re-derives the
@@ -714,11 +730,12 @@ func checkArmedSchema(target string) checkResult {
 		}
 	}
 
-	// Slice 5.2: lint the other three schema'd authorities when present. These
+	// Slice 5.2: lint the other four schema'd authorities when present. These
 	// are project_owned / external_generated, so absence is silent (not a warn);
 	// only a present-but-invalid instance is a FAIL. repo-recon-data.yml is
 	// seeded blank on install (external_generated), so it is usually present and
-	// valid; run-shape.yml and forbidden-patterns.project.js are optional.
+	// valid; run-shape.yml and forbidden-patterns.project.js are optional;
+	// complexity-dispositions.yml is seeded blank (project_owned).
 	for _, sp := range additionalSchemaPaths() {
 		live := filepath.Join(target, filepath.FromSlash(sp.path))
 		raw, rerr := os.ReadFile(live)
@@ -757,17 +774,19 @@ type schemaPath struct {
 	validator schema.Validator
 }
 
-// additionalSchemaPaths lists the three non-core-platform_armed schema'd
-// authorities doctor lints if present (Slice 5.2). run-shape.yml is the S4
-// runtime shape (project_owned, .vh-agent-harness/); repo-recon-data.yml is the
+// additionalSchemaPaths lists the non-core-platform_armed schema'd authorities
+// doctor lints if present (Slice 5.2). run-shape.yml is the S4 runtime shape
+// (project_owned, .vh-agent-harness/); repo-recon-data.yml is the
 // external_generated recon map; forbidden-patterns.project.js is the
-// project_owned deny-rule payload. Each resolves to its registered validator.
+// project_owned deny-rule payload; complexity-dispositions.yml is the
+// project_owned disposition manifest. Each resolves to its registered validator.
 func additionalSchemaPaths() []schemaPath {
-	out := make([]schemaPath, 0, 3)
+	out := make([]schemaPath, 0, 4)
 	for _, p := range []string{
 		".vh-agent-harness/run-shape.yml",
 		".opencode/repo-configs/repo-recon-data.yml",
 		".opencode/repo-configs/forbidden-patterns.project.js",
+		".opencode/repo-configs/complexity-dispositions.yml",
 	} {
 		if sch, ok := schema.SchemaForPath(p); ok {
 			out = append(out, schemaPath{path: p, validator: sch.Validator})

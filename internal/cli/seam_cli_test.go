@@ -425,6 +425,8 @@ func TestSeamClassifier_ReadsCoreOwnership(t *testing.T) {
 		want ownership.Class
 	}{
 		{".vh-agent-harness/vh-harness-profile.yml", ownership.ClassPlatformArmed},
+		{".vh-agent-harness/complexity-policy.yml", ownership.ClassPlatformArmed},
+		{".opencode/repo-configs/complexity-dispositions.yml", ownership.ClassProjectOwned},
 		{".opencode/repo-configs/forbidden-patterns.project.js", ownership.ClassProjectOwned},
 		{".vh-agent-harness/config-transform.mjs", ownership.ClassProjectOwned},
 		{".vh-agent-harness/config-transform.core.mjs", ownership.ClassPlatformManaged},

@@ -1,0 +1,321 @@
+{
+  "description": "Shared complexity signal parity vectors. Both the Go (internal/complexity) and Node (complexity-signal-lib.js) adapters materialize these vectors through the same ComputeSignal + Eligibility + CountLines + Sort logic and MUST produce identical results. This is the cross-language parity contract for the staged advisory hybrid (WARN-only; no transition authority).",
+  "default_policy": {
+    "version": 1,
+    "enabled": true,
+    "defaults": {
+      "event_file_lines": 350,
+      "snapshot_file_lines": 500
+    },
+    "per_language": {
+      ".go": {},
+      ".cjs": {},
+      ".cts": {},
+      ".js": {},
+      ".jsx": {},
+      ".mjs": {},
+      ".mts": {},
+      ".py": {},
+      ".ts": {},
+      ".tsx": {}
+    },
+    "exclude": {
+      "event_paths": [
+        ".git/**",
+        ".opencode/state/**",
+        "**/__pycache__/**",
+        "**/node_modules/**",
+        "tmp/**"
+      ],
+      "snapshot_paths": [
+        ".git/**",
+        ".opencode/**",
+        "**/__pycache__/**",
+        "**/node_modules/**",
+        "tmp/**"
+      ],
+      "snapshot_suffixes": [
+        "_test.go"
+      ]
+    },
+    "doctor": {
+      "max_candidates": 10
+    },
+    "recurrence": {
+      "enabled": false
+    }
+  },
+  "vectors": [
+    {
+      "id": "01-basic-inclusion",
+      "description": "Basic inclusion: .go, .js, .ts, .py are supported and produce signals.",
+      "projection": "repo_snapshot",
+      "policy": null,
+      "files": [
+        {"path": "main.go", "content": "package main\nfunc main() {}\n"},
+        {"path": "app.js", "content": "console.log('hi');\n"},
+        {"path": "mod.ts", "content": "export const x = 1;\n"},
+        {"path": "svc.py", "content": "def f():\n    pass\n"}
+      ],
+      "expected_signals": [
+        {"path": "main.go", "language": ".go", "observed": 2, "threshold": 500, "nominated": false},
+        {"path": "app.js", "language": ".js", "observed": 1, "threshold": 500, "nominated": false},
+        {"path": "mod.ts", "language": ".ts", "observed": 1, "threshold": 500, "nominated": false},
+        {"path": "svc.py", "language": ".py", "observed": 2, "threshold": 500, "nominated": false}
+      ],
+      "expected_excluded": []
+    },
+    {
+      "id": "02-unsupported-extension",
+      "description": "Unsupported extension (.md, .json, .yml) is excluded consistently in both projections.",
+      "projection": "repo_snapshot",
+      "policy": null,
+      "files": [
+        {"path": "README.md", "content": "# Title\n"},
+        {"path": "config.json", "content": "{}\n"},
+        {"path": "data.yml", "content": "k: v\n"}
+      ],
+      "expected_signals": [],
+      "expected_excluded": ["README.md", "config.json", "data.yml"]
+    },
+    {
+      "id": "03-root-render-exclusion",
+      "description": "Root .opencode/** is rendered output and excluded from snapshot.",
+      "projection": "repo_snapshot",
+      "policy": null,
+      "files": [
+        {"path": ".opencode/scripts/example.js", "content": "x;\n"},
+        {"path": "src/keep.js", "content": "y;\n"}
+      ],
+      "expected_signals": [
+        {"path": "src/keep.js", "language": ".js", "observed": 1, "threshold": 500, "nominated": false}
+      ],
+      "expected_excluded": [".opencode/scripts/example.js"]
+    },
+    {
+      "id": "04-corpus-source-inclusion",
+      "description": "templates/core/.opencode/** is source corpus and INCLUDED in snapshot (only root .opencode/** is excluded).",
+      "projection": "repo_snapshot",
+      "policy": null,
+      "files": [
+        {"path": "templates/core/.opencode/scripts/example.js", "content": "z;\n"},
+        {"path": "internal/cli/main.go", "content": "package cli\n"}
+      ],
+      "expected_signals": [
+        {"path": "templates/core/.opencode/scripts/example.js", "language": ".js", "observed": 1, "threshold": 500, "nominated": false},
+        {"path": "internal/cli/main.go", "language": ".go", "observed": 1, "threshold": 500, "nominated": false}
+      ],
+      "expected_excluded": []
+    },
+    {
+      "id": "05-test-policy-snapshot-excluded-postedit-eligible",
+      "description": "*_test.go excluded from snapshot but eligible for post-edit projection.",
+      "projection": "repo_snapshot",
+      "policy": null,
+      "files": [
+        {"path": "internal/example_test.go", "content": "package internal\n"},
+        {"path": "internal/example.go", "content": "package internal\n"}
+      ],
+      "expected_signals": [
+        {"path": "internal/example.go", "language": ".go", "observed": 1, "threshold": 500, "nominated": false}
+      ],
+      "expected_excluded": ["internal/example_test.go"],
+      "post_edit_override": {
+        "projection": "post_edit",
+        "expected_signals": [
+          {"path": "internal/example_test.go", "language": ".go", "observed": 1, "threshold": 350, "nominated": false}
+        ],
+        "expected_excluded": []
+      }
+    },
+    {
+      "id": "06-path-exclusions",
+      "description": "Path exclusions: .git/, state, cache, dependency, tmp paths excluded.",
+      "projection": "repo_snapshot",
+      "policy": null,
+      "files": [
+        {"path": ".git/config.js", "content": "x;\n"},
+        {"path": ".opencode/state/session.js", "content": "x;\n"},
+        {"path": "foo/__pycache__/cache.py", "content": "x\n"},
+        {"path": "node_modules/pkg/index.js", "content": "x;\n"},
+        {"path": "tmp/scratch.js", "content": "x;\n"},
+        {"path": "src/real.js", "content": "x;\n"}
+      ],
+      "expected_signals": [
+        {"path": "src/real.js", "language": ".js", "observed": 1, "threshold": 500, "nominated": false}
+      ],
+      "expected_excluded": [".git/config.js", ".opencode/state/session.js", "foo/__pycache__/cache.py", "node_modules/pkg/index.js", "tmp/scratch.js"]
+    },
+    {
+      "id": "07-line-counting",
+      "description": "Line counting: empty=0; single line no terminal newline=1; terminal newline does NOT create phantom extra line; CRLF and LF equal counts.",
+      "projection": "repo_snapshot",
+      "policy": null,
+      "files": [
+        {"path": "empty.js", "content": ""},
+        {"path": "one-no-newline.js", "content": "a"},
+        {"path": "one-with-newline.js", "content": "a\n"},
+        {"path": "two-no-newline.js", "content": "a\nb"},
+        {"path": "two-with-newline.js", "content": "a\nb\n"},
+        {"path": "crlf-two.js", "content": "a\r\nb\r\n"},
+        {"path": "crlf-one.js", "content": "a\r\n"}
+      ],
+      "line_counts": [
+        {"path": "empty.js", "expected": 0},
+        {"path": "one-no-newline.js", "expected": 1},
+        {"path": "one-with-newline.js", "expected": 1},
+        {"path": "two-no-newline.js", "expected": 2},
+        {"path": "two-with-newline.js", "expected": 2},
+        {"path": "crlf-two.js", "expected": 2},
+        {"path": "crlf-one.js", "expected": 1}
+      ],
+      "expected_signals": [
+        {"path": "two-no-newline.js", "language": ".js", "observed": 2, "threshold": 500, "nominated": false},
+        {"path": "two-with-newline.js", "language": ".js", "observed": 2, "threshold": 500, "nominated": false},
+        {"path": "crlf-two.js", "language": ".js", "observed": 2, "threshold": 500, "nominated": false},
+        {"path": "empty.js", "language": ".js", "observed": 0, "threshold": 500, "nominated": false},
+        {"path": "one-no-newline.js", "language": ".js", "observed": 1, "threshold": 500, "nominated": false},
+        {"path": "one-with-newline.js", "language": ".js", "observed": 1, "threshold": 500, "nominated": false},
+        {"path": "crlf-one.js", "language": ".js", "observed": 1, "threshold": 500, "nominated": false}
+      ],
+      "expected_excluded": []
+    },
+    {
+      "id": "08-threshold-boundary",
+      "description": "Threshold boundary: observed==threshold NOT nominated; observed==threshold+1 nominated. Strict inequality.",
+      "projection": "repo_snapshot",
+      "policy": {
+        "defaults": {"event_file_lines": 350, "snapshot_file_lines": 5},
+        "per_language": {".js": {}},
+        "exclude": {"event_paths": [], "snapshot_paths": [], "snapshot_suffixes": []}
+      },
+      "files": [
+        {"path": "at-threshold.js", "content_lines": 5, "note": "observed==threshold -> not nominated"},
+        {"path": "above-threshold.js", "content_lines": 6, "note": "observed==threshold+1 -> nominated"}
+      ],
+      "expected_signals": [
+        {"path": "above-threshold.js", "language": ".js", "observed": 6, "threshold": 5, "nominated": true},
+        {"path": "at-threshold.js", "language": ".js", "observed": 5, "threshold": 5, "nominated": false}
+      ],
+      "expected_excluded": []
+    },
+    {
+      "id": "09-default-inheritance",
+      "description": "Default inheritance: empty per_language entry inherits both defaults (event=350, snapshot=500).",
+      "projection": "repo_snapshot",
+      "policy": null,
+      "files": [
+        {"path": "big.go", "content_lines": 501}
+      ],
+      "expected_signals": [
+        {"path": "big.go", "language": ".go", "observed": 501, "threshold": 500, "nominated": true}
+      ],
+      "expected_excluded": [],
+      "post_edit_override": {
+        "projection": "post_edit",
+        "expected_signals": [
+          {"path": "big.go", "language": ".go", "observed": 501, "threshold": 350, "nominated": true}
+        ],
+        "expected_excluded": []
+      }
+    },
+    {
+      "id": "10-partial-override",
+      "description": "Partial override: .js event_file_lines overridden to 100 while snapshot_file_lines inherits default 500.",
+      "projection": "repo_snapshot",
+      "policy": {
+        "defaults": {"event_file_lines": 350, "snapshot_file_lines": 500},
+        "per_language": {".js": {"event_file_lines": 100}},
+        "exclude": {"event_paths": [], "snapshot_paths": [], "snapshot_suffixes": []}
+      },
+      "files": [
+        {"path": "mid.js", "content_lines": 200}
+      ],
+      "expected_signals": [
+        {"path": "mid.js", "language": ".js", "observed": 200, "threshold": 500, "nominated": false}
+      ],
+      "expected_excluded": [],
+      "post_edit_override": {
+        "projection": "post_edit",
+        "expected_signals": [
+          {"path": "mid.js", "language": ".js", "observed": 200, "threshold": 100, "nominated": true}
+        ],
+        "expected_excluded": []
+      }
+    },
+    {
+      "id": "11-ordering",
+      "description": "Ordering: descending observed LOC, then normalized path ascending.",
+      "projection": "repo_snapshot",
+      "policy": {
+        "defaults": {"event_file_lines": 350, "snapshot_file_lines": 1},
+        "per_language": {".js": {}},
+        "exclude": {"event_paths": [], "snapshot_paths": [], "snapshot_suffixes": []}
+      },
+      "files": [
+        {"path": "b/zebra.js", "content_lines": 3},
+        {"path": "a/apple.js", "content_lines": 3},
+        {"path": "c/mango.js", "content_lines": 5}
+      ],
+      "expected_ordered_paths": ["c/mango.js", "a/apple.js", "b/zebra.js"]
+    },
+    {
+      "id": "12-presentation-truncation",
+      "description": "Presentation truncation: only doctor.max_candidates rendered; full total retained.",
+      "projection": "repo_snapshot",
+      "policy": {
+        "defaults": {"event_file_lines": 350, "snapshot_file_lines": 1},
+        "per_language": {".js": {}},
+        "exclude": {"event_paths": [], "snapshot_paths": [], "snapshot_suffixes": []},
+        "doctor": {"max_candidates": 2}
+      },
+      "files": [
+        {"path": "f1.js", "content_lines": 10},
+        {"path": "f2.js", "content_lines": 9},
+        {"path": "f3.js", "content_lines": 8},
+        {"path": "f4.js", "content_lines": 7}
+      ],
+      "max_candidates": 2,
+      "expected_shown_count": 2,
+      "expected_total": 4
+    },
+    {
+      "id": "13-message-output",
+      "description": "Message output: projection-specific advisory containing projection identity, normalized path, observed value, threshold; NO FAIL/rejection/auto-split language.",
+      "projection": "repo_snapshot",
+      "policy": {
+        "defaults": {"event_file_lines": 350, "snapshot_file_lines": 1},
+        "per_language": {".js": {}},
+        "exclude": {"event_paths": [], "snapshot_paths": [], "snapshot_suffixes": []}
+      },
+      "files": [
+        {"path": "big.js", "content_lines": 5}
+      ],
+      "message_assertions": {
+        "must_contain": ["repo_snapshot", "big.js", "5"],
+        "must_not_contain": ["FAIL", "fail", "reject", "auto-split", "must split"]
+      }
+    },
+    {
+      "id": "14-boundary-indicators",
+      "description": "Boundary indicators serialized separately from metric; do not alter nomination status.",
+      "projection": "repo_snapshot",
+      "policy": {
+        "defaults": {"event_file_lines": 350, "snapshot_file_lines": 1},
+        "per_language": {".js": {}},
+        "exclude": {"event_paths": [], "snapshot_paths": [], "snapshot_suffixes": []}
+      },
+      "files": [
+        {"path": "ind.js", "content_lines": 5}
+      ],
+      "expected_signals": [
+        {"path": "ind.js", "language": ".js", "observed": 5, "threshold": 1, "nominated": true}
+      ],
+      "boundary_indicator_assertions": {
+        "kind": "top_level_symbol_count",
+        "evidence": "not_collected",
+        "separate_from_metric": true
+      }
+    }
+  ]
+}

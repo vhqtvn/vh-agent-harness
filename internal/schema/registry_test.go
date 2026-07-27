@@ -128,6 +128,10 @@ func TestSchemaForPath(t *testing.T) {
 		{"run-shape.yml", "", false}, // must be under .vh-agent-harness/
 		{"forbidden-patterns.project.js", TypeForbiddenPatternsProject, true},
 		{"repo-recon.image-lane.yml", TypeRepoRecon, true},
+		{".vh-agent-harness/complexity-policy.yml", TypeComplexityPolicy, true},
+		{"complexity-policy.yml", "", false}, // must be under .vh-agent-harness/
+		{".opencode/repo-configs/complexity-dispositions.yml", TypeComplexityDispositions, true},
+		{"complexity-dispositions.yml", "", false}, // must be under .opencode/repo-configs/
 		{"AGENTS.md", "", false},
 	}
 	for _, c := range cases {
@@ -141,9 +145,9 @@ func TestSchemaForPath(t *testing.T) {
 	}
 }
 
-func TestAllReturnsFourSchemas(t *testing.T) {
+func TestAllReturnsSixSchemas(t *testing.T) {
 	all := All()
-	if len(all) != 4 {
-		t.Fatalf("expected 4 registered schemas, got %d", len(all))
+	if len(all) != 6 {
+		t.Fatalf("expected 6 registered schemas, got %d", len(all))
 	}
 }

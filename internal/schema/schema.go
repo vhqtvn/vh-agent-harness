@@ -42,6 +42,19 @@ const (
 	// hotspots, packages, tests). Ownership class: external_generated ->
 	// regenerate; doctor validates the shape against the contract.
 	TypeRepoRecon Type = "repo-recon"
+
+	// TypeComplexityPolicy is the complexity-signal configuration file
+	// (.vh-agent-harness/complexity-policy.yml). Ownership class: platform_armed
+	// -> full Validate + structural Reconcile. The complexity scanner loads it
+	// to resolve per-file thresholds; doctor validates it.
+	TypeComplexityPolicy Type = "complexity-policy"
+
+	// TypeComplexityDispositions is the complexity disposition manifest
+	// (.opencode/repo-configs/complexity-dispositions.yml). Ownership class:
+	// project_owned (seed once, never clobber) -> seed-only reconcile; doctor
+	// validates the structural completeness + internal consistency of recorded
+	// dispositions.
+	TypeComplexityDispositions Type = "complexity-dispositions"
 )
 
 // FieldError is one structural validation problem at a specific schema path. It

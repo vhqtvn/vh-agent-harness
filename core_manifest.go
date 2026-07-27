@@ -163,6 +163,21 @@ func classifyCorePath(liveRel string) ownership.PathRule {
 	case ".vh-agent-harness/vh-harness-profile.yml":
 		rule.Class = ownership.ClassPlatformArmed
 		rule.Provenance = "core.profile"
+	case ".vh-agent-harness/complexity-policy.yml":
+		// Complexity signal policy: the platform ships the canonical Q1
+		// thresholds, per-language map, and exclusion rules as a schema-linted
+		// armed file. The project may override individual per_language
+		// thresholds within the schema envelope; the harness reconciles the
+		// merge structurally and preserves project edits.
+		rule.Class = ownership.ClassPlatformArmed
+		rule.Provenance = "core.complexity-policy"
+	case ".opencode/repo-configs/complexity-dispositions.yml":
+		// Project-owned disposition manifest: the harness seeds a blank
+		// scaffold ({version:1, dispositions:[]}) on first install, then
+		// preserves project-recorded accept/split-defer dispositions forever.
+		// The harness never writes dispositions itself.
+		rule.Class = ownership.ClassProjectOwned
+		rule.Provenance = "core.complexity-dispositions"
 	case "docs/planning/backlog.md", "docs/planning/roadmap.md":
 		// Planning docs: the harness seeds a canonical starter on a greenfield
 		// install, then NEVER clobbers — the backlog is the project's living
@@ -234,7 +249,9 @@ func CorePaths() ([]string, error) {
 // constant for reference and for tests that assert the exception surface.
 var coreExceptionsForDoc = map[string]ownership.Class{
 	".vh-agent-harness/vh-harness-profile.yml":             ownership.ClassPlatformArmed,
+	".vh-agent-harness/complexity-policy.yml":              ownership.ClassPlatformArmed,
 	".vh-agent-harness/config-transform.mjs":               ownership.ClassProjectOwned,
+	".opencode/repo-configs/complexity-dispositions.yml":   ownership.ClassProjectOwned,
 	".opencode/repo-configs/forbidden-patterns.project.js": ownership.ClassProjectOwned,
 	".opencode/repo-configs/repo-recon-data.yml":           ownership.ClassExternalGenerated,
 	// Planning docs: canonical starter seeded once, then project-owned (living backlog).

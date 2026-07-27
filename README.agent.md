@@ -911,7 +911,7 @@ export default function transform({ context }) {
   overlay-perm, environment, config-refs, gitignore, auto-classifier,
   auto-gate-ignore, skills, subagent-depth, defer-liveness,
   staged-errata-content, behavioral-closure, f1-envelope, f1-f2-consistency,
-  f2-pairs, head-progress). The `head-progress` check reads the commit-gate's
+  f2-pairs, head-progress, complexity-advisory). The `head-progress` check reads the commit-gate's
   durable closeout ledger (`.git/commit-gate/closeouts.log`) and WARNs when the
   last N (default 3, env `COMMIT_GATE_STALE_HEAD_THRESHOLD`) successful closeouts
   all recorded the same `post_commit_head` — a flatline signalling commits may
@@ -973,6 +973,18 @@ export default function transform({ context }) {
   projection carries an `f2_view` (nothing to audit — F2 rendering is a separate
   track and may not have attached view metadata yet). Like `f1-envelope`, it is
   a STRUCTURAL consistency audit, NOT a truth prover.
+  The `complexity-advisory` check loads the platform_armed
+  `complexity-policy.yml` and runs the repo-snapshot projection (file LOC over
+  tracked source, excluding rendered `.opencode/**`, test files, and
+  dependency/cache/tmp paths). It WARNs when any file exceeds the configured
+  threshold (default 500) and surfaces the top N candidates (default 10). It
+  NEVER returns FAIL — complexity signals INFORM; they do not gate. The check
+  SKIPs when the policy is absent or disabled, PASSES when no file is
+  nominated, and WARNs when candidates exist. A malformed policy WARNs too
+  (the armed-schema owns the FAIL). The blank
+  `complexity-dispositions.yml` is validated structurally without taking update
+  ownership. This is the staged advisory hybrid: complexity is advisory
+  evidence, never transition authority.
   `vh-agent-harness diff` shows drift vs. the corpus.
 - **Inspect / validate skills:** `vh-agent-harness skill list` prints every skill
   (core, overlay-pack, and rendered) with its source, whether it is rendered to
@@ -1547,9 +1559,10 @@ operator release-prep. The ceremony produces THREE sequential single-path
 (manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`.
 The release-tag wrapper's deterministic gates refuse the tag unless each
 commit binds to its predecessor exactly. The wrapper also runs **G0c**
-  (`vh-agent-harness doctor` — all 19 checks, including #12 defer-liveness,
+  (`vh-agent-harness doctor` — all 20 checks, including #12 defer-liveness,
   #13 staged-errata-content, #14 behavioral-closure, #15 dev-stale-embed,
-  #16 f1-envelope, #17 f1-f2-consistency, #18 f2-pairs, and #19 head-progress) as a hard machine gate AFTER the clean-worktree
+  #16 f1-envelope, #17 f1-f2-consistency, #18 f2-pairs, #19 head-progress, and
+  #20 complexity-advisory) as a hard machine gate AFTER the clean-worktree
 gate (G0b) and BEFORE the readiness-pass artifact gate (G1-G5). A
 non-HEALTHY doctor refuses the tag. This makes doctor a HARD ceremony stop,
 not a human-remembered pre-flight. Push-only mode exits before G0c (the tag
