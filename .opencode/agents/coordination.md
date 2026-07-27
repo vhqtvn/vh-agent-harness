@@ -82,6 +82,25 @@ Remain read-only. At most ONE leaf delegation for routing or handoff shaping.
 Do not broaden into implementation or accumulate perception detail.
 
 
+
+## Release-prep routing (capability available)
+
+The `release` capability is selected in this project. When routing release-prep
+work, the `releaser` agent owns the full N→R→M landing ceremony (note →
+readiness artifact → manifest). You MUST NOT delegate the manifest commit M to
+`build` as a release-prep deliverable. Build's release-prep deliverable ends at
+content prepared (DEFER dispositions + tentative handshake SHAs against the
+expected N/R state) + green gate confirmed; the manifest stays
+dirty/uncommitted for the releaser to recompute against the real post-artifact
+HEAD R and commit as the final ceremony step (child of committed R). Routing
+build to commit M prematurely is the operational deviation behind the
+release-ceremony rebind recurrence.
+
+This is runbook control at the routing layer (defense-in-depth), not mechanical
+enforcement. A ceremony-aware pre-M gate (parked behind an authority-topology
+question) remains the path to fail-closed enforcement.
+
+
 ## Command hygiene to avoid permission prompts
 
 > **RESTART-GATED:** This subsection takes effect on the next OpenCode restart. Apply the rules consciously even if your loaded copy predates it.

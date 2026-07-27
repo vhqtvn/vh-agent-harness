@@ -15,6 +15,20 @@ manifest-only commit through the committer, and invoke the wrapper with
 manifest authority. A release-agent-only operator gets manifest authority by
 default.
 
+**Sole M-committer (ownership boundary).** No upstream agent (`build`,
+`coordination`, or `project-coordinator`) commits the manifest M. Release-prep
+work routed to `build` prepares manifest CONTENT (DEFER dispositions + tentative
+handshake SHAs against the expected N/R state) but MUST leave
+`.vh-agent-harness/release-defer-dispositions.json` dirty/uncommitted; this
+agent is the SOLE committer of M, recomputing the authoritative handshake SHAs
+against the real post-artifact HEAD R in Step 3.3 before the manifest-only
+commit. A manifest committed upstream against the release-prep HEAD (before R
+has landed) is the operational deviation behind the release-ceremony rebind
+recurrence — it inverts the required N→R→M order and forces a reconstruct on
+top. This boundary is encoded at every driving surface that could route build
+to commit M; the ceremony-aware pre-M gate that would make it mechanically
+unavoidable remains parked.
+
 This agent is structured as a **thin spine + default adapter**:
 
 - The **spine** owns the flow-control contract, the safety/refusal taxonomy, the

@@ -849,3 +849,114 @@ func assertReleaserReadinessCeremonyContent(t *testing.T, label, got string) {
 		}
 	}
 }
+
+// TestReleasePrepRouting_BuildAndCoordinatorDoNotOwnMCommit is the routing-
+// correction regression for the release-prep R<->M rebind recurrence
+// (v0.15.0 -> v0.18.0). The recurrence came from the COORDINATOR routing
+// `build` to commit the manifest M against the release-prep HEAD P while the
+// readiness artifact R stayed dirty, forcing the releaser to reconstruct
+// N->R->M on top. The designed flow commits R before M; build committing M
+// directly is the deviation.
+//
+// This test pins the routing correction encoded in the build /
+// coordination / project-coordinator core agent prompts (gated behind
+// .capabilities.release so the clause renders ONLY when the release overlay is
+// selected — keeping templates/core domain-free for non-release consumers) and
+// affirms the releaser retains R-before-M sequencing plus sole-M-committer
+// ownership:
+//
+//   - Under release-selected render: build.md, coordination.md, and
+//     project-coordinator.md each carry the release-prep routing clause (build
+//     is NEVER the committer of M; the coordinator MUST NOT delegate M-commit
+//     to build); releaser.md retains Invariant 1b (handshake sacred) and the
+//     sole-M-committer boundary.
+//   - Under minimal render (release NOT selected): none of build.md /
+//     coordination.md / project-coordinator.md carries the clause — the
+//     .capabilities.release gate evaluates false and the core prompts stay
+//     domain-free.
+//
+// This is a STRUCTURAL contract-content guard (defense-in-depth at the routing
+// layer). It proves the routing text landed and is gated; it does NOT prove a
+// live model-driven release obeys the rule (no agent-runtime release-ceremony
+// harness exists).
+func TestReleasePrepRouting_BuildAndCoordinatorDoNotOwnMCommit(t *testing.T) {
+	// --- Release-selected render: the routing clause MUST land. ---
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	writeProfile(t, root, releaseViaCapabilitiesProfile)
+	if _, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("update with capabilities:[core/release]: %v", err)
+	}
+
+	routingAgents := []string{"build.md", "coordination.md", "project-coordinator.md"}
+	for _, agentFile := range routingAgents {
+		body, err := os.ReadFile(filepath.Join(root, ".opencode", "agents", agentFile))
+		if err != nil {
+			t.Fatalf("read %s under release-selected render: %v", agentFile, err)
+		}
+		got := string(body)
+		// The release-prep routing clause is present (gated behind
+		// .capabilities.release, so it renders only when release is selected).
+		if !strings.Contains(got, "Release-prep") {
+			t.Errorf("%s: release-prep routing clause must render when release is selected (the R<->M rebind routing correction)", agentFile)
+		}
+	}
+
+	// Build prompt MUST explicitly disown M-commit (the positive assertion that
+	// proves the negative: build is told NOT to commit M).
+	buildBody, err := os.ReadFile(filepath.Join(root, ".opencode", "agents", "build.md"))
+	if err != nil {
+		t.Fatalf("read build.md: %v", err)
+	}
+	if !strings.Contains(string(buildBody), "NEVER the committer of the manifest") {
+		t.Errorf("build.md must state the release-prep boundary (build is NEVER the committer of the manifest M)")
+	}
+
+	// Coordination + project-coordinator MUST refuse to delegate M-commit to
+	// build (the routing rule the recurrence violated).
+	for _, agentFile := range []string{"coordination.md", "project-coordinator.md"} {
+		body, err := os.ReadFile(filepath.Join(root, ".opencode", "agents", agentFile))
+		if err != nil {
+			t.Fatalf("read %s: %v", agentFile, err)
+		}
+		if !strings.Contains(string(body), "MUST NOT delegate the manifest commit M to") {
+			t.Errorf("%s must state the routing rule (MUST NOT delegate the manifest commit M to build)", agentFile)
+		}
+	}
+
+	// Releaser retains R-before-M sequencing (Invariant 1b) and the
+	// sole-M-committer ownership boundary.
+	relBody, err := os.ReadFile(filepath.Join(root, ".opencode", "agents", "releaser.md"))
+	if err != nil {
+		t.Fatalf("read releaser.md: %v", err)
+	}
+	gotRel := string(relBody)
+	for _, needle := range []string{
+		"Manifest handshake is sacred", // Invariant 1b (R-before-M, M-final)
+		"Sole M-committer",             // ownership boundary affirmation
+	} {
+		if !strings.Contains(gotRel, needle) {
+			t.Errorf("releaser.md: missing %q (R-before-M sequencing + sole-M-committer boundary must be retained)", needle)
+		}
+	}
+
+	// --- Minimal render (release NOT selected): the clause MUST NOT land. ---
+	rootMin := t.TempDir()
+	seamInstallInto(t, rootMin)
+	writeProfile(t, rootMin, "profile: minimal\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\n")
+	if _, err := seamUpdateOut(t, rootMin); err != nil {
+		t.Fatalf("update with minimal profile: %v", err)
+	}
+	for _, agentFile := range routingAgents {
+		body, err := os.ReadFile(filepath.Join(rootMin, ".opencode", "agents", agentFile))
+		if err != nil {
+			t.Fatalf("read %s under minimal render: %v", agentFile, err)
+		}
+		if strings.Contains(string(body), "Release-prep") {
+			t.Errorf("%s: release-prep routing clause must NOT render when release is unselected (.capabilities.release gate keeps templates/core domain-free)", agentFile)
+		}
+		if strings.Contains(string(body), "release-defer-dispositions.json") {
+			t.Errorf("%s: release-ceremony manifest path must NOT leak into a non-release render (domain-free core)", agentFile)
+		}
+	}
+}

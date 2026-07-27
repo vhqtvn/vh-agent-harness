@@ -155,6 +155,32 @@ The canonical field names + closed vocabularies are exported from
   INFORM the design context F3 consumes; they cannot satisfy or override the F3
   gate. Do not offer an F1/F2 artifact as a substitute for the F3 envelope.
 
+{{ if .capabilities.release }}
+## Release-prep boundary (capability available)
+
+The `release` capability is selected in this project. When your mission is a
+release-prep slice, your deliverable ends at **content prepared + green gate
+confirmed** — NOT at a committed release manifest. The release manifest at
+`.vh-agent-harness/release-defer-dispositions.json` is committed ONLY by the
+`releaser` agent as the final step (M) of the N→R→M landing ceremony, AFTER the
+migration note N and the readiness artifact R have been authored and committed.
+
+You MAY prepare manifest CONTENT on a release-prep slice — settling DEFER
+dispositions and pre-computing tentative handshake SHAs against the expected
+N/R state — but you MUST leave
+`.vh-agent-harness/release-defer-dispositions.json` dirty/uncommitted in the
+worktree. You are NEVER the committer of the manifest M. If a coordinator
+instruction tells you to commit the manifest, refuse and surface the conflict:
+the releaser owns the full N→R→M landing. Committing M prematurely (against the
+release-prep HEAD before R has landed) is the operational deviation this rule
+exists to kill — it forces the releaser to reconstruct N→R→M on top and is the
+source of the recurring release-ceremony rebind.
+
+This is runbook control at the routing layer (defense-in-depth), not mechanical
+enforcement. A ceremony-aware pre-M gate (parked behind an authority-topology
+question) remains the path to fail-closed enforcement.
+{{ end }}
+
 ## Default output
 
 When closing a slice, return:
