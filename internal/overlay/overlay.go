@@ -59,12 +59,13 @@ type Pack struct {
 //
 // The shipped overlays tree carries EMBEDDED packs that are selectable by name
 // out of the box: `release` (Phase-3 capability-installer reference, first
-// shipped pack) and `auto-classifier-pilot` (the opt-in auto-classifier safety
-// pilot). KnownPacks therefore returns ["auto-classifier-pilot", "release"]
-// (sorted). A project-local pack at .vh-agent-harness/overlays/<name>/ still
-// shadows an embedded pack of the same name (project-wins) via OpenPackFor.
-// Dropping a new pack directory under templates/overlays/ is listed here with no
-// code change.
+// shipped pack), `auto-classifier-pilot` (the opt-in auto-classifier safety
+// pilot), and `repo-mail` (the repo-mail inter-repo communication protocol
+// overlay — egress-gate wiring). KnownPacks therefore returns
+// ["auto-classifier-pilot", "release", "repo-mail"] (sorted). A project-local
+// pack at .vh-agent-harness/overlays/<name>/ still shadows an embedded pack of
+// the same name (project-wins) via OpenPackFor. Dropping a new pack directory
+// under templates/overlays/ is listed here with no code change.
 func KnownPacks() ([]string, error) {
 	sub, err := fs.Sub(corpus.OverlaysFS, corpus.OverlaysDir)
 	if err != nil {

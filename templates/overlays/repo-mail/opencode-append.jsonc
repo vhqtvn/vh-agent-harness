@@ -1,0 +1,22 @@
+{
+  // repo-mail overlay pack — opencode-append.
+  //
+  // This pack wires the generic domain-free repo-mail egress gate
+  // (templates/core/.opencode/repo-configs/repo-mail-egress-gate.js) to the
+  // shared scrubCredentials seam (auto-classifier-pilot/plugins/auto-gate-scrub.js).
+  //
+  // The wiring unit plugins/repo-mail-egress-wiring.js renders into
+  // .opencode/plugins/repo-mail-egress-wiring.js. It is a PURE LIBRARY (no
+  // server() export, carries the __repoMailEgressLibrary non-function sentinel),
+  // so the OpenCode plugin loader skips it as a non-plugin — exactly like
+  // auto-gate-scrub.js / auto-gate-verdict.js. It is imported explicitly by a
+  // repo-mail sender (a later slice), never auto-invoked.
+  //
+  // No permission grants are needed: the egress gate is a pure validator with
+  // no tool-call surface. No permission-pack.jsonc.
+  //
+  // Select this pack in .vh-agent-harness/vh-harness-profile.yml:
+  //   overlays:
+  //     - auto-classifier-pilot
+  //     - repo-mail          # <- add to render the wiring unit
+}

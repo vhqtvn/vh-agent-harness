@@ -8,13 +8,16 @@ package overlay
 // caught at the package level rather than only through an end-to-end seam run.
 //
 // PACK FIXTURE POLICY (2026-06-25 pre-publish clearance, updated 2026-07-01,
-// extended 2026-07-14 with the auto-classifier-pilot embed promotion):
-// the harness ships TWO embedded overlay packs — `auto-classifier-pilot` (the
-// opt-in auto-classifier safety pilot) and `release` (Phase-3
+// extended 2026-07-14 with the auto-classifier-pilot embed promotion, extended
+// 2026-07-27 with the repo-mail embed promotion):
+// the harness ships THREE embedded overlay packs — `auto-classifier-pilot` (the
+// opt-in auto-classifier safety pilot), `release` (Phase-3
 // capability-installer overlay-integration reference implementation, the first
-// shipped pack). web-overlay was relocated to a non-shipped adoption reference
-// under docs/adoption-examples/web/, so it is NOT a shipped pack. KnownPacks
-// therefore returns ["auto-classifier-pilot", "release"] (sorted). To keep
+// shipped pack), and `repo-mail` (the repo-mail inter-repo communication
+// protocol overlay — egress-gate wiring). web-overlay was relocated to a
+// non-shipped adoption reference under docs/adoption-examples/web/, so it is
+// NOT a shipped pack. KnownPacks therefore returns ["auto-classifier-pilot",
+// "release", "repo-mail"] (sorted). To keep
 // exercising the Pack API + merge/render contract against a richer shape than
 // the shipped packs carry, every pack-touching test below builds a SYNTHETIC
 // pack from testing/fstest.MapFS (mirroring the on-disk layout a real pack
@@ -35,15 +38,17 @@ import (
 )
 
 // knownPackNames is the sorted list of overlay packs shipped under
-// templates/overlays. The harness ships two embedded overlay packs:
+// templates/overlays. The harness ships three embedded overlay packs:
 // `auto-classifier-pilot` (opt-in auto-classifier safety pilot, promoted to the
-// embed on 2026-07-14) and `release` (Phase-3 capability-installer reference,
-// the first shipped pack), so KnownPacks returns ["auto-classifier-pilot",
-// "release"] (sorted). web-overlay remains relocated to
-// docs/adoption-examples/web/ and is NOT a shipped pack, so it is deliberately
-// absent here. (See TestKnownPacks_ShipsEmbeddedPacks for the live assertion
-// that pins this fixture to reality.)
-var knownPackNames = []string{"auto-classifier-pilot", "release"}
+// embed on 2026-07-14), `release` (Phase-3 capability-installer reference, the
+// first shipped pack), and `repo-mail` (repo-mail inter-repo communication
+// protocol overlay — egress-gate wiring, promoted to the embed on 2026-07-27),
+// so KnownPacks returns ["auto-classifier-pilot", "release", "repo-mail"]
+// (sorted). web-overlay remains relocated to docs/adoption-examples/web/ and is
+// NOT a shipped pack, so it is deliberately absent here. (See
+// TestKnownPacks_ShipsEmbeddedPacks for the live assertion that pins this
+// fixture to reality.)
+var knownPackNames = []string{"auto-classifier-pilot", "release", "repo-mail"}
 
 // synthWebStyleFS builds an in-memory fs.FS that mirrors the on-disk layout the
 // real web-overlay pack shipped: agent/command/skill UNIT files plus the three
@@ -158,17 +163,18 @@ func TestOpenPackFor_FallsBackToEmbedded(t *testing.T) {
 
 // --- KnownPacks ------------------------------------------------------------
 
-// TestKnownPacks_ShipsEmbeddedPacks confirms KnownPacks lists BOTH shipped
+// TestKnownPacks_ShipsEmbeddedPacks confirms KnownPacks lists the shipped
 // embedded overlay packs — `auto-classifier-pilot` (opt-in auto-classifier
-// safety pilot) and `release` (Phase-3 capability-installer reference). Both
-// are name-selectable out of the box. web-overlay remains relocated to a
+// safety pilot), `release` (Phase-3 capability-installer reference), and
+// `repo-mail` (repo-mail egress-gate wiring overlay). All three are
+// name-selectable out of the box. web-overlay remains relocated to a
 // non-shipped adoption reference and is deliberately absent.
 func TestKnownPacks_ShipsEmbeddedPacks(t *testing.T) {
 	got, err := KnownPacks()
 	if err != nil {
 		t.Fatalf("KnownPacks: %v", err)
 	}
-	want := []string{"auto-classifier-pilot", "release"}
+	want := []string{"auto-classifier-pilot", "release", "repo-mail"}
 	if len(got) != len(want) {
 		t.Fatalf("KnownPacks: expected %v, got %v", want, got)
 	}
@@ -211,8 +217,8 @@ func TestKnownPacks_MatchesEmbeddedDir(t *testing.T) {
 // TestOpenPack_UnknownNamesFailClosed confirms OpenPack fails closed (wrapping
 // fs.ErrNotExist) for any name that is not a shipped pack. This is the contract
 // a profile that references a non-existent pack hits. (The shipped names today
-// are `auto-classifier-pilot` and `release`; every name listed below is
-// deliberately NOT one of them.)
+// are `auto-classifier-pilot`, `release`, and `repo-mail`; every name listed
+// below is deliberately NOT one of them.)
 func TestOpenPack_UnknownNamesFailClosed(t *testing.T) {
 	for _, name := range []string{"web-overlay", "anything", "acme", "acme-cockpit"} {
 		t.Run(name, func(t *testing.T) {

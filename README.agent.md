@@ -254,7 +254,7 @@ not claim it passed from prompt inspection alone.
 
 ### Shipped overlay packs
 
-Besides project packs you author under `.vh-agent-harness/overlays/`, two
+Besides project packs you author under `.vh-agent-harness/overlays/`, three
 overlay packs ship **embedded in the binary**, selectable by name with no
 vendoring:
 
@@ -273,6 +273,15 @@ vendoring:
   `overlays: [auto-classifier-pilot]`. See "Auto-classifier configuration"
   below, or run `vh-agent-harness overlay docs auto-classifier-pilot` for the
   full reference.
+
+- `repo-mail` — the opt-in repo-mail inter-repo communication egress gate. The
+  pack provides ONLY the integration wiring (`repo-mail-egress-wiring.js`),
+  which binds the generic domain-free fail-closed egress gate
+  (`repo-mail-egress-gate.js`, shipped in **core** as the repo-mail protocol's
+  Contract C) to the shared `scrubCredentials` helper from `auto-classifier-pilot`
+  via dependency injection. It is **overlay-only** (no capability-manifest), so
+  it is selected solely via `overlays: [repo-mail]`, and it depends on
+  `auto-classifier-pilot` for the shared `scrubCredentials` helper.
 
 Each renders into `.opencode/` on `update` exactly like a project-local pack,
 and each is opt-in (a `minimal` profile that never names it renders nothing of
