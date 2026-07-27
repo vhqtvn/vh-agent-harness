@@ -568,6 +568,11 @@ func TestCommitGate_CloseoutLedger(t *testing.T) {
 			t.Fatalf("A commit should land first; got %v", commA)
 		}
 
+		// Capture the branch HEAD after A landed (H1). B's commit fails on the
+		// same-line conflict without moving the ref, so this is the unchanged
+		// HEAD the could_not_land record must carry as post_commit_head.
+		headAfterA := gitIn(t, dir, "rev-parse", "HEAD")
+
 		// B commits: current_head=H1 (moved), CAS rebase 3-way merge CONFLICTS
 		// (base="base", ours="B", theirs="A") -> could_not_land. Non-zero exit is
 		// expected for a failure status; parse the JSON line regardless.
@@ -588,17 +593,28 @@ func TestCommitGate_CloseoutLedger(t *testing.T) {
 		}
 
 		// The could_not_land closeout MUST be recorded into the durable ledger
-		// so doctor's stall surfacing can see it.
+		// so doctor's stall surfacing can see it. Retain the matching B record
+		// rather than reducing the search to a boolean, so the post_commit_head
+		// outcome can be asserted (D013: production writes current_head as
+		// post_commit_head at .opencode/scripts/commit-gate.sh:1049-1055 and
+		// :1064-1069).
 		records := readLedger(t, dir)
-		var foundB bool
+		var recB map[string]any
 		for _, r := range records {
 			if r["uuid"] == uuidBg && r["status"] == "could_not_land" {
-				foundB = true
+				recB = r
 				break
 			}
 		}
-		if !foundB {
-			t.Errorf("could_not_land closeout for B (uuid %s) not recorded in ledger; records: %v", uuidBg, records)
+		if recB == nil {
+			t.Fatalf("could_not_land closeout for B (uuid %s) not recorded in ledger; records: %v", uuidBg, records)
+		}
+		// The branch did not move on B's failed commit (could_not_land), so the
+		// recorded post_commit_head MUST equal the unchanged HEAD captured after
+		// A landed. A stale or empty value here would let doctor's stall
+		// surfacing misread the failed commit as flatlining HEAD.
+		if got := recB["post_commit_head"]; got != headAfterA {
+			t.Errorf("could_not_land post_commit_head = %v, want unchanged HEAD %s (the branch did not move on a failed commit)", got, headAfterA)
 		}
 	})
 }
