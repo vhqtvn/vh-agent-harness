@@ -106,6 +106,8 @@ const COORDINATION_TASK_TYPES = Object.freeze([
     "implementation",
     "study",
     "research",
+    "docs",
+    "verification",
 ]);
 const RESEARCH_SOURCE_POLICIES = Object.freeze([
     "repo_only",
@@ -1428,13 +1430,19 @@ function normalizeStoredCoordinationReview(sourceLastReview, reviewPaths) {
             : parsed?.frontmatter?.session_name
               ? String(parsed.frontmatter.session_name).trim()
               : null;
+    // Read-path enum normalization must be fault-tolerant: a bad stored
+    // last_review.status coerces to "" (then null) instead of throwing, so a
+    // single degraded review block cannot brick listCoordinationTasks() or
+    // any load-based op. Collected messages are discarded; the save path
+    // remains the strict authority for INPUT.
+    const reviewEnumErrors = [];
     const normalized = {
         path: storedPath,
         reviewed_at: (raw && raw.reviewed_at) || parsed?.reviewed_at || null,
         session_name: sessionName || null,
         title: String((raw && raw.title) || parsed?.title || "").trim(),
         status:
-            normalizeCoordinationEnum(
+            normalizeCoordinationEnumCollected(
                 (raw && raw.status) || parsed?.status,
                 [
                     "ready",
@@ -1445,6 +1453,7 @@ function normalizeStoredCoordinationReview(sourceLastReview, reviewPaths) {
                     "cancelled",
                 ],
                 "last_review.status",
+                reviewEnumErrors,
             ) || null,
         summary: String((raw && raw.summary) || parsed?.summary || "").trim(),
         next_action: String(
@@ -1477,11 +1486,21 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
     const normalizedTaskID = normalizeCoordinationTaskId(
         source.task_id || taskID || "",
     );
+    // Read/normalize path must be fault-tolerant where the save path is
+    // strict: route every enum field through the collected (non-throwing)
+    // validator so a single card with a bad stored enum value cannot brick
+    // listCoordinationTasks() and every load-based op that depends on it
+    // (read, activate, ready, update, repair, review, saveCloseout). A bad
+    // value coerces to "" and the per-field default applies; collected
+    // messages are discarded here — the save path remains the authority
+    // that rejects bad INPUT, the read path only tolerates what is on disk.
+    const readEnumErrors = [];
     let normalizedStatus =
-        normalizeCoordinationEnum(
+        normalizeCoordinationEnumCollected(
             source.status,
             COORDINATION_TASK_STATUSES,
             "status",
+            readEnumErrors,
         ) || "draft";
     const sessionAliases = uniqueStrings(
         normalizeStringList(source.session_aliases).map((value) =>
@@ -1505,42 +1524,47 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
             claimedAt = null;
         }
     }
-    const coordinationMode = normalizeCoordinationEnum(
+    const coordinationMode = normalizeCoordinationEnumCollected(
         source.coordination_mode,
         COORDINATION_MODES,
         "coordination_mode",
+        readEnumErrors,
     );
     const reportEnvelope =
-        normalizeCoordinationEnum(
+        normalizeCoordinationEnumCollected(
             source.report_envelope,
             COORDINATION_REPORT_ENVELOPES,
             "report_envelope",
+            readEnumErrors,
         ) || defaultReportEnvelopeForMode(coordinationMode);
     return {
         ...defaultCoordinationTaskPayload(normalizedTaskID),
         ...source,
         task_id: normalizedTaskID,
         title: String(source.title || "").trim(),
-        task_type: normalizeCoordinationEnum(
+        task_type: normalizeCoordinationEnumCollected(
             source.task_type,
             COORDINATION_TASK_TYPES,
             "task_type",
+            readEnumErrors,
         ),
         coordination_mode: coordinationMode,
         primary_lane: String(source.primary_lane || "").trim(),
         research_question: String(source.research_question || "").trim(),
         source_policy:
-            normalizeCoordinationEnum(
+            normalizeCoordinationEnumCollected(
                 source.source_policy,
                 RESEARCH_SOURCE_POLICIES,
                 "source_policy",
+                readEnumErrors,
             ) || null,
         source_allowlist: normalizeStringList(source.source_allowlist),
         desired_artifact_type:
-            normalizeCoordinationEnum(
+            normalizeCoordinationEnumCollected(
                 source.desired_artifact_type,
                 RESEARCH_ARTIFACT_TYPES,
                 "desired_artifact_type",
+                readEnumErrors,
             ) || null,
         target_artifact_path: normalizeOptionalText(source.target_artifact_path),
         rough_scope: normalizeStringList(source.rough_scope),
@@ -1580,16 +1604,18 @@ function normalizeCoordinationTaskRecord(payload, taskID = "") {
                           : "",
                       title: String(source.latest_report.title || "").trim(),
                       status:
-                          normalizeCoordinationEnum(
+                          normalizeCoordinationEnumCollected(
                               source.latest_report.status,
                               [...COORDINATION_CLOSEOUT_STATUSES],
                               "latest_report.status",
+                              readEnumErrors,
                           ) || null,
                       report_envelope:
-                          normalizeCoordinationEnum(
+                          normalizeCoordinationEnumCollected(
                               source.latest_report.report_envelope,
                               COORDINATION_REPORT_ENVELOPES,
                               "latest_report.report_envelope",
+                              readEnumErrors,
                           ) || null,
                       created_at: source.latest_report.created_at || null,
                       summary: String(source.latest_report.summary || "").trim(),
@@ -3487,7 +3513,16 @@ function loadCoordinationTask(taskIDRaw, options = {}) {
         readJson(targetPath, defaultCoordinationTaskPayload(taskID)),
         taskID,
     );
-    ensureCoordinationTaskCoreFields(payload, {
+    // Read-path fault tolerance: COLLECT (do not throw) core-field problems
+    // so a degraded card — a bad stored enum coerced to "" upstream, or a
+    // legacy-incomplete record — does not brick listCoordinationTasks() and
+    // every load-based op. The collected problems are intentionally not
+    // surfaced here; the save path (updateCoordinationTask and friends)
+    // keeps the strict throwing ensureCoordinationTaskCoreFields call, so
+    // only the read path tolerates already-stored data. This closes the
+    // read/write asymmetry: writes reject bad INPUT, reads tolerate bad
+    // STORED data.
+    collectCoordinationTaskCoreFieldErrors(payload, {
         allowLegacyIncompleteResearch: true,
     });
     return {

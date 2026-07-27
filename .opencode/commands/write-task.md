@@ -17,7 +17,7 @@ Workflow:
   - optional `task_id`
   - optional `status`: `draft | ready`
   - `title`
-  - `task_type`: `implementation | study | research`
+  - `task_type`: `implementation | study | research | docs | verification`
   - `coordination_mode`: `short | medium | long`
   - `primary_lane`
   - optional draft refinement fields:
@@ -40,7 +40,7 @@ Workflow:
     - for DEFER / p2-followup / review-defer conditional candidates, the Notes-prefix provenance lines (`source:...`, `trigger:...`, `studied:...`) MUST go here, one string per array element — `check-defer-triggers.js` reads them from `owner_notes[]` (NOT from the file body). `trigger:path_touched(<literal-repo-relative-path>)` is the most common predicate; the path is matched as a literal against `git diff --name-only` (no globbing).
   - optional `next_action`
 - if the inferred task is a new `task_type: research`, stop and tell the user to use `/research` instead of `/write-task`
-  - `/write-task` remains the generic entrypoint for `implementation` and `study`
+  - `/write-task` remains the generic entrypoint for `implementation`, `study`, `docs`, and `verification`
   - for existing research cards, use `/task-update` for broader metadata edits or `/task-repair` for incomplete research-contract fields
 - for `draft` tasks, require meaningful refinement material (`rough_scope`, `open_questions`, or `ready_criteria`)
 - for `ready` tasks, require a real file scope and a real validation plan; do not save a vague execution card

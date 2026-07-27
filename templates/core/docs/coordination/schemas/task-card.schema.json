@@ -34,7 +34,7 @@
     },
     "task_type": {
       "type": "string",
-      "enum": ["implementation", "study", "research"]
+      "enum": ["implementation", "study", "research", "docs", "verification"]
     },
     "coordination_mode": {
       "type": "string",

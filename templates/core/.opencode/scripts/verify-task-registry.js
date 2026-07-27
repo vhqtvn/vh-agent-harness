@@ -1168,6 +1168,183 @@ function main() {
             );
         }
 
+        // ------------------------------------------------------------------
+        // Resilience: a card with a bad STORED enum value (written directly
+        // to the task store, bypassing the validating save path) must NOT
+        // brick listCoordinationTasks(). Before the fix, a single bad enum
+        // threw inside normalizeCoordinationTaskRecord (and again inside
+        // loadCoordinationTask's throwing ensureCoordinationTaskCoreFields)
+        // and aborted the ENTIRE list plus every load-based op. After the
+        // fix the bad value coerces to "" (per-field default applies) and
+        // the good cards are still returned — blast radius contained.
+        // ------------------------------------------------------------------
+        const resilienceSentinel = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Resilience sentinel good card",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "resilience",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                constraints: ["Resilience fixture only."],
+                non_goals: ["No implementation work."],
+                success_criteria: [
+                    "List stays healthy when a sibling card has a bad stored enum.",
+                ],
+                validation_plan: [
+                    "Inject a bad enum on a sibling card and re-list.",
+                ],
+            },
+            {
+                cwd: "/verification",
+            },
+        );
+        createdTaskIDs.push(resilienceSentinel.task.task_id);
+
+        const resilienceBadEnum = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Resilience bad-enum card",
+                task_type: "study",
+                coordination_mode: "short",
+                primary_lane: "resilience",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                constraints: ["Resilience fixture only."],
+                non_goals: ["No implementation work."],
+                success_criteria: [
+                    "Bad stored enum coerces; never bricks the registry.",
+                ],
+                validation_plan: [
+                    "Mutate task_type/status/mode/envelope on disk and re-list.",
+                ],
+            },
+            {
+                cwd: "/verification",
+            },
+        );
+        createdTaskIDs.push(resilienceBadEnum.task.task_id);
+
+        // Corrupt the stored card directly on disk, bypassing the save path
+        // (the realistic way a bad enum reaches the store: a prior schema
+        // version, a manual edit, or a code regression).
+        const resilienceBadEnumPath = taskCardPath(
+            resilienceBadEnum.task.task_id,
+        );
+        const resilienceBadEnumPayload = JSON.parse(
+            fs.readFileSync(resilienceBadEnumPath, "utf8"),
+        );
+        resilienceBadEnumPayload.task_type = "bogus-type";
+        resilienceBadEnumPayload.status = "bogus-status";
+        resilienceBadEnumPayload.coordination_mode = "bogus-mode";
+        resilienceBadEnumPayload.report_envelope = "bogus-envelope";
+        resilienceBadEnumPayload.source_policy = "bogus-policy";
+        resilienceBadEnumPayload.desired_artifact_type = "bogus-artifact";
+        fs.writeFileSync(
+            resilienceBadEnumPath,
+            JSON.stringify(resilienceBadEnumPayload, null, 2),
+        );
+
+        // CRUX assertion: list must NOT throw and must still return the good
+        // sentinel card (blast radius contained to the degraded card).
+        let resilienceListError = null;
+        let resilienceListed = null;
+        try {
+            resilienceListed = listCoordinationTasks(coordinatorSessionID, {
+                cwd: "/verification",
+            });
+        } catch (error) {
+            resilienceListError = error;
+        }
+        if (resilienceListError) {
+            throw new StateError(
+                `Expected listCoordinationTasks() NOT to throw when a sibling card has a bad stored enum; got: ${resilienceListError instanceof Error ? resilienceListError.message : String(resilienceListError)}`,
+            );
+        }
+        if (
+            !resilienceListed.tasks.find(
+                (task) => task.task_id === resilienceSentinel.task.task_id,
+            )
+        ) {
+            throw new StateError(
+                "Expected good sentinel card to remain listable despite a sibling card's bad stored enum.",
+            );
+        }
+        const coercedBadEnum = resilienceListed.tasks.find(
+            (task) => task.task_id === resilienceBadEnum.task.task_id,
+        );
+        if (!coercedBadEnum) {
+            throw new StateError(
+                "Expected bad-enum card itself to remain listable (coerced), proving the blast radius is contained.",
+            );
+        }
+        // Bad stored values must NOT propagate verbatim into the listed
+        // output. task_type has no default → coerces to ""; bad status
+        // coerces to the "draft" default.
+        if (coercedBadEnum.task_type !== "") {
+            throw new StateError(
+                `Expected bad task_type to coerce to "", got "${coercedBadEnum.task_type}".`,
+            );
+        }
+        if (coercedBadEnum.status !== "draft") {
+            throw new StateError(
+                `Expected bad status to coerce to default "draft", got "${coercedBadEnum.status}".`,
+            );
+        }
+
+        // ------------------------------------------------------------------
+        // Positive coverage: the widened task_type enum now accepts docs and
+        // verification without the save path throwing.
+        // ------------------------------------------------------------------
+        const docsTask = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Docs task type accepted after enum widening",
+                task_type: "docs",
+                coordination_mode: "short",
+                primary_lane: "docs",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                constraints: ["Enum widening fixture only."],
+                non_goals: ["No implementation work."],
+                success_criteria: ["saveCoordinationTask accepts task_type=docs."],
+                validation_plan: ["Save and read back."],
+            },
+            {
+                cwd: "/verification",
+            },
+        );
+        createdTaskIDs.push(docsTask.task.task_id);
+        if (docsTask.task.task_type !== "docs") {
+            throw new StateError(
+                `Expected task_type "docs" to round-trip, got "${docsTask.task.task_type}".`,
+            );
+        }
+
+        const verificationTask = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Verification task type accepted after enum widening",
+                task_type: "verification",
+                coordination_mode: "short",
+                primary_lane: "verification",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                constraints: ["Enum widening fixture only."],
+                non_goals: ["No implementation work."],
+                success_criteria: [
+                    "saveCoordinationTask accepts task_type=verification.",
+                ],
+                validation_plan: ["Save and read back."],
+            },
+            {
+                cwd: "/verification",
+            },
+        );
+        createdTaskIDs.push(verificationTask.task.task_id);
+        if (verificationTask.task.task_type !== "verification") {
+            throw new StateError(
+                `Expected task_type "verification" to round-trip, got "${verificationTask.task.task_type}".`,
+            );
+        }
+
         console.log("verification: ok");
         console.log(`primary_task_id: ${primary.task.task_id}`);
         console.log(`overlap_task_id: ${overlap.task.task_id}`);
