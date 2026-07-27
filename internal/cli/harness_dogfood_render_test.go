@@ -472,6 +472,17 @@ func assertManifestAuthorityContent(t *testing.T, label, got string) {
 		{"release-version evaluator flag", "--release-version"},
 		{"accepted_overrides envelope field", "accepted_overrides"},
 		{"disclose_ids envelope field", "disclose_ids"},
+		// N -> R -> M ceremony topology (corrects the stale P -> M model that
+		// omitted the readiness-artifact commit R). Each needle is absent from
+		// the pre-correction readiness reporter, so a regression that drops the
+		// three-commit arc (or re-collapses it to P -> M) fails here before a
+		// release can ship with a reporter prompt inconsistent with the
+		// tag-time handshake scripts/release-tag.sh already enforces.
+		{"manifest ceremony N->R->M arc framing", "N -> R -> M"},
+		{"readiness-artifact-only child of N (R topology)", "readiness-artifact-only child of N"},
+		{"manifest-only child of R (M topology)", "manifest-only child of R"},
+		{"manifest pins to R not N", "NOT to N"},
+		{"N binding at HEAD^^ (absent in stale P->M model)", "HEAD^^"},
 	}
 	for _, c := range checks {
 		if !strings.Contains(got, c.needle) {

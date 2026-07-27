@@ -505,18 +505,29 @@ Hand-classification would reintroduce the model-output-as-authority
 anti-pattern this gate exists to close.
 
 **Manifest ceremony (sacred — do not weaken).** The manifest embeds its own
-parent commit and tree to prevent weakening after evaluation. The release-prep
-sequence is:
+parent commit and tree to prevent weakening after evaluation. The release
+sequence is a three-commit arc — **N -> R -> M** (note -> readiness artifact ->
+manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`:
 
-1. Reconcile the release arc at commit P (the release-prep HEAD).
-2. Write `.vh-agent-harness/release-defer-dispositions.json` with P as
-   `evaluated_commit` AND `manifest_parent_commit`, and `tree(P)` as
+1. Reconcile the release arc at commit **N** (the evaluated note /
+   release-preparation commit). N is the commit G7's evaluator inspects; it is
+   the readiness artifact's parent, NOT the manifest's parent.
+2. Author `.vh-agent-harness/release-readiness-pass.json` against N and commit
+   it as **R**, the readiness-artifact-only child of N. At tag time the
+   `HEAD^^..HEAD^` diff must be exactly the readiness artifact path, and the
+   artifact's `commit_sha` must equal `HEAD^^` (= N). This R commit is what
+   separates the evaluated note from the manifest.
+3. Write `.vh-agent-harness/release-defer-dispositions.json` with **R** as
+   `evaluated_commit` AND `manifest_parent_commit`, and `tree(R)` as
    `evaluated_tree`. Records are sorted lexically by `defer_id`. Schema is v1.
-3. Commit ONLY the manifest file as an immediate-child commit M (so `HEAD^`
-   when tagging == P, and `git diff --name-only P..M` is exactly the manifest
-   path). No other file may ride along — the manifest-only diff requirement is
-   what prevents a post-evaluation weakening.
-4. Set `release_base.kind` to `"tag"` for a prior-tag release, OR `"root"` for
+   The manifest pins to R (`HEAD^`, M's parent) — NOT to N — because the
+   readiness artifact is what binds the manifest's evaluation surface back to N
+   via its `commit_sha`.
+4. Commit ONLY the manifest file as **M**, the manifest-only child of R (so
+   `HEAD^` when tagging == R, and `git diff --name-only R..M` is exactly the
+   manifest path). No other file may ride along — the manifest-only diff
+   requirement is what prevents a post-evaluation weakening.
+5. Set `release_base.kind` to `"tag"` for a prior-tag release, OR `"root"` for
    the first tag in the repo's history (whole-history evaluation; the
    `HEAD~32` fallback is NOT used in release mode). `release_base.value` (for
    kind=tag) is DERIVED authoritatively by the evaluator at evaluation time
@@ -527,13 +538,15 @@ sequence is:
    is still required to be a well-formed non-empty string (schema v1 shape);
    if you want the manifest to read cleanly, set it to the current prior tag,
    but the evaluator no longer relies on it being correct.
-5. Before tagging, verify (the wrapper and CI recheck both re-run this): working
-   tree clean; manifest exists in HEAD; `HEAD^` exists; `evaluated_commit ==
-   manifest_parent_commit == HEAD^`; `evaluated_tree == tree(HEAD^)`; the
-   `HEAD^..HEAD` diff is exactly the manifest path; `release_base.kind=tag`
-   DERIVES a reachable prior tag from git (authoritative; the attested value is
-   advisory and a stale value self-heals without a manifest write) or
-   `release_base.kind=root`; schema + disposition checks pass.
+6. Before tagging, verify (the wrapper and CI recheck both re-run this): working
+   tree clean; manifest exists in HEAD; `HEAD^` (= R) and `HEAD^^` (= N) both
+   exist; the readiness artifact exists at `HEAD:` with `commit_sha == HEAD^^`
+   and the `HEAD^^..HEAD^` diff is exactly the readiness artifact path;
+   `evaluated_commit == manifest_parent_commit == HEAD^`; `evaluated_tree ==
+   tree(HEAD^)`; the `HEAD^..HEAD` diff is exactly the manifest path;
+   `release_base.kind=tag` DERIVES a reachable prior tag from git (authoritative;
+   the attested value is advisory and a stale value self-heals without a manifest
+   write) or `release_base.kind=root`; schema + disposition checks pass.
 
 **Evidence collection (read-only):**
 
