@@ -500,10 +500,21 @@ allows the safe read surface: `exec-ro *`, `guide`, `doctor`, `preflight`,
 without arguments).
 
 Withheld pending audit (still denied): `skill validate`, `logs`, `ps`.
-Excluded entirely: all mutation verbs (`exec`, `exec-sandbox`, `shell`, `up`,
-`down`, `install`, `update`, `uninstall`, `self-update`, `overlay new`),
-artifact producers (`diagnostics-export`), and broad wildcards (`skill *`,
-`overlay *`).
+Excluded entirely from the roster-wide read-only list: all mutation verbs
+(`exec`, `shell`, `up`, `down`, `install`, `update`, `uninstall`,
+`self-update`, `overlay new`), artifact producers (`diagnostics-export`), and
+broad wildcards (`skill *`, `overlay *`).
+
+`exec-sandbox` is a special case: it is NOT in the roster-wide
+`HarnessReadOnlyCommands` (it runs arbitrary code), but it is granted
+PER-AGENT via `ReadOnlyExtraAllows` to the read-only specialists that
+genuinely need to run read-code: `researcher`, `repo-explorer`, and
+`media-perception`. The grant is kernel-contained by the strict mode-floor
+(`exec_sandbox.min_mode: strict`): the executed code cannot write outside
+`./tmp/` or make network connections, so the agent keeps its read-only
+character. See the Read-Only Execution Policy
+(`.opencode/docs/agents/read-only-execution-policy.md`) for the Level B
+mechanism and the paired floor+grant invariant.
 
 **Family read-only admission rule.** Each admitted verb appears as both the
 scalar (`vh-agent-harness doctor`) and the wildcard (`vh-agent-harness
@@ -784,12 +795,15 @@ export default function transform({ context }) {
   - **best-effort floor** — clamps `--sandbox` up to at least `best-effort`.
   - **off** (or key absent) — no floor; the flags behave as documented above.
     Repos without the key keep running unaffected (the floor is opt-in).
-  - **Discovery** — the floor root walks UP from BOTH the real (physical,
-    symlink-resolved) cwd AND the `--cwd` target, taking the most restrictive of
-    both, until it finds a `.vh-agent-harness/run-shape.yml` with an
-    `exec_sandbox` block. A subdirectory invocation (or an out-of-project
-    `--cwd` targeting a strict-floored project) still discovers the repo-root
-    floor.
+  - **Discovery** — the floor root walks the ENTIRE ancestor chain from BOTH
+    the real (physical, symlink-resolved) cwd AND the `--cwd` target, taking
+    the MOST RESTRICTIVE floor found across the whole chain (not
+    nearest-wins). A child `run-shape.yml` without an `exec_sandbox` block is
+    skipped (walk continues); a weakening child floor (`min_mode: off` planted
+    under `./tmp/`) is overridden by a stricter enclosing parent. A
+    subdirectory invocation, an out-of-project `--cwd` targeting a
+    strict-floored project, or a weakening child floor cannot escape an
+    enclosing parent's strict floor.
   - **Fail-closed** — a present-but-BROKEN floor (wrong type, value/key typo,
     YAML syntax error, directory at the path, or unreadable file) makes
     exec-sandbox REFUSE to run uncontained rather than silently dropping the
