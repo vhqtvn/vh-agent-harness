@@ -9,6 +9,16 @@
 // │ rules injected through the integration overlay (private config), never here.│
 // └──────────────────────────────────────────────────────────────────────────┘
 //
+// ANONYMIZATION GUARANTEE (true strength): this gate is SHAPE-FAIL-CLOSED
+// (URL / git-remote / email / path shapes are refused automatically) and checks
+// STRUCTURED identifier fields for opaque-format compliance. It does NOT
+// auto-anonymize free-text prose — a repo/org/person name, scheme-less host, or
+// relative path in a body scalar is NOT caught here. Anonymizing arbitrary prose
+// is NLP-hard. Per the protocol's per-channel sensitivity policy, prose-bearing
+// or sensitive sends require operator-approve-send, which is enforced by the
+// SENDER (not this gate). This gate is the automatic shape floor; it is not, and
+// does not claim to be, the prose anonymizer.
+//
 // WHAT THIS IS — a fail-closed egress gate over canonical message bytes.
 //
 // The existing `forbidden-patterns` machinery (./forbidden-patterns.core.js +
@@ -20,18 +30,26 @@
 // no "inspector form" to excuse it. This module is the DOMAIN-FREE matcher
 // EXTENSION over arbitrary message scalars (not just command strings): it runs
 // deny-rules over the CANONICAL MESSAGE BYTES (deterministic serialization) and
-// every scalar within, enforcing the four anonymization invariants:
+// every scalar within. It performs these MECHANISMS (these are what the gate
+// actually does — NOT "the anonymization guarantee"; see the ANONYMIZATION
+// GUARANTEE block above for the true-strength statement):
 //
-//   1. forbidden-patterns (generic + private-ext): domain-free deny-rules over
+//   1. shape-fail-closed detection (forbidden-patterns, generic + private-ext):
+//      domain-free SHAPE deny-rules (endpoint-URL, git-remote, email-address,
+//      absolute-path shapes) + the project's private identity shapes, run over
 //      every scalar AND the canonical serialization. No allowIf carve-out —
 //      every match on a message scalar is dangerous.
 //   2. scrubCredentials any-mutation = REJECT: the shared scrub helper is used
 //      as a DETECTOR, not a cleaner. If applying it would change a scalar, the
 //      scalar carries credential-shaped content → REJECT. Transform-and-send is
 //      PROHIBITED.
-//   3. identifier allow-list: only channel-id / channel-class / key-id (opaque
-//      format) may appear as identity. Unknown field, invalid identifier class,
-//      or readable-slug identifier → REJECT.
+//   3. identifier-format checks on STRUCTURED fields only: the STRUCTURED
+//      identifier fields (sender/recipient channel-id, channel-class, key-id)
+//      may carry ONLY opaque-token identity — unknown field, invalid identifier
+//      class, or readable-slug identifier → REJECT. This does NOT scan
+//      free-text bodies (claims, limitations, evidence_refs prose, etc.) for
+//      identifiers — those are prose and need operator-approve-send on
+//      sensitive channels (see the ANONYMIZATION GUARANTEE block above).
 //   4. fail-closed: any uncertainty (missing scrubCredentials dependency,
 //      canonicalization failure, uncertain classification) → REJECT.
 //

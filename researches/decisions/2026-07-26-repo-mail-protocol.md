@@ -300,3 +300,35 @@ This flips Decision 1's O1-conditional clause to SATISFIED — O1 is confirmed a
 **HOLD — fully lifted.** Both conditions are now satisfied: (a) operator post-review CLEARED 2026-07-26; (b) carrier-side O1 conformance audit CLEARED 2026-07-27 (VIABLE). Slice 2 (fail-closed egress gate + domain-free matcher extension — the riskiest slice per Caveat 1) is unblocked to begin against committed canon.
 
 **Persistence discipline (supersession):** the full 9-property audit matrix is intentionally NOT persisted in this repo — carrier file:line citations are verifiable only from the carrier repo and would rot as a stale copy. This record carries only what the harness consumes: the gate verdict. No cross-repo file, absolute paths, or carrier citations enter this repo's canon.
+
+---
+
+## Addendum (2026-07-28): anonymization guarantee restated at true strength — per-channel sensitivity + approve-send
+
+### Decision 4 — anonymization is per-channel, stakes-allocated, NOT a blanket policy
+
+The Slice 2 egress gate is **shape-fail-closed** (URL / git-remote / email / path shapes refused automatically) and enforces **identifier-format checks on structured fields**. It does **NOT** auto-anonymize free-text prose — anonymizing arbitrary prose is NLP-hard, and the gate cannot self-guarantee it. The earlier framing ("enforcing the four anonymization invariants") oversold the gate's load-bearing guarantee: a schema-clean report whose prose names the protected repo was emitted believing it anonymized — the primary leak vector this bus exists to prevent. This addendum corrects that.
+
+The anonymization guarantee is restated at its true strength and allocated **per channel** via a required `sensitivity` field in the channel config:
+
+- **SENSITIVE channels** (carry protected-repo content): **operator-approve-before-send is MANDATORY** and IS the real anonymization guarantee. The operator reviews the message prose (what the gate cannot auto-scrub) and approves before emit. This fits the information-only design: the operator is already the actuation bridge on receipt; approve-send extends that same checkpoint to anonymization on send and adds no new principal.
+- **NON-SENSITIVE channels** (operator's own tools, no protected identity): **auto-send with the shape-scrub gate** (Slice 2's gate) — no human review needed.
+- **Structured-fields burden-reducer** (where a message kind allows it): verdict/status pings that are fully structured (controlled-vocabulary values, no prose) need neither prose-anonymization nor human review; reports/RFCs keep prose and the sensitive-channel human reviews them.
+
+The gate/sender routes on the channel's `sensitivity`. The gate stays channel-agnostic and pure; the **sender** applies the per-channel policy (approve-send on sensitive, auto-send on non-sensitive).
+
+### True-strength guarantee statement (canonical — operator-verbatim)
+
+> shape-fail-closed automatically on every channel + identifier-anonymization via operator-approve-send on sensitive channels — the gate does NOT auto-anonymize prose.
+
+### Hard precondition
+
+**No SENSITIVE channel goes live before the approve-send checkpoint is wired.** Until then, the bus carries only non-sensitive / test content. The sender MUST refuse to emit on a sensitive channel lacking the approve-send checkpoint.
+
+### Sender slice — HELD
+
+The sender slice is **held** until the approve-send checkpoint is designed (brief follows) and implemented. The gate (Slice 2) stands as the shape-fail-closed layer; it is not re-litigated.
+
+### What this does NOT change
+
+Decisions 1–3 (O1 transport, Non-Actuation, E2E confidentiality) and Contract A (envelope) stand. The anonymization binding-constraint #1 is now enforced via per-channel sensitivity (approve-send on sensitive) rather than implied by the gate. The Slice 2 gate's structural properties (no-throw, REJECT-not-transform, domain-free, layer-pure, non-actuation) remain real and unchanged — they are the spine of a shape-detector, correctly stated.
