@@ -271,16 +271,27 @@ var CoreLocationRules = map[string]LocationRule{
 	"build": {
 		Wildcard: Ask, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyAllow, Edit: Allow, // gate-exempt
 	},
-	"coordination":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyAllow, Edit: Deny}, // gate-exempt
-	"planner":             {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
-	"researcher":          {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"coordination": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyAllow, Edit: Deny}, // gate-exempt
+	"planner":      {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"researcher": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny,
+		// Level-B grant: exec-sandbox lets researcher run arbitrary read-code
+		// (incl. python3/node/bash) while the exec_sandbox.min_mode floor
+		// (strict) makes writes-outside-tmp and network physically impossible.
+		// This CONSCIOUSLY promotes researcher to Level B so local read-analysis
+		// (e.g. DB-cited classification, data dumps to tmp) is in-charter — no
+		// python3 wildcard grant, no build handoff. REVERSIBLE: remove this one
+		// entry to revert researcher to a pure read-only leaf.
+		ReadOnlyExtraAllows: []string{ExecSandboxCommand}},
 	"project-coordinator": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyAllow, Edit: Deny}, // gate-exempt
 	"debate":              {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	"debate-proposer":     {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	"debate-critic":       {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	"debate-synth":        {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	"solution-brief":      {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
-	"repo-explorer":       {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"repo-explorer": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny,
+		// Level-B grant: exec-sandbox lets repo-explorer run exploration
+		// scripts and AST tooling under kernel containment (strict floor).
+		ReadOnlyExtraAllows: []string{ExecSandboxCommand}},
 	"docs-steward": {
 		Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyReadOnly, Edit: Allow, // gate-exempt
 	},
@@ -305,7 +316,10 @@ var CoreLocationRules = map[string]LocationRule{
 	// the four inbound caller edges below are dropped by Emit's present-agent
 	// filter when this agent is absent from the rendered roster. NOT
 	// gate-exempt — gate-exempt is reserved for the four orchestrators above.
-	"media-perception": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"media-perception": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny,
+		// Level-B grant: exec-sandbox lets media-perception run perception
+		// tooling under kernel containment (strict floor).
+		ReadOnlyExtraAllows: []string{ExecSandboxCommand}},
 	// Cluster leaves (commit-reviewer-a..d) — the corpus ships these as full
 	// agent blocks. They carry the leafBaseRule (deny wildcard, allow
 	// readonly/git_readonly, deny gate, allow devSh) and a deny-all task rule.
@@ -468,6 +482,19 @@ const BacklogCommand = "vh-agent-harness exec node .opencode/scripts/normalize-b
 // "vh-agent-harness *" wildcard that matches the binary's own invocations.
 const DevShCommand = "vh-agent-harness *"
 
+// ExecSandboxCommand is the exec-sandbox verb pattern granted per-agent
+// (ReadOnlyExtraAllows) to read-only specialists that genuinely need to run
+// code (researcher, repo-explorer, media-perception). Unlike exec-ro (which
+// classifies and denies mutations at the command level), exec-sandbox runs
+// ARBITRARY code — its safety boundary is the KERNEL, not command
+// classification: the exec_sandbox.min_mode floor (strict) forces Landlock +
+// seccomp so writes outside ./tmp and network are physically impossible. This
+// is the canonical Level-B mechanism (read-only agent that needs command
+// execution; see read-only-execution-policy.md). NOT in HarnessReadOnlyCommands
+// because it is NOT safe for the entire read_only roster (pure-deliberation
+// agents like debate/planner/commit-message do not need code execution).
+const ExecSandboxCommand = "vh-agent-harness exec-sandbox *"
+
 // HarnessReadOnlyCommands is the CANONICAL, Go-owned inventory of safe
 // read-only vh-agent-harness verbs emitted as "allow" AFTER the broad
 // "vh-agent-harness *": "deny" entry (region 4b) for every agent whose
@@ -488,10 +515,15 @@ const DevShCommand = "vh-agent-harness *"
 // denied in v1): "vh-agent-harness skill validate *" (accepts caller-selected
 // paths, needs path-confinement audit), "vh-agent-harness logs *" (needs
 // information-disclosure audit), "vh-agent-harness ps" (needs command-line/
-// env-adjacent info audit). Explicitly EXCLUDED: all mutation verbs (exec *,
-// exec-sandbox *, shell *, up *, down *, install *, update *, uninstall *,
-// self-update *, overlay new *), artifact-producing verbs (diagnostics-export
-// *, __*), and broad wildcards (skill *, overlay *).
+// env-adjacent info audit). Explicitly EXCLUDED from this roster-wide list: all
+// mutation verbs (exec *, shell *, up *, down *, install *, update *, uninstall
+// *, self-update *, overlay new *), artifact-producing verbs (diagnostics-export
+// *, __*), and broad wildcards (skill *, overlay *). exec-sandbox * is ALSO
+// excluded from here because it runs arbitrary code (NOT safe for the ENTIRE
+// read_only roster) — it is granted PER-AGENT via ReadOnlyExtraAllows to the
+// Level-B specialists that genuinely need code execution (researcher,
+// repo-explorer, media-perception), relying on the exec_sandbox.min_mode floor
+// for kernel containment.
 //
 // FAMILY-RO ADMISSION RULE (verb + verb *): a verb is admitted as BOTH the
 // scalar ("vh-agent-harness doctor") AND the wildcard ("vh-agent-harness

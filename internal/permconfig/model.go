@@ -138,6 +138,26 @@ type LocationRule struct {
 	// transform output; nil when no transform is active. OpenCode uses findLast
 	// (last-match-wins), so an extra allow placed after "*": "deny" wins.
 	ExtraBash []BashEntry
+	// ReadOnlyExtraAllows holds per-agent harness verb patterns (e.g.
+	// "vh-agent-harness exec-sandbox *") emitted as "allow" AFTER the canonical
+	// HarnessReadOnlyCommands in region 4b, for read_only agents ONLY. This is
+	// the PER-AGENT grant channel for harness verbs that are safe only for
+	// SPECIFIC read-only agents — NOT the entire read_only roster (unlike
+	// HarnessReadOnlyCommands, which grants to ALL read_only agents). The
+	// canonical use case is exec-sandbox: it runs arbitrary code but is
+	// kernel-contained by the exec_sandbox.min_mode floor (strict forces writes
+	// outside ./tmp and network to be physically impossible), so it is safe to
+	// grant to read-only agents that genuinely need code execution
+	// (researcher, repo-explorer, media-perception) but NOT to pure-deliberation
+	// agents (debate, planner, commit-message, etc.). Under findLast, these
+	// allows (emitted after the 4a deny) win, so the granted agent runs the
+	// verb prompt-free while every other read_only agent (lacking the entry)
+	// stays denied by the 4a catch-all.
+	//
+	// MUST be empty for non-read_only agents (validate rejects it). Populated by
+	// core tables only; overlay-pack parsing does not read this field
+	// (exec-sandbox grant is a core safety decision).
+	ReadOnlyExtraAllows []string
 }
 
 // BashEntry is one extra pattern→decision pair contributed by the permission

@@ -1508,7 +1508,8 @@
                     "vh-agent-harness help *": "allow",
                     "vh-agent-harness skill list": "allow",
                     "vh-agent-harness skill list *": "allow",
-                    "vh-agent-harness overlay docs *": "allow"
+                    "vh-agent-harness overlay docs *": "allow",
+                    "vh-agent-harness exec-sandbox *": "allow"
                 },
                 "edit": {
                     "*": "deny",
@@ -1956,7 +1957,8 @@
                     "vh-agent-harness help *": "allow",
                     "vh-agent-harness skill list": "allow",
                     "vh-agent-harness skill list *": "allow",
-                    "vh-agent-harness overlay docs *": "allow"
+                    "vh-agent-harness overlay docs *": "allow",
+                    "vh-agent-harness exec-sandbox *": "allow"
                 },
                 "edit": {
                     "*": "deny",
@@ -2057,7 +2059,8 @@
                     "vh-agent-harness help *": "allow",
                     "vh-agent-harness skill list": "allow",
                     "vh-agent-harness skill list *": "allow",
-                    "vh-agent-harness overlay docs *": "allow"
+                    "vh-agent-harness overlay docs *": "allow",
+                    "vh-agent-harness exec-sandbox *": "allow"
                 },
                 "edit": {
                     "*": "deny",

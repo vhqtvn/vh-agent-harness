@@ -360,6 +360,15 @@ func computeBashBlock(rule LocationRule, locationName string, features Features)
 		for _, cmd := range HarnessReadOnlyCommands {
 			om.set(cmd, string(Allow))
 		}
+		// Per-agent extra allows (region 4b tail): harness verbs that are safe
+		// only for THIS specific read-only agent (e.g. exec-sandbox, kernel-
+		// contained by the exec_sandbox.min_mode floor). Emitted AFTER the
+		// canonical HarnessReadOnlyCommands so findLast resolves them to allow
+		// over the 4a deny. An agent lacking the entry stays denied by the 4a
+		// catch-all — this is the per-agent (not roster-wide) grant channel.
+		for _, cmd := range rule.ReadOnlyExtraAllows {
+			om.set(cmd, string(Allow))
+		}
 	}
 	return om
 }
@@ -478,6 +487,38 @@ func validateExtraBash(agentName string, entries []BashEntry) error {
 	return nil
 }
 
+// validateReadOnlyExtraAllows checks per-agent read-only extra allow entries
+// (the ReadOnlyExtraAllows field, emitted in region 4b tail for read_only
+// agents): each pattern must be non-empty, no duplicates within the agent's
+// set, no collision with a protected key, and the field MUST be empty for
+// non-read_only agents (it is only emitted in the read_only 4b branch — a
+// non-empty value on an allow/ask/deny agent would be silently dropped, which
+// is a silent authoring bug).
+func validateReadOnlyExtraAllows(agentName string, rule LocationRule) error {
+	if len(rule.ReadOnlyExtraAllows) == 0 {
+		return nil
+	}
+	if rule.HarnessPolicy != HarnessPolicyReadOnly {
+		return fmt.Errorf("agent %q: readOnlyExtraAllows is only valid for read_only agents (this agent has policy %q) — the field is ignored for non-read_only policies, so a non-empty value is an authoring bug",
+			agentName, rule.HarnessPolicy)
+	}
+	protected := protectedBashKeys()
+	seen := make(map[string]bool, len(rule.ReadOnlyExtraAllows))
+	for _, pat := range rule.ReadOnlyExtraAllows {
+		if pat == "" {
+			return fmt.Errorf("agent %q: readOnlyExtraAllows has empty pattern", agentName)
+		}
+		if seen[pat] {
+			return fmt.Errorf("agent %q: duplicate readOnlyExtraAllows pattern %q", agentName, pat)
+		}
+		if protected[pat] {
+			return fmt.Errorf("agent %q: readOnlyExtraAllows pattern %q collides with a protected key (wildcard, command group, backlog, canonical read-only verb, or vh-agent-harness entry)", agentName, pat)
+		}
+		seen[pat] = true
+	}
+	return nil
+}
+
 // validate ports the legacy resolver's validateRules() contract:
 //
 //   - Every location rule has valid wildcard/devSh/readonly/git_readonly decisions.
@@ -531,6 +572,10 @@ func validate(locations map[string]LocationRule, tasks map[string][]TaskEntry, g
 		}
 		// Transform-contributed ExtraBash validation.
 		if err := validateExtraBash(name, rule.ExtraBash); err != nil {
+			return err
+		}
+		// Per-agent ReadOnlyExtraAllows validation (region 4b tail).
+		if err := validateReadOnlyExtraAllows(name, rule); err != nil {
 			return err
 		}
 	}
