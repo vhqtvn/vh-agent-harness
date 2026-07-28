@@ -157,6 +157,7 @@ without losing a signal that is acted on elsewhere.
 | Source and render byte-identical | `diff .opencode/scripts/complexity-signal-lib.js templates/core/.opencode/scripts/complexity-signal-lib.js` → exit 0 | yes |
 | Exclude asymmetry pre-fix | `.opencode/**` matches `.opencode/scripts/X.js`; does NOT match `templates/core/.opencode/scripts/X.js` (glob anchored at segment 0) | yes |
 | README.agent.md does not overclaim axes | description says "file LOC" only; no multi-axis claim | yes |
+| `complexity-policy.yml` ownership = `platform_armed` | `core_manifest.go:252` embed manifest map: `".vh-agent-harness/complexity-policy.yml": ownership.ClassPlatformArmed`; corroborated by `internal/schema/complexity_policy.go:12` doc comment ("Ownership class: platform_armed") and `internal/cli/doctor_complexity.go:13` | yes |
 
 ## Findings
 - **file_loc is the sole live metric**: source=signal.go:41+policy.go:182, confidence=high, type=fact
@@ -172,3 +173,38 @@ without losing a signal that is acted on elsewhere.
 ## Follow-up
 - The agent-context axis (design's dominant signal) remains entirely absent. When it ships, revisit whether `function_loc` and a real `BoundaryIndicator` should also activate, and whether the Goodhart caveat above can be softened.
 - `state-lib.js` (6147 lines) and the other large embedded scripts are now excluded from the advisory; their complexity should be tracked in the harness backlog separately if the team chooses to address it.
+
+## Re-enable safety & honesty caveats (recorded at workstream close)
+
+### Armed-policy gotcha — the re-enable path
+
+`complexity-policy.yml` carries ownership class **`platform_armed`**.
+Consequence: `make update` does **NOT** propagate field-level state (notably
+`enabled`) from the template
+(`templates/core/.vh-agent-harness/complexity-policy.yml`) to the armed
+instance. The **armed instance `.vh-agent-harness/complexity-policy.yml` is
+what `doctor` actually reads.** Therefore whoever re-enables the complexity
+advisory when the agent-context axis lands **MUST edit BOTH files** — editing
+only the template and running `make update` will leave the armed instance
+unchanged and `doctor` will still see `enabled: false`.
+
+This qualifies the "so they stay in sync across `make update`" note above (the
+`snapshot_paths` exclude edit): that sync was a **manual** two-file edit, not an
+auto-sync. Armed files are not overwritten by render, so `enabled` (and any
+state field) must be set in the armed instance directly, with the template
+updated separately for consistency.
+
+### S3-canon honesty caveat
+
+The S3 probe + model-study baselines are now on canon (commit `08920d5`) as
+**byte-faithful records**, but they are **not re-derivable off-host**
+(Class-A evidence) — they depend on the on-host DB
+(`~/.local/share/opencode/opencode.db`, ~24 GB). A future reader should treat
+them as a recorded snapshot, not something independently reproducible from the
+repo alone.
+
+### Resting path
+
+This workstream rests at: **agent-context axis (axis-2) build → re-measure
+against the S3 baseline → re-enable** (editing both `complexity-policy.yml`
+files per the armed-policy gotcha above).
