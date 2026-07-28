@@ -66,17 +66,111 @@ def build_base_task() -> dict:
     }
 
 
+# ---- Recurrence-signature contract ----------------------------------------
+#
+# The recurrence block is OPTIONAL on every task-card (backward-compat: legacy
+# cards carry no block). When present, the block carries the two-level identity
+# (recurrence_id = exact-defect collapse key; symptom_class_id = immutable/
+# versioned taxonomy id `recurrence.v1/<class>`), the acknowledgement pair
+# (recurrence_count / last_acknowledged_count), non-identity evidence[], and a
+# bounded aliases[]/supersession list. JSON Schema draft-07 expresses per-field
+# shape (type, minLength, pattern, minimum:0, required, additionalProperties);
+# it CANNOT express the cross-field invariant recurrence_count >=
+# last_acknowledged_count, so that guard lives here in the validator script
+# (assert_ack_pair) and runs after schema validation passes.
+
+
+def build_recurrence_block() -> dict:
+    """A well-formed recurrence block (all four logical parts populated).
+
+    Example values are deliberately generic/domain-free so the embedded corpus
+    does not leak any one project's specifics into consumer repos.
+    """
+    return {
+        "recurrence_id": "exact-defect-canonical-example",
+        "symptom_class_id": "recurrence.v1/example-symptom-class",
+        "recurrence_count": 2,
+        "last_acknowledged_count": 1,
+        "evidence": [
+            {
+                "kind": "path",
+                "ref": "pkg/example/handler.go",
+                "note": "Recurring loop observed in the example handler.",
+            },
+            {
+                "kind": "outcome",
+                "ref": "review-observation-001",
+                "note": "Second observation of the same symptom class.",
+            },
+        ],
+        "aliases": [
+            {
+                "recurrence_id": "exact-defect-prior-alias",
+                "superseded": True,
+                "note": "Re-pointed after later evidence.",
+            },
+        ],
+    }
+
+
+def assert_ack_pair(name: str, payload: dict) -> None:
+    """Cross-field guard: recurrence_count >= last_acknowledged_count.
+
+    Runs AFTER schema validation passes. The schema REQUIRES both counts
+    whenever a recurrence block is present, so by the time this runs both are
+    guaranteed present integers >= 0 (type+minimum enforced by draft-07). Only
+    the relational >= is left, which draft-07 cannot express — hence this guard.
+    A card with no recurrence block is a no-op.
+    """
+    rec = payload.get("recurrence") if isinstance(payload, dict) else None
+    if not isinstance(rec, dict):
+        return
+    count = rec["recurrence_count"]
+    ack = rec["last_acknowledged_count"]
+    if count < ack:
+        raise AssertionError(
+            f"{name}: recurrence_count ({count}) must be >= "
+            f"last_acknowledged_count ({ack})"
+        )
+
+
 def validate_ok(name: str, payload: dict, validator: Draft7Validator) -> None:
     errors = sorted(validator.iter_errors(payload), key=lambda error: list(error.path))
     if errors:
         details = "; ".join(error.message for error in errors)
         raise AssertionError(f"{name} should be valid, but failed: {details}")
+    # A valid card must ALSO satisfy the cross-field ack-pair invariant.
+    assert_ack_pair(name, payload)
 
 
 def validate_fail(name: str, payload: dict, validator: Draft7Validator) -> None:
     errors = sorted(validator.iter_errors(payload), key=lambda error: list(error.path))
     if not errors:
         raise AssertionError(f"{name} should be invalid, but passed validation")
+
+
+def validate_fail_ack(name: str, payload: dict, validator: Draft7Validator) -> None:
+    """Schema PASSES but the cross-field ack-pair guard REJECTS.
+
+    This is the impossible-state case: recurrence_count and
+    last_acknowledged_count are individually well-formed (integers >= 0) so
+    draft-07 accepts them, but recurrence_count < last_acknowledged_count is
+    an impossible state the relational guard must reject.
+    """
+    errors = sorted(validator.iter_errors(payload), key=lambda error: list(error.path))
+    if errors:
+        details = "; ".join(error.message for error in errors)
+        raise AssertionError(
+            f"{name} should pass schema (ack-pair is the intended rejection), "
+            f"but schema failed: {details}"
+        )
+    try:
+        assert_ack_pair(name, payload)
+    except AssertionError:
+        return  # expected: the relational guard rejected the impossible state
+    raise AssertionError(
+        f"{name} should fail the ack-pair guard, but passed both schema and guard"
+    )
 
 
 def main() -> None:
@@ -144,6 +238,56 @@ def main() -> None:
     invalid_reviewed = deepcopy(reviewed_task)
     del invalid_reviewed["last_review"]["path"]
 
+    # ---- Recurrence-signature contract fixtures ----------------------------
+    #
+    # recurrence block is OPTIONAL: a card with no block must still validate
+    # (backward-compat — already covered by ready_task/draft_task/working_task/
+    # reviewed_task above; legacy_no_recurrence makes that assertion explicit).
+
+    # VALID: a recurrence-bearing card (identity + ack pair + evidence + alias).
+    recurrence_valid = deepcopy(ready_task)
+    recurrence_valid["recurrence"] = build_recurrence_block()
+
+    # A legacy card with NO recurrence block (backward-compat).
+    legacy_no_recurrence = deepcopy(ready_task)
+
+    # MALFORMED IDENTITY (schema-level rejection):
+    # empty recurrence_id when the block is present.
+    recurrence_empty_id = deepcopy(ready_task)
+    recurrence_empty_id["recurrence"] = build_recurrence_block()
+    recurrence_empty_id["recurrence"]["recurrence_id"] = ""
+
+    # symptom_class_id not matching recurrence.v1/<class>.
+    recurrence_bad_symptom_class = deepcopy(ready_task)
+    recurrence_bad_symptom_class["recurrence"] = build_recurrence_block()
+    recurrence_bad_symptom_class["recurrence"]["symptom_class_id"] = "bare-class-name"
+
+    # negative recurrence_count.
+    recurrence_negative_count = deepcopy(ready_task)
+    recurrence_negative_count["recurrence"] = build_recurrence_block()
+    recurrence_negative_count["recurrence"]["recurrence_count"] = -1
+
+    # IMPOSSIBLE STATE (cross-field guard rejection, schema passes):
+    # recurrence_count < last_acknowledged_count.
+    recurrence_count_lt_ack = deepcopy(ready_task)
+    recurrence_count_lt_ack["recurrence"] = build_recurrence_block()
+    recurrence_count_lt_ack["recurrence"]["recurrence_count"] = 1
+    recurrence_count_lt_ack["recurrence"]["last_acknowledged_count"] = 2
+
+    # MISSING ACKNOWLEDGEMENT PAIR (schema-level rejection): the block carries
+    # identity but NO acknowledgement state at all — the contract requires the
+    # pair whenever a block is present.
+    recurrence_missing_ack = deepcopy(ready_task)
+    recurrence_missing_ack["recurrence"] = build_recurrence_block()
+    del recurrence_missing_ack["recurrence"]["recurrence_count"]
+    del recurrence_missing_ack["recurrence"]["last_acknowledged_count"]
+
+    # MISSING ONE HALF of the ack pair (schema-level rejection): the counts are
+    # a pair — one present without the other is also malformed.
+    recurrence_missing_one_ack = deepcopy(ready_task)
+    recurrence_missing_one_ack["recurrence"] = build_recurrence_block()
+    del recurrence_missing_one_ack["recurrence"]["last_acknowledged_count"]
+
     validate_ok("draft_task", draft_task, validator)
     validate_ok("ready_task", ready_task, validator)
     validate_ok("working_task", working_task, validator)
@@ -173,9 +317,35 @@ def main() -> None:
     validate_fail("invalid_working", invalid_working, validator)
     validate_fail("invalid_reviewed", invalid_reviewed, validator)
 
+    # Recurrence-signature contract assertions.
+    validate_ok("recurrence_valid", recurrence_valid, validator)
+    validate_ok("legacy_no_recurrence", legacy_no_recurrence, validator)
+    validate_fail("recurrence_empty_id", recurrence_empty_id, validator)
+    validate_fail(
+        "recurrence_bad_symptom_class",
+        recurrence_bad_symptom_class,
+        validator,
+    )
+    validate_fail(
+        "recurrence_negative_count",
+        recurrence_negative_count,
+        validator,
+    )
+    validate_fail_ack(
+        "recurrence_count_lt_ack",
+        recurrence_count_lt_ack,
+        validator,
+    )
+    validate_fail("recurrence_missing_ack", recurrence_missing_ack, validator)
+    validate_fail(
+        "recurrence_missing_one_ack",
+        recurrence_missing_one_ack,
+        validator,
+    )
+
     print("schema_verification: ok")
     print(
-        "validated_examples: draft ready working reviewed invalid_draft invalid_research_missing_question invalid_research_missing_policy invalid_research_missing_artifact_type invalid_research_missing_artifact_path invalid_ready invalid_working invalid_reviewed"
+        "validated_examples: draft ready working reviewed invalid_draft invalid_research_missing_question invalid_research_missing_policy invalid_research_missing_artifact_type invalid_research_missing_artifact_path invalid_ready invalid_working invalid_reviewed recurrence_valid legacy_no_recurrence recurrence_empty_id recurrence_bad_symptom_class recurrence_negative_count recurrence_count_lt_ack recurrence_missing_ack recurrence_missing_one_ack"
     )
 
 
