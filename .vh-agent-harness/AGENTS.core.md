@@ -79,7 +79,6 @@ add-an-agent / add-command / add-skill recipe and the overlay anatomy.
 - `vh-agent-harness docs opencode-memory-model` when shaping or changing agent-memory conventions, workstream memory, or local/private OpenCode state
 - `docs/coordination/README.md` when shaping cross-boundary ownership, handoffs, blocker rules, or prompt/closeout coordination
 - `docs/coordination/TASK_MODES.md` and `docs/coordination/RUNTIME_MODEL.md` when a task may span multiple sessions, several subagent reports, or a local coordination runtime
-- `researches/AGENTS.md` when creating or updating durable comparative research material, source packets, or option memos
 - the relevant `researches/decisions/` memo when rethinking the coordinator-session workflow, local task registry, or future external coordinator/runtime options
 - the relevant `researches/decisions/` memo when designing or implementing `/write-task`, `/task-ready`, `/task-update`, `/task-repair`, `/task-list`, `/task-open`, `/resume-task`, `/task-closeout`, or `/task-review`
 - the relevant `researches/decisions/` memo when designing or changing the repo's durable research workflow, source-packet conventions, long-running research setup, or `/research` entrypoint
