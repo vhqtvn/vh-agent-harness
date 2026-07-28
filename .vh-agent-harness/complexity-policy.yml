@@ -28,6 +28,11 @@ exclude:
   snapshot_paths:
     - ".git/**"
     - ".opencode/**"
+    # templates/core/.opencode/** is the go:embed embedded-source mirror of the
+    # rendered .opencode/** tree (byte-identical; diff exit=0). Both are
+    # harness-release-managed artifacts, not project refactor targets, so both
+    # are excluded for consistency. No-op for consumers (no templates/core/).
+    - "templates/core/.opencode/**"
     - "**/__pycache__/**"
     - "**/node_modules/**"
     - "tmp/**"
