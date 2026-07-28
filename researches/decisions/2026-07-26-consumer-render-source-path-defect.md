@@ -256,3 +256,81 @@ mechanism — not to core.
 appears in the guard's source, its rendered mirror, or the code/docs commits;
 references remain generic ("consumer render", "non-Go consumer", "source
 checkout").
+
+---
+
+## Addendum 2 (2026-07-28): prefix-extension rejected; real class is dangling-reference (path-existence check DEFER)
+
+**Status update.** A slice attempted to generalize PART A's `templates/core`
+token into a dev-repo-only prefix set {`templates/core`, `researches/`,
+`docs/checkpoints/`} and extend the scan to the composed root `AGENTS.md`, to
+catch the B2 instance (`researches/AGENTS.md`, fixed in `56d041e`) and its
+sibling refs mechanically. The attempt was **rejected** after verification: the
+prefix-extension premise is flawed on BOTH new prefixes. This addendum records
+the rejection, names the real generalization, and DEFERs the correct detection.
+
+**Finding — both new prefixes are consumer conventions, not dev-only.**
+
+- **`researches/` is a consumer convention.** Verified:
+  `templates/core/.opencode/agents/researcher.md.tmpl` routes durable reference
+  material to `researches/sources/` and `researches/decisions/` (lines 45/47)
+  and names `researches/` as canonical behavior (line 58);
+  `templates/core/docs/coordination/RUNTIME_MODEL.md:93` ("promote only the
+  final durable report into `researches/`");
+  `templates/core/docs/coordination/AGENTS.md:32` ("`researches/decisions/` or
+  `researches/sources/` and link to them instead"). All ship in `templates/core`.
+  Adding `researches/` to a dev-only prefix set would false-positive these
+  legitimate consumer refs.
+- **`docs/checkpoints/` is likewise a consumer convention.** Verified:
+  `AGENTS.core.md` (lines 242/304/312 prescribe it as the dated-checkpoint
+  convention), `agents/docs-steward.md`, `commands/docs-sync.md`,
+  `commands/task-closeout.md`, AND `scripts/verify-session-state.js:75/439`
+  actively CONSTRUCT checkpoint paths under
+  `docs/checkpoints/${sessionName}-checkpoint.md` (consumers write there). ~14
+  generic refs incl. a live script path — all would false-positive.
+- **Only `templates/core` is a clean STRUCTURAL dev-only marker.** It is the
+  embedded source tree; no consumer has it; no generic guidance prescribes it.
+  PART A's literal-token detection remains correct and clean for it.
+
+**The real class — B2 is NOT a dev-only-prefix case.** B2
+(`researches/AGENTS.md`) is a *dangling reference to a specific NON-EXISTENT
+file*: `researches/` exists and is a legitimate consumer convention; only
+`AGENTS.md` UNDER it dangles (the file does not exist anywhere — confirmed
+`ls researches/AGENTS.md` → ENOENT, and `ls researches/README.md` → ENOENT).
+Prefix matching cannot distinguish "the dir is a legitimate convention" from "a
+specific file under it does not exist." The correct generalization is a
+**path-EXISTENCE check** — verify that a path referenced in a rendered (or
+example) core doc actually EXISTS in the render — not prefix matching.
+
+**Instances of the dangling-reference class (all verified):**
+
+| ID | Location | Reference | Exists? | Status |
+|----|----------|-----------|---------|--------|
+| **B2** | `templates/core/.vh-agent-harness/AGENTS.core.md` "Read when relevant" (removed) | `researches/AGENTS.md` | NO | FIXED `56d041e` |
+| **83-family** | `templates/core/.vh-agent-harness/AGENTS.core.md:82-85` (the four `researches/decisions/` memo refs) | `researches/decisions/` + "the relevant memo" (dev-specific content: coordinator workflow, `/write-task` family, durable research workflow, browser-driven research providers) | DIR is a convention; the referenced dev-specific memos do not exist in a consumer | UNFIXED — deferred (softer: dir + "relevant memo," not a crisp file) |
+| **MF2** | `templates/examples/docs/coordination/LANES.yaml:71-72` | `researches/README.md`, `researches/AGENTS.md` (required_context_files) | NO (both ENOENT) | UNFIXED — deferred. `templates/examples/` is embedded reference surfaced on-demand by `vh-agent-harness example` (`internal/cli/example.go`), NOT auto-rendered into a consumer repo → MF2 is **hygiene-only, not a consumer-render leak**. |
+
+**DEFER — path-existence-check mechanism.** A static path-existence check (does
+a referenced path resolve in the render?) is the correct detection for this
+class, but it is meaningfully harder than the prefix guard: it must distinguish
+a referenced PATH (checkable) from prose (not), handle the dir-vs-file
+distinction (the 83-family references a legitimate dir but dangling content
+under it), and avoid false-positives on tokens, placeholders, and `${...}`
+template expressions (e.g. `verify-session-state.js`'s
+`docs/checkpoints/${sessionName}-checkpoint.md` is a constructed path, not a
+literal ref). **Deferred as a separate, harder slice.** Trigger to promote: a
+4th confirmed instance, OR a release-boundary audit surfacing the class (same
+trigger shape as the prefix-guard's original DEFER). Not forced into the prefix
+guard — that guard stays scoped to its clean structural marker
+(`templates/core`) + the Go-only root heuristic (Part B).
+
+**Resolution for this slice.** (1) The prefix guard
+(`verify-no-source-tree-only-paths.js`) is **untouched** — its `templates/core`
+Part A is correct and clean; generalizing it via prefix would regress on
+consumer conventions. (2) The B2 fix (`56d041e`) **stands**. (3) The
+dangling-reference class — with instances B2 (fixed), 83-family, MF2 — is
+**captured here as a DEFER** for a path-existence-check mechanism, a separate
+slice.
+
+**Generic naming discipline (unchanged).** No adopter/overlay identifier
+appears in this addendum; references remain generic.
