@@ -7,3 +7,9 @@ runtime:
 # lifecycle: {}     # hooks are scripts/ pointers; absent = no-op
 # runners: {}
 # verbs: {}
+# exec_sandbox.min_mode is the binary-enforced sandbox MODE-FLOOR (Level-B
+# read-code containment). strict = writes-outside-tmp and network are
+# impossible; the floor clamps --sandbox UP so an exec-sandbox grant cannot be
+# escaped (P5 bypass denied). See read-only-execution-policy.md.
+exec_sandbox:
+  min_mode: strict

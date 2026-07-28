@@ -180,6 +180,186 @@ func LoadForRoot(projectRoot string) (*RunShape, error) {
 	return Load(candidate)
 }
 
+// minModeYAML is the tolerant decoder for the exec-sandbox floor. It decodes
+// the exec_sandbox block as a generic map (NOT a struct), so we can require
+// min_mode to be present whenever the block is present — closing the key-typo
+// hole (a misspelled key like `min_mdoe: strict` leaves min_mode absent, which
+// we treat as fail-closed rather than silently no-floor). Other top-level
+// blocks (runtime/lifecycle/...) are ignored entirely, so the floor stays
+// decoupled from lifecycle validity. The schema validator (internal/schema)
+// still lints the enum at doctor time.
+type minModeYAML struct {
+	ExecSandbox map[string]any `yaml:"exec_sandbox"`
+}
+
+// LoadMinMode reads exec_sandbox.min_mode from <projectRoot>/.vh-agent-harness/
+// run-shape.yml. It is tolerant of unrelated blocks (decodes ONLY exec_sandbox)
+// but FAIL-CLOSED on anything that looks like a deliberate-but-broken floor:
+//
+//   - file absent                          => ("", nil) — no floor (run uncontained)
+//   - exec_sandbox block absent (null/nil) => ("", nil) — no floor
+//   - exec_sandbox block present + min_mode is a valid string
+//     => (string, nil) — the floor value
+//   - exec_sandbox block present but min_mode KEY absent (incl. a misspelled
+//     key like `min_mdoe: strict`, where yaml drops the unknown key leaving
+//     min_mode unset)                      => ("", error) — FAIL-CLOSED
+//   - min_mode present but NOT a string
+//     (sequence/map/int/bool)              => ("", error) — FAIL-CLOSED
+//   - document-level YAML syntax error     => ("", error) — FAIL-CLOSED
+//   - file present but unreadable          => ("", error) — FAIL-CLOSED
+//
+// The min_mode-absent-when-block-present rule is the key-typo defense: an
+// operator who writes an exec_sandbox block INTENDED a floor, so a missing or
+// misspelled min_mode key is a mistake, not "no floor" — refuse rather than
+// silently dropping to ModeOff. (Unknown FUTURE keys are tolerated as long as
+// min_mode is present, preserving forward compatibility.) The schema validator
+// (doctor) catches these at health-check time too; this is the runtime
+// defense-in-depth. Returns "" when the file is absent.
+func LoadMinMode(projectRoot string) (string, error) {
+	candidate := filepath.Join(projectRoot, DirName, FileName)
+	info, err := os.Stat(candidate)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil // absent => no floor
+		}
+		return "", fmt.Errorf("run-shape %s: stat: %w", candidate, err)
+	}
+	if info.IsDir() {
+		// A directory at the floor path is a malformed-present floor: fail closed
+		// rather than silently treating it as absent (which would drop the floor
+		// to ModeOff — an open escape under a strict contract).
+		return "", fmt.Errorf("run-shape %s: expected a file, found a directory", candidate)
+	}
+	data, err := os.ReadFile(candidate)
+	if err != nil {
+		return "", fmt.Errorf("run-shape %s: read: %w", candidate, err)
+	}
+	var mm minModeYAML
+	if err := yaml.Unmarshal(data, &mm); err != nil {
+		return "", fmt.Errorf("run-shape %s: decode exec_sandbox: %w", candidate, err)
+	}
+	if mm.ExecSandbox == nil {
+		return "", nil // block absent => no floor
+	}
+	// Block present: min_mode MUST be present (a misspelled key leaves it
+	// absent). This is the key-typo fail-closed boundary.
+	v, ok := mm.ExecSandbox["min_mode"]
+	if !ok {
+		return "", fmt.Errorf("run-shape %s: exec_sandbox block present but min_mode key absent (misspelled key?); a present exec_sandbox block requires min_mode", candidate)
+	}
+	s, ok := v.(string)
+	if !ok {
+		// Present-but-wrong-type: fail closed. A typo like `min_mode: [strict]`
+		// must NOT silently collapse the floor to off.
+		return "", fmt.Errorf("run-shape %s: exec_sandbox.min_mode must be a string, got %T (%v)", candidate, v, v)
+	}
+	return s, nil
+}
+
+// FindMinMode walks upward from startDir through the ENTIRE ancestor chain and
+// returns the MAX (most restrictive) exec_sandbox.min_mode floor found at any
+// level. This is the floor-root locator: it lets an exec-sandbox invocation
+// from ANY subdirectory of a project still discover the project's strict floor
+// (closing the cwd-scoped bypass). Returns ("", "", nil) when no run-shape with
+// an exec_sandbox block exists between startDir and the filesystem root.
+//
+// MAX-over-entire-chain (not nearest-wins) is the load-bearing safety property:
+// a weakening child floor (e.g. one an agent plants under the RW ./tmp tree with
+// `min_mode: off`) CANNOT mask an enclosing parent's strict floor — the parent's
+// strict always wins because we take the MAX of ALL ancestors. A child without
+// an exec_sandbox block is simply skipped (it does not weaken anything).
+//
+// FAIL-CLOSED on a malformed-present candidate at ANY level: a directory at the
+// floor path, any stat error other than not-exist (e.g. EACCES unreadable), or a
+// broken exec_sandbox block (wrong-type min_mode, syntax error, misspelled key)
+// returns an error so loadExecSandboxFloor refuses to run uncontained. Only a
+// clean IsNotExist continues the upward walk. (FindForRoot has the analogous
+// walk for the runtime-verb locator; its stat handling is pre-existing and a
+// separate concern — this function is the floor-specific hardening.)
+func FindMinMode(startDir string) (projectRoot string, minMode string, err error) {
+	// Canonicalize to the PHYSICAL path. os.Getwd() returns a symlink-preserving
+	// LOGICAL path (it prefers $PWD), and filepath.Abs does not resolve symlinks
+	// — so walking the logical parent chain would let an agent escape the floor
+	// by cd-ing into an out-of-tree symlink that targets a nested project dir
+	// (FindMinMode would walk the symlink's parents, never the physical repo).
+	// EvalSymlinks resolves the whole path to its physical location so the
+	// upward walk ascends the REAL project tree. Fail-closed on resolution
+	// error: if we cannot establish the physical start, refuse rather than guess.
+	abs, err := filepath.Abs(startDir)
+	if err != nil {
+		return "", "", err
+	}
+	dir, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", "", fmt.Errorf("run-shape: resolve symlinks in floor-discovery start %q: %w (refusing to run uncontained)", startDir, err)
+	}
+	bestRank := 0
+	bestRaw := ""
+	bestRoot := ""
+	for {
+		candidate := filepath.Join(dir, DirName, FileName)
+		info, statErr := os.Stat(candidate)
+		switch {
+		case statErr == nil && !info.IsDir():
+			// proper file at this level → load. LoadMinMode fail-closes on a
+			// broken-present exec_sandbox block (wrong-type min_mode, syntax
+			// error, misspelled key). A file WITHOUT an exec_sandbox block
+			// returns ("", nil) → skip this level and keep walking.
+			mm, loadErr := LoadMinMode(dir)
+			if loadErr != nil {
+				return "", "", loadErr
+			}
+			if mm != "" {
+				rank := floorRank(mm)
+				if rank < 0 {
+					return "", "", fmt.Errorf("run-shape %s: exec_sandbox.min_mode %q is not a valid floor value (off|best-effort|strict)", candidate, mm)
+				}
+				// Track the MOST RESTRICTIVE floor across the entire chain.
+				// This is the anti-weakening guarantee: a child floor
+				// (e.g. planted under ./tmp with min_mode: off) cannot
+				// override a stricter enclosing parent.
+				if rank > bestRank {
+					bestRank = rank
+					bestRaw = mm
+					bestRoot = dir
+				}
+			}
+			// Continue walking up regardless — a parent might be STRICTER.
+		case os.IsNotExist(statErr):
+			// clean absent → keep walking up.
+		case statErr == nil && info.IsDir():
+			// directory at the floor path — malformed-present → fail closed.
+			return "", "", fmt.Errorf("run-shape %s: expected a file, found a directory", candidate)
+		default:
+			// stat error other than not-exist (e.g. EACCES unreadable) → fail
+			// closed: a present-but-unreadable floor must not silently drop.
+			return "", "", fmt.Errorf("run-shape %s: stat: %w", candidate, statErr)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return bestRoot, bestRaw, nil // reached filesystem root; return MAX floor found
+		}
+		dir = parent
+	}
+}
+
+// floorRank maps a raw min_mode string to an integer rank for MAX comparison.
+// Higher = more restrictive. Mirrors the off < best-effort < strict ordering in
+// internal/execsandbox without importing that package (avoids a cross-package
+// dependency). Returns -1 for an invalid value (caller fail-closes).
+func floorRank(s string) int {
+	switch s {
+	case "off":
+		return 1
+	case "best-effort":
+		return 2
+	case "strict":
+		return 3
+	default:
+		return -1
+	}
+}
+
 // FindForRoot walks upward from startDir looking for a run-shape.yml under a
 // `.vh-agent-harness/` directory. It returns the resolved project root (the dir
 // containing `.vh-agent-harness/`) and the parsed RunShape when found. When no

@@ -24,7 +24,14 @@ type RunShape struct{}
 // may carry (S4 authority). Anything else is an envelope violation.
 // run_shape_version is the optional schema-version stamp (the run-shape spec §3);
 // it is parseable metadata, not a runtime field, and is allowed alongside the
-// seven authority blocks.
+// authority blocks.
+//
+// exec_sandbox is the exec-sandbox policy block (project-owned containment
+// policy for the Level-B read-code mechanism). It carries min_mode
+// (off|best-effort|strict) — the binary-enforced sandbox MODE-FLOOR that
+// contains the exec-sandbox grant to read-only agents. See
+// researches/decisions/2026-07-29-exec-sandbox-level-b-mode-floor.md and
+// templates/core/.opencode/docs/agents/read-only-execution-policy.md.
 var runShapeAllowedTopLevel = map[string]bool{
 	"run_shape_version": true,
 	"runtime":           true,
@@ -34,6 +41,28 @@ var runShapeAllowedTopLevel = map[string]bool{
 	"verbs":             true,
 	"env":               true,
 	"proxies":           true,
+	"exec_sandbox":      true,
+}
+
+// allowedExecSandboxMinMode is the enum for exec_sandbox.min_mode (mirrors the
+// execsandbox.SandboxMode values off|best-effort|strict).
+var allowedExecSandboxMinMode = map[string]bool{
+	"off":         true,
+	"best-effort": true,
+	"strict":      true,
+}
+
+// runShapeAllowedTopLevelList returns the sorted, comma-joined list of allowed
+// top-level run-shape keys for error messages. Derived from the map so the
+// message can never drift from the allowlist (it had already drifted before,
+// omitting run_shape_version).
+func runShapeAllowedTopLevelList() string {
+	ks := make([]string, 0, len(runShapeAllowedTopLevel))
+	for k := range runShapeAllowedTopLevel {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return strings.Join(ks, ", ")
 }
 
 // allowedBackend enumerates the valid runtime backend values for v1.
@@ -82,7 +111,7 @@ func (RunShape) Validate(raw []byte) []FieldError {
 		if !runShapeAllowedTopLevel[k] {
 			errs = append(errs, FieldError{
 				Field:   k,
-				Message: fmt.Sprintf("unknown top-level key %q; allowed: runtime, services, lifecycle, runners, verbs, env, proxies", k),
+				Message: fmt.Sprintf("unknown top-level key %q; allowed: %s", k, runShapeAllowedTopLevelList()),
 			})
 		}
 	}
@@ -134,6 +163,38 @@ func (RunShape) Validate(raw []byte) []FieldError {
 					})
 				}
 			}
+		}
+	}
+
+	// exec_sandbox: if the block is present, it must be a map carrying a valid
+	// min_mode. A misspelled min_mode KEY (e.g. `min_mdoe: strict`) leaves
+	// min_mode absent — the schema flags that here (doctor) AND the runtime
+	// (LoadMinMode) fail-closes on it, so a key typo cannot silently disable the
+	// strict containment floor. A non-map exec_sandbox (scalar/sequence) is a
+	// wrong-shape block and is also flagged.
+	if esVal, ok := root["exec_sandbox"]; ok {
+		es, isMap := esVal.(map[string]any)
+		if !isMap {
+			errs = append(errs, FieldError{
+				Field:   "exec_sandbox",
+				Message: "must be a map with min_mode (off|best-effort|strict)",
+			})
+		} else if _, hasMin := es["min_mode"]; !hasMin {
+			// Block present but min_mode absent (misspelled key, or genuinely
+			// empty) — a present exec_sandbox block requires min_mode.
+			errs = append(errs, FieldError{
+				Field:   "exec_sandbox.min_mode",
+				Message: "exec_sandbox block present but min_mode key absent (misspelled key?); required when the block is present",
+			})
+		} else if s, ok := es["min_mode"].(string); ok {
+			if !allowedExecSandboxMinMode[s] {
+				errs = append(errs, FieldError{
+					Field:   "exec_sandbox.min_mode",
+					Message: fmt.Sprintf("invalid min_mode %q; enum: off | best-effort | strict", s),
+				})
+			}
+		} else {
+			errs = append(errs, FieldError{Field: "exec_sandbox.min_mode", Message: "must be a string"})
 		}
 	}
 

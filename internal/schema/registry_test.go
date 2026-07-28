@@ -11,9 +11,35 @@ lifecycle:
   hooks:
     pre_up: scripts/up.sh
     post_up: scripts/after-up.sh
+exec_sandbox:
+  min_mode: strict
 `)
 	if errs := (RunShape{}).Validate(good); len(errs) != 0 {
 		t.Fatalf("good run-shape: expected no errors, got %+v", errs)
+	}
+
+	// exec_sandbox.min_mode accepts the full enum without error.
+	for _, mode := range []string{"off", "best-effort", "strict"} {
+		raw := []byte("exec_sandbox:\n  min_mode: " + mode + "\n")
+		if errs := (RunShape{}).Validate(raw); len(errs) != 0 {
+			t.Fatalf("min_mode=%s: expected no errors, got %+v", mode, errs)
+		}
+	}
+
+	// forward-compat: an unknown future key alongside a present min_mode is fine.
+	if errs := (RunShape{}).Validate([]byte("exec_sandbox:\n  min_mode: strict\n  future_key: x\n")); len(errs) != 0 {
+		t.Fatalf("unknown future key + present min_mode: expected no errors, got %+v", errs)
+	}
+
+	// FAIL-CLOSED: a misspelled min_mode KEY (min_mode absent in a present block)
+	// is flagged, so doctor catches the key-typo hole before runtime.
+	keyTypoErrs := (RunShape{}).Validate([]byte("exec_sandbox:\n  min_mdoe: strict\n"))
+	ktFields := map[string]bool{}
+	for _, e := range keyTypoErrs {
+		ktFields[e.Field] = true
+	}
+	if !ktFields["exec_sandbox.min_mode"] {
+		t.Fatalf("misspelled min_mode key: expected exec_sandbox.min_mode error (block present but min_mode absent), got %+v", keyTypoErrs)
 	}
 
 	bad := []byte(`runtime:
@@ -23,6 +49,8 @@ lifecycle:
     pre_up: "docker compose up"   # inline shell, forbidden
     bogus_hook: scripts/x.sh
 rogue_key: 1
+exec_sandbox:
+  min_mode: strcit   # typo — must fail-closed (not silently collapse to off)
 `)
 	errs := (RunShape{}).Validate(bad)
 	fields := map[string]bool{}
@@ -34,6 +62,7 @@ rogue_key: 1
 		"lifecycle.hooks.pre_up", // inline shell
 		"lifecycle.hooks.bogus_hook",
 		"rogue_key",
+		"exec_sandbox.min_mode", // typo rejected (fail-closed floor boundary)
 	} {
 		if !fields[want] {
 			t.Fatalf("missing expected error field %q in %+v", want, errs)

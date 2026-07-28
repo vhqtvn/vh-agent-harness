@@ -491,6 +491,15 @@ runtime:
 # lifecycle: {}     # hooks are scripts/ pointers; absent = no-op
 # runners: {}
 # verbs: {}
+# exec_sandbox: min_mode is the binary-enforced sandbox MODE-FLOOR for the
+# exec-sandbox Level-B read-code mechanism (see the read-only-execution-policy
+# doc). off = no floor (standalone behavior); strict = the contained default
+# (writes-outside-tmp and network are impossible). The floor clamps the
+# caller-supplied --sandbox mode UP, so an exec-sandbox grant cannot be escaped.
+# Project-owned: a consumer upgrading from a pre-floor version keeps their
+# existing run-shape (no exec_sandbox block) until they add the key.
+exec_sandbox:
+  min_mode: strict
 `
 
 // seedRunShapeDefault writes the default run-shape.yml at

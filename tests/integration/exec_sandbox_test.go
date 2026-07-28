@@ -77,16 +77,25 @@ func sandboxFeatureCheck(t *testing.T) {
 	}
 }
 
-// runSandbox invokes exec-sandbox with the given flags and target command,
-// returning combined output and exit error.
+// runSandbox invokes exec-sandbox with the given flags and target command from
+// repoRoot, returning combined output and exit error.
 func runSandbox(t *testing.T, flags []string, target ...string) (string, int) {
+	t.Helper()
+	return runSandboxIn(t, repoRoot, flags, target...)
+}
+
+// runSandboxIn invokes exec-sandbox with cmd.Dir set to dir. Use an isolated dir
+// (e.g. a temp dir OUTSIDE the repo tree) to test exec-sandbox BASE behavior
+// without the repo's exec_sandbox.min_mode floor interfering (FindMinMode walks
+// up from dir; a dir outside any .vh-agent-harness/ resolves no floor).
+func runSandboxIn(t *testing.T, dir string, flags []string, target ...string) (string, int) {
 	t.Helper()
 	args := []string{"exec-sandbox"}
 	args = append(args, flags...)
 	args = append(args, "--")
 	args = append(args, target...)
 	cmd := exec.Command(sandboxBin, args...)
-	cmd.Dir = repoRoot
+	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	exitCode := 0
 	if err != nil {
@@ -155,19 +164,177 @@ func TestSandboxNetworkDeny(t *testing.T) {
 	}
 }
 
-// TestSandboxNetworkAllow verifies that socket creation works when --net=allow.
+// TestSandboxNetworkAllow verifies that socket creation works when --net=allow,
+// in an ISOLATED dir with no exec_sandbox.min_mode floor (the repo root now
+// carries a strict floor that would force --net=allow -> deny; to test the BASE
+// net-allow behavior we run from a temp dir outside the repo tree, where
+// FindMinMode resolves no floor).
 func TestSandboxNetworkAllow(t *testing.T) {
 	sandboxFeatureCheck(t)
 
-	out, exit := runSandbox(t, []string{"--sandbox=best-effort", "--net=allow"},
+	iso := t.TempDir() // outside the repo tree => no floor => base behavior
+	out, exit := runSandboxIn(t, iso, []string{"--sandbox=best-effort", "--net=allow"},
 		"python3", "-c", `import socket; s=socket.socket(); print("socket created OK")`)
 
 	if exit != 0 {
-		t.Fatalf("network should be allowed (--net=allow) but socket creation failed:\n%s", out)
+		t.Fatalf("network should be allowed (--net=allow, no floor) but socket creation failed:\n%s", out)
 	}
 	if !strings.Contains(out, "socket created OK") {
 		t.Fatalf("expected socket creation success, got:\n%s", out)
 	}
+}
+
+// TestSandboxStrictFloor_DeniesP5Bypass is the CRUX integration test: in the
+// repo (which carries exec_sandbox.min_mode: strict), the P5 bypass
+// (--sandbox=off) is DENIED — the binary upgrades off -> strict, so a write
+// OUTSIDE ./tmp/ fails with EACCES (the file is not created). This proves, via
+// the real binary on the real kernel, that an agent granted exec-sandbox cannot
+// escape the strict floor.
+func TestSandboxStrictFloor_DeniesP5Bypass(t *testing.T) {
+	sandboxFeatureCheck(t)
+
+	probe := filepath.Join(repoRoot, "tmp", "floor_p5_probe")
+	_ = os.Remove(probe)
+
+	// --sandbox=off under the repo's strict floor: must be upgraded to strict.
+	out, exit := runSandbox(t, []string{"--sandbox=off", "--net=deny"},
+		"touch", filepath.Join("tmp", "floor_p5_probe"))
+
+	// The write to ./tmp/ SUCCEEDS even under the upgraded strict floor (tmp is
+	// the RW dir). The crux assertion is that the floor upgraded off -> strict:
+	// the output must announce the upgrade, proving the bypass was denied.
+	if !strings.Contains(out, "upgraded to strict") {
+		t.Fatalf("P5 bypass: expected '--sandbox=off upgraded to strict' notice under the strict floor, got exit=%d:\n%s", exit, out)
+	}
+	if exit != 0 {
+		t.Fatalf("touch ./tmp/ under the upgraded strict floor should succeed, got exit=%d:\n%s", exit, out)
+	}
+	_ = os.Remove(probe)
+
+	// And the INTEGRITY half of the crux: writing OUTSIDE ./tmp/ must be denied
+	// under the strict floor, even though the caller asked for --sandbox=off.
+	out2, exit2 := runSandbox(t, []string{"--sandbox=off", "--net=deny"},
+		"touch", filepath.Join(".git", "floor_p5_outside"))
+	if exit2 == 0 {
+		t.Fatalf("CRUX BROKEN: --sandbox=off wrote OUTSIDE tmp (.git/) — the strict floor did NOT contain the bypass")
+	}
+	_ = os.Remove(filepath.Join(repoRoot, ".git", "floor_p5_outside"))
+	if !strings.Contains(strings.ToLower(out2), "permission denied") {
+		t.Fatalf("expected write-outside-tmp to be denied (EACCES) under the strict floor, got exit=%d:\n%s", exit2, out2)
+	}
+}
+
+// TestSandboxStrictFloor_ForcesNetDeny proves the net-floor half of the Level-B
+// containment contract: under the repo's strict floor, --net=allow is upgraded
+// to deny, so a granted agent cannot reach the network even by passing
+// --net=allow. (Contrast with TestSandboxNetworkAllow, which runs WITHOUT a
+// floor in an isolated dir.)
+func TestSandboxStrictFloor_ForcesNetDeny(t *testing.T) {
+	sandboxFeatureCheck(t)
+
+	out, exit := runSandbox(t, []string{"--sandbox=strict", "--net=allow"},
+		"python3", "-c", `import socket; s=socket.socket(); print("socket created OK")`)
+
+	if exit == 0 {
+		t.Fatalf("CRUX BROKEN: --net=allow under the strict floor permitted a socket — the net-floor did NOT deny network")
+	}
+	if !strings.Contains(out, "upgraded to deny") {
+		t.Fatalf("expected '--net=allow upgraded to deny' notice under the strict floor, got exit=%d:\n%s", exit, out)
+	}
+}
+
+// TestSandboxStrictFloor_ReadCodeAndTmpWrite proves the Level-B payoff: under
+// the strict floor, an agent can still run ARBITRARY read-code (python3 reads a
+// repo file) AND write to ./tmp/ — the containment denies only writes-outside-
+// tmp and network, not read analysis. This is the dogfood contract for the
+// researcher/media-perception/repo-explorer grant.
+func TestSandboxStrictFloor_ReadCodeAndTmpWrite(t *testing.T) {
+	sandboxFeatureCheck(t)
+
+	outFile := filepath.Join(repoRoot, "tmp", "floor_reader_dump")
+	_ = os.Remove(outFile)
+	// python3 reads a repo file (go.mod) and writes a dump to ./tmp/.
+	out, exit := runSandbox(t, []string{"--sandbox=off", "--net=deny"},
+		"python3", "-c",
+		`open("tmp/floor_reader_dump","w").write(open("go.mod").read()[:20]); print("read+tmpwrite OK")`)
+	if exit != 0 {
+		t.Fatalf("read-code + tmp-write should succeed under the strict floor, got exit=%d:\n%s", exit, out)
+	}
+	if !strings.Contains(out, "read+tmpwrite OK") {
+		t.Fatalf("expected read+tmpwrite success, got:\n%s", out)
+	}
+	if _, err := os.Stat(outFile); err != nil {
+		t.Fatalf("tmp dump not created under the strict floor: %v", err)
+	}
+	_ = os.Remove(outFile)
+}
+
+// TestSandboxStrictFloor_DualRootCwdBypass closes the out-of-project --cwd
+// bypass: a caller outside the project (no floor at their cwd) using --cwd to
+// target the strict-floored repo must STILL discover the floor from repoRoot.
+// Without dual-root resolution, the caller's cwd has no floor and the --cwd
+// target's strict floor is never consulted → --sandbox=off runs uncontained.
+func TestSandboxStrictFloor_DualRootCwdBypass(t *testing.T) {
+	sandboxFeatureCheck(t)
+
+	outside := t.TempDir() // caller cwd: outside the repo tree, no floor
+
+	// --sandbox=off from outside with --cwd=repoRoot: the floor must be discovered
+	// from repoRoot (strict) even though realCWD (outside) has no floor.
+	out, exit := runSandboxIn(t, outside,
+		[]string{"--cwd=" + repoRoot, "--sandbox=off", "--net=deny"},
+		"touch", filepath.Join(".git", "floor_cwd_bypass"))
+
+	// The floor upgrade notice proves the dual-root discovery worked.
+	if !strings.Contains(out, "upgraded to strict") {
+		t.Fatalf("dual-root --cwd bypass: expected '--sandbox=off upgraded to strict' notice (floor from repoRoot), got exit=%d:\n%s", exit, out)
+	}
+	// Writing OUTSIDE ./tmp/ must be denied — the strict containment held.
+	if exit == 0 {
+		t.Fatalf("CRUX BROKEN: --cwd bypass wrote to .git/ — the dual-root floor did NOT contain it")
+	}
+	_ = os.Remove(filepath.Join(repoRoot, ".git", "floor_cwd_bypass"))
+}
+
+// TestSandboxStrictFloor_WeakeningChildEscaped closes the F1 weakening-child
+// escape: a granted agent plants a weakening child run-shape.yml (min_mode: off)
+// under the RW ./tmp tree, then invokes from there with --sandbox=off. The
+// MAX-over-entire-chain walk MUST discover the project's strict parent floor
+// and override the child's weakening off — the agent CANNOT escape by planting
+// a weaker floor in its own writable area.
+func TestSandboxStrictFloor_WeakeningChildEscaped(t *testing.T) {
+	sandboxFeatureCheck(t)
+
+	// Plant a weakening floor under ./tmp/evil/ (agent-writable area).
+	evilDir := filepath.Join(repoRoot, "tmp", "evil-floor-test")
+	evilVh := filepath.Join(evilDir, ".vh-agent-harness")
+	if err := os.MkdirAll(evilVh, 0o755); err != nil {
+		t.Fatalf("mkdir evil floor dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(evilDir) })
+	evilShape := filepath.Join(evilVh, "run-shape.yml")
+	if err := os.WriteFile(evilShape, []byte("exec_sandbox:\n  min_mode: off\n"), 0o644); err != nil {
+		t.Fatalf("write weakening floor: %v", err)
+	}
+
+	// Invoke from the evil dir with --sandbox=off --net=allow (P5 bypass attempt).
+	// FindMinMode walks the ENTIRE chain: off at tmp/evil (rank 1) → strict at
+	// repo root (rank 3 > 1) → MAX = strict. The weakening child is overridden.
+	out, exit := runSandboxIn(t, evilDir,
+		[]string{"--sandbox=off", "--net=allow"},
+		"touch", filepath.Join("..", "..", ".git", "floor_weakening_child"))
+
+	// CRUX: the strict parent floor MUST override the weakening child.
+	if !strings.Contains(out, "upgraded to strict") {
+		t.Fatalf("weakening child escape: expected '--sandbox=off upgraded to strict' (parent strict overrides child off), got exit=%d:\n%s", exit, out)
+	}
+	if exit == 0 {
+		t.Fatalf("CRUX BROKEN: weakening child floor let --sandbox=off write to .git/ — MAX-over-chain did NOT override the child")
+	}
+	if !strings.Contains(out, "upgraded to deny") {
+		t.Fatalf("weakening child escape: expected '--net=allow upgraded to deny' (strict floor forces net deny), got exit=%d:\n%s", exit, out)
+	}
+	_ = os.Remove(filepath.Join(repoRoot, ".git", "floor_weakening_child"))
 }
 
 // TestSandboxParentDirNotAccessible verifies that `ls ..` is denied — the

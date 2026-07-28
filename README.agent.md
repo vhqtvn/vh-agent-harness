@@ -687,7 +687,7 @@ export default function transform({ context }) {
   Use exec-ro when an agent wants prompt-free read-only inspection (git or
   non-git). Use `exec` for anything mutating, anything with shell plumbing, or
   anything exec-ro's allowlist does not cover.
-- **Run a command under a kernel-enforced HOST-LOCAL Linux sandbox:** `vh-agent-harness exec-sandbox [--sandbox=off|best-effort|strict] [--net=deny|allow|ask] -- <cmd>`.
+- **Run a command under a kernel-enforced HOST-LOCAL Linux sandbox:** `vh-agent-harness exec-sandbox [--sandbox=off|best-effort|strict] [--net=deny|allow|ask] -- <cmd>`. An optional **mode floor** (`exec_sandbox.min_mode` in `run-shape.yml`) can clamp the effective mode UP so a caller can never run below the configured minimum (see "Mode floor" below).
 
   **Two execution planes (read this).** The exec commands look like one family
   but sit on two disjoint planes. `exec` and `exec-ro` dispatch through
@@ -754,6 +754,10 @@ export default function transform({ context }) {
   - `strict` — require OS primitives; fail-closed (exit non-zero, do not run)
     if unavailable.
 
+  A **mode floor** (see below) can clamp the effective mode UP from the
+  caller's `--sandbox` choice, so e.g. `--sandbox=off` under a strict floor
+  silently runs at `strict` instead.
+
   **Network (`--net`):** At the syscall layer this is a binary filter: seccomp
   blocks network syscalls when denied, permits when allowed. Default = deny.
   - `deny` — block socket/connect/bind/listen/accept/sendto/recvfrom via
@@ -764,6 +768,38 @@ export default function transform({ context }) {
     hard-deny + stderr notice + exit non-zero** (agents CANNOT auto-accept).
     The ask decision is resolved in the PARENT before forking the child, so the
     child trampoline only ever sees deny or allow.
+
+  **Mode floor (`exec_sandbox.min_mode`):** a project may set a binary-enforced
+  minimum sandbox mode so a caller can NEVER downgrade below it — regardless of
+  the `--sandbox`/`--net` flags passed on the command line. Configured in
+  `run-shape.yml` (project-owned):
+  ```yaml
+  exec_sandbox:
+    min_mode: strict   # off | best-effort | strict
+  ```
+  - **strict floor** — clamps BOTH axes: `--sandbox` is forced to `strict`
+    (writes outside `./tmp` become Landlock-impossible) AND `--net` is forced to
+    `deny` (network becomes seccomp-impossible). `--sandbox=off` and
+    `--net=allow` are silently upgraded; the caller cannot escape.
+  - **best-effort floor** — clamps `--sandbox` up to at least `best-effort`.
+  - **off** (or key absent) — no floor; the flags behave as documented above.
+    Repos without the key keep running unaffected (the floor is opt-in).
+  - **Discovery** — the floor root walks UP from BOTH the real (physical,
+    symlink-resolved) cwd AND the `--cwd` target, taking the most restrictive of
+    both, until it finds a `.vh-agent-harness/run-shape.yml` with an
+    `exec_sandbox` block. A subdirectory invocation (or an out-of-project
+    `--cwd` targeting a strict-floored project) still discovers the repo-root
+    floor.
+  - **Fail-closed** — a present-but-BROKEN floor (wrong type, value/key typo,
+    YAML syntax error, directory at the path, or unreadable file) makes
+    exec-sandbox REFUSE to run uncontained rather than silently dropping the
+    floor. Only a genuinely ABSENT floor (no `exec_sandbox` block / no
+    `run-shape.yml`) resolves to `off`.
+  - **Seed default** — new installs seed `min_mode: strict` via
+    `defaultRunShapeSeed`. On `update` from a pre-floor version, an existing
+    consumer's `run-shape.yml` is preserved (project-owned), so the floor is
+    NOT retroactively applied until the consumer adds the key. Fail-closed if
+    OS primitives are unavailable under a strict floor.
 
   **Seccomp policy = focused BLOCKLIST, not broad allowlist.** Default action
   is ALLOW; the blocklist covers (a) network syscalls when `--net=deny`, and
