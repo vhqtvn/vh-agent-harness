@@ -1,6 +1,7 @@
 {
     "_comment": "Leaf model files live in .local/config/agent-model/ (gitignored, operator-managed). Each leaf listed here must have a corresponding model file and opencode.jsonc agent entry. Disabled tiers (premium) are listed here for future activation — their leaf agents are NOT registered in opencode.jsonc until the tier is enabled. Temperature is NOT set here — it is pinned per-agent in opencode.jsonc.",
-    "schema_version": 1,
+    "_comment_schema_v2": "schema_version 2 adds panel structural capacity (the optional `panel` section: roles, lenses, class ownership, per-class quorum, escalation). It is ADDITIVE and BACKWARD-COMPATIBLE: every panel field defaults to the uniform 4-leaf redundant-block-finder behavior, so a config without a `panel` section (or with the shipped defaults) parses and behaves identically to schema_version 1. The schema_version is the CONFIG schema version (distinct from the commit-review-result.v2 OUTPUT schema emitted by leaves).",
+    "schema_version": 2,
     "tiers": [
         {
             "name": "free",
@@ -24,6 +25,63 @@
     "fail_fast": true,
     "escalation_policy": "all_approve",
     "findings_combination": "merge_across_tiers",
+    "panel": {
+        "_comment": "schema_version 2 panel capacity. DOMAIN-FREE: core ships GENERIC role/lens IDs only — no model names, no project specifics. MODEL IDENTITY stays in .local/config/agent-model/<leaf> (gitignored, per-repo). CLASS-OWNERSHIP MAPS, ROLE/LENS ASSIGNMENTS, and QUORUM/ESCALATION POLICY are per-repo config; core ships the DEFAULT that exactly reproduces the pre-panel uniform 4-leaf behavior. A leaf assumes a specialized role ONLY when its leaf_roles entry is changed from the default. A role's ranked primary/fallback MODEL CHAIN is expressed by assigning MULTIPLE leaves to the same role and relying on tier/leaf ordering; each leaf resolves its own model via .local/config/agent-model/<leaf>. This keeps model identity in one place and the fallback chain as leaf ordering, not a parallel model-id list.",
+        "roles": {
+            "r1_redundant": {
+                "description": "Redundant generalist block-finder. The default role for every leaf. Reviews all finding classes; authoritative as a redundant raiser for per-class quorum.",
+                "model_chain": "expressed via leaf ordering (multiple leaves with this role); each leaf model from .local/config/agent-model/<leaf>"
+            },
+            "r1_backup_secondary": {
+                "description": "Secondary backup block-finder (redundant slot, model-agnostic). Same charter as r1_redundant; exists to preserve block-finding when a primary leaf is unavailable. The dependency is the fallback chain, not any pinned model.",
+                "model_chain": "expressed via leaf ordering; each leaf model from .local/config/agent-model/<leaf>"
+            },
+            "r2_contract_data": {
+                "description": "Contract/data-integrity specialist lens. Authoritative owner for contract_drift and data_integrity finding classes (the loss-weakest class — where primary model coverage is most fragile). Intended to backstop those classes WITHOUT depending on any specific model.",
+                "model_chain": "expressed via leaf ordering; each leaf model from .local/config/agent-model/<leaf>"
+            },
+            "r3_security": {
+                "description": "Security specialist lens. Authoritative owner for the security finding class.",
+                "model_chain": "expressed via leaf ordering; each leaf model from .local/config/agent-model/<leaf>"
+            },
+            "r4_blind_spot": {
+                "description": "Blind-spot / spec-conformance lens. RESERVED — NOT active by default. The 5-leaf reshape is not approved; this entry exists for structural completeness only and has no leaf assigned in the default leaf_roles.",
+                "model_chain": "expressed via leaf ordering; each leaf model from .local/config/agent-model/<leaf>"
+            }
+        },
+        "lenses": {
+            "block_finder": { "description": "Generalist lens covering all finding classes.", "finding_classes": ["*"] },
+            "contract_data": { "description": "Contract/data-integrity lens.", "finding_classes": ["contract_drift", "data_integrity"] },
+            "security": { "description": "Security lens.", "finding_classes": ["security"] },
+            "blind_spot": { "description": "Blind-spot / spec-conformance lens. RESERVED (not active by default).", "finding_classes": ["spec_alignment"] }
+        },
+        "leaf_roles": {
+            "_comment": "leaf name -> {role, lens}. DEFAULT makes every leaf a redundant generalist (current behavior). To specialize a leaf: change its role/lens here AND point its .local/config/agent-model/<leaf> at the intended model. A specialized role only takes effect when at least one leaf holds it.",
+            "commit-reviewer-a": { "role": "r1_redundant", "lens": "block_finder" },
+            "commit-reviewer-b": { "role": "r1_redundant", "lens": "block_finder" },
+            "commit-reviewer-c": { "role": "r1_redundant", "lens": "block_finder" },
+            "commit-reviewer-d": { "role": "r1_redundant", "lens": "block_finder" }
+        },
+        "class_ownership": {
+            "_comment": "finding class -> owning role. DEFAULT routes every class to r1_redundant (current behavior). To route a class to a specialist, set its owner to a specialized role (e.g. contract_drift -> r2_contract_data) AND ensure at least one leaf holds that role in leaf_roles. '*' is the fallback owner for any class not listed explicitly.",
+            "security": "r1_redundant",
+            "data_integrity": "r1_redundant",
+            "contract_drift": "r1_redundant",
+            "correctness": "r1_redundant",
+            "*": "r1_redundant"
+        },
+        "quorum": {
+            "_comment": "Per-class quorum. REFINES (does not replace) cross-leaf disagreement resolution. A class-C BLOCK finding is UPHELD if (a) at least one owner-role lens for class C raises it, OR (b) at least one r1_redundant leaf raises it. A non-owner, non-redundant lens CANNOT outvote the owner on the owner's class (no cross-lens outvote). The existing evidence-verifiability rule still applies — a BLOCK without diff-verifiable evidence is still downgraded. In the DEFAULT config this reduces exactly to current behavior: a class-C BLOCK is upheld if any leaf raises it with evidence.",
+            "rule": "owner_or_redundant",
+            "owner_predicate": "panel.class_ownership[<class>]",
+            "redundant_role": "r1_redundant"
+        },
+        "escalation": {
+            "_comment": "Cross-lens conflict disposition. When owner-lenses DISAGREE across classes on the same finding (a genuine cross-lens conflict, not a simple within-class disagreement), record an escalation_disclosures entry. DISCLOSURE ONLY (like axis_conflict): surfaces the conflict verbatim and NEVER changes the collapsed verdict (still blocked > split > approve). The authority line is unchanged — lenses propose, the coordinator + commit-gate dispose.",
+            "disposition": "disclose_only",
+            "field": "escalation_disclosures"
+        }
+    },
     "lightweight_review": {
         "doc_globs": ["researches/**/*.md", "docs/**/*.md", "docs/*.md", "researches/*.md"],
         "mode": "single_leaf",
