@@ -483,6 +483,16 @@ func assertManifestAuthorityContent(t *testing.T, label, got string) {
 		{"manifest-only child of R (M topology)", "manifest-only child of R"},
 		{"manifest pins to R not N", "NOT to N"},
 		{"N binding at HEAD^^ (absent in stale P->M model)", "HEAD^^"},
+		// G7 remedy class-1 parent-naming (closes the regression window the 5
+		// ceremony-subsection needles above do NOT cover): the rejection-remedy
+		// prose must reframe the manifest's parent as R, the readiness-artifact
+		// commit at HEAD^ — NOT the stale "immediate child of the release-prep
+		// HEAD" (P -> M) framing the ceremony subsection already corrected. The
+		// needle is unique to the remedy section (the ceremony subsection says
+		// "pins to R (`HEAD^`, M's parent) — NOT to N", a different surface), so
+		// a revert that re-introduces the stale remedy phrasing fails here even
+		// though the ceremony subsection stays correct.
+		{"remedy section manifest pins to R not N", "the manifest pins to R, NOT N"},
 	}
 	for _, c := range checks {
 		if !strings.Contains(got, c.needle) {

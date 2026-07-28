@@ -669,8 +669,9 @@ remedies — the readiness agent must distinguish them in `what_is_missing`:
    `release_relevance` / `disposition` / `metadata_state` to a non-blocking
    outcome (or attaches an `override` object with operator approval when the
    refusal is release-relevant and intended to ship), then re-runs the
-   manifest-only child-commit ceremony (re-commit only the manifest as an
-   immediate child of the release-prep HEAD; recompute `evaluated_commit` /
+   manifest-only child-commit ceremony (re-commit only the manifest as the
+   manifest-only child of R, the readiness-artifact commit at `HEAD^`, so
+   the manifest pins to R, NOT N; recompute `evaluated_commit` /
    `evaluated_tree` / `manifest_parent_commit`); OR (b) the override ceremony
    is used (the sanctioned "ship despite this finding" path). Both remedies
    record and disclose.
