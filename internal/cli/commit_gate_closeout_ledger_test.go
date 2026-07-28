@@ -458,10 +458,19 @@ func TestCommitGate_CloseoutLedger(t *testing.T) {
 
 		// Commit all 3 in PARALLEL — concurrent update-ref CAS + closeout
 		// append + count-cap sweep. THIS is where the flock must serialize
-		// append-vs-trim so no committed closeout is lost to a concurrent
-		// trim's snapshot-to-mv window (the B-F1/B-F2 race). The barrier
-		// maximizes commit-phase overlap.
-		gateUUIDs := make([]string, n)
+		// append-vs-trim so no closeout (committed or refused) is lost to a
+		// concurrent trim's snapshot-to-mv window (the B-F1/B-F2 race). The
+		// barrier maximizes commit-phase overlap.
+		//
+		// S2 policy (refuse-on-rebase): exactly ONE of the 3 disjoint commits
+		// lands as `committed` (the CAS winner — its update-ref old-oid==H0
+		// succeeds first, no merge). The other two retry, find HEAD moved,
+		// run the CAS 3-way merge, and the merged tree (reviewed file + the
+		// winner's disjoint file) != their reviewed tree → `rebased_refused`.
+		// All 3 still append a closeout record, so the flock append-vs-trim
+		// serialization remains the path under stress regardless of status.
+		type result struct{ uuidG, status string }
+		results := make([]result, n)
 		errs := make([]error, n)
 		var wg sync.WaitGroup
 		wg.Add(n)
@@ -474,15 +483,16 @@ func TestCommitGate_CloseoutLedger(t *testing.T) {
 				s := sessions[i]
 				comm, combined, err := runGateE(dstScripts, dir, nil, "commit",
 					"--uuid", s.uuidG, "--tree-hash", s.treeHash, "--message-file", s.msgRel)
-				if err != nil || comm == nil {
-					errs[i] = fmt.Errorf("commit: %v\n%s", err, combined)
+				if comm == nil {
+					errs[i] = fmt.Errorf("commit produced no status JSON: %v\n%s", err, combined)
 					return
 				}
-				if status, _ := comm["status"].(string); status != "committed" {
-					errs[i] = fmt.Errorf("commit status %v (want committed): %v", status, comm)
+				status, _ := comm["status"].(string)
+				if status != "committed" && status != "rebased_refused" {
+					errs[i] = fmt.Errorf("commit status %v (want committed|rebased_refused): %v", status, comm)
 					return
 				}
-				gateUUIDs[i] = s.uuidG
+				results[i] = result{s.uuidG, status}
 			}()
 		}
 		close(start)
@@ -497,22 +507,37 @@ func TestCommitGate_CloseoutLedger(t *testing.T) {
 			return
 		}
 
+		// S2 policy counts: exactly 1 committed (CAS winner) + (n-1) refused.
+		counts := map[string]int{}
+		for _, r := range results {
+			if r.uuidG != "" {
+				counts[r.status]++
+			}
+		}
+		if counts["committed"] != 1 {
+			t.Errorf("expected exactly 1 committed (CAS winner at H0), got %d", counts["committed"])
+		}
+		if counts["rebased_refused"] != n-1 {
+			t.Errorf("expected %d rebased_refused (concurrent disjoint losers), got %d", n-1, counts["rebased_refused"])
+		}
+
 		records := readLedger(t, dir)
-		// The ledger tail-trims to the cap; the 3 real commits are the newest
-		// records, so they MUST all be present (none lost to a trim race).
+		// All n closeouts (1 committed + n-1 refused) are the newest records,
+		// so they MUST all survive any tail-trim — the flock append-vs-trim
+		// serialization is the property under test, regardless of status.
 		present := make(map[string]bool, len(records))
 		for _, r := range records {
 			if u, _ := r["uuid"].(string); u != "" {
 				present[u] = true
 			}
 		}
-		for i, want := range gateUUIDs {
-			if want == "" {
+		for i, r := range results {
+			if r.uuidG == "" {
 				t.Errorf("committer %d recorded no gate uuid", i)
 				continue
 			}
-			if !present[want] {
-				t.Errorf("committed closeout uuid %s (committer %d) MISSING from ledger — lost to a concurrent trim (flock serialization failed)", want, i)
+			if !present[r.uuidG] {
+				t.Errorf("closeout uuid %s (committer %d, status %s) MISSING from ledger — lost to a concurrent trim (flock serialization failed)", r.uuidG, i, r.status)
 			}
 		}
 		// Cap honored: the ledger never grew past the cap + concurrency slack.
@@ -615,6 +640,119 @@ func TestCommitGate_CloseoutLedger(t *testing.T) {
 		// surfacing misread the failed commit as flatlining HEAD.
 		if got := recB["post_commit_head"]; got != headAfterA {
 			t.Errorf("could_not_land post_commit_head = %v, want unchanged HEAD %s (the branch did not move on a failed commit)", got, headAfterA)
+		}
+	})
+
+	// -----------------------------------------------------------------
+	// Subtest 7 (S2 D5 invariant): rebased_refused when a concurrent
+	// disjoint commit would fuse its content into the reviewed tree. This is
+	// the deterministic (sequential) crux for S2 — approved-tree integrity
+	// under concurrency. A clean single committer lands its reviewed tree
+	// exactly (committed_tree == reviewed_tree); a second committer whose
+	// disjoint file would be fused by the CAS merge is REFUSED, so the
+	// committed_tree == reviewed_tree invariant holds via refusal rather
+	// than substitution.
+	// -----------------------------------------------------------------
+	t.Run("rebased_refused_on_disjoint_concurrent_commit", func(t *testing.T) {
+		dir, dstScripts := setupScratchRepo(t)
+		seedAndCommit(t, dir, "base\n") // H0 = {file.txt: base}
+		head0 := gitIn(t, dir, "rev-parse", "HEAD")
+
+		// A acquires file.txt -> "A" at H0 (treeA = {file.txt: A}).
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("A\n"), 0o644); err != nil {
+			t.Fatalf("write A: %v", err)
+		}
+		uuidAa := genUUID(t, dstScripts)
+		msgA := writeAgentMsg(t, dir, uuidAa)
+		acqA := runGate(t, dstScripts, dir, nil, "acquire",
+			"--paths", `["file.txt"]`, "--message-file", msgA, "--session-alias", "s2-a")
+		uuidAg, _ := acqA["uuid"].(string)
+		treeA, _ := acqA["tree_hash"].(string)
+		if status, _ := acqA["status"].(string); status != "acquired" {
+			t.Fatalf("A acquire: %v", acqA)
+		}
+		if got, _ := acqA["head_at_acquire"].(string); got != head0 {
+			t.Fatalf("A head_at_acquire = %q, want %s", got, head0)
+		}
+
+		// B acquires a DIFFERENT disjoint file other.txt -> "other" at H0
+		// (treeB = {file.txt: base, other.txt: other}). B's reviewed tree
+		// does NOT include A's change to file.txt.
+		if err := os.WriteFile(filepath.Join(dir, "other.txt"), []byte("other\n"), 0o644); err != nil {
+			t.Fatalf("write other: %v", err)
+		}
+		uuidBa := genUUID(t, dstScripts)
+		msgB := writeAgentMsg(t, dir, uuidBa)
+		acqB := runGate(t, dstScripts, dir, nil, "acquire",
+			"--paths", `["other.txt"]`, "--message-file", msgB, "--session-alias", "s2-b")
+		uuidBg, _ := acqB["uuid"].(string)
+		treeB, _ := acqB["tree_hash"].(string)
+		if status, _ := acqB["status"].(string); status != "acquired" {
+			t.Fatalf("B acquire: %v", acqB)
+		}
+
+		// A commits first: clean (current_head==expected==H0, no merge).
+		// committed_tree == reviewed treeA (the invariant's left side).
+		commA := runGate(t, dstScripts, dir, nil, "commit",
+			"--uuid", uuidAg, "--tree-hash", treeA, "--message-file", msgA)
+		if status, _ := commA["status"].(string); status != "committed" {
+			t.Fatalf("A commit should land first; got %v", commA)
+		}
+		if got, _ := commA["tree_hash"].(string); got != treeA {
+			t.Errorf("A committed tree_hash = %v, want reviewed tree %s (committed_tree == reviewed_tree)", got, treeA)
+		}
+		headAfterA := gitIn(t, dir, "rev-parse", "HEAD")
+		if headAfterA == head0 {
+			t.Fatalf("A commit did not advance HEAD")
+		}
+
+		// B commits: current_head=H1 (moved) != expected=H0 -> CAS 3-way
+		// merge (base=H0, ours=treeB, theirs=H1). The merge takes theirs'
+		// file.txt:A and ours' other.txt:other -> new_tree = {file.txt: A,
+		// other.txt: other} != treeB ({file.txt: base, other.txt: other}).
+		// The gate REFUSES rather than commit the merged tree. Non-zero exit
+		// is expected for the refusal; parse the JSON line regardless.
+		commB, combinedB, errB := runGateE(dstScripts, dir, nil, "commit",
+			"--uuid", uuidBg, "--tree-hash", treeB, "--message-file", msgB)
+		if commB == nil {
+			t.Fatalf("B commit produced no status JSON; err=%v\n%s", errB, combinedB)
+		}
+		if got := commB["status"]; got != "rebased_refused" {
+			t.Errorf("B commit status = %v, want rebased_refused (concurrent disjoint commit would fuse content into reviewed tree)\n%s", got, combinedB)
+		}
+		if got := commB["reason"]; got != "reviewed_tree_diverged" {
+			t.Errorf("B commit reason = %v, want reviewed_tree_diverged", got)
+		}
+		// The refused commit names both trees so the divergence is auditable.
+		if got, _ := commB["reviewed_tree"].(string); got != treeB {
+			t.Errorf("B reviewed_tree = %v, want %s", got, treeB)
+		}
+		mergedTree, _ := commB["merged_tree"].(string)
+		if mergedTree == "" || mergedTree == treeB {
+			t.Errorf("B merged_tree = %q, want a non-empty tree != reviewed tree %s", mergedTree, treeB)
+		}
+
+		// The branch did NOT move on B's behalf: HEAD is still A's commit.
+		headAfterB := gitIn(t, dir, "rev-parse", "HEAD")
+		if headAfterB != headAfterA {
+			t.Errorf("after B's refusal, HEAD = %s, want unchanged %s (the branch did not move on a refused commit)", headAfterB, headAfterA)
+		}
+
+		// The rebased_refused closeout MUST be recorded durably (sibling of
+		// could_not_land) so the deferred RE-VIEW trigger is measurable.
+		records := readLedger(t, dir)
+		var recB map[string]any
+		for _, r := range records {
+			if r["uuid"] == uuidBg && r["status"] == "rebased_refused" {
+				recB = r
+				break
+			}
+		}
+		if recB == nil {
+			t.Fatalf("rebased_refused closeout for B (uuid %s) not recorded in ledger; records: %v", uuidBg, records)
+		}
+		if got := recB["post_commit_head"]; got != headAfterA {
+			t.Errorf("rebased_refused post_commit_head = %v, want unchanged HEAD %s (the branch did not move on a refused commit)", got, headAfterA)
 		}
 	})
 }

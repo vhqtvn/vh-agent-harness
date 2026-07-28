@@ -117,7 +117,7 @@ Forward the following context to every leaf:
 - All user-provided context: feature summary, exact file list, primary lane, repo rules/docs references, file-cap override, review mode, non-goals, validation already run
 - The review rules and review-for checklist from the command
 - Any lane defaults or assumptions the command has already stated
-- If a tree_hash is available from the commit-gate acquire step: pass the tree_hash value to each leaf so it can read the diff via `git diff HEAD <tree_hash>`
+- If a tree_hash is available from the commit-gate acquire step: pass BOTH the tree_hash AND the `head_at_acquire` anchor (the acquire-time HEAD the gate records, emitted in the acquire output) to each leaf. Each leaf reads the diff via `git diff <head_at_acquire> <tree_hash>` — diffing against the acquire anchor, NOT bare `HEAD`. Review is lock-free (the gate releases the lock before Phase 2), so a concurrent committer can move bare `HEAD` between acquire and review; diffing against bare `HEAD` would pull the concurrent commit's files into the reviewed scope as phantom reverse-changes. Anchoring on `head_at_acquire` keeps the reviewed scope equal to the acquire-time scope (S1: approved-tree integrity under concurrency).
 - The changed-file list (for lightweight_review matching and scope reference)
 - The active task-contract body (the Spec-axis input), obtained per "Task-contract injection" below; forward `task_contract: null` when no session is bound
 
@@ -146,9 +146,9 @@ feature summary or the diff.
 
 ### HARD RULE: Never inline diff content in task parameters
 
-The command's inspection scaffold may include `!`git diff --cached` expansions. Do NOT paste the expanded diff output into any leaf's task parameter. The diff can be very large and will overflow the task JSON. Instead, provide only the tree_hash and file list so each leaf can read the diff from the repo using `git diff HEAD <tree_hash>`.
+The command's inspection scaffold may include `!`git diff --cached` expansions. Do NOT paste the expanded diff output into any leaf's task parameter. The diff can be very large and will overflow the task JSON. Instead, provide the `head_at_acquire` anchor, the tree_hash, and the file list so each leaf can read the diff from the repo using `git diff <head_at_acquire> <tree_hash>` (NOT bare `HEAD` — see the acquire-anchor rule in the Invocation section above).
 
-Forward user-provided context verbatim (feature summary, file list, lane, etc.), but replace the diff expansion with a reference (tree_hash + file list).
+Forward user-provided context verbatim (feature summary, file list, lane, etc.), but replace the diff expansion with a reference (head_at_acquire + tree_hash + file list).
 
 **`review_mode` forwarding:** If the caller provides a `review_mode`, forward it verbatim to all leaves. If the caller-provided value is not in the declared enum (`merge-ready`, `security-focused`, `docs-only`, `coordination-synthesis`, `runtime-policy`, `eval-promotion`, `frontend-ui`, `degraded-single-review`), default to `merge-ready` and forward a note to all leaves mentioning the unrecognized value. In the aggregated output, set `review_mode` to the value all leaves agree on. If leaf `review_mode` values disagree, treat as malformed and set overall verdict to `blocked` with a blocking issue noting the mismatch.
 
