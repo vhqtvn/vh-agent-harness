@@ -74,6 +74,16 @@ constraint that isolates DAY-0; it is not the primary axis.
   **DAY-0.** The only control whose authority is BLOCKS and whose cadence is
   pre-code/BUILD-READY.
 
+> **Namespace note (terminology clarification, 2026-07-29):** F1, F2, and F3
+> here are **control-topology families** (synthesis-producing / rendering /
+> design-gate), named on the data-role axis. They are distinct from the
+> **case-study failure-class taxonomy** (`F1–F7` in
+> `docs/case-study/2026-07-22-unverified-claims-at-lossy-boundaries.md`), which
+> uses the same `Fn` letters to label *failure modes* (e.g. case-study F4 =
+> node-tested/path-untested). The two namespaces share labels by accident of
+> numbering, not by shared meaning. This is a terminology clarification only;
+> it does not reopen the topology decision or any control's placement.
+
 ### MIXED resolution (load-bearing)
 
 R1 and P-a are **declared ONCE in F1** — their canonical identity is the

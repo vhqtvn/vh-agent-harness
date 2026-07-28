@@ -106,6 +106,16 @@ F4 contains three UNION controls:
 
 This family label does not merge the three properties. It supplies a topology placement for independently failing controls with a common validator/steward data-role.
 
+> **Terminology clarification (added 2026-07-29):** Topology F4
+> (assurance/integrity-stewardship control family, defined here) is distinct
+> from case-study failure F4 (node-tested/path-untested, in
+> `docs/case-study/2026-07-22-unverified-claims-at-lossy-boundaries.md`). The
+> two share the `F4` label by accident of numbering, not by shared meaning.
+> F4-A (declared-scope coverage) partially covers adjacent risk but does
+> **not** close or absorb the case-study's route-level/path-testing obligation
+> (§4.5). This is a terminology clarification only; it does not reopen the
+> substantive topology or the F4-A/F4-B decision.
+
 F4 also does not create new transition authority. Each mechanism still receives authority only through its actual enforcement host:
 
 - reviewer and coordinator output remains INFORM;
@@ -143,6 +153,17 @@ This operationalizes the case study's:
 - §4.2 facts-as-cache-entries discipline;
 - §4.5 requirement to test the path rather than only the node;
 - §4.7 correction closure.
+
+> **Non-equivalence note at the §4.5 bridge (added 2026-07-29):** Operationalizing
+> the case study's §4.5 vocabulary here is F4-A's *declared-scope coverage*
+> concern (every declared item received a disposition). It is **not** a closure
+> of the case study's route-level/path-testing obligation: F4-A checks coverage
+> of declared scope, whereas case-study failure F4 (node-tested/path-untested)
+> is the distinct property of whether the *load-bearing path* was actually
+> exercised. Topology F4 and case-study failure F4 are different properties
+> (UNION siblings); F4-A partially covers adjacent risk but does not absorb the
+> case-study F4 concern. This is a terminology clarification; it does not reopen
+> the F4-A/F4-B decision or the §4.5 reference.
 
 #### F4-B1 — canonical verifier execution
 
