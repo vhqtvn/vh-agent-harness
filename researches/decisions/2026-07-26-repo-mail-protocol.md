@@ -332,3 +332,39 @@ The sender slice is **held** until the approve-send checkpoint is designed (brie
 ### What this does NOT change
 
 Decisions 1–3 (O1 transport, Non-Actuation, E2E confidentiality) and Contract A (envelope) stand. The anonymization binding-constraint #1 is now enforced via per-channel sensitivity (approve-send on sensitive) rather than implied by the gate. The Slice 2 gate's structural properties (no-throw, REJECT-not-transform, domain-free, layer-pure, non-actuation) remain real and unchanged — they are the spine of a shape-detector, correctly stated.
+
+---
+
+## Addendum (2026-07-28, resolution): approve-send checkpoint policy — the three open questions settled
+
+Decision 4 established per-channel sensitivity + mandatory operator-approve-send on sensitive channels and flagged three open design questions. They are now resolved (operator-endorsed, post-debate), recorded here as canonical policy. The true-strength guarantee from the prior addendum stands unchanged; this addendum records how the checkpoint is enforced.
+
+### Q1 — sensitive channel × fully-structured message: CONSERVATIVE APPROVE-SEND (no auto exception)
+
+Sensitive channels require operator-approve-send for ALL messages, including fully-structured ones. The structured-fields burden-reducer does NOT apply on sensitive channels. Anonymization is non-negotiable: a misclassified "structured" kind leaks protected identity, while an unnecessary approval only costs operator time — the asymmetry settles it. The constraints do not establish the proof machinery (machine-verifiable "fully structured forever" + schema-evolution controls) a safe auto-send exception would require.
+
+A future narrow exception is possible ONLY via an explicit policy defining a machine-verifiable "fully structured" classification + schema-evolution controls, adopted as a recorded decision. Until then, conservative approve stands.
+
+### Q2 — approve-send attestation: SENDER-SIDE PAYLOAD-FREE AUDIT LOG (no in-message field)
+
+The approval (approver, timestamp, message hash, channel) is recorded in a SENDER-SIDE audit log. The emitted envelope is UNCHANGED — no `human_approved_by` / `human_approved_at` field. An approver identity in-message would be a NEW cross-boundary identifier, violating the envelope-anonymization binding. The protocol is information-only: the recipient cannot auto-act on receipt and does not need approval provenance. A future recipient-verifiable-provenance requirement would require an explicit revision of the anonymization binding + a fresh threat-model pass, not an incidental metadata addition.
+
+The audit record must be PAYLOAD-FREE — no raw message body or protected identifiers copied into the secondary store.
+
+### Q3 — `sensitivity` is a REQUIRED channel field; ABSENT → REFUSE-TO-LOAD
+
+`sensitivity: sensitive | non-sensitive` is REQUIRED in every channel config. A channel MISSING the field is NON-OPERATIONAL (refuse-to-load) until the operator explicitly classifies it. The fail-closed spine (uncertainty → refuse) + sensitivity being an operator-owned trust decision (not inferable) settle this over the rejected "treat-as-sensitive" default (a silent safe-ish fallback that lets the omission persist unnoticed). The refusal surfaces a stable error reason (e.g. `missing_channel_sensitivity`) that does NOT echo the message body, paths, or protected identifiers.
+
+### Invariant — approval never overrides the gate
+
+Operator approval is the safeguard for the PROSE/SEMANTIC gap (what the gate cannot auto-scrub), NOT a fallback for rejected payloads. Shape/structured safety failures REJECT before the approval surface — the operator only ever sees a message that already passed the mechanical gate. Approval cannot force emission of a message the gate rejected.
+
+### The resolved checkpoint design (canonical)
+
+> Explicitly classified channel → mechanical shape/structured gate → hard refusal on uncertainty → operator approval for sensitive sends → unchanged anonymized envelope → payload-free local approval audit.
+
+The three policy decisions cohere with no cross-question tension. The SENDER (not the gate) applies the per-channel policy; the gate stays pure and channel-agnostic. Q1+Q3 reinforce one boundary (no send policy without explicit classification; sensitive = human checkpoint). Q2 keeps the Q1 checkpoint local (no new cross-boundary identity). Q2+Q3 share an audit/diagnostic hygiene rule: local records and refusal diagnostics must not echo raw sensitive payloads.
+
+### Sender slice — HELD
+
+The sender slice remains HELD. The approve-send checkpoint POLICY is now settled (this addendum); the sender slice implements against it. The hard precondition (no sensitive channel goes live before the approve-send checkpoint is wired) holds.
