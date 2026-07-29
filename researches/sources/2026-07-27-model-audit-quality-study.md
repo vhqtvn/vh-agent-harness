@@ -180,6 +180,12 @@ kiro-4-6 and the kiro-4-5-paid transient — a concrete downstream cost of §1's
 
 ## §4 Unique upheld catches (does a model find what others miss)
 
+> **Correction flag (added 2026-07-29):** the unique-catch ranking in this §4 was
+> computed **UNSCOPED** (contaminated by the co-mingled sensitive repo) and **INVERTS
+> when scoped** to `vh-agent-harness`+`vh-solara`. See the §14 erratum at the end of
+> this file (cites `./2026-07-28-m1-natural-miss-mechanism-study.md` §1.8). The original
+> unscoped numbers below are preserved in place as the historical record.
+
 A coord upheld finding whose *only* matched leaf-origin is model *m* = a **true
 unique catch**. Normalized by participation (rounds the model was present with
 ≥1 upheld finding in the round):
@@ -379,6 +385,11 @@ those low-yield classes.
 
 ## §13 Bottom-line read (input to the panel-restructure decision)
 
+> **Correction flag (added 2026-07-29):** the "keep one grok/glm diversity slot for
+> unique catches" rationale below is **superseded on-repo** — it rests on the unscoped §4
+> ranking that inverts when scoped (GPT dominates unique-catch scoped). See the §14
+> erratum at the end of this file.
+
 **What earns a slot on QUALITY (not rate):**
 
 1. **`gpt-latest:free` — keep, pin it.** Highest upheld-precision (18.4%,
@@ -409,3 +420,81 @@ quality — 3 of 4 slots are near-interchangeable on upheld catches.
 > pin **one GPT-class block-finder** on stakes, keep **one grok/glm diversity
 > slot** for unique catches, and repoint the weak kiro slot to a **security
 > lens** rather than retiring it on a one-day transient.
+
+---
+
+## §14 Erratum (2026-07-29) — §4 unique-catch ranking was UNSCOPED and INVERTS when scoped
+
+**Erratum type:** ADDITIVE correction. The original §4 and §13 numbers and prose are
+**preserved in place** as the historical record (marked with correction flags at §4 and
+§13 above); this section records the scoped recompute and supersedes the diversity-slot
+rationale on-repo. Nothing above is deleted or silently rewritten.
+
+**Source:** [`./2026-07-28-m1-natural-miss-mechanism-study.md`](./2026-07-28-m1-natural-miss-mechanism-study.md) §1.8 (new series member #11).
+
+### What was wrong
+
+The §4 "Unique upheld catches" table and the §13 bottom-line that consumes it ("**grok
+and glm are the strongest unique contributors → keep one diversity slot from {grok,
+glm}**") were computed **UNSCOPED** — over `directory IN {vh-agent-harness, vh-solara,
+<deep-fake-detection>}` with the sensitive third-party repo included. That repo dominates
+the unscoped volume and its leaf/findings mix skewed the unique-catch ranking.
+
+### The scoped recompute (the inversion)
+
+**Scoped correctly (`vh-agent-harness` + `vh-solara` only), the unique-catch ranking
+INVERTS.** Scoped numbers from the validated M1 quantitative leg (operator-anchor-verified):
+
+| model | §4 solo-upheld (UNSCOPED, canon) | **M1 scoped solo-upheld (co-present)** | **M1 scoped solo / matched-upheld** | **M1 scoped miss-rate** |
+|---|---:|---:|---:|---:|
+| `gpt-latest:free` | 8 (2.9%, near-bottom) | **114** | **57.3%** | **33.1%** |
+| `gpt-5.5:free` | 6 (7.4%, top) | 24 | 58.5% | **29.9% (lowest)** |
+| `grok` | 18 (6.5%, top) | 65 | 43.6% | 41.0% |
+| `glm-5.2-high` | 22 (6.2%, top) | 46 | 32.9% | 44.6% |
+| `kiro-4-6:free` | 5 (1.8%, bottom) | 10 | 21.7% | 56.5% |
+
+**The inversion is on TWO independent scoped cuts:**
+
+1. **Unique-catch ranking flips.** Unscoped canon ranked grok/glm on top and gpt-latest
+   near the bottom (2.9%). Scoped, **gpt-latest is the TOP unique catcher** (114 solo
+   findings — more than grok and glm COMBINED) and grok/glm rank below it. The canon's
+   "grok and glm are the strongest unique contributors" is an artifact of the sensitive
+   repo's leaf mix, not a property of the in-scope panel.
+2. **Miss-rate confirms the flip from the other side.** Scoped miss-rate: GPT-class misses
+   LEAST (gpt-5.5 29.9% / gpt-latest 33.1%); grok 41.0%; glm 44.6%; kiro-4-6 56.5%. GPT is
+   simultaneously the **strongest unique catcher AND the lowest misser** scoped — the
+   mirror image of the canon's "keep grok/glm for unique catches" framing.
+
+### What this changes in §13
+
+- **STRENGTHENED:** "pin one GPT-class block-finder on stakes." Scoped evidence is
+  stronger than the canon's — GPT leads not only on block-rate + upheld-precision (§2/§3)
+  but ALSO on unique catches and miss-rate. GPT is the load-bearing reviewer on every
+  scoped quality axis.
+- **SUPERSEDED on-repo:** "keep one grok/glm diversity slot for unique catches." Scoped,
+  grok/glm are NOT the top unique contributors (GPT is). They still contribute real unique
+  catches (grok 65, glm 46 solo), so a diversity slot is not worthless — but its
+  justification shifts from "they catch what GPT misses MOST" to "redundant coverage +
+  GPT-independent agreement." The diminishing-returns coverage curve (§6: 3 models ≈
+  96.5%) is unaffected (it was already participation-weighted and holds scoped).
+
+### Comparability caveat (from M1 §1.8, stated honestly)
+
+The two solo-upheld tables use DIFFERENT denominators (canon: solo / rounds-with-upheld;
+M1: solo / matched-upheld), so the percentages are not directly comparable across tables.
+The inversion rests on (a) the solo-upheld COUNT ranking within the scoped co-present
+population (apples-to-apples: gpt-latest 114 > grok 65 > glm 46) and (b) the miss-rate,
+which is definitionally comparable and independently confirms the direction. The scoped
+population is co-present-only (a subset) and uses the refined ≥0.45 match threshold (vs
+canon's ≥0.5); these are methodological refinements, not contamination, and the direction
+is robust because it appears on BOTH cuts.
+
+### Recommendation
+
+Until an official recompute of §4/§13 lands (scoped to `vh-agent-harness`+`vh-solara`,
+excluding the sensitive repo, co-present subset, §0 quarantine applied), **any citation of
+§4/§13's "grok/glm are the strongest unique contributors" should carry this erratum
+flag.** The scoped numbers already exist in the M1 memo §1.8 and its validated
+`m1_output.json` (`cross_check_section4_solo_upheld` + `per_model_miss_rate`); the
+official recompute is a canon-side transcription + matching-threshold sensitivity check,
+not new measurement.
