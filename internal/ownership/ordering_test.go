@@ -201,3 +201,29 @@ func TestIsMutableByPlatform(t *testing.T) {
 		}
 	}
 }
+
+// TestIsPlatformOverwritable pins the wholesale-overwrite class set for a seam
+// apply: exactly platform_managed and overlay_extension. This is the same set the
+// seam apply switch (internal/substrate/apply.go planOutcome) routes to its
+// managed-* outcomes. The switch is the LIVE authority and does NOT call this
+// predicate. This test pins the PREDICATE side: changing the predicate's
+// return-set without reconciling it with the switch fails here. The switch side
+// is not mechanically coupled to this test — its routing is covered by the
+// substrate apply tests plus review; coupling the two (shared fixture, apply-side
+// assertion, or wiring the predicate) is a tracked follow-up when planOutcome's
+// class routing is next changed.
+func TestIsPlatformOverwritable(t *testing.T) {
+	cases := map[Class]bool{
+		ClassPlatformManaged:   true,  // generic force-overwrite
+		ClassPlatformArmed:     false, // reconcile/proposal path, never wholesale overwrite
+		ClassOverlayExtension:  true,  // overlay-system overwrite when the pack is active
+		ClassProjectOwned:      false, // preserved when present, seeded once when absent
+		ClassExternalGenerated: false, // provider/project-owned, preserved/seeded
+		ClassLocalOnly:         false, // not on the platform update path
+	}
+	for c, want := range cases {
+		if got := IsPlatformOverwritable(c); got != want {
+			t.Errorf("IsPlatformOverwritable(%s) = %v, want %v", c, got, want)
+		}
+	}
+}

@@ -121,23 +121,28 @@ func offLatticeClass(from, to Class) Class {
 //   - external_generated : false (provider/project-owned; seeded once, then drift-checked only)
 //   - local_only         : false (not on the platform update path)
 //
-// Slice 5.1 wired this predicate LIVE into the seam apply path
-// (internal/substrate/apply.go): the per-class switch is now gated behind
-// IsPlatformOverwritable so the overwrite route is provably limited to the two
-// platform-overwritable classes. The legacy manifest model (internal/manifest)
-// converges its vocabulary onto the armed lattice via IsRenderable, which now
-// honors the same six classes. This function remains unit-tested to prove
-// project_owned / external_generated / local_only are never plain-mutable.
+// This predicate is the guard behind hooks.LeafIsPlatformMutable
+// (internal/hooks/ownership.go): it proves consumer-authored hook leaves classify
+// project_owned and so are never overwritten by an ungated platform update. It is
+// NOT called from the seam apply path (internal/substrate/apply.go): that path
+// routes platform_managed to its managed-overwrite outcome via a hand-rolled
+// per-class switch in planOutcome (see IsPlatformOverwritable for the
+// wholesale-overwrite class set that switch honors). The legacy manifest model
+// (internal/manifest) converges its vocabulary onto the armed lattice via
+// IsRenderable, which honors the same six classes. This function is unit-tested
+// to prove project_owned / external_generated / local_only are never
+// plain-mutable.
 func IsMutableByPlatform(c Class) bool {
 	return c == ClassPlatformManaged
 }
 
-// IsPlatformOverwritable reports whether a class may be overwritten WHOLESALE
-// during a seam apply (install/update). It is the apply-path overwrite gate
-// (Slice 5.1). Two classes qualify:
+// IsPlatformOverwritable reports whether a class is in the wholesale-overwrite
+// set for a seam apply (install/update): the set of classes the seam apply path
+// routes to its managed-* outcomes. Two classes qualify:
 //
-//   - platform_managed : the generic force-overwrite class (IsMutableByPlatform).
-//     A plain re-render overwrites it on every update.
+//   - platform_managed : the generic force-overwrite class (the single class
+//     IsMutableByPlatform is true for). A plain re-render overwrites it on every
+//     update.
 //   - overlay_extension: overwritten by the OVERLAY SYSTEM when its pack is
 //     active (Slice 4). When a pack is deselected the unit is simply not staged,
 //     so the live copy is left untouched; the authority for the overwrite is the
@@ -152,6 +157,15 @@ func IsMutableByPlatform(c Class) bool {
 // (managed-unchanged) when the live instance is already byte-identical to the
 // freshly rendered corpus. Reaching the managed-overwrite route for any other
 // class is a platform bug and fails closed.
+//
+// Authority: the LIVE overwrite decision is that per-class switch in planOutcome
+// (internal/substrate/apply.go), which is hand-rolled and does NOT call this
+// predicate — the switch is the authority; this predicate documents the same
+// class-set it routes. TestIsPlatformOverwritable pins the predicate's side of
+// that agreement (a change to the predicate without reconciling the switch fails
+// the test); switch-side drift is covered by the substrate apply tests plus
+// review. (Wiring the predicate as the switch's single source of truth is a
+// tracked follow-up, not the current state.)
 func IsPlatformOverwritable(c Class) bool {
 	return c == ClassPlatformManaged || c == ClassOverlayExtension
 }
