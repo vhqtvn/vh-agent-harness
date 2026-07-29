@@ -776,16 +776,7 @@ This decision brief authorizes no implementation. After sign-off, the next step 
 - `researches/sources/2026-07-28-complexity-advisory-signal-triage.md` — complexity-control precision, over-raise, and silence-until-improved recommendation.
 - `.opencode/skills/` — current rendered skill inventory; no existing contract/invariant-audit skill found.
 
-**Recommended filename:** `researches/decisions/2026-07-29-contract-invariant-audit-capability.md`
-
-**Read-only confirmation:** No files were written, and no skill, agent, command, helper, or other implementation file was authored.
-
-```closure-verdict
-verdict: pursue-as-skill-overlay
-confidence: medium
-result: decision-brief-complete
-sign_off_gate: awaiting-operator-sign-off
-core_promotion: not-authorized
-authority: informs-only
-next_action: operator-sign-off-before-authoring-overlay-pilot
-```
+> Note: the decision verdict, confidence, sign-off gate, core-promotion status,
+> authority line, and next-action live in Section 7 above and are not repeated
+> here. Implementation is authorized only after operator sign-off (see Section 7
+> → Sign-off gate).
