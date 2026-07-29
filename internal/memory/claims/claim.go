@@ -141,19 +141,66 @@ type CardError struct {
 	Err  error
 }
 
+// LivenessCard is the F4-C release-diff-recurrence projection of a SINGLE file
+// under .local/coordinator/tasks/. Unlike DeferCard (the released-claim pool,
+// filtered to defer-/errata- *.json), LivenessCard is derived from EVERY file
+// in the tasks dir with NO prefix and NO extension filter — the
+// silencer-immunity contract: a card cannot escape the recurrence gate by being
+// named without the defer- prefix or by being .md instead of .json.
+//
+// Field semantics:
+//   - TaskID: the JSON task_id when the file parses as JSON and carries one;
+//     otherwise the filename stem (extension-stripped). Used to match against
+//     manifest defer_ids and operator override ids.
+//   - Status: the JSON status when parseable; otherwise "" (which is NOT in the
+//     closed set → treated as OPEN — fail-closed: a non-card file with a fired
+//     target blocks until dispositioned).
+//   - Targets: every path_touched(<arg>) extracted from the raw file text
+//     (deduped, first-seen order). Extraction is over the WHOLE file body so a
+//     target declared in owner_notes, rough_scope, files_in_scope, or any other
+//     field is caught. The predicate classifies each target exact vs
+//     non-grammar (glob/dir) at gate time.
+//   - IsJSON: whether the file parsed as a JSON object carrying a task_id. A
+//     non-JSON file (e.g. a .md scratch card) is still a LivenessCard — its
+//     targets are extracted from the raw text and its status defaults to OPEN.
+//
+// The kernel DERIVES LivenessCards (read/inform); the release gate alone maps
+// fired+undisposed cards to a FAIL verdict. This type is DISTINCT from DeferCard
+// so unparseable/non-JSON files never touch the released-claim card pool.
+type LivenessCard struct {
+	Path    string
+	TaskID  string
+	Status  string
+	Title   string
+	Targets []string
+	IsJSON  bool
+}
+
 // Registry is the in-memory typed projection of every claim the gate consults,
 // derived synchronously from on-disk state by Derive. It is the SINGLE source
 // the gate consumes, closing dual-derivation (one kernel, one consumer).
 // Records is the substrate-level (record.Record) view carrying the S1 claim
 // schema in each body; the gate does not need it but it proves the kernel lives
 // over internal/memory and feeds future §4.2 consumers.
+//
+// LivenessCards is the F4-C release-diff-recurrence projection (a SEPARATE
+// contradiction class from Cards). It is derived from EVERY file under
+// .local/coordinator/tasks/ with NO prefix(defer-/errata-) filter and NO
+// extension(.json) filter — the silencer-immunity contract — so it is a strict
+// superset of the Cards pool. It is kept DISTINCT from Cards so unparseable /
+// non-JSON files (.md, stray non-card files) never pollute the released-claim
+// card pool: Cards feeds the released-claim contradiction logic (fail-closed on
+// parse errors), LivenessCards feeds the recurrence predicate (parse-tolerant,
+// silencer-immune). buildRecords does NOT project LivenessCards — they are not
+// S1 claims, they are recurrence-surface atoms.
 type Registry struct {
-	Notes        []NoteClaim
-	Cards        []DeferCard
-	CardErrors   []CardError
-	Records      []record.Record
-	TasksPresent bool
-	NotesPresent bool
+	Notes         []NoteClaim
+	Cards         []DeferCard
+	LivenessCards []LivenessCard
+	CardErrors    []CardError
+	Records       []record.Record
+	TasksPresent  bool
+	NotesPresent  bool
 	// AdoptionMarker is the DERIVED state of the committed coordinator-adoption
 	// marker (defer-003). The kernel projects one of AdoptionMarkerAbsent /
 	// AdoptionMarkerValid / AdoptionMarkerCorrupt; it does NOT decide what the
@@ -200,6 +247,16 @@ var semverVersionRe = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
 // "v0.12.0.md". extractReferencedVersions pulls ALL matches from a string (not
 // just the first) so a scope entry naming two notes is fully evaluated.
 var migrationNotePathRe = regexp.MustCompile(`v\d+\.\d+\.\d+\.md`)
+
+// pathTouchedRe matches the DEFER trigger-grammar predicate path_touched(<arg>)
+// anywhere in a file body. The arg ([^)]+) is the operand: an exact repo path
+// in v1 (e.g. internal/cli/release_gate.go), a glob (src/*), or a directory
+// operand (internal/). The predicate's grammar is prefix-agnostic — it matches
+// `trigger:path_touched(X)` in owner_notes AND a bare `path_touched(X)` in any
+// other field — so the F4-C recurrence gate is silencer-immune: a card cannot
+// escape by declaring its target outside the owner_notes Notes block. The gate
+// classifies each arg as exact vs non-grammar (glob/dir) at predicate time.
+var pathTouchedRe = regexp.MustCompile(`path_touched\(([^)]+)\)`)
 
 // semverLess compares two bare release version tokens (vX.Y.Z) numerically by
 // major.minor.patch. This is used to sort migration notes so that
@@ -256,6 +313,15 @@ func CardIsClosed(c DeferCard) bool {
 	return closedStatuses[strings.ToLower(strings.TrimSpace(c.Status))]
 }
 
+// StatusIsClosed reports whether a raw status string is in the closed set
+// (case-insensitive, whitespace-trimmed). Exported so the F4-C recurrence
+// predicate can classify a LivenessCard's status without re-importing the
+// closed-set definition. An empty status (a non-JSON file, or a JSON card with
+// no status field) is NOT closed → OPEN (fail-closed for the recurrence gate).
+func StatusIsClosed(status string) bool {
+	return closedStatuses[strings.ToLower(strings.TrimSpace(status))]
+}
+
 // Derive is the §4.1 closure kernel: it reads BOTH on-disk sides the gate needs
 // and returns a single typed projection. It is STRICTLY NON-AUTHORITATIVE —
 // read/inform side-effects only (no writes, no persistence, no gating).
@@ -287,6 +353,15 @@ func Derive(repoRoot string) (Registry, error) {
 	// adopted" apart from "adopted transport lost". The kernel only DERIVES this
 	// state; the gate alone maps it to a tier (authority line).
 	reg.AdoptionMarker, reg.AdoptionMarkerDetail = loadAdoptionMarker(repoRoot)
+	// F4-C release-diff-recurrence surface: the silencer-immune superset of the
+	// tasks dir. DISTINCT from Cards (loadDeferCards) — see the LivenessCard doc
+	// and the Registry.LivenessCards field. Computed here so the single-derivation
+	// invariant holds (one kernel, one consumer); the released-claim pool and the
+	// recurrence pool never share a parse path.
+	reg.LivenessCards, err = loadLivenessCards(repoRoot)
+	if err != nil {
+		return reg, fmt.Errorf("read liveness cards: %w", err)
+	}
 	// Collision-safe claim identity (defer-004): normalize task_id, then reject
 	// empty and duplicate IDs as CardError BEFORE record projection. This runs
 	// before buildRecords so invalid cards can never collapse onto one
@@ -354,6 +429,110 @@ func loadDeferCards(repoRoot string) (cards []DeferCard, present bool, cardErrs 
 		cards = append(cards, c)
 	}
 	return cards, true, cardErrs, nil
+}
+
+// loadLivenessCards is the F4-C release-diff-recurrence loader. It reads EVERY
+// file under <repoRoot>/.local/coordinator/tasks/ with NO prefix(defer-/errata-)
+// filter and NO extension(.json) filter — the silencer-immunity contract. This
+// is a STRICT SUPERSET of loadDeferCards' selection: every defer/errata card is
+// also a LivenessCard, plus any other file (res-, eval-, review- cards; .md
+// scratch cards; stray non-card files) that carries a path_touched(<arg>)
+// target.
+//
+// PARSE TOLERANCE: unlike loadDeferCards (which is fail-closed on parse errors
+// — an unparseable defer/errata card is a CardError → tierFail), loadLivenessCards
+// is PARSE-TOLERANT. A file that does not parse as JSON, or parses but carries
+// no task_id, is still a LivenessCard: its targets are extracted from the raw
+// text and its status defaults to OPEN. This is deliberate: the recurrence gate
+// must be silencer-immune (a .md card with a fired target blocks), and a
+// non-JSON file is not a parse FAILURE for recurrence purposes — it is an
+// open-status card whose targets happen to live in free text. The released-
+// claim pool's fail-closed discipline is handled separately by loadDeferCards.
+//
+// DIRECTORY-LEVEL I/O: a missing tasks dir returns (nil, nil) (clean no-op —
+// loadDeferCards already set TasksPresent=false and the gate SKIPs). Any other
+// directory read error propagates (→ Derive error → gate FAIL). Individual
+// unreadable FILES are skipped (they contribute no targets and cannot fire).
+//
+// The kernel DERIVES only; the gate maps fired+undisposed cards to FAIL.
+func loadLivenessCards(repoRoot string) (cards []LivenessCard, err error) {
+	tasksDir := filepath.Join(repoRoot, ".local", "coordinator", "tasks")
+	entries, readErr := os.ReadDir(tasksDir)
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return nil, nil
+		}
+		return nil, readErr
+	}
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		path := filepath.Join(tasksDir, name)
+		raw, e := os.ReadFile(path)
+		if e != nil {
+			// Individual unreadable file: skip (no targets → cannot fire). Not a
+			// CardError (this is the recurrence pool, not the released-claim pool).
+			continue
+		}
+		c := LivenessCard{
+			Path:    path,
+			Targets: extractPathTouchedTargets(string(raw)),
+		}
+		// Try JSON parse for task_id/status/title. A non-JSON file (or a JSON
+		// file with no task_id) falls back to filename-derived id + OPEN status.
+		var obj struct {
+			TaskID string `json:"task_id"`
+			Status string `json:"status"`
+			Title  string `json:"title"`
+		}
+		if json.Unmarshal(raw, &obj) == nil && strings.TrimSpace(obj.TaskID) != "" {
+			c.TaskID = strings.TrimSpace(obj.TaskID)
+			c.Status = obj.Status
+			c.Title = obj.Title
+			c.IsJSON = true
+		} else {
+			c.TaskID = livenessIDFromFilename(name)
+			c.IsJSON = false
+		}
+		cards = append(cards, c)
+	}
+	return cards, nil
+}
+
+// extractPathTouchedTargets returns the de-duplicated list of path_touched(<arg>)
+// operands found in a file body, in first-seen order. The regex is prefix-agnostic
+// (matches `trigger:path_touched(X)` and a bare `path_touched(X)` alike), so a
+// target declared in any field is caught. Classification (exact vs non-grammar)
+// happens at gate time.
+func extractPathTouchedTargets(text string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range pathTouchedRe.FindAllStringSubmatch(text, -1) {
+		arg := strings.TrimSpace(m[1])
+		if arg != "" && !seen[arg] {
+			seen[arg] = true
+			out = append(out, arg)
+		}
+	}
+	return out
+}
+
+// livenessIDFromFilename derives a LivenessCard.TaskID from a filename when the
+// file is not JSON or carries no task_id. The common task-card extensions are
+// stripped so a `defer-foo.json` and a `defer-foo.md` derive the SAME id
+// (defer-foo), letting a manifest defer_id match either form. Unknown
+// extensions are left intact (the full filename is a stable id).
+func livenessIDFromFilename(name string) string {
+	stem := name
+	for _, ext := range []string{".json", ".md", ".txt"} {
+		if strings.HasSuffix(stem, ext) {
+			stem = strings.TrimSuffix(stem, ext)
+			break
+		}
+	}
+	return stem
 }
 
 // loadAdoptionMarker reads and validates the committed coordinator-adoption

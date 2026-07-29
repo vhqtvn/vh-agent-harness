@@ -839,3 +839,292 @@ func TestStagedErrataContent_LiveRepoIsClean(t *testing.T) {
 		t.Fatalf("live repo must not FAIL the staged-errata-content check, got FAIL: %s", r.detail)
 	}
 }
+
+// --- F4-C release-diff-recurrence predicate (doctor #12, second class) ---
+//
+// These tests prove the F1-D1 gap fix: an OPEN liveness card whose
+// path_touched target re-fires in the release diff (PRIOR_TAG..HEAD) is REFUSED
+// when a release is imminent (an about-to-release note exists), and CLEARS once
+// a disposition lands (closed status / manifest entry / operator override). They
+// also prove silencer-immunity (a card without the defer- prefix or a .md card
+// blocks) and the advisory-only behavior of fog/cold findings.
+
+// gitCommitFile writes a file at relpath with the given content, adds it, and
+// commits it so the recurrence predicate can compute a meaningful
+// PRIOR_TAG..HEAD diff.
+func gitCommitFile(t *testing.T, dir, relpath, content, msg string) {
+	t.Helper()
+	full := filepath.Join(dir, relpath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatalf("mkdir for %s: %v", relpath, err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", relpath, err)
+	}
+	exec.Command("git", "-C", dir, "config", "user.email", "t@t").Run()
+	exec.Command("git", "-C", dir, "config", "user.name", "t").Run()
+	if err := exec.Command("git", "-C", dir, "add", relpath).Run(); err != nil {
+		t.Fatalf("git add %s: %v", relpath, err)
+	}
+	if err := exec.Command("git", "-C", dir, "commit", "-q", "-m", msg).Run(); err != nil {
+		t.Fatalf("git commit %s: %v", relpath, err)
+	}
+}
+
+// writeManifest writes a minimal release-defer-dispositions manifest carrying the
+// given defer_ids as records[]. Doctor #12 reads this for manifest_entry(c); it
+// does NOT validate the handshake (that is the release-mode evaluator's job).
+func writeManifest(t *testing.T, dir string, deferIDs []string) {
+	t.Helper()
+	d := filepath.Join(dir, ".vh-agent-harness")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatalf("mkdir manifest dir: %v", err)
+	}
+	records := make([]map[string]any, 0, len(deferIDs))
+	for _, id := range deferIDs {
+		records = append(records, map[string]any{"defer_id": id})
+	}
+	obj := map[string]any{"schema_version": 1, "records": records}
+	raw, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "release-defer-dispositions.json"), raw, 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+}
+
+// writeLivenessCard writes a coordinator task card under
+// <dir>/.local/coordinator/tasks/<name> carrying an owner_notes trigger block.
+// Used by the F4-C recurrence tests where the card's path_touched target is the
+// signal. name may carry ANY extension/prefix (the silencer-immunity contract).
+func writeLivenessCard(t *testing.T, dir, name, taskID, status string, ownerNotes []string) {
+	t.Helper()
+	obj := map[string]any{
+		"schema_version": 1,
+		"task_id":        taskID,
+		"title":          "recurrence-test-card",
+		"status":         status,
+		"owner_notes":    ownerNotes,
+	}
+	raw, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal card %s: %v", name, err)
+	}
+	writeTaskCard(t, dir, name, string(raw))
+}
+
+// writeRawLivenessCard writes an arbitrary body (e.g. markdown) as a liveness
+// card file. Used to prove silencer-immunity for non-JSON cards.
+func writeRawLivenessCard(t *testing.T, dir, name, body string) {
+	t.Helper()
+	writeTaskCard(t, dir, name, body)
+}
+
+// recurrenceFixture builds a scratch git repo with: a prior tag (v1.0.0), a
+// committed change to targetPath AFTER the tag (so targetPath is in the
+// v1.0.0..HEAD diff), a valid adoption marker, and an about-to-release
+// (untagged) migration note v1.1.0 (so releaseImminent == true). Returns dir.
+func recurrenceFixture(t *testing.T, targetPath string) string {
+	t.Helper()
+	dir := t.TempDir()
+	gitInit(t, dir)
+	t.Setenv("VH_HARNESS_DEFER_DIFF_SINCE", "") // force self-derived prior tag
+	t.Setenv("VH_HARNESS_DEFER_OVERRIDE_IDS", "")
+	writeAdoptionMarker(t, dir)
+	gitCommitFile(t, dir, targetPath, "baseline\n", "baseline")
+	gitTag(t, dir, "v1.0.0")
+	gitCommitFile(t, dir, targetPath, "changed\n", "modify target")
+	writeMigrationNote(t, dir, "v1.1.0") // untagged → about-to-release
+	return dir
+}
+
+// TestDeferRecurrence_RefusesFiredOpenCard is the BEHAVIORAL-CLOSURE CRUX
+// (REFUSE half): an imminent release whose diff fires an OPEN .local/coordinator/
+// tasks/ defer with no disposition is REFUSED (FAIL) and the offending card is
+// named. The card deliberately carries NO defer- prefix (silencer-immunity: a
+// card cannot escape the gate by being named without the prefix).
+func TestDeferRecurrence_RefusesFiredOpenCard(t *testing.T) {
+	target := "internal/cli/release_gate.go"
+	dir := recurrenceFixture(t, target)
+	writeLivenessCard(t, dir, "task-no-prefix.json", "task-no-prefix", "draft",
+		[]string{"source:review-defer", "trigger:path_touched(" + target + ")", "studied:2026-07-30"})
+
+	r := checkDeferLiveness(dir)
+	if r.tier == tierSkip {
+		t.Skipf("check unavailable in env: %s", r.detail)
+	}
+	if r.tier != tierFail {
+		t.Fatalf("CRUX want FAIL for fired open card with no disposition, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "task-no-prefix") {
+		t.Errorf("FAIL should name the offending card; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "release-diff-recurrence") {
+		t.Errorf("FAIL should flag the recurrence class; got %q", r.detail)
+	}
+}
+
+// TestDeferRecurrence_ClearsViaClosedStatus is the CRUX CLEAR half (a): once the
+// fired card's status moves into the closed set (completed), the refuse clears.
+func TestDeferRecurrence_ClearsViaClosedStatus(t *testing.T) {
+	target := "internal/cli/release_gate.go"
+	dir := recurrenceFixture(t, target)
+	writeLivenessCard(t, dir, "task-clearable.json", "task-clearable", "completed",
+		[]string{"trigger:path_touched(" + target + ")"})
+
+	r := checkDeferLiveness(dir)
+	if r.tier == tierSkip {
+		t.Skipf("check unavailable in env: %s", r.detail)
+	}
+	if r.tier != tierPass {
+		t.Fatalf("CRUX want PASS after closed status, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestDeferRecurrence_ClearsViaManifestEntry is the CRUX CLEAR half (b): an
+// otherwise-blocking open card clears when a manifest record for its task_id
+// exists (the releaser's committed disposition).
+func TestDeferRecurrence_ClearsViaManifestEntry(t *testing.T) {
+	target := "internal/cli/release_gate.go"
+	dir := recurrenceFixture(t, target)
+	writeLivenessCard(t, dir, "task-manifest.json", "task-manifest", "draft",
+		[]string{"trigger:path_touched(" + target + ")"})
+	writeManifest(t, dir, []string{"task-manifest"})
+
+	r := checkDeferLiveness(dir)
+	if r.tier == tierSkip {
+		t.Skipf("check unavailable in env: %s", r.detail)
+	}
+	if r.tier != tierPass {
+		t.Fatalf("CRUX want PASS after manifest entry, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestDeferRecurrence_ClearsViaOperatorOverride is the CRUX CLEAR half (c): an
+// otherwise-blocking open card clears when the operator supplies a live-intent
+// override (VH_HARNESS_DEFER_OVERRIDE_IDS env var).
+func TestDeferRecurrence_ClearsViaOperatorOverride(t *testing.T) {
+	target := "internal/cli/release_gate.go"
+	dir := recurrenceFixture(t, target)
+	writeLivenessCard(t, dir, "task-override.json", "task-override", "draft",
+		[]string{"trigger:path_touched(" + target + ")"})
+	t.Setenv("VH_HARNESS_DEFER_OVERRIDE_IDS", "task-override")
+
+	r := checkDeferLiveness(dir)
+	if r.tier == tierSkip {
+		t.Skipf("check unavailable in env: %s", r.detail)
+	}
+	if r.tier != tierPass {
+		t.Fatalf("CRUX want PASS after operator override, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestDeferRecurrence_MDCardBlocks proves silencer-immunity for non-JSON cards:
+// a .md file (not parseable as JSON) carrying a path_touched target in free text
+// is treated as an OPEN card and BLOCKS when its target fires.
+func TestDeferRecurrence_MDCardBlocks(t *testing.T) {
+	target := "internal/cli/release_gate.go"
+	dir := recurrenceFixture(t, target)
+	writeRawLivenessCard(t, dir, "scratch-notes.md",
+		"# scratch\n\nTrigger: path_touched("+target+")\n")
+
+	r := checkDeferLiveness(dir)
+	if r.tier == tierSkip {
+		t.Skipf("check unavailable in env: %s", r.detail)
+	}
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for fired .md card (silencer-immunity), got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "scratch-notes") {
+		t.Errorf("FAIL should name the .md card (filename-derived id); got %q", r.detail)
+	}
+}
+
+// TestDeferRecurrence_NonGrammarTriggerIsCold proves a card whose ONLY target
+// is non-grammar (a glob or directory operand) is COLD — INFORM only, never
+// blocks. v1 exact-match cannot resolve glob/dir path_touched semantics.
+func TestDeferRecurrence_NonGrammarTriggerIsCold(t *testing.T) {
+	target := "internal/cli/release_gate.go"
+	dir := recurrenceFixture(t, target)
+	writeLivenessCard(t, dir, "task-glob.json", "task-glob", "draft",
+		[]string{"trigger:path_touched(internal/cli/*)"})
+
+	r := checkDeferLiveness(dir)
+	if r.tier == tierSkip {
+		t.Skipf("check unavailable in env: %s", r.detail)
+	}
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for cold (glob) card — INFORM only, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "cold card") {
+		t.Errorf("PASS detail should INFORM about the cold card; got %q", r.detail)
+	}
+}
+
+// TestDeferRecurrence_FogCardIsInform proves a card with NO path_touched target
+// (fog) is INFORM only — never blocks — even when a release is imminent.
+func TestDeferRecurrence_FogCardIsInform(t *testing.T) {
+	target := "internal/cli/release_gate.go"
+	dir := recurrenceFixture(t, target)
+	writeLivenessCard(t, dir, "task-fog.json", "task-fog", "draft",
+		[]string{"source:review-defer", "studied:2026-07-30"}) // no trigger:path_touched
+
+	r := checkDeferLiveness(dir)
+	if r.tier == tierSkip {
+		t.Skipf("check unavailable in env: %s", r.detail)
+	}
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for fog card — INFORM only, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "fog card") {
+		t.Errorf("PASS detail should INFORM about the fog card; got %q", r.detail)
+	}
+}
+
+// TestDeferRecurrence_DormantWhenNoReleaseImminent proves the predicate is
+// DORMANT (advisory only, no FAIL) when no release is imminent (no about-to-
+// release note), even with a fired open card. This keeps doctor HEALTHY during
+// ordinary development; the BLOCK activates only at tag time.
+func TestDeferRecurrence_DormantWhenNoReleaseImminent(t *testing.T) {
+	target := "internal/cli/release_gate.go"
+	dir := t.TempDir()
+	gitInit(t, dir)
+	t.Setenv("VH_HARNESS_DEFER_DIFF_SINCE", "")
+	t.Setenv("VH_HARNESS_DEFER_OVERRIDE_IDS", "")
+	writeAdoptionMarker(t, dir)
+	gitCommitFile(t, dir, target, "baseline\n", "baseline")
+	gitTag(t, dir, "v1.0.0")
+	gitCommitFile(t, dir, target, "changed\n", "modify target")
+	// A RELEASED note (tagged) — no about-to-release → releaseImminent == false.
+	writeMigrationNote(t, dir, "v1.0.0")
+	writeLivenessCard(t, dir, "task-dormant.json", "task-dormant", "draft",
+		[]string{"trigger:path_touched(" + target + ")"})
+
+	r := checkDeferLiveness(dir)
+	if r.tier == tierSkip {
+		t.Skipf("check unavailable in env: %s", r.detail)
+	}
+	if r.tier != tierPass {
+		t.Fatalf("want PASS (dormant) when no release imminent, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestDeferRecurrence_LiveRepoIsClean runs the gate against the real repo. It
+// must not FAIL (v0.18.0 is tagged and there is no about-to-release note, so the
+// predicate is dormant). FAIL is a regression.
+func TestDeferRecurrence_LiveRepoIsClean(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	repoRoot, err := repoRootFromCwd(t)
+	if err != nil {
+		t.Skipf("could not locate git working-tree root: %v", err)
+	}
+	t.Setenv("VH_HARNESS_DEFER_DIFF_SINCE", "")
+	t.Setenv("VH_HARNESS_DEFER_OVERRIDE_IDS", "")
+	r := checkDeferLiveness(repoRoot)
+	if r.tier == tierFail {
+		t.Fatalf("live repo must not FAIL the defer-liveness gate, got FAIL: %s", r.detail)
+	}
+}

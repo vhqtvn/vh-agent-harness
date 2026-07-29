@@ -616,7 +616,15 @@ if [ -f ".vh-agent-harness/lineage.yml" ]; then
       "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
     exit 1
   fi
-  if ! G0C_OUTPUT=$("$HARNESS_BIN" doctor 2>&1); then
+  # G0c runs doctor AFTER the ceremony created the about-to-release migration
+  # note, so the F4-C release-diff-recurrence predicate (doctor #12, second
+  # contradiction class) is ACTIVE here: an OPEN defer card whose path_touched
+  # target re-fires in PRIOR_TAG..HEAD without a disposition makes doctor
+  # UNHEALTHY and refuses the tag. The diff context is threaded explicitly via
+  # VH_HARNESS_DEFER_DIFF_SINCE so the predicate and this script agree on the
+  # release boundary (defense-in-depth: the predicate self-derives the same ref
+  # via `git describe --tags --abbrev=0` when the env var is unset).
+  if ! G0C_OUTPUT=$(VH_HARNESS_DEFER_DIFF_SINCE="$PRIOR_TAG" "$HARNESS_BIN" doctor 2>&1); then
     emit false "$VERSION" "" false \
       "release-readiness-gate: G0c doctor not HEALTHY (a machine check FAILED — run \`$HARNESS_BIN doctor\` for the full report). Doctor output: $G0C_OUTPUT" \
       "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"

@@ -56,12 +56,14 @@ package cli
 // is out of scope for this slice.
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/memory/claims"
@@ -205,7 +207,9 @@ func checkDeferLiveness(target string) checkResult {
 		return checkResult{name: name, tier: tierSkip, detail: "no templates/migrations/v*.md notes present"}
 	}
 
-	// 3. Cross-reference both sides via the kernel's typed projection.
+	// 3. Cross-reference both sides via the kernel's typed projection (the
+	//    ORIGINAL contradiction class: an OPEN defer/errata card referencing a
+	//    present released/about-to-release migration note).
 	contradictions := findDeferLivenessContradictions(reg.Cards, reg.Notes)
 	openCount := 0
 	for _, c := range reg.Cards {
@@ -215,26 +219,50 @@ func checkDeferLiveness(target string) checkResult {
 	}
 	relCnt, unrelCnt := countReleasedNotes(reg.Notes)
 
-	// Fail-closed: a malformed/unreadable card is itself a release blocker,
-	// reported alongside any open-claim contradictions.
-	if len(reg.CardErrors) == 0 && len(contradictions) == 0 {
-		return checkResult{name: name, tier: tierPass,
-			detail: fmt.Sprintf("%d card(s) (%d open), %d note(s) (%d released, %d about-to-release); no release-blocking contradiction",
-				len(reg.Cards), openCount, len(reg.Notes), relCnt, unrelCnt)}
+	// 4. F4-C release-diff-recurrence predicate (the NEW contradiction class).
+	//    An OPEN liveness card whose path_touched target re-fires in the release
+	//    diff (PRIOR_TAG..HEAD) and which lacks a fresh disposition (closed
+	//    status / manifest entry / operator override). This seals the F1-D1 gap:
+	//    deferred debt whose trigger re-fires in the release arc can no longer
+	//    ship without a forced verdict.
+	//
+	//    ACTIVATION: the recurrence predicate's BLOCK escalates to FAIL only
+	//    when a release is imminent (an about-to-release / untagged migration
+	//    note exists) — mirroring check #13's proven pattern. When no release is
+	//    imminent the findings are advisory (the predicate is dormant) so doctor
+	//    stays HEALTHY during ordinary development. At tag time (G0c) the
+	//    ceremony has created the about-to-release note, so the predicate is
+	//    active and refuses on any undisposed fired card. Fog (no target) and
+	//    COLD (glob/dir non-grammar) findings are ALWAYS advisory (INFORM, never
+	//    block).
+	recReport := evaluateDeferRecurrence(target, reg)
+	releaseImminent := unrelCnt > 0
+
+	hasCardErrors := len(reg.CardErrors) > 0
+	hasContradictions := len(contradictions) > 0
+	hasRecurrenceBlock := releaseImminent && len(recReport.blockers) > 0
+
+	if !hasCardErrors && !hasContradictions && !hasRecurrenceBlock {
+		detail := fmt.Sprintf("%d card(s) (%d open), %d note(s) (%d released, %d about-to-release); no release-blocking contradiction",
+			len(reg.Cards), openCount, len(reg.Notes), relCnt, unrelCnt)
+		if extra := recReport.advisoryDetail(); extra != "" {
+			detail += "\n" + extra
+		}
+		return checkResult{name: name, tier: tierPass, detail: detail}
 	}
 
 	var b strings.Builder
-	if len(reg.CardErrors) > 0 {
+	if hasCardErrors {
 		fmt.Fprintf(&b, "%d unreadable/unparseable defer/errata card(s) (gate is fail-closed — fix or remove before release):",
 			len(reg.CardErrors))
 		for _, ce := range reg.CardErrors {
 			fmt.Fprintf(&b, "\n  - %s: %v", filepath.Join(".local", "coordinator", "tasks", filepath.Base(ce.Path)), ce.Err)
 		}
-		if len(contradictions) > 0 {
+	}
+	if hasContradictions {
+		if hasCardErrors {
 			b.WriteByte('\n')
 		}
-	}
-	if len(contradictions) > 0 {
 		fmt.Fprintf(&b, "%d open defer/errata card(s) contradict released/about-to-release claims (%d released, %d about-to-release notes):",
 			len(contradictions), relCnt, unrelCnt)
 		for _, cx := range contradictions {
@@ -242,6 +270,25 @@ func checkDeferLiveness(target string) checkResult {
 			b.WriteString(cx.String())
 		}
 		b.WriteString("\nresolve each card by moving its status into the closed set (completed/cancelled/staged) — e.g. inject the correction into the target migration note and stage the card, or explicitly dismiss it. Released notes are immutable; corrections ship as errata in the next release's note.")
+	}
+	if hasRecurrenceBlock {
+		if hasCardErrors || hasContradictions {
+			b.WriteByte('\n')
+		}
+		fmt.Fprintf(&b, "%d open defer card(s) whose path_touched target re-fired in the release diff (%s) without a fresh disposition (release-diff-recurrence, F4-C):",
+			len(recReport.blockers), recReport.diffRef)
+		for _, blk := range recReport.blockers {
+			fmt.Fprintf(&b, "\n  - %s [status=%s]: fired target(s) %s",
+				livenessCardLabel(blk.card), livenessStatusLabel(blk.card), quotedList(blk.targets))
+		}
+		b.WriteString("\nresolve each card by: (a) moving its status into the closed set (completed/cancelled/staged), (b) adding a disposition record for its task_id to .vh-agent-harness/release-defer-dispositions.json, or (c) supplying an operator override via the VH_HARNESS_DEFER_OVERRIDE_IDS env var.")
+	}
+	// Advisory recurrence findings (fog / cold / dormant) are appended to the
+	// detail whenever present, even on a FAIL, so the operator sees the full
+	// recurrence surface. They never escalate the tier on their own.
+	if adv := recReport.advisoryDetail(); adv != "" {
+		b.WriteString("\n")
+		b.WriteString(adv)
 	}
 	return checkResult{name: name, tier: tierFail, detail: b.String()}
 }
@@ -289,6 +336,273 @@ func countReleasedNotes(notes []claims.NoteClaim) (released, aboutToRelease int)
 		}
 	}
 	return
+}
+
+// --- F4-C release-diff-recurrence predicate (the SECOND contradiction class) ---
+//
+// This is the F1-D1 gap fix: 16 `draft` DEFER cards whose path_touched target
+// sits in the release diff would otherwise ship without a forced verdict (the
+// case study's §4.3 deferred-debt-decay failure at population scale). The
+// predicate re-evaluates every OPEN liveness card's trigger against the release
+// diff (PRIOR_TAG..HEAD) and refuses while any card whose target re-fired lacks
+// a fresh disposition (closed status / manifest entry / operator override).
+//
+// Federated authority: the GATE+G0c refuse; the RELEASER/OPERATOR dispose; the
+// manifest M is the releaser's (the committed disposition record rechecked by
+// the release-mode evaluator in check-defer-triggers.js). Doctor #12 reads the
+// manifest only for manifest_entry(c) — it does NOT validate the handshake
+// (that is the release-mode evaluator's job).
+//
+// Silencer immunity: the predicate consults reg.LivenessCards — EVERY file under
+// .local/coordinator/tasks/ (no prefix/extension filter) — not reg.Cards (the
+// defer-/errata- *.json subset). A card cannot escape the gate by being named
+// without the defer- prefix or by being .md instead of .json.
+
+// recurrenceBlocker is a single release-blocking finding: an OPEN liveness card
+// whose path_touched target exact-matches a path in the release diff and which
+// lacks a fresh disposition.
+type recurrenceBlocker struct {
+	card    claims.LivenessCard
+	targets []string // exact-match targets that fired (sorted)
+}
+
+// recurrenceReport carries the predicate's full output. blockers escalate to
+// FAIL only when a release is imminent (checkDeferLiveness maps releaseImminent
+// from about-to-release note count). fogCards and coldCards are ALWAYS advisory
+// (INFORM, never block): a fog card declares no target; a cold card declares
+// only non-grammar (glob/dir) targets that v1 exact-match cannot resolve.
+type recurrenceReport struct {
+	diffRef      string          // the PRIOR_TAG used (e.g. "v0.18.0"); "(none)" if no prior tag
+	diffComputed bool            // whether the diff path set was computed
+	diffPaths    map[string]bool // set of changed paths (empty if not computed)
+	blockers     []recurrenceBlocker
+	fogCards     []claims.LivenessCard
+	coldCards    []claims.LivenessCard
+}
+
+// evaluateDeferRecurrence computes the full F4-C release-diff-recurrence
+// surface. It never returns an error: an uncomputable diff (no prior tag on a
+// greenfield repo, or a transient git failure) yields an empty report (no
+// blockers) — fail-SAFE (the release-mode manifest evaluator in
+// check-defer-triggers.js is the independent second enforcement surface). The
+// release-context threading (G0c passes PRIOR_TAG via the
+// VH_HARNESS_DEFER_DIFF_SINCE env var) takes precedence over the self-derived
+// git describe, so the tag-time gate and the predicate agree on the boundary.
+func evaluateDeferRecurrence(target string, reg claims.Registry) recurrenceReport {
+	rep := recurrenceReport{}
+
+	// Resolve the diff-since ref: honor the release-context env var (G0c
+	// threading), else derive from the most recent tag.
+	diffSince := os.Getenv("VH_HARNESS_DEFER_DIFF_SINCE")
+	if diffSince == "" {
+		out, err := exec.Command("git", "-C", target, "describe", "--tags", "--abbrev=0").Output()
+		if err != nil {
+			rep.diffRef = "(none)"
+			return rep
+		}
+		diffSince = strings.TrimSpace(string(out))
+	}
+	rep.diffRef = diffSince
+
+	// Compute the diff path set (PRIOR_TAG..HEAD).
+	out, err := exec.Command("git", "-C", target, "diff", "--name-only", diffSince).Output()
+	if err != nil {
+		rep.diffRef = diffSince + " (diff-unavailable)"
+		return rep
+	}
+	rep.diffComputed = true
+	rep.diffPaths = map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		p := strings.TrimSpace(line)
+		if p != "" {
+			rep.diffPaths[p] = true
+		}
+	}
+
+	// Disposition-satisfaction surfaces.
+	manifestIDs := manifestEntryIDs(target)
+	overrideIDs := overrideIDSet()
+
+	for _, c := range reg.LivenessCards {
+		// disposition_satisfied(c): closed status OR manifest entry OR override.
+		if claims.StatusIsClosed(c.Status) {
+			continue
+		}
+		if manifestIDs[c.TaskID] {
+			continue
+		}
+		if overrideIDs[c.TaskID] {
+			continue
+		}
+		// Fog: no targets at all → INFORM only.
+		if len(c.Targets) == 0 {
+			rep.fogCards = append(rep.fogCards, c)
+			continue
+		}
+		// Classify targets: exact vs non-grammar (glob/dir).
+		var exactTargets, nonGrammarTargets []string
+		for _, t := range c.Targets {
+			if isNonGrammarTarget(t) {
+				nonGrammarTargets = append(nonGrammarTargets, t)
+			} else {
+				exactTargets = append(exactTargets, t)
+			}
+		}
+		// Fired: at least one exact target in the diff.
+		var fired []string
+		for _, t := range exactTargets {
+			if rep.diffPaths[t] {
+				fired = append(fired, t)
+			}
+		}
+		if len(fired) > 0 {
+			sort.Strings(fired)
+			rep.blockers = append(rep.blockers, recurrenceBlocker{card: c, targets: fired})
+		} else if len(exactTargets) == 0 && len(nonGrammarTargets) > 0 {
+			// COLD: only non-grammar targets (v1 exact-match cannot resolve) → INFORM.
+			rep.coldCards = append(rep.coldCards, c)
+		}
+		// else: exact targets exist but none fired → silent (card's trigger is
+		// not in this release arc).
+	}
+	return rep
+}
+
+// manifestEntryIDs reads the committed disposition manifest at
+// .vh-agent-harness/release-defer-dispositions.json and returns the set of
+// defer_id values that carry a releaser/operator disposition. Doctor #12 uses
+// this for manifest_entry(c). It does NOT validate the handshake (schema,
+// evaluated_commit-vs-HEAD) — that is the release-mode evaluator's job; doctor
+// only needs to know WHICH cards are accounted for. A missing/unparseable
+// manifest yields an empty set: no manifest_entry is satisfied, so the closed-
+// status check still carries the disposition burden (fail-safe, not silent).
+func manifestEntryIDs(repoRoot string) map[string]bool {
+	ids := map[string]bool{}
+	path := filepath.Join(repoRoot, ".vh-agent-harness", "release-defer-dispositions.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ids
+	}
+	var obj struct {
+		Records []struct {
+			DeferID string `json:"defer_id"`
+		} `json:"records"`
+	}
+	if json.Unmarshal(raw, &obj) != nil {
+		return ids
+	}
+	for _, r := range obj.Records {
+		if r.DeferID != "" {
+			ids[r.DeferID] = true
+		}
+	}
+	return ids
+}
+
+// overrideIDSet returns the operator live-intent override set from the
+// VH_HARNESS_DEFER_OVERRIDE_IDS env var (comma-separated task_ids). This is the
+// escape hatch for an operator to dispose a card at doctor time without a
+// manifest commit (the federated authority: releaser/operator dispose).
+func overrideIDSet() map[string]bool {
+	ids := map[string]bool{}
+	for _, raw := range strings.Split(os.Getenv("VH_HARNESS_DEFER_OVERRIDE_IDS"), ",") {
+		id := strings.TrimSpace(raw)
+		if id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+// isNonGrammarTarget reports whether a path_touched arg is a non-exact-match
+// (glob/dir-prefix) operand. v1 recurrence resolution is EXACT-match only; such
+// targets are COLD (logged, never block). A target ending in '/' is a directory
+// operand; a target containing glob metacharacters (* ? [ {) is a glob. Both
+// are non-grammar for v1 exact-match. glob/dir-prefix path_touched semantics
+// are deferred to v2 (defer-glob-trigger-v2).
+func isNonGrammarTarget(t string) bool {
+	if strings.HasSuffix(t, "/") {
+		return true
+	}
+	return strings.ContainsAny(t, "*?[{")
+}
+
+// livenessCardLabel renders a LivenessCard for the gate detail: the task_id,
+// title (if any), and the source filename so the operator can locate the card
+// file under .local/coordinator/tasks/.
+func livenessCardLabel(c claims.LivenessCard) string {
+	base := filepath.Base(c.Path)
+	if c.Title != "" {
+		return fmt.Sprintf("%s (%s) [%s]", c.TaskID, c.Title, base)
+	}
+	return fmt.Sprintf("%s [%s]", c.TaskID, base)
+}
+
+// livenessStatusLabel renders a card's status for the gate detail, distinguishing
+// a JSON-parsed status from a non-JSON card's implicit OPEN default.
+func livenessStatusLabel(c claims.LivenessCard) string {
+	if c.Status == "" {
+		return "open (implicit, non-JSON card)"
+	}
+	return c.Status
+}
+
+// quotedList renders a string slice as a quoted, comma-separated list for the
+// gate detail.
+func quotedList(items []string) string {
+	quoted := make([]string, len(items))
+	for i, s := range items {
+		quoted[i] = strconv.Quote(s)
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// advisoryDetail renders the fog/cold/dormant advisory findings as a detail
+// block. Returns "" when there is nothing advisory to report. These never
+// escalate the tier: they INFORM the operator of the recurrence surface. Fog
+// and cold ID lists are capped (first 8 shown, remainder summarized) so a large
+// task dir does not flood the gate detail.
+func (r recurrenceReport) advisoryDetail() string {
+	if !r.diffComputed && len(r.fogCards) == 0 && len(r.coldCards) == 0 {
+		return "" // nothing computed, nothing advisory
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "release-diff-recurrence (F4-C): diff-since=%s", r.diffRef)
+	if !r.diffComputed {
+		b.WriteString("; diff not computable (predicate dormant — manifest evaluator is the independent second surface)")
+		if len(r.fogCards) == 0 && len(r.coldCards) == 0 {
+			return b.String()
+		}
+	}
+	if len(r.fogCards) > 0 {
+		b.WriteString("; ")
+		b.WriteString(summarizeIDs("fog", "no trigger target, INFORM only", r.fogCards))
+	}
+	if len(r.coldCards) > 0 {
+		b.WriteString("; ")
+		b.WriteString(summarizeIDs("cold", "glob/dir target, INFORM only until v2", r.coldCards))
+	}
+	return b.String()
+}
+
+// summarizeIDs renders a labeled, capped list of card IDs: the first 8 IDs,
+// then "+N more" if the list is longer. Keeps the gate detail readable on a
+// large task dir.
+func summarizeIDs(kind, note string, cards []claims.LivenessCard) string {
+	const cap = 8
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d %s card(s) (%s):", len(cards), kind, note)
+	rest := cards
+	if len(rest) > cap {
+		rest = rest[:cap]
+	}
+	for _, c := range rest {
+		fmt.Fprintf(&b, " %s", c.TaskID)
+	}
+	if len(cards) > cap {
+		fmt.Fprintf(&b, " (+%d more)", len(cards)-cap)
+	}
+	return b.String()
 }
 
 // --- doctor check #13: staged-errata-content (the THIRD failure mode) ---
