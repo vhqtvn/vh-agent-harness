@@ -1,5 +1,27 @@
 {
   "manifest_version": "1",
   "successful_render_id": "b6911733c6e015f9",
-  "entries": []
+  "entries": [
+    {
+      "destination_path": ".opencode/skills/contract-invariant-audit/SKILL.md",
+      "producer_kind": "overlay_skill",
+      "overlay_pack": "contract-invariant-audit-pilot",
+      "source_relative_path": "skills/contract-invariant-audit/SKILL.md",
+      "rendered_digest": "sha256:8030241ac65428eb515c6be9f31427058e4782321541f9afa53914f64f76d711"
+    },
+    {
+      "destination_path": ".opencode/skills/contract-invariant-audit/references/pilot-runbook.md",
+      "producer_kind": "overlay_skill",
+      "overlay_pack": "contract-invariant-audit-pilot",
+      "source_relative_path": "skills/contract-invariant-audit/references/pilot-runbook.md",
+      "rendered_digest": "sha256:f7df10194fd7856513b7637a1972646e1a8551888ca36b75749d58b4c167ad98"
+    },
+    {
+      "destination_path": ".opencode/skills/contract-invariant-audit/scripts/manifest-helper.js",
+      "producer_kind": "overlay_skill",
+      "overlay_pack": "contract-invariant-audit-pilot",
+      "source_relative_path": "skills/contract-invariant-audit/scripts/manifest-helper.js",
+      "rendered_digest": "sha256:68b7be0de17bbe8ef119baf5c7a71f9785364759b4ad5626ef29e2a80e0b2705"
+    }
+  ]
 }
