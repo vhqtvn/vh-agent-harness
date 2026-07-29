@@ -147,7 +147,9 @@ These classes are cited so this memo does not propose duplicate work.
   dead-`exec-ro`-rule and RO-leaf-reaches-mutation-verb classes are closed by
   authoring against the real evaluator. **Not re-claimed here.**
 - **F4 / F6 — node-tested-path-untested; dual derivation of "managed set".**
-  DONE / in-flight. `ae5b30d`
+  DONE / in-flight. `ae5b30d` closes the capability-owned
+  CoreOutputs/output-filtering aspect only; it does **not** close F4's general
+  route-level/path-testing obligation (§4.5).
   `feat(core): add capability-owned CoreOutputs filtering for media-perception`
   makes capability selection control which capability-owned files render
   (resolver/substrate/CLI seams, + tests including
@@ -313,7 +315,7 @@ of the three commits:
 | `store.go` flock+fsync + bounded fault-tolerant reader | `internal/memory/store/store.go:200-283` (append: mutex+flock+fsync), `:349-477` (read: bounded, malformed skipped+counted) | yes |
 | Typed-memory layer is dormant (no `records.jsonl`) | `find .opencode/state -name records.jsonl` → no output | yes |
 | F7/§4.6 closed by read_only policy | `git show --stat ba68c76` (6 files, +1266/-65: model/tables/emit/test) + `5fcd295` (render regen, 4 files) | yes |
-| F4/F6 closed by CoreOutputs filtering | `git show --stat ae5b30d` (21 files, +1703/-97: resolver/substrate/CLI + tests) | yes |
+| F4 (output-filtering aspect only)/F6 closed by CoreOutputs filtering | `git show --stat ae5b30d` (21 files, +1703/-97: resolver/substrate/CLI + tests) | yes |
 | `doctor` proven as §4.1 host | `docs/checkpoints/2026-07-16-auto-gate-ignore-gitignore-doctor-gap.md` (A+B+D hybrid; `checkAutoGateGitignored` + D6 leak-assertion tests) | yes |
 | Dangling ref at README:14-15 never existed | `git log --oneline -- researches/decisions/2026-04-29-coordination-control-plane-options.md` → empty | yes |
 | Case-study "orchestrator" / "3/3 modalities" line numbers | `docs/case-study/2026-07-22-unverified-claims-at-lossy-boundaries.md` L18, L36, L40 | yes |
