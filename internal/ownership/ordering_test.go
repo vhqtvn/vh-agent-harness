@@ -184,9 +184,9 @@ func TestCompare_BriefRaiseRejectTable(t *testing.T) {
 	})
 }
 
-// TestIsMutableByPlatform is the Slice-4 "project_owned is never plain-mutable"
+// TestIsMutableByGenericRender is the Slice-4 "project_owned is never plain-mutable"
 // guard. Only platform_managed may be touched by an ungated platform render.
-func TestIsMutableByPlatform(t *testing.T) {
+func TestIsMutableByGenericRender(t *testing.T) {
 	cases := map[Class]bool{
 		ClassPlatformManaged:   true,
 		ClassPlatformArmed:     false, // armed path only, not a plain render
@@ -196,13 +196,13 @@ func TestIsMutableByPlatform(t *testing.T) {
 		ClassLocalOnly:         false, // not on the platform update path
 	}
 	for c, want := range cases {
-		if got := IsMutableByPlatform(c); got != want {
-			t.Errorf("IsMutableByPlatform(%s) = %v, want %v", c, got, want)
+		if got := IsMutableByGenericRender(c); got != want {
+			t.Errorf("IsMutableByGenericRender(%s) = %v, want %v", c, got, want)
 		}
 	}
 }
 
-// TestIsPlatformOverwritable pins the wholesale-overwrite class set for a seam
+// TestIsOverwritableBySeamApply pins the wholesale-overwrite class set for a seam
 // apply: exactly platform_managed and overlay_extension. This is the same set the
 // seam apply switch (internal/substrate/apply.go planOutcome) routes to its
 // managed-* outcomes. The switch is the LIVE authority and does NOT call this
@@ -212,7 +212,7 @@ func TestIsMutableByPlatform(t *testing.T) {
 // substrate apply tests plus review; coupling the two (shared fixture, apply-side
 // assertion, or wiring the predicate) is a tracked follow-up when planOutcome's
 // class routing is next changed.
-func TestIsPlatformOverwritable(t *testing.T) {
+func TestIsOverwritableBySeamApply(t *testing.T) {
 	cases := map[Class]bool{
 		ClassPlatformManaged:   true,  // generic force-overwrite
 		ClassPlatformArmed:     false, // reconcile/proposal path, never wholesale overwrite
@@ -222,8 +222,44 @@ func TestIsPlatformOverwritable(t *testing.T) {
 		ClassLocalOnly:         false, // not on the platform update path
 	}
 	for c, want := range cases {
-		if got := IsPlatformOverwritable(c); got != want {
-			t.Errorf("IsPlatformOverwritable(%s) = %v, want %v", c, got, want)
+		if got := IsOverwritableBySeamApply(c); got != want {
+			t.Errorf("IsOverwritableBySeamApply(%s) = %v, want %v", c, got, want)
 		}
+	}
+}
+
+// TestGenericMutableIsSubsetOfSeamOverwritable pins the DISAMBIGUATION between
+// the two exported overwrite/mutability predicates and the structural
+// relationship that makes them confusable (audit finding F2): they are NOT
+// synonyms, and one is a strict subset of the other.
+//
+//   - IsMutableByGenericRender guards the GENERIC (overlay-unaware) render/force-
+//     overwrite: true for {platform_managed} only.
+//   - IsOverwritableBySeamApply guards the SEAM-APPLY wholesale overwrite: true
+//     for {platform_managed, overlay_extension}.
+//
+// The subset invariant IsMutableByGenericRender(c) => IsOverwritableBySeamApply(c)
+// holds for every class: everything a generic ungated render may overwrite, a seam
+// apply may also overwrite — but the seam apply additionally overwrites
+// overlay_extension (by overlay-system authority). This was previously an
+// unenforced, assumption-only invariant (audit F2 "Related C3"); pinning it here
+// means a future edit to either predicate that breaks the relationship fails the
+// test rather than silently recreating the confusable-pair hazard. It does NOT
+// change either predicate's truth table.
+func TestGenericMutableIsSubsetOfSeamOverwritable(t *testing.T) {
+	for _, c := range AllClasses() {
+		mutable := IsMutableByGenericRender(c)
+		overwritable := IsOverwritableBySeamApply(c)
+		if mutable && !overwritable {
+			t.Errorf("disambiguation violation: IsMutableByGenericRender(%s)=true but IsOverwritableBySeamApply(%s)=false (generic-render-mutable must be a subset of seam-apply-overwritable)", c, c)
+		}
+	}
+	// Sanity: the two predicates are genuinely distinct (the subset is strict),
+	// so the rename exists for a reason — they are not interchangeable.
+	if !IsOverwritableBySeamApply(ClassOverlayExtension) {
+		t.Errorf("IsOverwritableBySeamApply(overlay_extension) must be true; the predicates would be identical otherwise")
+	}
+	if IsMutableByGenericRender(ClassOverlayExtension) {
+		t.Errorf("IsMutableByGenericRender(overlay_extension) must be false; the predicates would be identical otherwise")
 	}
 }

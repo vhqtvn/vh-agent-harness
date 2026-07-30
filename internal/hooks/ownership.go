@@ -14,14 +14,14 @@ import (
 // platform only SEEDS it (once, on install) and then never touches it.
 //
 // This is the D2 interaction for Slice 5: hook leaves classify project_owned, so
-// ownership.IsMutableByPlatform(ClassProjectOwned) is FALSE — platform updates
+// ownership.IsMutableByGenericRender(ClassProjectOwned) is FALSE — platform updates
 // can NEVER overwrite consumer-authored hooks. Hooks therefore cannot become a
 // side door around update-safety either: even if a platform update shipped a
 // malicious hook leaf, it could not replace the consumer's project_owned one.
 //
 // TODO(slice-followup): wire this through ownership.Resolve(defaults, overrides)
 // .EffectiveMap.ClassOf(path) once the manifest converges on the armed-class
-// vocabulary. Slice 4 (ownership package) shipped the lattice + IsMutableByPlatform
+// vocabulary. Slice 4 (ownership package) shipped the lattice + IsMutableByGenericRender
 // as the unit-tested analogue while the live manifest still uses a parallel
 // vocabulary (ClassProjectOwned="project-owned" + IsRenderable). Until that
 // convergence lands, this function is the armed-class analogue: it asserts the
@@ -38,7 +38,7 @@ func ClassifyLeaf(leaf string) ownership.Class {
 // a hook leaf. It is always FALSE for project_owned leaves: this is the D2 guard
 // that keeps consumer-authored hooks safe across `vh-agent-harness update`.
 func LeafIsPlatformMutable(leaf string) bool {
-	return ownership.IsMutableByPlatform(ClassifyLeaf(leaf))
+	return ownership.IsMutableByGenericRender(ClassifyLeaf(leaf))
 }
 
 // AssertLeafPolicy is a compile-time anchor that the runshape fixed-point set and

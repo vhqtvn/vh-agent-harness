@@ -237,12 +237,12 @@ func walkStaged(stagingDir string) ([]string, error) {
 // Ownership routing: this switch is the AUTHORITATIVE overwrite decision for a
 // seam apply. The overwrite route (ActionManagedOverwrite) is reserved for the
 // platform-overwritable classes — platform_managed (generic force-overwrite; the
-// single class ownership.IsMutableByPlatform is true for) and overlay_extension
+// single class ownership.IsMutableByGenericRender is true for) and overlay_extension
 // (overlay-system overwrite when the pack is active). Every other class is
 // preserved, seeded-once, schema-reconciled/proposed, or off-path. Only those two
 // classes reach ActionManagedOverwrite, so the live ownership lattice is the
 // single authority for which paths a plain apply may clobber.
-// ownership.IsPlatformOverwritable documents this same class-set (and is pinned by
+// ownership.IsOverwritableBySeamApply documents this same class-set (and is pinned by
 // its own test) but is NOT called here — this switch is the live gate, not the
 // predicate.
 func planOutcome(opts ApplyOptions, rel string) (FileOutcome, error) {
@@ -255,7 +255,7 @@ func planOutcome(opts ApplyOptions, rel string) (FileOutcome, error) {
 
 	switch cls.Class {
 	case ownership.ClassPlatformManaged:
-		// IsMutableByPlatform(ClassPlatformManaged) == true: the generic
+		// IsMutableByGenericRender(ClassPlatformManaged) == true: the generic
 		// force-overwrite class. A plain re-render overwrites it wholesale —
 		// UNLESS the live instance is already byte-identical to the freshly
 		// re-rendered corpus, in which case we route to ActionManagedNoop

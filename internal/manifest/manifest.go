@@ -68,10 +68,15 @@ const (
 // Slice 5.1: the discriminator honors BOTH the legacy vocabulary
 // (managed / generated-from-config) AND the converged armed lattice
 // (platform_managed / platform_armed / overlay_extension are renderable;
-// project_owned / external_generated / local_only are not). This is the
-// manifest-side analogue of ownership.IsPlatformOverwritable +
-// IsMutableByPlatform: renderable classes are exactly those a platform render
-// may touch, and protected/off-path classes are exactly those it may not.
+// project_owned / external_generated / local_only are not). NOTE: the renderable
+// set is a SUPERSET of the ownership overwrite/mutability predicates, NOT
+// exhausted by them — it additionally includes platform_armed, which is
+// renderable/refreshable via the armed reconcile path rather than a wholesale
+// overwrite. Compare ownership.IsOverwritableBySeamApply ({platform_managed,
+// overlay_extension}) and ownership.IsMutableByGenericRender ({platform_managed}
+// only): the render/upgrade/uninstall lifecycle touches a broader set than a
+// plain apply because the armed reconcile path also re-renders platform_armed.
+// Do NOT equate IsRenderable with either predicate.
 func IsRenderable(class string) bool {
 	switch class {
 	case ClassManaged, ClassGeneratedFromConfig,

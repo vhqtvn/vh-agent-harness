@@ -89,9 +89,9 @@
 //
 // # Update-path respect
 //
-// IsMutableByPlatform reports whether an UNGATED platform render/overwrite may
+// IsMutableByGenericRender reports whether an UNGATED platform render/overwrite may
 // touch a path of the given class. Only platform_managed is plain-mutable; every
-// other class (including project_owned) is not. The wiring of IsMutableByPlatform
+// other class (including project_owned) is not. The wiring of IsMutableByGenericRender
 // into the live render/upgrade path is a follow-up: the prototype's manifest
 // (internal/manifest) currently uses a parallel simpler class vocabulary
 // (managed / generated-from-config / project-owned) and already protects its
