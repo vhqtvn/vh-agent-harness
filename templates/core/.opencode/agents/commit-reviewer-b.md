@@ -177,6 +177,53 @@ Rule of thumb: a noticed material concern is always emitted; only its
 disposition (BLOCK/DEFER/DROP) is negotiable. Uncertainty about disposition is
 never grounds for omission.
 
+## Changed-Unit Accounting (advisory)
+
+To make your examination traceable, account concisely for every meaningful
+changed unit in the slice. This is **advisory diagnostic metadata only**. It does
+NOT create a finding, does NOT block, does NOT change any disposition, and does
+NOT trigger any coordinator transition. It exists solely so a later reviewer can
+distinguish "this unit was examined and raised no concern" from "this unit was
+never substantively examined."
+
+For each meaningful changed unit, record one of three bounded statuses:
+
+- **examined, no actionable concern** — you substantively read the unit and found
+  nothing material. No finding is emitted for it.
+- **examined, finding emitted** — you substantively read the unit and produced a
+  finding in `findings[]`; reference the finding id (e.g. `F3`).
+- **not substantively examined, with reason** — you did not give the unit
+  substantive attention. State the reason briefly (out of declared scope, pure
+  generated or vendored content, mechanical formatting-only change, or another
+  concrete reason). This is disclosure, NOT a finding and NOT a block.
+
+### Meaningful units, not mechanical hunks
+
+Account over **meaningful changed units** — a file, a function, a contract, or
+another unit a reviewer would naturally reason about — rather than mechanically
+repeating every diff hunk or every changed line. For a small change one or a few
+units suffice. For a large change, group the diff into the handful of units a
+reviewer would actually reason about; do not inflate the accounting to one entry
+per hunk.
+
+### Where it goes
+
+Place the accounting in `validation_notes` as a compact text block. Do NOT add a
+new schema field — `validation_notes` is the sanctioned home for this diagnostic
+metadata. A terse form is fine, e.g.:
+
+    validation_notes: "units: handler.py:check_token (examined, finding F1); handler.py:_refresh (examined, no concern); tokens.sql (not substantively examined, generated migration)"
+
+### Constraints
+
+- The accounting NEVER upgrades into a finding. If a unit has a material concern,
+  emit that concern as a real finding in `findings[]` (per Expression Discipline)
+  and record its unit as "examined, finding emitted" here.
+- Do not mark a unit "examined" unless you substantively read it. Mark it "not
+  substantively examined, with reason" instead — honest disclosure is the point.
+- Do not let the accounting inflate output or dilute attention on the units that
+  actually carry risk.
+
 ## Assessment axes and verdict collapse
 
 Every review produces TWO required result families, both emitted in the SAME
