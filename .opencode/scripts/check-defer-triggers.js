@@ -668,6 +668,39 @@ function validateReleaseManifest(obj) {
             const ov = validateOverrideObject(r.override, i);
             if (!ov.ok) return ov;
         }
+        // Slice 5 recurrence ack-pair forward-compat. The manifest gains
+        // OPTIONAL recurrence acknowledgement fields (recurrence_count +
+        // last_acknowledged_count) on a record. The pair is a CONTRACT: when
+        // EITHER field is present, BOTH must be present, both must be
+        // non-negative integers, and recurrence_count >= last_acknowledged_count
+        // (you cannot have acknowledged more observations than exist). A record
+        // WITHOUT either field is a v1 entry and passes UNCHANGED (backward-
+        // compat — no existing release breaks). This validates the manifest's
+        // INTERNAL consistency only; the release-time count-vs-ack comparison
+        // against live card state is the release gate's job (Go checkDeferLiveness).
+        //
+        // Presence is detected by KEY EXISTENCE (hasOwnProperty), NOT by value
+        // truthiness: an explicit `{"recurrence_count": null}` carries the key
+        // and so enters the pair-contract block, where the typeof check below
+        // rejects null (typeof null === "object", not "number"). Detecting
+        // presence by `!== null` would treat a null half-pair as absent and let
+        // it pass as a v1 record — a fail-open on a malformed manifest.
+        const hasRecCount = Object.prototype.hasOwnProperty.call(r, "recurrence_count");
+        const hasAckCount = Object.prototype.hasOwnProperty.call(r, "last_acknowledged_count");
+        if (hasRecCount || hasAckCount) {
+            if (!hasRecCount || !hasAckCount) {
+                return { ok: false, error: `${where}.acknowledgement pair incomplete: recurrence_count and last_acknowledged_count are both required when either is present` };
+            }
+            if (typeof r.recurrence_count !== "number" || !Number.isInteger(r.recurrence_count) || r.recurrence_count < 0) {
+                return { ok: false, error: `${where}.recurrence_count must be a non-negative integer; got ${JSON.stringify(r.recurrence_count)}` };
+            }
+            if (typeof r.last_acknowledged_count !== "number" || !Number.isInteger(r.last_acknowledged_count) || r.last_acknowledged_count < 0) {
+                return { ok: false, error: `${where}.last_acknowledged_count must be a non-negative integer; got ${JSON.stringify(r.last_acknowledged_count)}` };
+            }
+            if (r.recurrence_count < r.last_acknowledged_count) {
+                return { ok: false, error: `${where}.recurrence_count (${r.recurrence_count}) < last_acknowledged_count (${r.last_acknowledged_count}): ack-pair invariant violated` };
+            }
+        }
     }
     // Sort check: records must already be in lexical order by defer_id. This
     // forces deterministic authoring and prevents reorderings from masking a

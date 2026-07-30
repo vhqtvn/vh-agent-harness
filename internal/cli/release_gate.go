@@ -241,12 +241,21 @@ func checkDeferLiveness(target string) checkResult {
 	hasCardErrors := len(reg.CardErrors) > 0
 	hasContradictions := len(contradictions) > 0
 	hasRecurrenceBlock := releaseImminent && len(recReport.blockers) > 0
+	// Recurrence-ack enforcement (Slice 5): an unacknowledged recurrence
+	// (derived count > committed manifest ack) or an uncollapsed duplicate
+	// (producer-bypass) is a gate-consistency failure → BLOCKED at release time.
+	// Dormant when no release is imminent (mirrors the F4-C predicate).
+	ackReport := evaluateRecurrenceAck(target)
+	hasAckBlock := releaseImminent && len(ackReport.blockers) > 0
 
-	if !hasCardErrors && !hasContradictions && !hasRecurrenceBlock {
+	if !hasCardErrors && !hasContradictions && !hasRecurrenceBlock && !hasAckBlock {
 		detail := fmt.Sprintf("%d card(s) (%d open), %d note(s) (%d released, %d about-to-release); no release-blocking contradiction",
 			len(reg.Cards), openCount, len(reg.Notes), relCnt, unrelCnt)
 		if extra := recReport.advisoryDetail(); extra != "" {
 			detail += "\n" + extra
+		}
+		if adv := ackReport.advisoryDetail(); adv != "" {
+			detail += "\n" + adv
 		}
 		return checkResult{name: name, tier: tierPass, detail: detail}
 	}
@@ -283,12 +292,27 @@ func checkDeferLiveness(target string) checkResult {
 		}
 		b.WriteString("\nresolve each card by: (a) moving its status into the closed set (completed/cancelled/staged), (b) adding a disposition record for its task_id to .vh-agent-harness/release-defer-dispositions.json, or (c) supplying an operator override via the VH_HARNESS_DEFER_OVERRIDE_IDS env var.")
 	}
+	if hasAckBlock {
+		if hasCardErrors || hasContradictions || hasRecurrenceBlock {
+			b.WriteByte('\n')
+		}
+		b.WriteString(formatRecurrenceAckBlockers(ackReport.blockers))
+	}
 	// Advisory recurrence findings (fog / cold / dormant) are appended to the
 	// detail whenever present, even on a FAIL, so the operator sees the full
 	// recurrence surface. They never escalate the tier on their own.
 	if adv := recReport.advisoryDetail(); adv != "" {
 		b.WriteString("\n")
 		b.WriteString(adv)
+	}
+	// Dormant ack blockers (no release imminent) are appended as INFORM so the
+	// operator sees pending re-adjudication state. Skipped when hasAckBlock:
+	// those blockers are already rendered above as the active FAIL reason.
+	if !hasAckBlock {
+		if adv := ackReport.advisoryDetail(); adv != "" {
+			b.WriteString("\n")
+			b.WriteString(adv)
+		}
 	}
 	return checkResult{name: name, tier: tierFail, detail: b.String()}
 }

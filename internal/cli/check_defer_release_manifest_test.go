@@ -43,6 +43,12 @@ type manifestRecordSpec struct {
 	StudiedAt        string
 	ReviewedAt       string
 	Override         *manifestOverrideSpec // nil → null
+	// Recurrence acknowledgement pair (Slice 5 forward-compat). Pointer-typed so
+	// nil → OMITTED (v1 backward-compat: an entry without ack fields is valid and
+	// passes unchanged). When EITHER is non-nil the validator requires BOTH and
+	// enforces recurrence_count >= last_acknowledged_count.
+	RecurrenceCount       *int
+	LastAcknowledgedCount *int
 }
 
 // manifestSpec models the whole manifest. Corruption hooks (Forged*) let
@@ -115,6 +121,12 @@ func buildManifestBytes(t *testing.T, scratch string, spec manifestSpec) []byte 
 				"approved_at":     r.Override.ApprovedAt,
 				"reason":          r.Override.Reason,
 			}
+		}
+		if r.RecurrenceCount != nil {
+			rec["recurrence_count"] = *r.RecurrenceCount
+		}
+		if r.LastAcknowledgedCount != nil {
+			rec["last_acknowledged_count"] = *r.LastAcknowledgedCount
 		}
 		records = append(records, rec)
 	}
@@ -1392,4 +1404,296 @@ func regexpMatch(pattern, s string) bool {
 		}
 	}
 	return len(s) == 40
+}
+
+// =============================================================================
+// Slice 5: recurrence ack-pair forward-compat (manifest-authority)
+// =============================================================================
+//
+// The committed manifest gains OPTIONAL recurrence acknowledgement fields
+// (recurrence_count + last_acknowledged_count) on a record. This is
+// FORWARD-COMPATIBLE with schema v1: the ack-pair invariant
+// (recurrence_count >= last_acknowledged_count) is enforced ONLY when those
+// fields are present. A v1 record WITHOUT them passes unchanged — no existing
+// release breaks. The explicit disposition matrix (block/disclose/override) is
+// orthogonal to the ack pair and continues to control after the ack is current.
+
+// intptr returns a pointer to n (test helper for the *int ack fields).
+func intptr(n int) *int { return &n }
+
+// ackRecordSpec returns a manifestRecordSpec seeded as a release-relevant,
+// disclosed, valid record carrying a recurrence ack pair, so the ack-pair
+// tests can focus on the ack invariant without re-deriving the full matrix.
+func ackRecordSpec(id string, count, ack *int) manifestRecordSpec {
+	r := manifestRecordSpec{
+		DeferID:               id,
+		ReleaseRelevance:      "yes",
+		Disposition:           "disclose",
+		MetadataState:         "valid",
+		Summary:               "Recurrence-bearing defer with acknowledgement pair.",
+		Reason:                "Acknowledged at the committed count; disposition controls.",
+		SourceRef:             ".local/coordinator/tasks/" + id + ".json",
+		StudiedAt:             "2026-07-29T00:00:00Z",
+		ReviewedAt:            "2026-07-30T00:00:00Z",
+		RecurrenceCount:       count,
+		LastAcknowledgedCount: ack,
+	}
+	return r
+}
+
+// TestCheckDefer_Manifest_RecurrenceAckPair_BackwardCompat — a v1 record with
+// NO recurrence/ack fields passes unchanged. This is the load-bearing
+// backward-compat guarantee: existing releases do not break when the validator
+// gains ack-pair awareness. (Slice 5 forward-compat, matrix case BC.)
+func TestCheckDefer_Manifest_RecurrenceAckPair_BackwardCompat(t *testing.T) {
+	scratch, script, _ := setupReleaseEvalRepo(t)
+	// Seed record carries NO ack fields (both pointers nil → omitted).
+	r := seededNoDiscloseInvalid("defer-v1-norec")
+	spec := manifestSpec{
+		ReleaseBaseKind:     "tag",
+		ReleaseBaseValue:    "v0.1.0",
+		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+		Records:             []manifestRecordSpec{r},
+	}
+	manifestBytes := buildManifestBytes(t, scratch, spec)
+	commitReleaseManifest(t, scratch, manifestBytes, "")
+	exitCode, result, _, _ := runReleaseEvalManifest(t, script)
+	if exitCode != 0 {
+		t.Fatalf("v1 record without ack fields must PASS (exit 0); got %d (err=%v)", exitCode, result.Error)
+	}
+	if result.Classification == "evaluator-error" {
+		t.Errorf("v1 record must not be evaluator-error; got %v", result.Error)
+	}
+}
+
+// TestCheckDefer_Manifest_RecurrenceAckPair_ValidPasses — a record carrying a
+// well-formed ack pair (recurrence_count == last_acknowledged_count) passes,
+// and the explicit disposition still controls (yes+disclose+valid → disclose).
+func TestCheckDefer_Manifest_RecurrenceAckPair_ValidPasses(t *testing.T) {
+	scratch, script, _ := setupReleaseEvalRepo(t)
+	spec := manifestSpec{
+		ReleaseBaseKind:     "tag",
+		ReleaseBaseValue:    "v0.1.0",
+		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+		Records:             []manifestRecordSpec{ackRecordSpec("defer-ack-ok", intptr(3), intptr(3))},
+	}
+	manifestBytes := buildManifestBytes(t, scratch, spec)
+	commitReleaseManifest(t, scratch, manifestBytes, "")
+	exitCode, result, _, _ := runReleaseEvalManifest(t, script)
+	if exitCode != 0 {
+		t.Fatalf("valid ack pair (count==ack) must PASS (exit 0); got %d (err=%v)", exitCode, result.Error)
+	}
+	if result.Classification != "disclose" {
+		t.Errorf("yes+disclose+valid with ack pair → disclose; got %q (err=%v)", result.Classification, result.Error)
+	}
+}
+
+// TestCheckDefer_Manifest_RecurrenceAckPair_CountGreaterThanAckPasses — the
+// ack-pair invariant is recurrence_count >= last_acknowledged_count, so count
+// > ack is ACCEPTED at the manifest level (count can legitimately exceed the
+// ack within the committed record — the manifest attests count as observed and
+// ack as last-adjudicated; the GATE, not the manifest validator, enforces the
+// release-time count-vs-ack comparison against live card state). This pins
+// that the validator checks only the manifest's INTERNAL consistency
+// (count >= ack), NOT the release-time freshness.
+func TestCheckDefer_Manifest_RecurrenceAckPair_CountGreaterThanAckPasses(t *testing.T) {
+	scratch, script, _ := setupReleaseEvalRepo(t)
+	spec := manifestSpec{
+		ReleaseBaseKind:     "tag",
+		ReleaseBaseValue:    "v0.1.0",
+		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+		Records:             []manifestRecordSpec{ackRecordSpec("defer-ack-ahead", intptr(3), intptr(2))},
+	}
+	manifestBytes := buildManifestBytes(t, scratch, spec)
+	commitReleaseManifest(t, scratch, manifestBytes, "")
+	exitCode, result, _, _ := runReleaseEvalManifest(t, script)
+	if exitCode != 0 {
+		t.Fatalf("count>ack must PASS at the manifest validator (exit 0); got %d (err=%v)", exitCode, result.Error)
+	}
+	if result.Classification == "evaluator-error" {
+		t.Errorf("count>ack must not be a schema error; got %v", result.Error)
+	}
+}
+
+// TestCheckDefer_Manifest_RecurrenceAckPair_CountLessThanAckRefuses — the
+// manifest's INTERNAL ack-pair invariant is recurrence_count >=
+// last_acknowledged_count. A record with count < ack is self-contradictory
+// (you cannot have acknowledged more observations than exist) → schema invalid
+// → evaluator-error (exit 2).
+func TestCheckDefer_Manifest_RecurrenceAckPair_CountLessThanAckRefuses(t *testing.T) {
+	scratch, script, _ := setupReleaseEvalRepo(t)
+	spec := manifestSpec{
+		ReleaseBaseKind:     "tag",
+		ReleaseBaseValue:    "v0.1.0",
+		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+		Records:             []manifestRecordSpec{ackRecordSpec("defer-ack-bad", intptr(1), intptr(3))},
+	}
+	manifestBytes := buildManifestBytes(t, scratch, spec)
+	commitReleaseManifest(t, scratch, manifestBytes, "")
+	exitCode, result, _, _ := runReleaseEvalManifest(t, script)
+	if exitCode != 2 {
+		t.Fatalf("count < ack must REFUSE (exit 2, evaluator-error); got %d", exitCode)
+	}
+	if result.Classification != "evaluator-error" {
+		t.Errorf("count < ack → evaluator-error; got %q", result.Classification)
+	}
+	if result.Error == nil || !strings.Contains(*result.Error, "recurrence_count") {
+		t.Errorf("error must mention recurrence_count; got %v", result.Error)
+	}
+}
+
+// TestCheckDefer_Manifest_RecurrenceAckPair_HalfPairRefuses — the ack pair is a
+// CONTRACT: both counts whenever recurrence ack state is carried. A record with
+// only ONE of recurrence_count / last_acknowledged_count is incomplete → schema
+// invalid → evaluator-error.
+func TestCheckDefer_Manifest_RecurrenceAckPair_HalfPairRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		count *int
+		ack   *int
+	}{
+		{"count-only", intptr(3), nil},
+		{"ack-only", nil, intptr(3)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scratch, script, _ := setupReleaseEvalRepo(t)
+			spec := manifestSpec{
+				ReleaseBaseKind:     "tag",
+				ReleaseBaseValue:    "v0.1.0",
+				ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+				Records:             []manifestRecordSpec{ackRecordSpec("defer-half", tc.count, tc.ack)},
+			}
+			manifestBytes := buildManifestBytes(t, scratch, spec)
+			commitReleaseManifest(t, scratch, manifestBytes, "")
+			exitCode, result, _, _ := runReleaseEvalManifest(t, script)
+			if exitCode != 2 {
+				t.Fatalf("half ack pair must REFUSE (exit 2); got %d", exitCode)
+			}
+			if result.Classification != "evaluator-error" {
+				t.Errorf("half ack pair → evaluator-error; got %q", result.Classification)
+			}
+		})
+	}
+}
+
+// TestCheckDefer_Manifest_RecurrenceAckPair_NullFieldsRefuses — an explicit
+// null value for either ack field is PRESENT (the key exists) and so enters the
+// pair-contract block, where the typeof check rejects null (typeof null ===
+// "object", not "number") → evaluator-error. This pins that presence is detected
+// by key existence, NOT value truthiness: a null half-pair must NOT be treated
+// as absent (which would let it pass as a v1 record — a fail-open on a malformed
+// manifest). The valid base (count=2, ack=2) is mutated via string replacement
+// to inject null (the manifestRecordSpec *int fields cannot express null).
+func TestCheckDefer_Manifest_RecurrenceAckPair_NullFieldsRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		repl []string // pairs of (find, replaceWith) applied in order
+	}{
+		{"null-count-only", []string{`"recurrence_count": 2`, `"recurrence_count": null`}},
+		{"null-ack-only", []string{`"last_acknowledged_count": 2`, `"last_acknowledged_count": null`}},
+		{"both-null", []string{
+			`"recurrence_count": 2`, `"recurrence_count": null`,
+			`"last_acknowledged_count": 2`, `"last_acknowledged_count": null`,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scratch, script, _ := setupReleaseEvalRepo(t)
+			spec := manifestSpec{
+				ReleaseBaseKind:     "tag",
+				ReleaseBaseValue:    "v0.1.0",
+				ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+				Records:             []manifestRecordSpec{ackRecordSpec("defer-null", intptr(2), intptr(2))},
+			}
+			manifestBytes := buildManifestBytes(t, scratch, spec)
+			mutated := string(manifestBytes)
+			for i := 0; i+1 < len(tc.repl); i += 2 {
+				mutated = strings.ReplaceAll(mutated, tc.repl[i], tc.repl[i+1])
+			}
+			if mutated == string(manifestBytes) {
+				t.Fatalf("setup invariant: null mutation did not change manifest bytes; raw=\n%s", string(manifestBytes))
+			}
+			commitReleaseManifest(t, scratch, []byte(mutated), "")
+			exitCode, result, _, _ := runReleaseEvalManifest(t, script)
+			if exitCode != 2 {
+				t.Fatalf("null ack field must REFUSE (exit 2, evaluator-error); got %d", exitCode)
+			}
+			if result.Classification != "evaluator-error" {
+				t.Errorf("null ack field → evaluator-error; got %q", result.Classification)
+			}
+		})
+	}
+}
+
+// TestCheckDefer_Manifest_RecurrenceAckPair_DispositionStillHonored — after the
+// ack pair is current (count >= ack), the explicit disposition matrix controls
+// exactly as specified (memo §"Manifest-v2 disposition interaction"): block
+// continues to block; disclose+valid permits with disclosure; override_required
+// permits via the override path. The ack fields are ORTHOGONAL to the
+// disposition and must not perturb it.
+func TestCheckDefer_Manifest_RecurrenceAckPair_DispositionStillHonored(t *testing.T) {
+	t.Run("block-still-blocks", func(t *testing.T) {
+		scratch, script, _ := setupReleaseEvalRepo(t)
+		r := ackRecordSpec("defer-ack-block", intptr(2), intptr(2))
+		r.Disposition = "block"
+		spec := manifestSpec{
+			ReleaseBaseKind:     "tag",
+			ReleaseBaseValue:    "v0.1.0",
+			ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+			Records:             []manifestRecordSpec{r},
+		}
+		manifestBytes := buildManifestBytes(t, scratch, spec)
+		commitReleaseManifest(t, scratch, manifestBytes, "")
+		exitCode, result, _, _ := runReleaseEvalManifest(t, script)
+		if exitCode != 1 {
+			t.Fatalf("ack+block must still REFUSE (exit 1, blocker); got %d", exitCode)
+		}
+		if result.Classification != "blocker" {
+			t.Errorf("ack+block → blocker; got %q", result.Classification)
+		}
+	})
+	t.Run("disclose-valid-still-allows", func(t *testing.T) {
+		scratch, script, _ := setupReleaseEvalRepo(t)
+		spec := manifestSpec{
+			ReleaseBaseKind:     "tag",
+			ReleaseBaseValue:    "v0.1.0",
+			ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+			Records:             []manifestRecordSpec{ackRecordSpec("defer-ack-disclose", intptr(2), intptr(2))},
+		}
+		manifestBytes := buildManifestBytes(t, scratch, spec)
+		commitReleaseManifest(t, scratch, manifestBytes, "")
+		exitCode, result, _, _ := runReleaseEvalManifest(t, script)
+		if exitCode != 0 {
+			t.Fatalf("ack+disclose+valid must ALLOW (exit 0); got %d (err=%v)", exitCode, result.Error)
+		}
+		if result.Classification != "disclose" {
+			t.Errorf("ack+disclose+valid → disclose; got %q", result.Classification)
+		}
+	})
+	t.Run("override-required-still-requires-ceremony", func(t *testing.T) {
+		scratch, script, _ := setupReleaseEvalRepo(t)
+		r := ackRecordSpec("defer-ack-override", intptr(2), intptr(2))
+		r.Disposition = "override_required"
+		r.Override = &manifestOverrideSpec{
+			ReleaseVersion: "v0.13.0",
+			ApprovedBy:     "operator",
+			ApprovedAt:     "2026-07-30T00:00:00Z",
+			Reason:         "ship it",
+		}
+		spec := manifestSpec{
+			ReleaseBaseKind:     "tag",
+			ReleaseBaseValue:    "v0.1.0",
+			ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+			Records:             []manifestRecordSpec{r},
+		}
+		manifestBytes := buildManifestBytes(t, scratch, spec)
+		commitReleaseManifest(t, scratch, manifestBytes, "")
+		// No --release-version → override_required refuses (ceremony required).
+		exitCode, result, _, _ := runReleaseEvalManifest(t, script)
+		if exitCode != 1 {
+			t.Fatalf("ack+override_required without ceremony must REFUSE (exit 1); got %d", exitCode)
+		}
+		if result.Classification != "blocker" {
+			t.Errorf("ack+override_required no ceremony → blocker; got %q", result.Classification)
+		}
+	})
 }
