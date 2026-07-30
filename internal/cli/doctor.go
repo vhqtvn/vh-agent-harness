@@ -70,6 +70,7 @@ var doctorCmd = &cobra.Command{
   f2-pairs        F2 canonical+MD pairs structurally consistent  FAIL if pair incomplete / digest mismatch / stale projection
   head-progress   last N successful closeouts advanced HEAD  WARN if post_commit_head flatlined across N closeouts (Pattern 4); SKIP greenfield
   complexity-advisory repo-snapshot scan of nominated files    WARN if candidates above threshold (advisory only; NEVER FAIL)
+  recurrence-state canonical recurrence groups + defects       WARN if malformed/conflicts/uncollapsed; INFO clean; SKIP none
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -375,6 +376,29 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	car := checkComplexityAdvisory(abs)
 	fmt.Fprintln(out, "    "+car.String())
 	applyTier(car.tier, &problems, &warns)
+
+	// 21. recurrence-state (the recurrence-signature diagnostic, INFORMS only).
+	//     Surfaces the four diagnostic categories (memo efa53fb, §Placement
+	//     "Doctor") over the .local/coordinator/tasks/ card population by
+	//     consuming the PURE derivation (internal/memory/recurrence):
+	//     (1) canonical recurrence groups — informational identity / symptom
+	//     class / observation count; (2) malformed identity — a card's
+	//     recurrence block fails a load-bearing shape/consistency check; (3)
+	//     conflicting aliases — an ambiguous alias map (conflicting canonical
+	//     claims / a cycle Derive had to break); (4) uncollapsed duplicates —
+	//     N recurrence-bearing cards sharing an effective_recurrence_id exist
+	//     as separate cards (producer dedup bypass — manual/direct writes that
+	//     skipped the Slice-3 dedup path). TIERING is advisory-only (NEVER
+	//     FAIL): WARN when any defect is found, INFO when recurrence cards
+	//     exist and are clean, SKIP when no card carries a recurrence block.
+	//     This is the SAFETY LAYER INFORMing (doctor detects + reports; the
+	//     release gate, Slice 5, ACTs / fails closed). The uncollapsed-
+	//     duplicates check DETECTS producer-bypass; it does NOT enforce merging
+	//     (the producer owns writes; the gate owns enforcement).
+	fmt.Fprintln(out, "  recurrence-state:")
+	rr := checkRecurrenceState(abs)
+	fmt.Fprintln(out, "    "+rr.String())
+	applyTier(rr.tier, &problems, &warns)
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)
