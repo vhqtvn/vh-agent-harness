@@ -83,9 +83,13 @@ type EffectiveMap map[string]EffectiveEntry
 //     class, or touches an off-lattice class.
 //   - project-wins precedence holds ONLY for accepted (raise/no-op) overrides.
 //     A downgrade override is rejected even though project-wins in general.
-//   - The first INVALID class literal encountered among the platform defaults
-//     aborts immediately with that InvalidClassError (corrupted upstream input
-//     is not partially honored).
+//   - Defaults are validated in deterministic sorted-path order. The first
+//     INVALID class literal encountered — that of the lexicographically-first
+//     offending default path — aborts immediately with that InvalidClassError
+//     (corrupted upstream input is not partially honored). The abort decision
+//     is deterministic regardless; sorting makes the REPORTED offending class
+//     deterministic too, so "first" is an honest ordering rather than an
+//     artifact of Go-map iteration.
 //
 // When one or more overrides are rejected, Resolve returns the partial effective
 // map (defaults applied; accepted overrides applied) AND a non-nil error joining
@@ -99,8 +103,16 @@ func Resolve(defaults ModuleDefaults, overrides Overrides) (EffectiveMap, error)
 
 	// 1. Seed from platform defaults. Validate each class literal up front: an
 	//    invalid default is corrupted upstream input — abort rather than
-	//    partially honoring it.
-	for path, rule := range defaults {
+	//    partially honoring it. Iterate in deterministic sorted-path order so the
+	//    reported offending class is stable when >=2 defaults are invalid (see
+	//    the doc note above; the abort happens regardless of order).
+	defPaths := make([]string, 0, len(defaults))
+	for p := range defaults {
+		defPaths = append(defPaths, p)
+	}
+	sort.Strings(defPaths)
+	for _, path := range defPaths {
+		rule := defaults[path]
 		if !rule.Class.IsValid() {
 			return effective, &InvalidClassError{Class: string(rule.Class)}
 		}

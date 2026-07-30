@@ -294,6 +294,49 @@ func TestResolve_InvalidDefaultClassAborts(t *testing.T) {
 	}
 }
 
+// TestResolve_InvalidDefaultReportedIsDeterministic pins the reporting
+// determinism contract for invalid platform defaults (contract-invariant-audit
+// pilot run, finding F3, classes C5/C4). Resolve documents that defaults are
+// validated in deterministic sorted-path order, so the offending class reported
+// by the aborting InvalidClassError is stable.
+//
+// The hazard this guards: Resolve's seeding loop iterates the platform-default
+// map, whose Go-map iteration order is nondeterministic. With >=2 corrupted
+// defaults carrying DISTINCT invalid literals, a plain `for path := range
+// defaults` would surface whichever class its map iteration reached first — so
+// the REPORTED offending class (InvalidClassError.Class) would vary run to run,
+// contradicting the "first" ordering the doc promises. TestResolve above uses a
+// SINGLE invalid default and so cannot expose the nondeterminism.
+//
+// This test seeds TWO invalid defaults with distinct literals and asserts, over
+// many iterations (to exercise map-iteration nondeterminism), that the reported
+// class is always the one on the lexicographically-first path. Resolve must
+// still abort on invalid defaults (behavior preserved); only the REPORTED
+// default is deterministic.
+func TestResolve_InvalidDefaultReportedIsDeterministic(t *testing.T) {
+	// Two invalid literals on two paths; sorted order is "a" < "b", so the
+	// deterministic reported class is the one on path "a".
+	def := ModuleDefaults{
+		"a": PathRule{Class: Class("bogus_a")},
+		"b": PathRule{Class: Class("bogus_b")},
+	}
+	const want = Class("bogus_a") // class of the lexicographically-first path
+	const iterations = 50
+	for i := 0; i < iterations; i++ {
+		_, err := Resolve(def, nil)
+		var ice *InvalidClassError
+		if !errors.As(err, &ice) {
+			t.Fatalf("iteration %d: err must be *InvalidClassError; got %T: %v", i, err, err)
+		}
+		if Class(ice.Class) != want {
+			t.Fatalf("iteration %d: reported invalid class = %q, want deterministic %q "+
+				"(the class of the lexicographically-first invalid default path); "+
+				"Resolve must validate defaults in sorted-path order (audit F3)",
+				i, ice.Class, want)
+		}
+	}
+}
+
 // --- Resolve: multi-violation join -----------------------------------------
 
 // TestResolve_MultipleViolationsJoined: several bad overrides in one pass all
