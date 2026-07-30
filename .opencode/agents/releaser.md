@@ -511,9 +511,23 @@ The readiness artifact binds the model-driven gates (G1-coverage through
 G5-curated-note) to the release-prep commit; the wrapper independently
 re-checks the deterministic gates (G0/G0b/G0c) at tag time, so neither surface can
 both author AND authorize the same gate. G0c is `vh-agent-harness doctor`
-(all 15 checks, including #12 defer-liveness, #13 staged-errata-content, #14 behavioral-closure, and #15 dev-stale-embed) — a
+(all 21 checks, including #12 defer-liveness, #13 staged-errata-content, #14 behavioral-closure, #15 dev-stale-embed, #20 complexity-advisory, and #21 recurrence-state) — a
 non-HEALTHY doctor refuses the tag. This makes doctor a HARD machine gate, not a
 human-remembered pre-flight.
+
+> **Recurrence-ack enforcement (doctor #12, release-time fail-closed).** When a
+> recurrence-bearing defer carries the manifest acknowledgement pair
+> (`recurrence_count` + `last_acknowledged_count`), check #12 compares the DERIVED
+> count (read from the live card) against the committed
+> `last_acknowledged_count` and refuses the tag when the count exceeds the ack —
+> a new observation must not slip through under a stale acknowledgement. An
+> uncollapsed duplicate (≥2 cards sharing an effective recurrence id, a
+> producer-dedup bypass) also refuses. Both are dormant when no release is
+> imminent. The remedy is operator re-adjudication (bump the manifest's
+> `last_acknowledged_count` to the current count), NOT a code change — do not
+> invent a recovery recipe that edits code or weakens the gate. Schema-v1
+> manifest records without the pair are unaffected (the ack check is dormant for
+> them).
 
 **Prerequisite — parent orchestrator owns the readiness invocation, against
 the note commit N.** At the start of Step 3.2, HEAD = N (the note commit from

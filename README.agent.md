@@ -960,8 +960,9 @@ export default function transform({ context }) {
 - **Verify:** `vh-agent-harness doctor` (lineage, armed-schema, managed-drift,
   overlay-perm, environment, config-refs, gitignore, auto-classifier,
   auto-gate-ignore, skills, subagent-depth, defer-liveness,
-  staged-errata-content, behavioral-closure, f1-envelope, f1-f2-consistency,
-  f2-pairs, head-progress, complexity-advisory). The `head-progress` check reads the commit-gate's
+  staged-errata-content, behavioral-closure, dev-stale-embed, f1-envelope,
+  f1-f2-consistency, f2-pairs, head-progress, complexity-advisory,
+  recurrence-state). The `head-progress` check reads the commit-gate's
   durable closeout ledger (`.git/commit-gate/closeouts.log`) and WARNs when the
   last N (default 3, env `COMMIT_GATE_STALE_HEAD_THRESHOLD`) successful closeouts
   all recorded the same `post_commit_head` — a flatline signalling commits may
@@ -1063,8 +1064,10 @@ export default function transform({ context }) {
   merged:{...}}` on stdout. On `merge` the producer updates the canonical card
   (count bumped, observation appended, ack held → unacknowledged) instead of
   spawning a new card; on `new_card` it writes fresh. This INFORMs only — the
-  producer APPLIES the convenience; the release gate (future Slice 5) is the
-  transition authority. Not normally run by humans.
+  producer APPLIES the convenience; doctor check #12 (`defer-liveness`) is the
+  transition authority that FAILS-CLOSED at release time when a recurrence is
+  unacknowledged (see "Single release-authority model" below). Not normally run
+  by humans.
 
 ## Extending the harness (`/harness`)
 
@@ -1561,7 +1564,19 @@ handshake, and override semantics live in
 - `records[]` — one entry per DEFER finding, with `release_relevance ∈
   {yes,no,unknown}`, `disposition ∈ {block,disclose,override_required}`,
   `metadata_state ∈ {valid,stale,invalid}`, summary/reason/source_ref, and an
-  optional `override` object.
+  optional `override` object. A record MAY also carry the OPTIONAL recurrence
+  acknowledgement pair `recurrence_count` + `last_acknowledged_count`; schema-v1
+  entries omit them (bounded backward-compat — the ack check is dormant for
+  records without the pair). When the pair is present, doctor check #12 reads the
+  committed `last_acknowledged_count` from the manifest and compares it against
+  the DERIVED recurrence count (computed from the live card the producer wrote,
+  NOT the manifest's attested `recurrence_count`), FAILS-CLOSED at release time
+  when the derived count exceeds the ack (an unacknowledged recurrence — a new
+  observation must not slip through under a stale acknowledgement). The remedy is
+  operator re-adjudication (bump the manifest's `last_acknowledged_count` to the
+  current count), NOT a code change. An uncollapsed duplicate (≥2 cards sharing an
+  effective recurrence id, a producer-dedup bypass) is also a release-blocking
+  failure. Both are dormant when no release is imminent.
 
 ### Coordinator-adoption marker (defer-liveness opt-in, unmanaged)
 
@@ -1620,10 +1635,11 @@ operator release-prep. The ceremony produces THREE sequential single-path
 (manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`.
 The release-tag wrapper's deterministic gates refuse the tag unless each
 commit binds to its predecessor exactly. The wrapper also runs **G0c**
-  (`vh-agent-harness doctor` — all 20 checks, including #12 defer-liveness,
+  (`vh-agent-harness doctor` — all 21 checks, including #12 defer-liveness,
   #13 staged-errata-content, #14 behavioral-closure, #15 dev-stale-embed,
-  #16 f1-envelope, #17 f1-f2-consistency, #18 f2-pairs, #19 head-progress, and
-  #20 complexity-advisory) as a hard machine gate AFTER the clean-worktree
+  #16 f1-envelope, #17 f1-f2-consistency, #18 f2-pairs, #19 head-progress,
+  #20 complexity-advisory, and #21 recurrence-state) as a hard machine gate
+  AFTER the clean-worktree
 gate (G0b) and BEFORE the readiness-pass artifact gate (G1-G5). A
 non-HEALTHY doctor refuses the tag. This makes doctor a HARD ceremony stop,
 not a human-remembered pre-flight. Push-only mode exits before G0c (the tag
