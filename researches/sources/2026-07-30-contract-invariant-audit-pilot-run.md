@@ -93,7 +93,7 @@ missing/duplicate/unknown/non-terminal/shard defects.
 The 4 `clean` dispositions each carry unit-level evidence (not bulk-defaulted):
 `doc.go` (doc matches implementation; forward-looking notes honestly hedged),
 `errors.go` (four typed errors are `errors.As`-detectable, join-safe,
-self-explaining; the `NotHandOverridableError.Path`-filled-by-resolver分工 is
+self-explaining; the `NotHandOverridableError.Path`-filled-by-resolver division of responsibility is
 documented), and the two test files (executable specs, not contract authorities;
 test-coverage adequacy is out of scope per SKILL.md "When NOT to use").
 
@@ -207,7 +207,7 @@ under-sampled class.
 
 | sample_id | candidate / unit | original | second_opinion | basis |
 |---|---|---|---|---|
-| R1 | errors.go / resolve.go `NotHandOverridableError.Path` mutation (resolve.go:172-176 sets `nhe.Path` on an error returned by Compare) | clean (dismissed as "documented, minor") | **confirm** | `Compare` allocates a fresh `&NotHandOverridableError{…}` per call (ordering.go:80), so the mutation has no aliasing hazard across calls; the path-agnostic→path-filled分工 is documented at the call site and handled in the message. Original disposition holds. |
+| R1 | errors.go / resolve.go `NotHandOverridableError.Path` mutation (resolve.go:172-176 sets `nhe.Path` on an error returned by Compare) | clean (dismissed as "documented, minor") | **confirm** | `Compare` allocates a fresh `&NotHandOverridableError{…}` per call (ordering.go:80), so the mutation has no aliasing hazard across calls; the path-agnostic→path-filled division of responsibility is documented at the call site and handled in the message. Original disposition holds. |
 | R2 (class probe) | whole package — **C2 hidden side effects** (probed as the suspected under-sampled class) | n/a | **no instances found** | Package-level state is write-once-at-init only (`allClasses`, `validClassList`, `protectionRank` — all initialized via `var`/IIFE, never reassigned). No `init()`, no I/O, no goroutines, no receiver mutation. `Resolve`/`decideOverride`/`Compare` are pure. The package is pure-functional; C2 is genuinely absent. Its only "state" is the dual-declaration C1 concern (already captured as F4), not a hidden side effect. |
 
 **Effect on ledger:** none (no restore/downgrade/escalate). The primary pass was
