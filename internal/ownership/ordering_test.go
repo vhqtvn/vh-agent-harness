@@ -42,6 +42,50 @@ func TestClass_IsValid(t *testing.T) {
 	}
 }
 
+// TestAllClasses_AndAllClassesMap_AgreeOnVocabulary pins the DUAL declaration of
+// the valid-class vocabulary (contract-invariant-audit pilot run, finding F4,
+// classes C1/C3). The six armed classes are declared TWICE in package ownership:
+//
+//   - the allClasses map (class.go), consulted by IsValid / ParseClass; and
+//   - the AllClasses() slice literal (class.go), consumed by error guidance via
+//     validClassList and by canonical-order tests.
+//
+// The intended invariant is keys(allClasses) == set(AllClasses()) in BOTH
+// directions. TestClass_IsValid above enforces only ONE direction
+// (AllClasses() ⊆ allClasses-keys: every listed class is valid). The reverse —
+// a class added to the map but omitted from the slice — was previously
+// unenforced: such a class would pass IsValid while being silently absent from
+// AllClasses() / error guidance, with no test failing. This test pins both
+// directions so any future divergence fails immediately.
+//
+// AllClasses() does NOT feed any safety decision (IsValid/Compare/protectionRank
+// do not consult it), so divergence corrupts only error guidance, not the
+// lattice decision. This is a test-only addition; it does NOT change either
+// declaration.
+func TestAllClasses_AndAllClassesMap_AgreeOnVocabulary(t *testing.T) {
+	// keys(allClasses) ⊆ set(AllClasses()): every map key (i.e. every class that
+	// IsValid accepts) appears in the slice (i.e. is reachable via AllClasses()
+	// and error guidance).
+	inSlice := make(map[Class]bool, len(allClasses))
+	for _, c := range AllClasses() {
+		inSlice[c] = true
+	}
+	for c := range allClasses {
+		if !inSlice[c] {
+			t.Errorf("vocabulary divergence: class %q is in the allClasses map (so IsValid "+
+				"accepts it) but is NOT in AllClasses()/error guidance — the two declarations "+
+				"must agree (audit F4)", c)
+		}
+	}
+	// set(AllClasses()) ⊆ keys(allClasses): every slice entry is a valid map key.
+	for _, c := range AllClasses() {
+		if !allClasses[c] {
+			t.Errorf("vocabulary divergence: class %q is in AllClasses() but is NOT a key of "+
+				"the allClasses map — the two declarations must agree (audit F4)", c)
+		}
+	}
+}
+
 // TestClass_IsHandOverridable confirms the on-lattice vs off-lattice split.
 func TestClass_IsHandOverridable(t *testing.T) {
 	onLattice := []Class{ClassPlatformManaged, ClassPlatformArmed, ClassOverlayExtension, ClassProjectOwned}
