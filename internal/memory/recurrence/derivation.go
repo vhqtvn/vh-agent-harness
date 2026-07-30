@@ -78,8 +78,8 @@ type Alias struct {
 // (status, files_in_scope, ...) — those belong to internal/memory/claims, not
 // to recurrence identity.
 type Card struct {
-	TaskID     string
-	Recurrence *Block // nil → legacy card → effective identity = TaskID
+	TaskID     string `json:"task_id"`
+	Recurrence *Block `json:"recurrence,omitempty"` // nil → legacy card → effective identity = TaskID
 }
 
 // Observation is one card's contribution to a canonical recurrence group. The
@@ -87,8 +87,8 @@ type Card struct {
 // as the card/report identifier even after recurrence identity is added") and
 // its evidence entries are carried verbatim for aggregation.
 type Observation struct {
-	TaskID   string
-	Evidence []Evidence
+	TaskID   string     `json:"task_id"`
+	Evidence []Evidence `json:"evidence,omitempty"`
 }
 
 // Group is ONE canonical recurrence entry: every card sharing a resolved

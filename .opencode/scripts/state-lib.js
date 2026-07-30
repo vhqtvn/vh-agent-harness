@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "url";
 import {
     validateF3DesignReadiness,
@@ -4043,6 +4044,336 @@ function parseCoordinationReview(reviewPath, options = {}) {
     return result;
 }
 
+
+// resolveHarnessBinary picks the vh-agent-harness binary to invoke for the
+// recurrence dedup bridge. Resolution order:
+//   1. env VH_AGENT_HARNESS_BIN (explicit override; tests use this)
+//   2. repo-relative bin/vh-agent-harness (dev/dogfood: freshly built)
+//   3. "vh-agent-harness" on PATH (consumer install)
+// Returns null only if no explicit override and no repo bin exists and the
+// bare name is not on PATH (checked lazily by execFileSync later).
+function resolveHarnessBinary() {
+    const envBin = (process.env.VH_AGENT_HARNESS_BIN || "").trim();
+    if (envBin) return envBin;
+    const repoBin = path.join(repoRoot(), "bin", "vh-agent-harness");
+    if (fs.existsSync(repoBin)) return repoBin;
+    return "vh-agent-harness"; // PATH fallback; execFileSync searches PATH
+}
+
+// resolveRecurrenceDedup consults the Go derivation via `vh-agent-harness
+// recurrence dedup` to decide whether an incoming recurrence-bearing card is a
+// REPEAT of a known canonical (merge → the producer updates the canonical
+// instead of spawning) or a new defect (new_card → write fresh).
+//
+// FAIL-CLOSED: if the binary is unavailable, the scan errors, or the response
+// is malformed, this THROWS rather than returning a new_card decision. A
+// fail-open to new_card would silently spawn a SECOND card for one
+// effective_recurrence_id, violating the slice's defining N→1 invariant.
+// Fail-closed forces the caller to see the error and retry; the release gate
+// (Slice 5) provides additional fail-closed enforcement on unadjudicated
+// recurrences.
+//
+// @param {{task_id: string, recurrence: object}} incomingCard
+// @returns {{action: string, effective_id: string, canonical_task_id: string, merged: ?object}}
+// @throws {Error} if the bridge scan, binary execution, or response parsing fails
+function resolveRecurrenceDedup(incomingCard) {
+    // Scan existing recurrence-bearing cards (exclude the incoming card itself
+    // so an update to an existing card does not "merge" it with itself).
+    let existingCards;
+    try {
+        const scanned = scanCoordinationTaskCards();
+        existingCards = scanned
+            .filter(
+                (entry) =>
+                    !entry.degraded &&
+                    entry.task &&
+                    entry.task.recurrence &&
+                    entry.taskID !== incomingCard.task_id,
+            )
+            .map((entry) => ({
+                task_id: entry.taskID,
+                recurrence: entry.task.recurrence,
+            }));
+    } catch (e) {
+        throw new Error(
+            `recurrence dedup scan failed (cannot determine merge target; fail-closed): ${e && e.message ? e.message : e}`,
+        );
+    }
+
+    const bin = resolveHarnessBinary();
+    let raw;
+    try {
+        raw = execFileSync(
+            bin,
+            ["recurrence", "dedup"],
+            {
+                input: JSON.stringify({
+                    incoming: {
+                        task_id: incomingCard.task_id,
+                        recurrence: incomingCard.recurrence,
+                    },
+                    existing: existingCards,
+                }),
+                encoding: "utf8",
+                timeout: 10000,
+                stdio: ["pipe", "pipe", "ignore"],
+            },
+        );
+    } catch (e) {
+        throw new Error(
+            `recurrence dedup bridge failed — binary unavailable or timed out (cannot determine merge target; fail-closed): ${e && e.message ? e.message : e}`,
+        );
+    }
+
+    let decision;
+    try {
+        decision = JSON.parse(raw);
+    } catch (e) {
+        throw new Error(
+            `recurrence dedup bridge returned malformed JSON (fail-closed): ${e && e.message ? e.message : e}`,
+        );
+    }
+
+    if (decision && decision.action === "new_card") {
+        return decision; // valid: bridge ran successfully, no match
+    }
+    if (
+        decision &&
+        decision.action === "merge" &&
+        decision.merged &&
+        typeof decision.merged === "object" &&
+        decision.canonical_task_id
+    ) {
+        return decision; // valid: bridge ran successfully, match found
+    }
+    // Unknown action or structurally incomplete merge decision.
+    throw new Error(
+        `recurrence dedup bridge returned unexpected response (fail-closed): ${raw.slice(0, 200)}`,
+    );
+}
+
+// normalizeRecurrenceBlockForWrite validates an incoming recurrence block
+// against the task-card schema contract (task-card.schema.json:304-395)
+// BEFORE it reaches the persisted record. The schema requires:
+//   - string recurrence_id (minLength 1) — NO type coercion
+//   - string symptom_class_id (^recurrence.v1/.+$)
+//   - integer recurrence_count >= 0, last_acknowledged_count >= 0
+//   - ack-pair invariant recurrence_count >= last_acknowledged_count
+//   - additionalProperties:false at block, evidence[], and aliases[] levels
+//
+// This is WRITE-BOUNDARY validation (producer convenience), NOT gate-wired
+// schema enforcement (defer-018, Slice 5). It prevents a caller from
+// persisting a malformed recurrence block that would violate the schema.
+// On success, returns a FRESHLY-CONSTRUCTED conforming object (only known
+// properties, so no unexpected keys leak to disk). On failure, throws an
+// Error listing every validation problem.
+//
+// @param {object} recurrence
+// @returns {object} a schema-conforming recurrence block
+// @throws {Error} if the block violates the schema contract
+function normalizeRecurrenceBlockForWrite(recurrence) {
+    if (
+        typeof recurrence !== "object" ||
+        recurrence === null ||
+        Array.isArray(recurrence)
+    ) {
+        throw new Error("recurrence must be an object");
+    }
+    const problems = [];
+
+    // --- Top-level type checks (strict — no String() coercion) ---
+    if (
+        typeof recurrence.recurrence_id !== "string" ||
+        recurrence.recurrence_id.trim() === ""
+    ) {
+        problems.push(
+            "recurrence_id must be a non-empty string.",
+        );
+    }
+    if (
+        typeof recurrence.symptom_class_id !== "string" ||
+        !/^recurrence\.v1\/.+$/.test(recurrence.symptom_class_id)
+    ) {
+        problems.push(
+            "symptom_class_id must be a string matching ^recurrence.v1/<class>.",
+        );
+    }
+    if (
+        !Number.isInteger(recurrence.recurrence_count) ||
+        recurrence.recurrence_count < 0
+    ) {
+        problems.push("recurrence_count must be a non-negative integer.");
+    }
+    if (
+        !Number.isInteger(recurrence.last_acknowledged_count) ||
+        recurrence.last_acknowledged_count < 0
+    ) {
+        problems.push(
+            "last_acknowledged_count must be a non-negative integer.",
+        );
+    }
+    if (
+        Number.isInteger(recurrence.recurrence_count) &&
+        Number.isInteger(recurrence.last_acknowledged_count) &&
+        recurrence.recurrence_count < recurrence.last_acknowledged_count
+    ) {
+        problems.push(
+            "ack-pair invariant violated: recurrence_count < last_acknowledged_count.",
+        );
+    }
+
+    // --- Top-level additionalProperties: false ---
+    const BLOCK_ALLOWED = new Set([
+        "recurrence_id",
+        "symptom_class_id",
+        "recurrence_count",
+        "last_acknowledged_count",
+        "evidence",
+        "aliases",
+    ]);
+    for (const key of Object.keys(recurrence)) {
+        if (!BLOCK_ALLOWED.has(key))
+            problems.push(
+                `unknown property "${key}" (additionalProperties: false).`,
+            );
+    }
+
+    // --- evidence[] items (additionalProperties: false on each item) ---
+    const EVIDENCE_ALLOWED = new Set([
+        "kind",
+        "ref",
+        "note",
+        "capability",
+        "outcome",
+        "commit_subject",
+        "commit_range",
+    ]);
+    if (recurrence.evidence !== undefined) {
+        if (!Array.isArray(recurrence.evidence)) {
+            problems.push("evidence must be an array.");
+        } else {
+            recurrence.evidence.forEach((e, i) => {
+                if (
+                    typeof e !== "object" ||
+                    e === null ||
+                    Array.isArray(e)
+                ) {
+                    problems.push(`evidence[${i}] must be an object.`);
+                    return;
+                }
+                if (typeof e.kind !== "string" || e.kind.trim() === "")
+                    problems.push(
+                        `evidence[${i}].kind must be a non-empty string.`,
+                    );
+                if (typeof e.ref !== "string" || e.ref.trim() === "")
+                    problems.push(
+                        `evidence[${i}].ref must be a non-empty string.`,
+                    );
+                for (const opt of [
+                    "note",
+                    "capability",
+                    "outcome",
+                    "commit_subject",
+                    "commit_range",
+                ]) {
+                    if (e[opt] !== undefined && typeof e[opt] !== "string")
+                        problems.push(
+                            `evidence[${i}].${opt} must be a string if present.`,
+                        );
+                }
+                for (const key of Object.keys(e)) {
+                    if (!EVIDENCE_ALLOWED.has(key))
+                        problems.push(
+                            `evidence[${i}] unknown property "${key}" (additionalProperties: false).`,
+                        );
+                }
+            });
+        }
+    }
+
+    // --- aliases[] items (additionalProperties: false on each item) ---
+    const ALIAS_ALLOWED = new Set(["recurrence_id", "superseded", "note"]);
+    if (recurrence.aliases !== undefined) {
+        if (!Array.isArray(recurrence.aliases)) {
+            problems.push("aliases must be an array.");
+        } else {
+            recurrence.aliases.forEach((a, i) => {
+                if (
+                    typeof a !== "object" ||
+                    a === null ||
+                    Array.isArray(a)
+                ) {
+                    problems.push(`aliases[${i}] must be an object.`);
+                    return;
+                }
+                if (
+                    typeof a.recurrence_id !== "string" ||
+                    a.recurrence_id.trim() === ""
+                )
+                    problems.push(
+                        `aliases[${i}].recurrence_id must be a non-empty string.`,
+                    );
+                if (
+                    a.superseded !== undefined &&
+                    typeof a.superseded !== "boolean"
+                )
+                    problems.push(
+                        `aliases[${i}].superseded must be a boolean if present.`,
+                    );
+                if (a.note !== undefined && typeof a.note !== "string")
+                    problems.push(
+                        `aliases[${i}].note must be a string if present.`,
+                    );
+                for (const key of Object.keys(a)) {
+                    if (!ALIAS_ALLOWED.has(key))
+                        problems.push(
+                            `aliases[${i}] unknown property "${key}" (additionalProperties: false).`,
+                        );
+                }
+            });
+        }
+    }
+
+    if (problems.length) {
+        throw new Error(
+            `recurrence validation failed: ${problems.length} problem(s):\n${problems.map((p, i) => `${i + 1}. ${p}`).join("\n")}`,
+        );
+    }
+
+    // Return a FRESHLY-CONSTRUCTED conforming object so no unexpected
+    // properties from the input leak to the persisted record.
+    const out = {
+        recurrence_id: recurrence.recurrence_id,
+        symptom_class_id: recurrence.symptom_class_id,
+        recurrence_count: recurrence.recurrence_count,
+        last_acknowledged_count: recurrence.last_acknowledged_count,
+    };
+    if (recurrence.evidence !== undefined) {
+        out.evidence = recurrence.evidence.map((e) => {
+            const eo = { kind: e.kind, ref: e.ref };
+            for (const opt of [
+                "note",
+                "capability",
+                "outcome",
+                "commit_subject",
+                "commit_range",
+            ]) {
+                if (e[opt] !== undefined) eo[opt] = e[opt];
+            }
+            return eo;
+        });
+    }
+    if (recurrence.aliases !== undefined) {
+        out.aliases = recurrence.aliases.map((a) => {
+            const ao = { recurrence_id: a.recurrence_id };
+            if (a.superseded !== undefined) ao.superseded = a.superseded;
+            if (a.note !== undefined) ao.note = a.note;
+            return ao;
+        });
+    }
+    return out;
+}
+
 function saveCoordinationTask(sessionID, taskPayload, options = {}) {
     const actor = coordinationActorContext(sessionID, options);
     const input = taskPayload && typeof taskPayload === "object" ? taskPayload : {};
@@ -4051,11 +4382,149 @@ function saveCoordinationTask(sessionID, taskPayload, options = {}) {
             ? String(input.next_action || "").trim()
             : null;
     const explicitTaskID = String(input.task_id || "").trim();
-    const taskID = explicitTaskID
+    const requestedTaskID = explicitTaskID
         ? normalizeCoordinationTaskId(explicitTaskID)
         : generateCoordinationTaskId(input.title || "task");
+
+    // --- Write-boundary recurrence validation ---
+    // Validate the recurrence block BEFORE any dedup processing so no durable
+    // card carries an invalid acknowledgement pair (schema contract:
+    // task-card.schema.json:304-395). This is producer convenience, NOT
+    // gate-wired schema enforcement (defer-018, Slice 5). A recurrence block
+    // that is undefined or null passes through unchanged (legacy / remove).
+    let validatedRecurrence = input.recurrence;
+    if (input.recurrence !== undefined && input.recurrence !== null) {
+        validatedRecurrence = normalizeRecurrenceBlockForWrite(input.recurrence);
+    }
+
+    // --- Recurrence dedup (P1-MEMORY-001 Slice 3, WRITE-LAYER crux) ---
+    // If the incoming card carries a recurrence block, consult the Go
+    // derivation to decide whether it is a repeat of a known canonical (merge
+    // → update the canonical instead of spawning) or a new defect (new_card →
+    // write fresh). On merge, the write is redirected to the canonical task_id
+    // so NO new card is spawned; the canonical's recurrence block is updated
+    // with the merged block (count bumped, observation appended, ack held →
+    // unacknowledged). The producer APPLIES this convenience; the release gate
+    // (Slice 5) is the transition authority.
+    let dedup = null;
+    let taskID = requestedTaskID;
+    if (
+        validatedRecurrence &&
+        typeof validatedRecurrence === "object" &&
+        String(validatedRecurrence.recurrence_id || "").trim()
+    ) {
+        dedup = resolveRecurrenceDedup({
+            task_id: requestedTaskID,
+            recurrence: validatedRecurrence,
+        });
+        if (dedup.action === "merge" && dedup.canonical_task_id) {
+            taskID = dedup.canonical_task_id; // redirect to canonical
+        }
+    }
+    const isMerge = Boolean(dedup && dedup.action === "merge" && dedup.canonical_task_id);
+
     const existing = loadCoordinationTask(taskID, { required: false });
     const created = !existing.exists;
+
+    // MERGE PATH (recurrence repeat): update the canonical's recurrence block
+    // + append a recurrence_merged history event. The canonical's
+    // non-recurrence fields (title, status, scope, …) are AUTHORITY — the
+    // repeat's identity folds in ONLY via the merged recurrence block
+    // (count bumped, observation appended, ack held → unacknowledged). No
+    // new card is spawned; the incoming requestedTaskID is intentionally
+    // NOT persisted as a separate card.
+    //
+    // TOCTOU guard: the dedup decision (which canonical) is stable, but the
+    // merged block's recurrence_count was computed from a scan OUTSIDE the
+    // per-card lock. If a concurrent save bumped the canonical's count between
+    // the scan and lock acquisition, re-resolve from the lock-time state
+    // inside the callback. This narrows (does not eliminate) the race window;
+    // full concurrency integrity is the Slice 5 release-gate authority (the
+    // producer is convenience, not authority — see DEFER card
+    // defer-recurrence-toctou-race).
+    if (isMerge) {
+        const mergedSaved = updateCoordinationTask(taskID, (current) => {
+            let mergedBlock = dedup.merged;
+            const currentBlock = current.recurrence;
+            if (
+                currentBlock &&
+                mergedBlock &&
+                currentBlock.recurrence_count !==
+                    mergedBlock.recurrence_count - 1
+            ) {
+                // Stale scan: a concurrent save bumped the canonical's count
+                // OR changed which card is canonical. Re-resolve from the
+                // lock-time state so the count and observations reflect all
+                // prior merges. The re-resolve must confirm BOTH a merge AND
+                // the same canonical we hold the lock on — if a concurrent
+                // writer established a different card as the new canonical,
+                // adopting its merged block here would persist a foreign
+                // identity into the locked card (identity/history corruption).
+                const reDecision = resolveRecurrenceDedup({
+                    task_id: requestedTaskID,
+                    recurrence: validatedRecurrence,
+                });
+                if (
+                    reDecision.action === "merge" &&
+                    reDecision.merged &&
+                    reDecision.canonical_task_id === taskID
+                ) {
+                    mergedBlock = reDecision.merged;
+                } else {
+                    // Re-resolution did not confirm a merge for THIS canonical.
+                    // This can happen when the bridge fails-open (action=
+                    // new_card on binary timeout/error), when a genuine state
+                    // change means the incoming is no longer a repeat, or when
+                    // a concurrent writer established a DIFFERENT card as the
+                    // new canonical. ABORT the write instead of persisting the
+                    // stale pre-lock mergedBlock, which could overwrite a
+                    // concurrent merge and silently lose an observation or
+                    // corrupt recurrence identity. atomicWriteJson is never
+                    // reached because the callback throws before returning.
+                    // The caller can retry the operation.
+                    throw new Error(
+                        "recurrence merge aborted: lock-time re-resolution could not confirm merge " +
+                        "for the locked canonical (possible concurrent write, canonical-identity change, " +
+                        "or bridge failure); retry the operation.",
+                    );
+                }
+            }
+            return {
+                ...current,
+                recurrence: mergedBlock,
+                history: [
+                    ...(current.history || []),
+                    {
+                        at: isoZ(),
+                        event: "recurrence_merged",
+                        session_name: actor.session_name,
+                        status: current.status,
+                        note:
+                            `Recurrence repeat merged into canonical from incoming ${requestedTaskID} ` +
+                            `(count ${mergedBlock.recurrence_count}, disposition now unacknowledged: count > ack).`,
+                    },
+                ],
+            };
+        });
+        const mergedOverlaps = detectCoordinationTaskOverlaps(
+            mergedSaved.task_id,
+            mergedSaved.files_in_scope,
+        );
+        return {
+            ...actor,
+            created: false,
+            merged_into: dedup.canonical_task_id,
+            path: relativeToRepo(coordinationTaskPath(mergedSaved.task_id)),
+            task: mergedSaved,
+            summary: summarizeCoordinationTask(mergedSaved),
+            overlaps: mergedOverlaps,
+            ...recommendedCoordinationTaskFields(
+                mergedSaved,
+                actor.session_name || null,
+            ),
+        };
+    }
+
     const saved = updateCoordinationTask(taskID, (current) => {
         // Collect every validation problem in this callback before throwing.
         // We never want to partially mutate `next` and then throw, so we
@@ -4201,6 +4670,10 @@ function saveCoordinationTask(sessionID, taskPayload, options = {}) {
                 input.owner_notes !== undefined
                     ? normalizeStringList(input.owner_notes)
                     : current.owner_notes,
+            recurrence:
+                validatedRecurrence !== undefined
+                    ? validatedRecurrence
+                    : current.recurrence,
             status: nextStatus,
             next_action:
                 explicitNextAction !== null
@@ -4243,6 +4716,13 @@ function saveCoordinationTask(sessionID, taskPayload, options = {}) {
             }),
         );
         throwCollectedErrors(errors);
+        // null recurrence = explicit removal: delete the property entirely
+        // so the persisted card does not carry a schema-invalid
+        // `recurrence: null` (the schema requires type:object; nullable
+        // fields elsewhere use [type,null] — recurrence does not).
+        if (validatedRecurrence === null) {
+            delete next.recurrence;
+        }
         return next;
     });
     const overlaps = detectCoordinationTaskOverlaps(

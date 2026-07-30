@@ -1054,6 +1054,17 @@ export default function transform({ context }) {
   auto-uploaded** — the operator decides if/when to share. Run `--dry-run`
   first to review the manifest and redaction counts. See the `diagnostics-export`
   skill for the operator review checklist.
+- **Recurrence dedup bridge:** `vh-agent-harness recurrence dedup` is a stateless
+  stdin/stdout JSON bridge between the JS task-card producer
+  (`saveCoordinationTask` in `.opencode/scripts/state-lib.js`) and the pure Go
+  recurrence derivation (`internal/memory/recurrence`). The producer scans
+  existing cards, sends `{incoming:{task_id,recurrence:{...}}, existing:[...]}` on
+  stdin, and receives `{action:"merge"|"new_card", effective_id, canonical_task_id,
+  merged:{...}}` on stdout. On `merge` the producer updates the canonical card
+  (count bumped, observation appended, ack held → unacknowledged) instead of
+  spawning a new card; on `new_card` it writes fresh. This INFORMs only — the
+  producer APPLIES the convenience; the release gate (future Slice 5) is the
+  transition authority. Not normally run by humans.
 
 ## Extending the harness (`/harness`)
 

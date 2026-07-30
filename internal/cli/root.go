@@ -65,6 +65,7 @@ Health & diagnostics
   preflight            verify environment + install integrity before install/upgrade
   doctor               verify install health
   proposals            list recorded armed-file conflicts (the proposal ledger)
+  recurrence dedup     recurrence dedup bridge (producer stdin/stdout JSON; INFORMS only)
   skill                list and validate OpenCode skills (frontmatter health)
   diff                 inspect drift vs. the embedded corpus
   diagnostics-export   bundle harness state into a redacted, shareable archive (--dry-run)
