@@ -31,8 +31,8 @@ func TestClassifyLeaf_ProjectOwned(t *testing.T) {
 		if ownership.IsMutableByGenericRender(c) {
 			t.Errorf("D2 VIOLATION: project_owned hook leaf %q must NOT be platform-mutable (IsMutableByGenericRender returned true)", leaf)
 		}
-		if LeafIsPlatformMutable(leaf) {
-			t.Errorf("LeafIsPlatformMutable(%q) = true, want false", leaf)
+		if LeafIsMutableByGenericRender(leaf) {
+			t.Errorf("LeafIsMutableByGenericRender(%q) = true, want false", leaf)
 		}
 	}
 }

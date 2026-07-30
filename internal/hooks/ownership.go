@@ -34,10 +34,10 @@ func ClassifyLeaf(leaf string) ownership.Class {
 	return ownership.ClassProjectOwned
 }
 
-// LeafIsPlatformMutable reports whether a platform (ungated) update may overwrite
+// LeafIsMutableByGenericRender reports whether a platform (ungated) update may overwrite
 // a hook leaf. It is always FALSE for project_owned leaves: this is the D2 guard
 // that keeps consumer-authored hooks safe across `vh-agent-harness update`.
-func LeafIsPlatformMutable(leaf string) bool {
+func LeafIsMutableByGenericRender(leaf string) bool {
 	return ownership.IsMutableByGenericRender(ClassifyLeaf(leaf))
 }
 

@@ -121,7 +121,7 @@ func offLatticeClass(from, to Class) Class {
 //   - external_generated : false (provider/project-owned; seeded once, then drift-checked only)
 //   - local_only         : false (not on the platform update path)
 //
-// This predicate is the guard behind hooks.LeafIsPlatformMutable
+// This predicate is the guard behind hooks.LeafIsMutableByGenericRender
 // (internal/hooks/ownership.go): it proves consumer-authored hook leaves classify
 // project_owned and so are never overwritten by an ungated platform update. It is
 // NOT called from the seam apply path (internal/substrate/apply.go): that path
