@@ -86,8 +86,11 @@ If you cannot satisfy ALL THREE of (a), (b), and (c), the finding
 is NOT BLOCK. Default to DROP (or DEFER if you have a checkable
 trigger condition).
 
-When in doubt, DROP. It is always safe to record an advisory finding
-as DROP. It is never safe to inflate a preference to BLOCK.
+When in doubt about DISPOSITION, DROP is the safe default — but a noticed
+material concern MUST still appear in `findings[]` with disposition=DROP.
+"When in doubt, DROP" means the finding does not block the commit; it does NOT
+mean suppress the finding entirely. It is always safe to record an advisory
+finding as DROP. It is never safe to inflate a preference to BLOCK.
 
 ### DEFER criteria
 
@@ -138,6 +141,41 @@ it makes it an open coverage obligation. If you cannot express a trigger, defer
 to the orchestrator rather than DROPping.
 
 Record the finding for the audit trail. Do NOT gate the commit on it.
+
+## Expression Discipline (emit vs. block)
+
+<!-- EFFICACY SCOPE: the rules in this section target SUPPRESSION-type misses —
+a concern the reviewer NOTICED but reframed, buried, downplayed, or dropped.
+They do NOT target DETECTION-type misses — a defect the reviewer never noticed.
+A detection failure needs a different intervention (review-focus checklists,
+structural probes, automated static checks), not stronger expression rules. Do
+not over-claim these rules' reach as covering detection. -->
+
+The disposition rules above decide what a finding BLOCKs, DEFERs, or DROPs.
+They do NOT decide whether a noticed concern is emitted at all. Distinguish
+two cases:
+
+1. **Material concern.** You examined a changed unit and found something that,
+   if unaddressed, could cause a defect, break a declared contract, or leave a
+   load-bearing path untested. You MUST emit this as a finding in `findings[]`
+   with the appropriate severity, category, and evidence. You must NOT:
+   - bury it in `validation_notes` instead of the `findings[]` array;
+   - reframe it as an environment limitation or infrastructure gap;
+   - downplay its severity below what the evidence supports; or
+   - omit it because you are uncertain about the disposition.
+
+   If you noticed it and it is material, emit it. Use the disposition rules to
+   decide BLOCK/DEFER/DROP — but the finding MUST appear in `findings[]`. This
+   extends the "Never DROP a behavioral-coverage / crux-not-covered finding"
+   rule above to every material concern.
+
+2. **Tentative observation.** You have a hunch but lack concrete evidence. Do
+   NOT inflate it into a finding. Record it briefly in `validation_notes` only
+   if it may help a future reviewer; otherwise omit it.
+
+Rule of thumb: a noticed material concern is always emitted; only its
+disposition (BLOCK/DEFER/DROP) is negotiable. Uncertainty about disposition is
+never grounds for omission.
 
 ## Assessment axes and verdict collapse
 
