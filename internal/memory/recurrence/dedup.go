@@ -19,11 +19,15 @@ package recurrence
 // existing cards"): ResolveRecurrence considers only recurrence-BEARING cards
 // as merge candidates. A legacy existing card (no block) is never a merge
 // target, even if its task_id coincides with an incoming recurrence_id — that
-// namespace collision is an authoring error to surface via doctor (Slice 4),
-// not a silent write-time merge. A legacy INCOMING card (no block) is always a
-// NewCard: its effective id is its own unique task_id, which no recurrence
-// canonical shares. This keeps the write boundary from silently upgrading a
-// legacy card with recurrence semantics.
+// literal-key collision resolves to NewCard (no silent write-time merge or
+// auto-promotion of the legacy card), and is deliberately NOT surfaced as a
+// diagnostic: diagnoseUncollapsedDuplicates counts only recurrence-bearing
+// cards (diagnostics.go), so the legacy+recurrence collision the derivation
+// intentionally allows is never flagged (pinned by
+// TestMigration_DedupNeverAutoMergesLegacyExisting). A legacy INCOMING
+// card (no block) is always a NewCard: its effective id is its own unique
+// task_id, which no recurrence canonical shares. This keeps the write
+// boundary from silently upgrading a legacy card with recurrence semantics.
 
 // EvidenceKindRecurrenceObservation is the evidence discriminator used to
 // record WHICH incoming card produced a repeat observation on the canonical
