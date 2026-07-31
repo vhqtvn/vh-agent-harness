@@ -217,9 +217,17 @@ const TASK_CONTRACT_SECTION_ORDER = Object.freeze([
 ]);
 
 export class StateError extends Error {
-    constructor(message) {
+    constructor(message, cause) {
         super(message);
         this.name = "StateError";
+        // Optional causal chain. Attaching the original error preserves the
+        // distinction a caller needs to classify a failure (e.g. a JSON.parse
+        // SyntaxError vs a genuine filesystem error that surfaced inside the
+        // same try block). Existing callers construct StateError with a single
+        // message argument, so an absent cause changes nothing.
+        if (cause !== undefined && cause !== null) {
+            this.cause = cause;
+        }
     }
 }
 
@@ -416,7 +424,13 @@ function readJson(targetPath, defaultValue) {
     try {
         return JSON.parse(fs.readFileSync(targetPath, "utf8"));
     } catch (error) {
-        throw new StateError(`Malformed JSON state file: ${targetPath}`);
+        // Preserve the original error as `.cause` so a caller can classify the
+        // failure: a JSON.parse SyntaxError (corrupt JSON) vs a genuine
+        // filesystem error (permission denied / IO) that surfaced inside this
+        // try block. The thrown type (StateError) and message are unchanged, so
+        // every existing caller behaves exactly as before; only callers that
+        // opt into inspecting `.cause` see the new field.
+        throw new StateError(`Malformed JSON state file: ${targetPath}`, error);
     }
 }
 
@@ -3758,6 +3772,22 @@ function loadCoordinationTask(taskIDRaw, options = {}) {
 // action boundary (readyCoordinationTask) refuses degraded cards. Each entry
 // carries the repo-relative path so a quarantine row is safe to display
 // without leaking absolute operator-local paths.
+//
+// Syntax-invalid quarantine: a SINGLE corrupt `.json` file used to brick the
+// whole scan, because readJson() throws on a JSON.parse failure and
+// loadCoordinationTask() propagated that throw. Different scanner contract
+// from the semantic-degradation quarantine (which has a normalized task object
+// to report offending_fields against): a syntax-corrupt file cannot be parsed
+// at all, so there is no task_id and no offending_fields to report — only the
+// filename is recoverable. Here we catch the JSON.parse failure PER CARD,
+// emit a filename-level quarantine entry, and CONTINUE scanning the rest.
+// Genuine filesystem errors (permission denied, missing directory, IO) are
+// RETHROWN so they surface loudly instead of being silently swallowed as a
+// "quarantined card" — only JSON parse failures are reported-and-continue.
+// This mirrors the normalizeCoordinationEnum -> normalizeCoordinationEnumCollected
+// split: the throw lives at readJson (every direct caller), the fault tolerance
+// lives at this scan boundary (the only place that scans a whole directory and
+// must not let one bad file poison the rest).
 function scanCoordinationTaskCards() {
     ensureLocalCoordinatorNamespace();
     const files = fs.existsSync(localCoordinatorTasksRoot())
@@ -3767,24 +3797,94 @@ function scanCoordinationTaskCards() {
         .filter((name) => name.endsWith(".json"))
         .map((name) => {
             const taskID = name.replace(/\.json$/, "");
-            const loaded = loadCoordinationTask(taskID);
-            return {
-                taskID,
-                path: relativeToRepo(loaded.path),
-                task: loaded.payload,
-                diagnostics: loaded.diagnostics,
-                degraded: Boolean(loaded.diagnostics && loaded.diagnostics.degraded),
-            };
+            const targetPath = coordinationTaskPath(taskID);
+            try {
+                const loaded = loadCoordinationTask(taskID);
+                return {
+                    taskID,
+                    path: relativeToRepo(loaded.path),
+                    task: loaded.payload,
+                    diagnostics: loaded.diagnostics,
+                    degraded: Boolean(loaded.diagnostics && loaded.diagnostics.degraded),
+                };
+            } catch (error) {
+                // Catch JSON.parse failures ONLY. readJson attaches the
+                // original error as `.cause`, so a genuine SyntaxError
+                // (corrupt JSON) is distinguishable from a filesystem error
+                // (permission denied / missing / IO) that surfaced inside
+                // readJson's try block. Genuine fs errors are rethrown.
+                if (!isCoordinationCardSyntaxError(error)) {
+                    throw error;
+                }
+                return {
+                    taskID,
+                    path: relativeToRepo(targetPath),
+                    // No task object is recoverable from an unparseable file;
+                    // null keeps the array consumers (listCoordinationTaskCards,
+                    // resolveRecurrenceDedup, listCoordinationTasks) honest —
+                    // they must treat a syntax entry as "not a card" and route
+                    // it into quarantine[] only.
+                    task: null,
+                    diagnostics: null,
+                    degraded: true,
+                    syntaxError: true,
+                    problems: [coordinationCardSyntaxMessage(error)],
+                };
+            }
         });
     return scanned.sort((left, right) => {
+        const leftTask = left && left.task ? left.task : null;
+        const rightTask = right && right.task ? right.task : null;
         const leftUpdated = String(
-            left.task.updated_at || left.task.created_at || "",
+            (leftTask && (leftTask.updated_at || leftTask.created_at)) || "",
         );
         const rightUpdated = String(
-            right.task.updated_at || right.task.created_at || "",
+            (rightTask && (rightTask.updated_at || rightTask.created_at)) || "",
         );
         return rightUpdated.localeCompare(leftUpdated);
     });
+}
+
+/**
+ * Classify an error thrown while scanning a single coordination-task card as a
+ * JSON.parse (syntax) failure. Returns true ONLY when the error is the
+ * StateError readJson emits for malformed JSON AND its `.cause` is a genuine
+ * SyntaxError — the signature of JSON.parse rejecting corrupt input. Any other
+ * error (a filesystem SystemError with `.code`, a missing-file StateError from
+ * a TOCTOU race, anything without a SyntaxError cause) returns false so the
+ * scan boundary rethrows it instead of swallowing a real failure as a
+ * "quarantined card".
+ *
+ * @param {*} error
+ * @returns {boolean}
+ */
+function isCoordinationCardSyntaxError(error) {
+    if (!(error instanceof StateError)) {
+        return false;
+    }
+    const message = String(error.message || "");
+    if (!message.startsWith("Malformed JSON state file:")) {
+        return false;
+    }
+    return error.cause instanceof SyntaxError;
+}
+
+/**
+ * Extract a stable, human-readable message from a JSON.parse failure caught at
+ * the scan boundary. Prefers the original SyntaxError's message (the parser's
+ * own positioning text) so a quarantine row points the operator at the defect;
+ * falls back to a generic label if the cause is unexpectedly absent.
+ *
+ * @param {*} error
+ * @returns {string}
+ */
+function coordinationCardSyntaxMessage(error) {
+    const cause = error && error.cause;
+    const text =
+        cause && typeof cause.message === "string" && cause.message.trim()
+            ? cause.message.trim()
+            : "Invalid JSON (parse failure).";
+    return text;
 }
 
 // Trusted projection: every NON-degraded card's normalized task. Degraded
@@ -4828,10 +4928,22 @@ function listCoordinationTasks(sessionID, options = {}) {
     // semantics; the safeguard against acting on a degraded card is the
     // action-boundary refusal in readyCoordinationTask plus the degraded flag
     // on the task representation, not omission from the list.
+    //
+    // Syntax-invalid (unparseable) files carry no task object — they are
+    // excluded from the status filter (there is no status to match), from
+    // `tasks`, and from every count, but they ARE surfaced in `quarantine[]`
+    // with error_type:"syntax" so a single corrupt `.json` no longer bricks
+    // the scan AND is still reported. The status filter intentionally does
+    // NOT gate syntax entries: a corrupt file is a problem regardless of any
+    // requested status subset.
     const scanned = scanCoordinationTaskCards();
-    const filteredScanned = scanned.filter((entry) =>
-        statuses.length ? statuses.includes(entry.task.status) : true,
-    );
+    const syntaxEntries = scanned.filter((entry) => entry.syntaxError);
+    const filteredScanned = scanned.filter((entry) => {
+        if (!entry.task) {
+            return false;
+        }
+        return statuses.length ? statuses.includes(entry.task.status) : true;
+    });
     const tasks = filteredScanned.map((entry) => entry.task);
     const counts = {};
     for (const task of tasks) {
@@ -4847,7 +4959,10 @@ function listCoordinationTasks(sessionID, options = {}) {
     for (const task of healthyTasks) {
         healthyCounts[task.status] = (healthyCounts[task.status] || 0) + 1;
     }
-    const quarantine = filteredScanned
+    // Semantic quarantine: degraded-but-parseable cards (bad stored enum or
+    // missing core field). Unchanged from the report-and-continue contract —
+    // each carries offending_fields from the normalized task's diagnostics.
+    const semanticQuarantine = filteredScanned
         .filter((entry) => entry.degraded)
         .map((entry) => ({
             // card_id comes from the parsed card when the task_id is
@@ -4860,6 +4975,19 @@ function listCoordinationTasks(sessionID, options = {}) {
             offending_fields: [...entry.diagnostics.offendingFields],
             problems: [...entry.diagnostics.problems],
         }));
+    // Syntax quarantine: unparseable files. No normalized task exists, so
+    // there is no card_id recoverable from the body and no offending_fields
+    // to report — the filename stem is the only stable key and the parse
+    // error message is the only diagnostic. error_type:"syntax" lets a
+    // consumer render these differently from semantic-degraded cards.
+    const syntaxQuarantine = syntaxEntries.map((entry) => ({
+        card_id: entry.taskID,
+        path: entry.path,
+        error_type: "syntax",
+        offending_fields: [],
+        problems: [...entry.problems],
+    }));
+    const quarantine = [...semanticQuarantine, ...syntaxQuarantine];
     return {
         ...actor,
         // Existing counts are UNCHANGED (compat): they cover every card that

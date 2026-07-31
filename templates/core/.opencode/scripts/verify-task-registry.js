@@ -1681,6 +1681,146 @@ function main() {
             );
         }
 
+        // ------------------------------------------------------------------
+        // Syntax-invalid quarantine (filename-level): a SINGLE corrupt `.json`
+        // file used to brick the whole registry scan (readJson throws on a
+        // JSON.parse failure and loadCoordinationTask propagated it). The fix
+        // catches the parse failure per card, emits a filename-level quarantine
+        // entry (no normalized task — no offending_fields), and CONTINUES. The
+        // scan must NOT swallow genuine filesystem errors — but a corrupt-JSON
+        // sibling must not poison a healthy sentinel.
+        // ------------------------------------------------------------------
+        const syntaxScope = "tests/fixtures/syntax-quarantine-scope/";
+
+        // Healthy sentinel — must still list and read despite a corrupt sibling.
+        const syntaxSentinel = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Syntax quarantine sentinel healthy card",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "quarantine",
+                files_in_scope: [syntaxScope],
+                constraints: ["Syntax quarantine fixture only."],
+                non_goals: ["No implementation work."],
+                success_criteria: [
+                    "Healthy sentinel lists and reads while a sibling is syntax-corrupt.",
+                ],
+                validation_plan: [
+                    "Write a corrupt sibling .json to disk and re-list + re-read.",
+                ],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(syntaxSentinel.task.task_id);
+
+        // Corrupt sibling: invalid JSON that JSON.parse rejects (the exact
+        // defect that used to brick the scan). Written directly to the tasks
+        // dir; tracked for cleanup via createdTaskIDs (cleanupArtifacts removes
+        // `<taskID>.json`).
+        const syntaxCorruptID =
+            "verification-syntax-corrupt-fixture-card";
+        const syntaxCorruptPath = taskCardPath(syntaxCorruptID);
+        fs.writeFileSync(syntaxCorruptPath, "{ not valid json,,, ");
+        createdTaskIDs.push(syntaxCorruptID);
+
+        // CRUX: the scan does NOT throw despite one corrupt sibling.
+        let syntaxList = null;
+        try {
+            syntaxList = listCoordinationTasks(coordinatorSessionID, {
+                cwd: "/verification",
+            });
+        } catch (error) {
+            throw new StateError(
+                `Syntax CRUX: listCoordinationTasks threw on a corrupt sibling: ${error && error.message ? error.message : error}`,
+            );
+        }
+
+        // The healthy sentinel is still returned in tasks[] and is NOT degraded.
+        const syntaxSentinelInTasks = syntaxList.tasks.find(
+            (task) => task.task_id === syntaxSentinel.task.task_id,
+        );
+        if (!syntaxSentinelInTasks) {
+            throw new StateError(
+                "Syntax CRUX: expected healthy sentinel to remain in tasks[] despite a corrupt sibling.",
+            );
+        }
+        if (syntaxSentinelInTasks.degraded) {
+            throw new StateError(
+                "Syntax CRUX: expected healthy sentinel to NOT be degraded.",
+            );
+        }
+
+        // The corrupt file appears in quarantine[] keyed by filename stem, with
+        // error_type "syntax" and empty offending_fields (no normalized task).
+        const syntaxEntry = syntaxList.quarantine.find(
+            (entry) => entry.card_id === syntaxCorruptID,
+        );
+        if (!syntaxEntry) {
+            throw new StateError(
+                "Syntax CRUX: expected corrupt file to appear in quarantine[] keyed by filename stem.",
+            );
+        }
+        if (syntaxEntry.error_type !== "syntax") {
+            throw new StateError(
+                `Syntax CRUX: expected error_type "syntax", got "${syntaxEntry.error_type}".`,
+            );
+        }
+        if (syntaxEntry.offending_fields.length !== 0) {
+            throw new StateError(
+                `Syntax CRUX: expected offending_fields [] (no normalized task), got [${syntaxEntry.offending_fields.join(", ")}].`,
+            );
+        }
+        if (!syntaxEntry.problems.length) {
+            throw new StateError(
+                "Syntax CRUX: expected at least one parse-error problem message.",
+            );
+        }
+        if (!syntaxEntry.path || syntaxEntry.path.startsWith("/")) {
+            throw new StateError(
+                "Syntax CRUX: expected repo-relative path (not absolute) in quarantine entry.",
+            );
+        }
+
+        // The corrupt file must NOT appear in tasks[] (there is no parseable
+        // task to show) and must NOT be counted in total/healthy_total.
+        const syntaxCorruptInTasks = syntaxList.tasks.find(
+            (task) => task.task_id === syntaxCorruptID,
+        );
+        if (syntaxCorruptInTasks) {
+            throw new StateError(
+                "Syntax CRUX: expected corrupt file to NOT appear in tasks[].",
+            );
+        }
+
+        // Semantic + syntax quarantine coexist: the degraded semantic siblings
+        // from the earlier block (bad-status / missing-field / multi-bad) are
+        // still reported with error_type "semantic", while the corrupt file is
+        // error_type "syntax". Both error_type values must be present.
+        const semanticEntries = syntaxList.quarantine.filter(
+            (entry) => entry.error_type === "semantic",
+        );
+        const syntaxEntries = syntaxList.quarantine.filter(
+            (entry) => entry.error_type === "syntax",
+        );
+        if (!semanticEntries.length) {
+            throw new StateError(
+                "Syntax coexistence: expected at least one semantic quarantine entry to survive alongside the syntax entry.",
+            );
+        }
+        if (syntaxEntries.length !== 1) {
+            throw new StateError(
+                `Syntax coexistence: expected exactly ONE syntax quarantine entry, got ${syntaxEntries.length}.`,
+            );
+        }
+
+        // degraded_count invariant still holds across both error types.
+        if (syntaxList.degraded_count !== syntaxList.quarantine.length) {
+            throw new StateError(
+                `Syntax coexistence: expected degraded_count === quarantine.length, got ${syntaxList.degraded_count} vs ${syntaxList.quarantine.length}.`,
+            );
+        }
+
         // Case 10: degraded-core repair branch (lifecycle-exit recovery).
         // A degraded non-research card can be repaired in place via repair; a
         // healthy card's task_type/status stay immutable; the research-repair
