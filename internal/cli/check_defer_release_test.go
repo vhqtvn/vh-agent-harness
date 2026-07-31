@@ -297,3 +297,91 @@ func TestCheckDefer_PromoterMode_MalformedOrJoinTrigger(t *testing.T) {
 			"(not-touched-since-ref), not malformed; got:\n%s", stdout)
 	}
 }
+
+// TestCheckDefer_PromoterMode_MalformedAfterTagTrigger is the after_tag-arm
+// witness for the same parsePredicate malformed guard that the path_touched
+// test above exercises. parsePredicate handles after_tag identically to
+// path_touched: greedy ^after_tag\((.+)\)$ capture, then the shared
+// isMalformedArg helper. For an arg carrying `||` or an unbalanced paren it
+// returns {kind:"malformed"}, and evaluatePredicate surfaces
+// `malformed-predicate` — NOT the buggy silent-park note.
+//
+// NB: the silent-park note DIFFERS by arm. The path_touched arm parked as
+// `not-touched-since-ref` (the garbage arg missed the Set.has lookup). The
+// after_tag arm parks as `tag-missing` because tagExists's isSafeRef rejects
+// the garbage arg. Either way the card silently parks as "valid-not-met"
+// (indistinguishable from a genuine future-watch) instead of being visibly
+// flagged malformed. This witness pins the after_tag arm so neither arm can
+// regress without a test going red. It also pins that a well-formed
+// after_tag(<existing-tag>) still evaluates to READY, proving the malformed
+// guard does not over-reject legitimate after_tag triggers.
+func TestCheckDefer_PromoterMode_MalformedAfterTagTrigger(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node not on PATH: %v", err)
+	}
+	_, script, tasksDir := setupReleaseEvalRepo(t)
+
+	// Card 1: malformed `||`-joined after_tag trigger. The greedy regex would
+	// capture `v0.1.0)||after_tag(v0.2.0` as the arg; without the malformed
+	// guard, tagExists's isSafeRef rejects that garbage and the card silently
+	// parks as tag-missing. The fix must report malformed-predicate.
+	writeReleaseCard(t, tasksDir, "defer-after-malformed.json", "defer-after-malformed",
+		"draft", releaseCardNotes("source:review-defer",
+			"after_tag(v0.1.0)||after_tag(v0.2.0)", "2026-07-31"))
+	// Card 2: well-formed after_tag whose tag EXISTS in the scratch repo
+	// (setupReleaseEvalRepo creates v0.1.0). This must evaluate to READY so the
+	// malformed guard is shown not to reject a legitimate after_tag.
+	writeReleaseCard(t, tasksDir, "defer-after-ok.json", "defer-after-ok",
+		"draft", releaseCardNotes("source:review-defer",
+			"after_tag(v0.1.0)", "2026-07-31"))
+
+	cmd := exec.Command(nodeBin, script, "--tasks", tasksDir, "--since", "v0.1.0")
+	cmd.Dir = filepath.Dir(filepath.Dir(filepath.Dir(script)))
+	var outb, errb strings.Builder
+	cmd.Stdout = &outb
+	cmd.Stderr = &errb
+	timer := time.AfterFunc(30*time.Second, func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	defer timer.Stop()
+	runErr := cmd.Run()
+	exitCode := 0
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("node spawn error: %v\nstderr: %s", runErr, errb.String())
+		}
+	}
+	stdout := outb.String()
+	if exitCode != 0 {
+		t.Fatalf("promoter mode must exit 0 (never blocking); got %d\n%s", exitCode, stdout)
+	}
+
+	// CRUX: the malformed after_tag trigger must surface malformed-predicate,
+	// and must NOT be silently parked as tag-missing (the after_tag arm's
+	// silent-park note, analogous to path_touched's not-touched-since-ref).
+	buggyLine := "after_tag(v0.1.0)||after_tag(v0.2.0) (tag-missing)"
+	fixedLine := "after_tag(v0.1.0)||after_tag(v0.2.0) (malformed-predicate)"
+	if strings.Contains(stdout, buggyLine) {
+		t.Fatalf("malformed ||-joined after_tag trigger was silently parked as tag-missing "+
+			"(after_tag-arm stealth-park defect regressed). Promoter output:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, fixedLine) {
+		t.Fatalf("malformed ||-joined after_tag trigger must surface malformed-predicate; got:\n%s", stdout)
+	}
+
+	// Well-formed after_tag(<existing-tag>) must still evaluate to READY
+	// (tag-exists), proving the malformed guard does not over-reject legitimate
+	// after_tag triggers.
+	if !strings.Contains(stdout, "[READY] defer-after-ok") {
+		t.Errorf("well-formed after_tag(v0.1.0) must evaluate to READY (tag exists); got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "after_tag(v0.1.0) (tag-exists)") {
+		t.Errorf("well-formed after_tag(v0.1.0) detail must show tag-exists; got:\n%s", stdout)
+	}
+}
