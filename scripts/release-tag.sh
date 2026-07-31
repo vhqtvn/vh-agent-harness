@@ -552,10 +552,11 @@ if [ -n "$G0B_OUTPUT" ]; then
   exit 1
 fi
 
-# G0c — vh-agent-harness doctor HEALTHY (all 15 checks). This is the mandatory
+# G0c — vh-agent-harness doctor HEALTHY (all 21 checks). This is the mandatory
 # machine gate that makes `vh-agent-harness doctor` a HARD ceremony stop: any
 # problem-tier or fail-tier check (including #12 defer-liveness, #13
-# staged-errata-content, #14 behavioral-closure, and #15 dev-stale-embed)
+# staged-errata-content, #14 behavioral-closure, #15 dev-stale-embed,
+# #20 complexity-advisory, and #21 recurrence-state)
 # refuses the tag BEFORE the readiness-pass artifact gate or any tag mutation.
 #
 # This kills the "human-remembered pre-flight" anti-pattern: doctor is no longer
