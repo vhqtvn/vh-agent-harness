@@ -4563,6 +4563,34 @@ function saveCoordinationTask(sessionID, taskPayload, options = {}) {
     // producer is convenience, not authority — see DEFER card
     // defer-recurrence-toctou-race).
     if (isMerge) {
+        // --- TEST-ONLY pre-lock interleaving seam (TOCTOU guard exercise) ---
+        // The dedup decision (which canonical) and the merged block were
+        // computed from a scan OUTSIDE the per-card lock acquired inside
+        // updateCoordinationTask below — the TOCTOU window this producer's
+        // lock-time re-resolve guard narrows. This optional, per-call,
+        // synchronous callback fires exactly once at the after-decision /
+        // before-lock boundary so a verifier can mutate the canonical via
+        // the real producer (saveCoordinationTask) and exercise the
+        // lock-time re-resolve → throw wiring deterministically.
+        //
+        // Containment contract (enforced by construction):
+        //  - per-call: passed via the options arg only; NOT an env var.
+        //  - inert by default: every production + existing-test caller omits it.
+        //  - synchronous, invoked at most once (single merge path, single call).
+        //  - NOT propagated: the merge path calls updateCoordinationTask
+        //    (lock+persist), never saveCoordinationTask; the only nested
+        //    saveCoordinationTask is one the callback itself issues, and the
+        //    caller controls whether to pass this option there.
+        //  - CANNOT override the dedup result, suppress locking, authorize
+        //    persistence, or override a thrown guard: the callback only
+        //    provides the interleaving opportunity; the re-resolve guard
+        //    below remains the sole authority and may still throw.
+        if (typeof options._testPreLockInterleave === "function") {
+            options._testPreLockInterleave({
+                canonical_task_id: dedup.canonical_task_id,
+                requested_task_id: requestedTaskID,
+            });
+        }
         const mergedSaved = updateCoordinationTask(taskID, (current) => {
             let mergedBlock = dedup.merged;
             const currentBlock = current.recurrence;

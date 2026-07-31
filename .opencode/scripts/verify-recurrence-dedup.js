@@ -28,6 +28,15 @@
  *   7. BRIDGE FAILURE (fail-closed): when the Go binary is unavailable,
  *      saving a recurrence-bearing card THROWS instead of silently spawning
  *      a duplicate — N→1 invariant preserved even under bridge failure.
+ *   8. TOCTOU RE-RESOLVE→THROW (deterministic guard exercise): a narrow
+ *      per-call test seam (_testPreLockInterleave) fires ONE ordinary nested
+ *      saveCoordinationTask at the after-decision/before-lock boundary that
+ *      re-identifies + bumps the canonical in the scan→lock window; the outer
+ *      repeat then acquires the real lock, reloads the changed canonical,
+ *      re-resolves via the REAL Go binary, and THROWS before persisting — no
+ *      stale outer write, no duplicate card, no lost observation. Exercises
+ *      the producer's lock-time re-resolve guard wiring deterministically
+ *      (closes the testable slice of defer-recurrence-toctou-race).
  *
  * Invoke via:
  *   vh-agent-harness exec node .opencode/scripts/verify-recurrence-dedup.js
@@ -67,6 +76,8 @@ const PROBE_IDS = [
     "verify-recurrence-alias-repeat1",
     "verify-recurrence-alias-repeat2",
     "verify-recurrence-bridgefail",
+    "verify-recurrence-toctou-canon",
+    "verify-recurrence-toctou-outer",
 ];
 
 function taskPath(id) {
@@ -663,6 +674,166 @@ function main() {
             "BRIDGE-FAIL 7b: no card must exist on disk (save aborted, not spawned as new_card)",
         );
 
+        // === Scenario 8: TOCTOU re-resolve → throw guard (deterministic) ===
+        // Closes the testable slice of defer-recurrence-toctou-race. The
+        // lock-time re-resolve→throw guard (state-lib.js saveCoordinationTask
+        // merge path) is structurally unreachable in single-threaded runs
+        // because nothing mutates the canonical in the scan→lock window. A
+        // narrow per-call test seam (_testPreLockInterleave) fires ONE
+        // ordinary nested saveCoordinationTask (real producer, hook NOT
+        // propagated) at the after-decision/before-lock boundary. The nested
+        // save re-identifies + bumps the canonical's recurrence block
+        // (count 1→2, R8→R8-OTHER) so the outer's lock-time state has
+        // diverged from its pre-lock merged block. The outer then acquires
+        // the real lock, reloads the changed canonical, re-resolves via the
+        // REAL Go binary, and THROWS before atomicWriteJson (fail-closed: no
+        // stale outer write, no duplicate, no lost observation).
+        //
+        // This exercises scan→lock→reload→re-resolve→throw deterministically.
+        // It does NOT test scheduler fairness or real lock contention (out of
+        // scope — those remain on the broader defer card).
+        const toctouCanonId = "verify-recurrence-toctou-canon";
+        const toctouOuterId = "verify-recurrence-toctou-outer";
+        saveCoordinationTask(SESSION_ID, {
+            task_id: toctouCanonId,
+            title: "TOCTOU canonical (R8, count 1, ack 1)",
+            task_type: "implementation",
+            coordination_mode: "short",
+            primary_lane: "substrate",
+            files_in_scope: ["tmp/"],
+            success_criteria: ["TOCTOU canonical exists."],
+            validation_plan: ["Verify card on disk."],
+            status: "ready",
+            recurrence: {
+                recurrence_id: "R8",
+                symptom_class_id: "recurrence.v1/class-a",
+                recurrence_count: 1,
+                last_acknowledged_count: 1,
+                evidence: [{ kind: "path", ref: "src/toctou-canon.go" }],
+                aliases: [],
+            },
+        });
+
+        // The interleaving: mutate the canonical via the REAL producer
+        // (saveCoordinationTask) WITHOUT the hook option, so the nested
+        // save cannot re-fire the seam (containment: the merge path never
+        // recurses into saveCoordinationTask, and this nested call does not
+        // pass _testPreLockInterleave). It re-identifies the canonical's
+        // recurrence block to R8-OTHER and bumps the count to 2 — modeling a
+        // concurrent writer that changed canonical identity + count in the
+        // scan→lock window. The outer's pre-lock merged block (R8, count 2)
+        // becomes stale AND its R8 incoming no longer matches the locked
+        // canonical → re-resolve returns new_card → throw.
+        let toctouHookInvoked = 0;
+        const toctouInterleave = () => {
+            toctouHookInvoked += 1;
+            saveCoordinationTask(SESSION_ID, {
+                task_id: toctouCanonId,
+                title: "TOCTOU canonical (re-identified by interleaving writer)",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "substrate",
+                files_in_scope: ["tmp/"],
+                success_criteria: ["Canonical re-identified."],
+                validation_plan: ["Verify re-identified block on disk."],
+                status: "ready",
+                recurrence: {
+                    recurrence_id: "R8-OTHER",
+                    symptom_class_id: "recurrence.v1/class-a",
+                    recurrence_count: 2,
+                    last_acknowledged_count: 0,
+                },
+            });
+        };
+
+        let toctouThrew = false;
+        let toctouError = null;
+        try {
+            saveCoordinationTask(
+                SESSION_ID,
+                {
+                    task_id: toctouOuterId,
+                    title: "TOCTOU outer repeat (R8)",
+                    task_type: "implementation",
+                    coordination_mode: "short",
+                    primary_lane: "substrate",
+                    files_in_scope: ["tmp/"],
+                    success_criteria: ["Outer should abort (stale snapshot)."],
+                    validation_plan: ["Verify no stale write."],
+                    status: "ready",
+                    recurrence: {
+                        recurrence_id: "R8",
+                        symptom_class_id: "recurrence.v1/class-a",
+                        recurrence_count: 1,
+                        last_acknowledged_count: 1,
+                        evidence: [{ kind: "path", ref: "src/toctou-outer.go" }],
+                        aliases: [],
+                    },
+                },
+                { _testPreLockInterleave: toctouInterleave },
+            );
+        } catch (e) {
+            toctouThrew = true;
+            toctouError = e instanceof Error ? e.message : String(e);
+        }
+
+        // --- TOCTOU outcome assertions (outcome-observed, not mechanism) ---
+        assert(
+            toctouHookInvoked === 1,
+            `TOCTOU 8a: pre-lock interleave seam must fire exactly once, got ${toctouHookInvoked}`,
+        );
+        assert(
+            toctouThrew,
+            "TOCTOU 8b: outer repeat must THROW (stale lock-time snapshot → re-resolve new_card → abort before persist)",
+        );
+        assert(
+            toctouError && /recurrence merge aborted/i.test(toctouError),
+            `TOCTOU 8c: thrown error must be the recurrence merge-abort guard, got: ${toctouError}`,
+        );
+        // Canonical on disk MUST equal the legitimate nested-save result
+        // (re-identified + bumped), NOT the outer's stale pre-lock block.
+        const toctouCanonOnDisk = readTask(toctouCanonId);
+        assert(
+            toctouCanonOnDisk.recurrence.recurrence_id === "R8-OTHER",
+            `TOCTOU 8d: canonical recurrence_id must be the nested R8-OTHER (not the outer's stale R8), got ${toctouCanonOnDisk.recurrence.recurrence_id}`,
+        );
+        assert(
+            toctouCanonOnDisk.recurrence.recurrence_count === 2,
+            `TOCTOU 8e: canonical count must be 2 (nested bump preserved), got ${toctouCanonOnDisk.recurrence.recurrence_count}`,
+        );
+        // NO stale outer recurrence_observation appended (outer aborted).
+        // The canonical's evidence may be absent (the nested re-identify block
+        // carried none); guard the access so absence is itself proof no outer
+        // observation was appended.
+        const toctouCanonEvidence =
+            (toctouCanonOnDisk.recurrence &&
+                toctouCanonOnDisk.recurrence.evidence) ||
+            [];
+        const toctouOuterObs = toctouCanonEvidence.filter(
+            (e) =>
+                e.kind === "recurrence_observation" &&
+                e.ref === toctouOuterId,
+        );
+        assert(
+            toctouOuterObs.length === 0,
+            `TOCTOU 8f: NO stale outer recurrence_observation must be appended, got ${toctouOuterObs.length}`,
+        );
+        // NO stale outer recurrence_merged history event (outer aborted before persist).
+        const toctouMergeEvents = toctouCanonOnDisk.history.filter(
+            (h) =>
+                h.event === "recurrence_merged" &&
+                String(h.note || "").includes(toctouOuterId),
+        );
+        assert(
+            toctouMergeEvents.length === 0,
+            `TOCTOU 8g: NO stale outer recurrence_merged history event must be appended, got ${toctouMergeEvents.length}`,
+        );
+        // NO duplicate repeat card spawned (outer's requestedTaskID never persisted).
+        assert(
+            !fs.existsSync(taskPath(toctouOuterId)),
+            "TOCTOU 8h: outer repeat card must NOT exist on disk (no duplicate spawn)",
+        );
+
         console.log("verification: ok");
         console.log(
             "scenario 1 (merge): repeat R1 → canonical updated (count 1→2, ack held 1 = unacknowledged, observation appended, recurrence_merged history); NO spawn",
@@ -684,6 +855,9 @@ function main() {
         );
         console.log(
             "scenario 7 (bridge failure): binary unavailable → save THROWS (fail-closed), no duplicate card spawned",
+        );
+        console.log(
+            "scenario 8 (TOCTOU re-resolve→throw): interleaving writer mutates canonical in scan→lock window → outer re-resolves via real binary → THROWS before persist (no stale write, no duplicate)",
         );
         console.log(`binary: ${bin}`);
     } finally {
