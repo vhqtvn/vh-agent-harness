@@ -110,10 +110,6 @@ type Group struct {
 	// (== len(Observations)). It reflects the population the derivation
 	// collapsed; the producer (Slice 3) maintains the authored per-card count.
 	RecurrenceCount int
-	// LastAcknowledged is the max last_acknowledged_count across the group's
-	// cards (the ack-pair, Slice 5 release-enforcement territory). Surfaced
-	// here so a later slice can compare count > ack; this slice does NOT act.
-	LastAcknowledged int
 	// Aliases are the alias declarations aggregated across the group's cards.
 	Aliases []Alias
 	// IsLegacy is true when NO card in the group carries a recurrence block
@@ -183,9 +179,6 @@ func Derive(cards []Card) Result {
 			a.blockSeen = true
 			if a.g.SymptomClassID == "" {
 				a.g.SymptomClassID = c.Recurrence.SymptomClassID
-			}
-			if c.Recurrence.LastAcknowledgedCount > a.g.LastAcknowledged {
-				a.g.LastAcknowledged = c.Recurrence.LastAcknowledgedCount
 			}
 			// Copy evidence (value-typed struct → safe independent slice).
 			obs.Evidence = append(obs.Evidence, c.Recurrence.Evidence...)
