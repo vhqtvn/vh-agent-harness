@@ -156,8 +156,11 @@ func TestMigration_EffectiveIDNeverDerives(t *testing.T) {
 // producer dedup (ResolveRecurrence, Slice 3) considers ONLY recurrence-bearing
 // cards as merge candidates. A legacy EXISTING card (no block) is never a merge
 // target, even when its task_id coincides with an incoming recurrence_id — that
-// namespace collision is an authoring error for doctor (Slice 4) to surface, NOT
-// a silent write-time merge or auto-promotion of the legacy card.
+// namespace collision resolves to NewCard (no silent write-time merge or
+// auto-promotion of the legacy card), and is deliberately NOT surfaced as a
+// diagnostic: diagnoseUncollapsedDuplicates counts only recurrence-bearing cards
+// (diagnostics.go), so the legacy+recurrence literal-key collision the derivation
+// intentionally allows is never flagged.
 //
 // Without this guard the write boundary would silently upgrade a legacy card
 // with recurrence semantics, violating the "explicit promotion" contract.
