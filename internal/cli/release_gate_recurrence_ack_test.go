@@ -325,3 +325,64 @@ func TestRecurrenceAck_E2ECrux_FailThenPass(t *testing.T) {
 		t.Fatalf("CRUX step 4: want PASS after re-adjudication (ack bumped to 3), got %s: %s", r.tier, r.detail)
 	}
 }
+
+// --- MIN-ack across recurrence_id + task_id keys (fail-closed double-entry) ---
+
+// TestRecurrenceAck_MINAckAcrossRecurrenceAndTaskIDKeys proves the fail-closed
+// MIN-ack branch in release_gate_recurrence_ack.go (the loop that resolves a
+// group's committed ack by taking the MINIMUM across every matching manifest
+// entry — keyed by BOTH the group's EffectiveID/recurrence_id AND any
+// contributing task_id). This is the only previously-untested enforcement
+// branch: the single-match paths (recurrence_id-only and task_id-only) are
+// proven by the tests above, but the DOUBLE-ENTRY shape — one entry keyed by the
+// recurrence_id, a second entry keyed by a contributing task_id, carrying
+// DIFFERENT ack values — was not.
+//
+// A task_id-keyed promoted entry that holds a STALER (smaller) ack than the
+// recurrence_id-keyed one must pull the effective ack DOWN to the MIN and block,
+// even when the recurrence_id-keyed entry ALONE would pass. Without the MIN
+// (e.g. first-match-wins or EffectiveID-only lookup), the stale task_id-keyed
+// entry would be ignored and the gate would silently fail-open under a stale
+// ack — the exact defect a release-authority fail-closed gate must never allow.
+//
+// Fixture values (chosen so the MIN is load-bearing, not incidental):
+//   - card: task_id="T-r1", recurrence_id="R1" (distinct), recurrence_count=4
+//     (the derived count the gate compares against).
+//   - manifest entry A keyed by recurrence_id "R1" → last_acknowledged_count=5
+//     (ALONE this would PASS: derived 4 ≤ 5 — no block).
+//   - manifest entry B keyed by contributing task_id "T-r1" →
+//     last_acknowledged_count=2 (this is the MIN: derived 4 > 2 → BLOCK).
+//
+// Result: effective ack = MIN(5, 2) = 2 → derived 4 > 2 → FAIL (unacknowledged).
+func TestRecurrenceAck_MINAckAcrossRecurrenceAndTaskIDKeys(t *testing.T) {
+	dir := recurrenceAckFixture(t)
+	// One recurrence group: task_id T-r1 contributes to recurrence_id R1.
+	// recurrence_count=4 is the derived count the gate compares against.
+	recCard(t, dir, "rec-r1.json", "T-r1",
+		recBlockJSON("R1", "recurrence.v1/band-aid-loop", 4, 2))
+	// DOUBLE-ENTRY manifest: one record keyed by the canonical recurrence_id,
+	// one keyed by the contributing task_id, carrying DIFFERENT ack values.
+	writeAckManifest(t, dir, []ackManifestEntry{
+		{DeferID: "R1", Count: 4, Ack: 5},   // recurrence_id-keyed: ALONE would PASS (4 ≤ 5)
+		{DeferID: "T-r1", Count: 4, Ack: 2}, // task_id-keyed: the MIN that forces the BLOCK
+	})
+
+	r := checkDeferLiveness(dir)
+	if r.tier == tierSkip {
+		t.Skipf("check unavailable in env: %s", r.detail)
+	}
+	if r.tier != tierFail {
+		t.Fatalf("CRUX want FAIL under MIN-ack (derived 4 > min-ack MIN(5,2)=2; the recurrence_id-keyed entry alone would PASS since 4 ≤ 5), got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "R1") {
+		t.Errorf("FAIL should name the recurrence id R1; got %q", r.detail)
+	}
+	if !strings.Contains(strings.ToLower(r.detail), "unacknowledged") {
+		t.Errorf("FAIL should flag the unacknowledged class; got %q", r.detail)
+	}
+	// The FAIL detail must attest the MIN ack (2), not the recurrence_id-keyed
+	// ack (5) — proving the MIN was taken across both keys, not first-match.
+	if !strings.Contains(r.detail, "recurrence_count 4 > last_acknowledged_count 2") {
+		t.Errorf("FAIL should report the MIN ack value (2), not the recurrence_id-keyed ack (5); got %q", r.detail)
+	}
+}
