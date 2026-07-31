@@ -1068,6 +1068,19 @@ export default function transform({ context }) {
   transition authority that FAILS-CLOSED at release time when a recurrence is
   unacknowledged (see "Single release-authority model" below). Not normally run
   by humans.
+- **Task-card validator:** `vh-agent-harness task-card validate [<file>]`
+  validates a task-card JSON document against the task-card schema
+  (`docs/coordination/schemas/task-card.schema.json`) plus the cross-field
+  acknowledgement-pair invariant (`recurrence_count >= last_acknowledged_count`)
+  that JSON Schema draft-07 cannot express. With a file path it reads that file;
+  with no argument it reads stdin. It prints `task-card: valid` on stdout and
+  exits 0 on success, or a defect list on stdout and exits 1 on rejection
+  (read/parse errors go to stderr). The validator ships a bounded, dependency-
+  free draft-07 subset engine (pure logic in `internal/taskcard` — no Python, no
+  pip; the Go port of the retired `.opencode/scripts/verify-task-card-schema.py`
+  under defer-018). The contract is also gated by a Go test that ports the
+  validator's fixtures, so it runs in `go test ./...`. This INFORMs only — it is
+  a diagnostic, not a transition authority.
 
 ## Extending the harness (`/harness`)
 

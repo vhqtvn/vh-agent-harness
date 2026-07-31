@@ -66,6 +66,7 @@ Health & diagnostics
   doctor               verify install health
   proposals            list recorded armed-file conflicts (the proposal ledger)
   recurrence dedup     recurrence dedup bridge (producer stdin/stdout JSON; INFORMS only)
+  task-card validate   validate a task-card JSON file/stdin (schema + ack-pair guard; INFORMS only)
   skill                list and validate OpenCode skills (frontmatter health)
   diff                 inspect drift vs. the embedded corpus
   diagnostics-export   bundle harness state into a redacted, shareable archive (--dry-run)

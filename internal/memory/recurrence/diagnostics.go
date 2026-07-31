@@ -20,8 +20,10 @@ package recurrence
 // missing last_acknowledged_count" is indistinguishable from "the count is 0"
 // after decode. The ack-pair is a load-bearing contract (the schema REQUIRES
 // both whenever a block is present), so the diagnostic must see the RAW shape.
-// The full draft-07 schema remains the Python validator's job (defer-018,
-// Slice 5); MalformedBlock replicates only the load-bearing observable checks.
+// The full draft-07 schema lives in the Go validator (internal/taskcard, the
+// `vh-agent-harness task-card validate` subcommand — the defer-018 port that
+// retired the standalone Python script); MalformedBlock replicates only the
+// load-bearing observable checks doctor needs at runtime.
 
 import (
 	"encoding/json"
@@ -62,14 +64,15 @@ type Finding struct {
 
 // symptomClassIDPattern is the regex anchored on the task-card.schema.json
 // recurrence.symptom_class_id pattern ("^recurrence\\.v1/.+$", line 316),
-// replicated in Go so the malformed check does not shell the Python validator
-// on every doctor run. It is the load-bearing shape; the full draft-07 schema
-// stays the validator's job (defer-018).
+// replicated in Go so the malformed check does not shell out to the full
+// validator on every doctor run. It is the load-bearing shape; the full
+// draft-07 schema is enforced by internal/taskcard (the defer-018 Go port).
 var symptomClassIDPattern = regexp.MustCompile(`^recurrence\.v1/.+$`)
 
 // MalformedBlock returns the load-bearing shape defects in a raw recurrence
 // block (the JSON bytes of the card's "recurrence" object). It replicates the
-// checks from verify-task-card-schema.py observable at the Go layer:
+// recurrence-block checks the full contract validator (internal/taskcard) also
+// enforces, limited to the load-bearing fields doctor needs at runtime:
 //
 //   - empty recurrence_id (present-but-empty OR structurally absent),
 //   - symptom_class_id not matching ^recurrence.v1/.+$ (present-but-bad OR absent),
