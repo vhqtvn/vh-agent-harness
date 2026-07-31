@@ -207,3 +207,93 @@ func TestCheckDefer_PromoterModeUnchanged(t *testing.T) {
 		t.Errorf("promoter mode must NOT emit JSON; got JSON-like output:\n%s", stdout)
 	}
 }
+
+// TestCheckDefer_PromoterMode_MalformedOrJoinTrigger guards a stealth-park
+// defect in parsePredicate. The greedy regex /^path_touched\((.+)\)$/ used to
+// swallow `a)||path_touched(b` for the malformed trigger
+// `path_touched(a)||path_touched(b)`, classify it as a VALID path_touched with a
+// garbage arg, and the card silently parked as "valid-not-met"
+// (note: not-touched-since-ref) — indistinguishable from a genuine future-watch.
+// `||` is not an OR operator anywhere (the real OR is `any(...)` via
+// extractTriggers), so such a trigger can NEVER fire and must be visibly flagged.
+//
+// After the fix, parsePredicate returns {kind:"malformed"} for an arg carrying
+// `||` or an unbalanced paren, and the promoter detail surfaces
+// `malformed-predicate` — NOT `not-touched-since-ref`. This test also pins that
+// a well-formed single `path_touched(x)` and a well-formed
+// `any(path_touched(x),path_touched(y))` still parse and evaluate correctly, so
+// the malformed guard does not reject legitimate triggers.
+func TestCheckDefer_PromoterMode_MalformedOrJoinTrigger(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node not on PATH: %v", err)
+	}
+	_, script, tasksDir := setupReleaseEvalRepo(t)
+
+	// Card 1: malformed `||`-joined trigger. fileA.go IS in the release arc, so
+	// the old buggy path classified this as a valid path_touched and reported
+	// not-touched-since-ref (a silent park). The fix must report malformed.
+	writeReleaseCard(t, tasksDir, "defer-malformed.json", "defer-malformed",
+		"draft", releaseCardNotes("source:review-defer",
+			"path_touched(fileA.go)||path_touched(fileB.go)", "2026-07-31"))
+	// Card 2: well-formed single path_touched on a path IN the arc.
+	writeReleaseCard(t, tasksDir, "defer-single.json", "defer-single",
+		"draft", releaseCardNotes("source:review-defer",
+			"path_touched(fileA.go)", "2026-07-31"))
+	// Card 3: well-formed any() OR over one IN-arc and one OUT-of-arc path.
+	writeReleaseCard(t, tasksDir, "defer-any.json", "defer-any",
+		"draft", releaseCardNotes("source:review-defer",
+			"any(path_touched(fileA.go),path_touched(fileB.go))", "2026-07-31"))
+
+	cmd := exec.Command(nodeBin, script, "--tasks", tasksDir, "--since", "v0.1.0")
+	cmd.Dir = filepath.Dir(filepath.Dir(filepath.Dir(script)))
+	var outb, errb strings.Builder
+	cmd.Stdout = &outb
+	cmd.Stderr = &errb
+	timer := time.AfterFunc(30*time.Second, func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	defer timer.Stop()
+	runErr := cmd.Run()
+	exitCode := 0
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("node spawn error: %v\nstderr: %s", runErr, errb.String())
+		}
+	}
+	stdout := outb.String()
+	if exitCode != 0 {
+		t.Fatalf("promoter mode must exit 0 (never blocking); got %d\n%s", exitCode, stdout)
+	}
+
+	// CRUX: the malformed trigger must surface malformed-predicate, and must NOT
+	// be silently parked as not-touched-since-ref (the defect).
+	buggyLine := "path_touched(fileA.go)||path_touched(fileB.go) (not-touched-since-ref)"
+	fixedLine := "path_touched(fileA.go)||path_touched(fileB.go) (malformed-predicate)"
+	if strings.Contains(stdout, buggyLine) {
+		t.Fatalf("malformed ||-joined trigger was silently parked as not-touched-since-ref "+
+			"(stealth-park defect regressed). Promoter output:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, fixedLine) {
+		t.Fatalf("malformed ||-joined trigger must surface malformed-predicate; got:\n%s", stdout)
+	}
+
+	// Well-formed single path_touched must still evaluate (fileA.go is in the arc).
+	if !strings.Contains(stdout, "[READY] defer-single") {
+		t.Errorf("well-formed single path_touched(fileA.go) must evaluate to READY (touched); got:\n%s", stdout)
+	}
+	// Well-formed any() must still split + evaluate both inner predicates:
+	// fileA.go touched (OR fires → READY), fileB.go cleanly not-touched.
+	if !strings.Contains(stdout, "[READY] defer-any") {
+		t.Errorf("well-formed any() over an in-arc path must be READY; got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "path_touched(fileB.go) (not-touched-since-ref)") {
+		t.Errorf("well-formed any() must evaluate the second inner predicate cleanly "+
+			"(not-touched-since-ref), not malformed; got:\n%s", stdout)
+	}
+}

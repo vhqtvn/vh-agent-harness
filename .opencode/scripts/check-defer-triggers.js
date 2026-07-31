@@ -285,23 +285,63 @@ function tagExists(tag) {
 }
 
 // Parse a single predicate string into {kind, arg}. Returns null for
-// unrecognized shapes (caller reports unknown-predicate). PROMOTER-mode
-// parser: lenient greedy match so `path_touched(a)||path_touched(b)` reports
-// unknown-predicate rather than throwing. Release mode no longer parses
-// task-card trigger grammar — it reads committed manifest dispositions only.
-// The promoter remains on this lenient parser.
+// unrecognized shapes (caller reports unknown-predicate). Returns
+// {kind:"malformed"} for a shape that LOOKS like a known predicate but whose
+// greedy-captured arg still carries predicate-structural characters — a
+// literal `||` (a malformed OR attempt; the real OR grammar is `any(...)` via
+// extractTriggers) or an unbalanced `(`/`)` (a path/ref operand never contains
+// parens) — so the caller surfaces it as malformed-predicate, NOT a clean
+// not-touched. Without this guard the greedy `(.+)` in the regex would swallow
+// `a)||path_touched(b` for `path_touched(a)||path_touched(b)`, classify it as a
+// valid path_touched with a garbage arg, and the card would silently park as
+// "valid-not-met" (note: not-touched-since-ref) — indistinguishable from a
+// genuine future-watch. The card is malformed and can never fire, so it must be
+// visibly flagged, not parked. PROMOTER-mode parser only; release mode reads
+// committed manifest dispositions and never parses task-card trigger grammar.
 function parsePredicate(trigger) {
     const t = (trigger || "").trim();
     let m = t.match(/^path_touched\((.+)\)$/);
-    if (m) return { kind: "path_touched", arg: m[1].trim() };
+    if (m) {
+        const arg = m[1].trim();
+        if (isMalformedArg(arg)) return { kind: "malformed" };
+        return { kind: "path_touched", arg };
+    }
     m = t.match(/^after_tag\((.+)\)$/);
-    if (m) return { kind: "after_tag", arg: m[1].trim() };
+    if (m) {
+        const arg = m[1].trim();
+        if (isMalformedArg(arg)) return { kind: "malformed" };
+        return { kind: "after_tag", arg };
+    }
     return null;
 }
 
+// True if a greedy-captured predicate arg still carries predicate-structural
+// characters, i.e. it is not a clean operand: a literal `||` (malformed OR
+// join — the real OR is `any(...)`), or an unbalanced `(`/`)` (a path/ref/tag
+// operand never contains parens). Legitimate operands never contain `|`, `(`,
+// or `)`, so this never rejects a well-formed trigger.
+function isMalformedArg(arg) {
+    if (arg.includes("||")) return true;
+    let depth = 0;
+    for (const ch of arg) {
+        if (ch === "(") depth++;
+        else if (ch === ")") {
+            depth--;
+            if (depth < 0) return true;
+        }
+    }
+    return depth !== 0;
+}
+
 // Evaluate one parsed predicate against the current repo state. Returns
-// { met: bool, note: string }. Generic predicate evaluator; currently called only by the promoter path (via evaluateCandidate).
+// { met: bool, note: string }. Generic predicate evaluator; currently called
+// only by the promoter path (via evaluateCandidate). A {kind:"malformed"}
+// predicate (from parsePredicate) reports malformed-predicate so the card is
+// visibly not a clean not-touched, never silently parked as valid-not-met.
 function evaluatePredicate(pred, changedPaths) {
+    if (pred.kind === "malformed") {
+        return { met: false, note: "malformed-predicate" };
+    }
     if (pred.kind === "path_touched") {
         if (!changedPaths) {
             return { met: false, note: "no-git-diff-data" };
