@@ -1681,6 +1681,467 @@ function main() {
             );
         }
 
+        // Case 10: degraded-core repair branch (lifecycle-exit recovery).
+        // A degraded non-research card can be repaired in place via repair; a
+        // healthy card's task_type/status stay immutable; the research-repair
+        // path is unchanged; research->degraded overlap and tolerated-contract
+        // dispatch are handled explicitly. (Save-path bogus-enum throw is
+        // preserved in verify-state-validation.js.)
+        function degradeCard(taskID, mutator) {
+            const cardPath = taskCardPath(taskID);
+            const data = JSON.parse(fs.readFileSync(cardPath, "utf8"));
+            mutator(data);
+            fs.writeFileSync(cardPath, JSON.stringify(data, null, 2));
+        }
+
+        // 10a. Degraded non-research repair succeeds.
+        const degradedImpl = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Degraded impl repair recovery",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "build",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                success_criteria: ["Card is valid again."],
+                validation_plan: ["Read back non-degraded."],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(degradedImpl.task.task_id);
+        degradeCard(degradedImpl.task.task_id, (data) => {
+            data.task_type = "";
+        });
+        const degradedImplRead = readCoordinationTask(
+            coordinatorSessionID,
+            degradedImpl.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (!degradedImplRead.degraded) {
+            throw new StateError("Case 10a: expected degraded card after clearing task_type.");
+        }
+        if (!degradedImplRead.diagnostics.offending_fields.includes("task_type")) {
+            throw new StateError("Case 10a: expected task_type in offending fields.");
+        }
+        repairCoordinationTask(
+            coordinatorSessionID,
+            degradedImpl.task.task_id,
+            { task_type: "implementation" },
+            { cwd: "/verification" },
+        );
+        const repairedImplRead = readCoordinationTask(
+            coordinatorSessionID,
+            degradedImpl.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (repairedImplRead.degraded) {
+            throw new StateError("Case 10a: expected card non-degraded after repair.");
+        }
+        if (repairedImplRead.task.task_type !== "implementation") {
+            throw new StateError("Case 10a: expected task_type restored to implementation.");
+        }
+
+        // 10b. Atomic multi-field recovery: partial repair rejected, no write;
+        // complete repair succeeds atomically.
+        const degradedMulti = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Degraded multi-field atomic recovery",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "build",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                success_criteria: ["Atomic recovery."],
+                validation_plan: ["Partial must not write."],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(degradedMulti.task.task_id);
+        degradeCard(degradedMulti.task.task_id, (data) => {
+            data.task_type = "";
+            data.coordination_mode = "";
+        });
+        expectStateError(
+            () =>
+                repairCoordinationTask(
+                    coordinatorSessionID,
+                    degradedMulti.task.task_id,
+                    { task_type: "implementation" },
+                    { cwd: "/verification" },
+                ),
+            "still missing",
+        );
+        const partialRead = readCoordinationTask(
+            coordinatorSessionID,
+            degradedMulti.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (!partialRead.degraded) {
+            throw new StateError("Case 10b: partial repair must NOT have written (card still degraded).");
+        }
+        // No-write proof: the supplied repair value (task_type) must NOT have
+        // persisted, and the still-corrupted field (coordination_mode) must
+        // remain empty. An impl that wrote task_type before rejecting would
+        // leave the card degraded but with task_type restored -- hiding the
+        // atomicity claim.
+        if (partialRead.task.task_type !== "") {
+            throw new StateError("Case 10b: partial repair must not persist the supplied task_type (no-write violated).");
+        }
+        if (partialRead.task.coordination_mode !== "") {
+            throw new StateError("Case 10b: still-corrupted coordination_mode must remain unchanged (no-write violated).");
+        }
+        repairCoordinationTask(
+            coordinatorSessionID,
+            degradedMulti.task.task_id,
+            { task_type: "implementation", coordination_mode: "short" },
+            { cwd: "/verification" },
+        );
+        const multiRepairedRead = readCoordinationTask(
+            coordinatorSessionID,
+            degradedMulti.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (multiRepairedRead.degraded) {
+            throw new StateError("Case 10b: complete repair must clear degraded.");
+        }
+
+        // 10c. Healthy-card immutability: a HEALTHY (non-degraded) card cannot
+        // change task_type/status via repair (carve-out is degraded-only).
+        const healthyImpl = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Healthy immutability sentinel",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "build",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                success_criteria: ["task_type/status immutable."],
+                validation_plan: ["Refused with no mutation."],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(healthyImpl.task.task_id);
+        const healthyRead = readCoordinationTask(
+            coordinatorSessionID,
+            healthyImpl.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (healthyRead.degraded) {
+            throw new StateError("Case 10c: sentinel card must be healthy (non-degraded).");
+        }
+        expectStateError(
+            () =>
+                repairCoordinationTask(
+                    coordinatorSessionID,
+                    healthyImpl.task.task_id,
+                    { task_type: "research" },
+                    { cwd: "/verification" },
+                ),
+            "does not use the research repair flow",
+        );
+        expectStateError(
+            () =>
+                repairCoordinationTask(
+                    coordinatorSessionID,
+                    healthyImpl.task.task_id,
+                    { status: "completed" },
+                    { cwd: "/verification" },
+                ),
+            "does not use the research repair flow",
+        );
+        const healthyAfter = readCoordinationTask(
+            coordinatorSessionID,
+            healthyImpl.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (healthyAfter.task.task_type !== "implementation" || healthyAfter.task.status !== "ready") {
+            throw new StateError("Case 10c: healthy card task_type/status unchanged after refused repair.");
+        }
+
+        // 10d. Research->degraded overlap (residual risk #2): a research card
+        // whose task_type is corrupted surfaces as non-research degraded; the
+        // degraded branch restores the core field and the intact research
+        // contract survives.
+        const overlapResearch = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Research degraded overlap sentinel",
+                task_type: "research",
+                coordination_mode: "medium",
+                primary_lane: "queueing",
+                research_question: "How should overlap repair behave?",
+                source_policy: "repo_only",
+                desired_artifact_type: "sources",
+                target_artifact_path: "researches/sources/overlap.md",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                success_criteria: ["task_type restored to research."],
+                validation_plan: ["Read back research + contract intact."],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(overlapResearch.task.task_id);
+        const overlapBefore = readCoordinationTask(
+            coordinatorSessionID,
+            overlapResearch.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (overlapBefore.degraded) {
+            throw new StateError("Case 10d: research card must be healthy before corruption.");
+        }
+        degradeCard(overlapResearch.task.task_id, (data) => {
+            data.task_type = "";
+        });
+        const overlapDegraded = readCoordinationTask(
+            coordinatorSessionID,
+            overlapResearch.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (!overlapDegraded.degraded) {
+            throw new StateError("Case 10d: research card with cleared task_type must be degraded.");
+        }
+        if (!overlapDegraded.diagnostics.offending_fields.includes("task_type")) {
+            throw new StateError("Case 10d: expected task_type in offending fields.");
+        }
+        repairCoordinationTask(
+            coordinatorSessionID,
+            overlapResearch.task.task_id,
+            { task_type: "research" },
+            { cwd: "/verification" },
+        );
+        const overlapRepaired = readCoordinationTask(
+            coordinatorSessionID,
+            overlapResearch.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (overlapRepaired.degraded) {
+            throw new StateError("Case 10d: overlap repair must clear degraded.");
+        }
+        if (overlapRepaired.task.task_type !== "research") {
+            throw new StateError("Case 10d: expected task_type restored to research.");
+        }
+        if (overlapRepaired.task.research_question !== "How should overlap repair behave?") {
+            throw new StateError("Case 10d: research contract must survive the core-field repair.");
+        }
+
+        // 10e. Research tolerated-contract gap must NOT enter the degraded
+        // branch (residual risk #3): missing-but-tolerated research contract
+        // fields leave the card degraded:false, routing to research-repair.
+        const toleratedResearch = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Research tolerated gap sentinel",
+                task_type: "research",
+                coordination_mode: "medium",
+                primary_lane: "queueing",
+                research_question: "Initial tolerated question?",
+                source_policy: "repo_only",
+                desired_artifact_type: "sources",
+                target_artifact_path: "researches/sources/tolerated.md",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                success_criteria: ["Routes to research branch, not degraded."],
+                validation_plan: ["degraded stays false."],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(toleratedResearch.task.task_id);
+        degradeCard(toleratedResearch.task.task_id, (data) => {
+            data.research_question = "";
+        });
+        const toleratedRead = readCoordinationTask(
+            coordinatorSessionID,
+            toleratedResearch.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (toleratedRead.degraded) {
+            throw new StateError("Case 10e: research tolerated-contract gap must NOT be degraded.");
+        }
+        if (toleratedRead.task.task_type !== "research") {
+            throw new StateError("Case 10e: tolerated research card must still read as research.");
+        }
+        repairCoordinationTask(
+            coordinatorSessionID,
+            toleratedResearch.task.task_id,
+            { research_question: "Re-supplied contract question?" },
+            { cwd: "/verification" },
+        );
+        const toleratedRepaired = readCoordinationTask(
+            coordinatorSessionID,
+            toleratedResearch.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (toleratedRepaired.task.research_question !== "Re-supplied contract question?") {
+            throw new StateError("Case 10e: tolerated research card must route to research-repair (contract updated).");
+        }
+
+        // 10f. Bogus replacement enum rejected via strict canonical validation.
+        const bogusEnumCard = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Bogus enum replacement sentinel",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "build",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                success_criteria: ["Bogus enum rejected."],
+                validation_plan: ["Strict canonical validation."],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(bogusEnumCard.task.task_id);
+        degradeCard(bogusEnumCard.task.task_id, (data) => {
+            data.task_type = "";
+        });
+        expectStateError(
+            () =>
+                repairCoordinationTask(
+                    coordinatorSessionID,
+                    bogusEnumCard.task.task_id,
+                    { task_type: "bogus-type" },
+                    { cwd: "/verification" },
+                ),
+            "task_type must be one of",
+        );
+
+        // 10g. Status-conditional offender handling: corrupting status coerces
+        // on read, expanding the offending set with status-conditional offenders
+        // (rough_scope/open_questions/ready_criteria when coerced to draft).
+        // Those VANISH when status is corrected, so the partial-repair check
+        // scopes to repairable offenders only.
+        const statusDegraded = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Degraded status-conditional sentinel",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "build",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                success_criteria: ["Status-conditional offenders vanish."],
+                validation_plan: ["Repair status to ready."],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(statusDegraded.task.task_id);
+        degradeCard(statusDegraded.task.task_id, (data) => {
+            data.task_type = "";
+            data.status = "bogus-status";
+        });
+        const statusDegradedRead = readCoordinationTask(
+            coordinatorSessionID,
+            statusDegraded.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (!statusDegradedRead.degraded) {
+            throw new StateError("Case 10g: expected degraded after status corruption.");
+        }
+        if (!statusDegradedRead.diagnostics.offending_fields.includes("status")) {
+            throw new StateError("Case 10g: expected status in offending fields.");
+        }
+        expectStateError(
+            () =>
+                repairCoordinationTask(
+                    coordinatorSessionID,
+                    statusDegraded.task.task_id,
+                    { task_type: "implementation" },
+                    { cwd: "/verification" },
+                ),
+            "still missing",
+        );
+        repairCoordinationTask(
+            coordinatorSessionID,
+            statusDegraded.task.task_id,
+            { task_type: "implementation", status: "ready" },
+            { cwd: "/verification" },
+        );
+        const statusRepairedRead = readCoordinationTask(
+            coordinatorSessionID,
+            statusDegraded.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (statusRepairedRead.degraded) {
+            throw new StateError("Case 10g: complete repair must clear degraded despite status-conditional offenders.");
+        }
+
+        // 10h. Ordinary update unchanged: task_type still rejected by ordinary
+        // update on a healthy card (carve-out is degraded-repair-only).
+        expectStateError(
+            () =>
+                updateCoordinationTaskMetadata(
+                    coordinatorSessionID,
+                    healthyImpl.task.task_id,
+                    { task_type: "research" },
+                    { cwd: "/verification" },
+                ),
+            "Unsupported fields",
+        );
+
+        // 10i. Restore-only (transition-guard bypass closed): a card degraded in
+        // a NON-status field (title) cannot have its healthy status moved via
+        // repair — status is repairable ONLY when it is itself an offender.
+        // This blocks repairCoordinationTask({title, status:"completed"}) from
+        // landing a terminal lifecycle state through updateCoordinationTask,
+        // which never calls coordinationTaskStatusTransitionErrors.
+        const titleDegraded = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Restore-only transition guard sentinel",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "build",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                success_criteria: ["status not movable via repair."],
+                validation_plan: ["Restore-only enforced."],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(titleDegraded.task.task_id);
+        degradeCard(titleDegraded.task.task_id, (data) => {
+            data.title = "";
+        });
+        const titleDegradedRead = readCoordinationTask(
+            coordinatorSessionID,
+            titleDegraded.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (!titleDegradedRead.degraded) {
+            throw new StateError("Case 10i: expected degraded after clearing title.");
+        }
+        if (titleDegradedRead.diagnostics.offending_fields.includes("status")) {
+            throw new StateError("Case 10i: status must NOT be an offender (title-only degradation).");
+        }
+        // Attempt to smuggle a terminal status through repair alongside the
+        // title restore -> rejected (status is not an offending field).
+        expectStateError(
+            () =>
+                repairCoordinationTask(
+                    coordinatorSessionID,
+                    titleDegraded.task.task_id,
+                    { title: "Restored title", status: "completed" },
+                    { cwd: "/verification" },
+                ),
+            "Unsupported fields",
+        );
+        // Restore-only repair (title only) succeeds and leaves status untouched.
+        repairCoordinationTask(
+            coordinatorSessionID,
+            titleDegraded.task.task_id,
+            { title: "Restored title" },
+            { cwd: "/verification" },
+        );
+        const titleRestoredRead = readCoordinationTask(
+            coordinatorSessionID,
+            titleDegraded.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (titleRestoredRead.degraded) {
+            throw new StateError("Case 10i: restore-only repair must clear degraded.");
+        }
+        if (titleRestoredRead.task.status !== "ready") {
+            throw new StateError("Case 10i: status must remain 'ready' (restore-only cannot move a non-offending status).");
+        }
+        if (titleRestoredRead.task.title !== "Restored title") {
+            throw new StateError("Case 10i: title must be restored.");
+        }
+
         console.log("verification: ok");
         console.log(`primary_task_id: ${primary.task.task_id}`);
         console.log(`overlap_task_id: ${overlap.task.task_id}`);

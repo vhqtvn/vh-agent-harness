@@ -2034,6 +2034,26 @@ const RESEARCH_REPAIRABLE_FIELD_NAMES = [
     "target_artifact_path",
 ];
 
+// Core identity/enum fields a DEGRADED card may need restored through
+// /task-repair. This is the restorable identity/enum offender subset — the
+// fields whose corruption degrades a card that the repair branch can fix in
+// one request. The ordinary update allowlist
+// (TASK_METADATA_UPDATE_*_FIELD_NAMES) deliberately never exposes
+// task_type/status, so healthy-card task_type/status immutability is enforced
+// elsewhere (by that allowlist). The repair carve-out is gated strictly on
+// diagnostics.degraded === true AND restricted to fields that are CURRENTLY
+// offending (restore-only — see repairDegradedCoordinationTaskCoreFields), so
+// it cannot be used to move a healthy field (e.g. a non-offending status) and
+// thereby bypass the lifecycle transition guard.
+const DEGRADED_CORE_REPAIRABLE_FIELD_NAMES = [
+    "task_type",
+    "status",
+    "coordination_mode",
+    "report_envelope",
+    "title",
+    "primary_lane",
+];
+
 const TASK_METADATA_UPDATE_PRE_EXECUTION_FIELD_NAMES = [
     "title",
     "coordination_mode",
@@ -5480,16 +5500,185 @@ function updateCoordinationTaskMetadata(
     };
 }
 
+// Degraded-core repair branch of repairCoordinationTask. Restores the CURRENT
+// core-offender subset (offendingFields ∩ DEGRADED_CORE_REPAIRABLE_FIELD_NAMES)
+// on a degraded card in one atomic request — restore-only, never an edit of
+// non-offending fields. Dispatched STRICTLY on diagnostics.degraded === true
+// (a healthy card never reaches here), so the task_type/status carve-out does
+// not weaken healthy-card immutability — which the ordinary update allowlist
+// (TASK_METADATA_UPDATE_*_FIELD_NAMES, never including task_type/status)
+// enforces elsewhere. Repair routes through updateCoordinationTask (the
+// canonical writer), which re-runs collectCoordinationTaskCoreFieldErrors +
+// throws BEFORE atomicWriteJson, so a partial/invalid repair never lands.
+function repairDegradedCoordinationTaskCoreFields(actor, loaded, payload) {
+    const offendingFields = loaded.diagnostics
+        ? [...loaded.diagnostics.offendingFields]
+        : [];
+    const errors = [];
+    const enumInvalidFields = new Set();
+    // RESTORE-ONLY: a degraded-card repair may touch ONLY fields that are
+    // currently offending. The allowed payload set is the intersection of the
+    // core-offender field set and THIS card's offendingFields — NOT the full
+    // repairable set. This closes a transition-guard bypass: if status were
+    // accepted on a card degraded by a NON-status corruption (e.g. title), the
+    // repair could move a healthy status to a terminal value (completed) via
+    // updateCoordinationTask, which re-runs only enum-validity
+    // (collectCoordinationTaskCoreFieldErrors), never the lifecycle transition
+    // legality guard (coordinationTaskStatusTransitionErrors, enforced only on
+    // the save path). Restricting to offenders keeps the carve-out a pure
+    // "restore corrupted fields" exit; legitimate status recovery (where status
+    // itself is the corrupted offender) remains allowed.
+    const repairableOffenders = offendingFields.filter((field) =>
+        DEGRADED_CORE_REPAIRABLE_FIELD_NAMES.includes(field),
+    );
+    errors.push(
+        ...unexpectedCoordinationTaskPayloadFieldsErrors(
+            payload,
+            repairableOffenders,
+            "degraded task repair",
+        ),
+    );
+    const providedRepairFields = Object.keys(payload).filter((key) =>
+        repairableOffenders.includes(key),
+    );
+    // Residual risk #1: the repair must cover EVERY offending field this
+    // branch can repair (the core enum/identity offenders). Status-conditional
+    // offenders (rough_scope/open_questions/ready_criteria when status coerces
+    // to "draft"; active_session_alias/claimed_at for "working") VANISH once
+    // status is corrected; list-field offenders (files_in_scope etc.) are
+    // outside this branch (caught by the canonical save-path throw as
+    // backstop). So the partial-repair check considers only repairable
+    // offenders uncovered by the payload — keeping the save-path throw a
+    // backstop, not the primary diagnostic.
+    const uncoveredFields = repairableOffenders.filter(
+        (field) => !providedRepairFields.includes(field),
+    );
+    if (uncoveredFields.length) {
+        errors.push(
+            `Task ${loaded.payload.task_id} is degraded (repairable offending fields: ${repairableOffenders.join(", ")}). Provide a repair value for every repairable offending field; still missing: ${uncoveredFields.join(", ")}.`,
+        );
+    }
+    // Pre-normalize provided enum values so a bogus replacement yields a
+    // precise error BEFORE the canonical writer takes the lock.
+    const repairedTaskType =
+        payload.task_type !== undefined
+            ? normalizeCoordinationEnumCollected(
+                  payload.task_type,
+                  COORDINATION_TASK_TYPES,
+                  "task_type",
+                  errors,
+                  enumInvalidFields,
+              )
+            : null;
+    const repairedStatus =
+        payload.status !== undefined
+            ? normalizeCoordinationEnumCollected(
+                  payload.status,
+                  COORDINATION_TASK_STATUSES,
+                  "status",
+                  errors,
+                  enumInvalidFields,
+              )
+            : null;
+    const repairedCoordinationMode =
+        payload.coordination_mode !== undefined
+            ? normalizeCoordinationEnumCollected(
+                  payload.coordination_mode,
+                  COORDINATION_MODES,
+                  "coordination_mode",
+                  errors,
+                  enumInvalidFields,
+              )
+            : null;
+    const repairedReportEnvelope =
+        payload.report_envelope !== undefined
+            ? normalizeCoordinationEnumCollected(
+                  payload.report_envelope,
+                  COORDINATION_REPORT_ENVELOPES,
+                  "report_envelope",
+                  errors,
+                  enumInvalidFields,
+              )
+            : null;
+    const repairedTitle =
+        payload.title !== undefined
+            ? String(payload.title || "").trim()
+            : null;
+    const repairedPrimaryLane =
+        payload.primary_lane !== undefined
+            ? String(payload.primary_lane || "").trim()
+            : null;
+    throwCollectedErrors(errors);
+
+    // Fields actually written by this repair. With restore-only,
+    // providedRepairFields == repairableOffenders (the partial-repair check
+    // above guarantees every repairable offender is covered, and the
+    // unexpected-field check forbids any non-offender). Scope the history note
+    // and return value to these, not the full offending set (which may also
+    // carry status-conditional / list-field offenders this branch never wrote).
+    const repairedFields = uniqueStrings(providedRepairFields);
+    const saved = updateCoordinationTask(loaded.payload.task_id, (current) => ({
+        ...current,
+        task_type:
+            repairedTaskType !== null ? repairedTaskType : current.task_type,
+        status: repairedStatus !== null ? repairedStatus : current.status,
+        coordination_mode:
+            repairedCoordinationMode !== null
+                ? repairedCoordinationMode
+                : current.coordination_mode,
+        report_envelope:
+            repairedReportEnvelope !== null
+                ? repairedReportEnvelope
+                : current.report_envelope,
+        title: repairedTitle !== null ? repairedTitle : current.title,
+        primary_lane:
+            repairedPrimaryLane !== null
+                ? repairedPrimaryLane
+                : current.primary_lane,
+        history: [
+            ...(current.history || []),
+            {
+                at: isoZ(),
+                event: "task_repaired",
+                session_name: actor.session_name,
+                status: current.status,
+                note: `Repaired degraded core fields (${repairedFields.join(", ")}).`,
+            },
+        ],
+    }));
+    return {
+        ...actor,
+        path: relativeToRepo(coordinationTaskPath(saved.task_id)),
+        task: saved,
+        summary: summarizeCoordinationTask(saved),
+        repaired_fields: repairedFields,
+        ...recommendedCoordinationTaskFields(saved, actor.session_name || null),
+    };
+}
+
 function repairCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) {
     const actor = coordinationActorContext(sessionID, options);
     const loaded = loadCoordinationTask(taskIDRaw);
+    const payload = input && typeof input === "object" ? input : {};
+
+    // DISPATCH: a DEGRADED card (diagnostics.degraded === true — authoritative,
+    // recorded pre-coercion by normalizeCoordinationTaskRecordWithDiagnostics)
+    // takes the degraded-core repair branch, which can restore the core
+    // enum/identity fields that the ordinary update allowlist never exposes. A
+    // HEALTHY research card whose contract is missing-but-tolerated
+    // (allowLegacyIncompleteResearch) is NOT degraded and falls through to the
+    // preserved research-contract repair branch below.
+    if (loaded.diagnostics && loaded.diagnostics.degraded === true) {
+        return repairDegradedCoordinationTaskCoreFields(actor, loaded, payload);
+    }
+
+    // Research-contract repair branch (preserved).
     const errors = [];
     if (loaded.payload.task_type !== "research") {
         errors.push(
             `Task ${loaded.payload.task_id} is ${loaded.payload.task_type} and does not use the research repair flow.`,
         );
     }
-    const payload = input && typeof input === "object" ? input : {};
     const missingResearchFields = missingResearchContractFields(loaded.payload);
     if (loaded.payload.task_type === "research") {
         if (!missingResearchFields.length) {
