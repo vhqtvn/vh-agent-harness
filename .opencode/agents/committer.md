@@ -90,11 +90,11 @@ It is the only agent that stages, commits, and manages session lifecycle on beha
    trip the matcher. See `.opencode/skills/gated-commit/SKILL.md` for the full
    canonical example.
 
-2.5. Refresh heartbeat during long operations (required for reviews exceeding TTL)
+2.5. Refresh heartbeat during long operations (required for reviews exceeding the retention window)
      → .opencode/scripts/commit-gate.sh heartbeat --uuid "<UUID>"
      - Heartbeat refreshes both lock metadata (if a lock dir exists) and per-session metadata (`meta-${UUID}`).
-     - In lock-free mode, TTL-based stale cleanup uses the per-session metadata file's mtime. If a review may take longer than the TTL window (default 10 minutes), heartbeat MUST be called periodically to prevent the session metadata from being deleted by a later acquire.
-     - **Required** for any review that may exceed the TTL. Call at least once every TTL / 2 interval during long-running reviews.
+     - In lock-free mode, scratch retention uses the per-session metadata file's mtime. Scratch (meta-/index-) is only reaped once it is BOTH older than the retention window (`COMMIT_GATE_GC_MAX_AGE`, default 3600s / 1 hour) AND not in the protected-UUID set (active lock UUID, `_current_uuid`, or any UUID whose `meta-*` is still fresh). This is the SAME contract `_gate_gc_sweep` uses — the acquire-time cleanup does NOT carry a separate shorter 600s lock-TTL contract. Heartbeat keeps a session inside the fresh-meta protection (it refreshes `meta-${UUID}` mtime and rewrites `_current_uuid`), so heartbeat MUST be called periodically for any review that may run longer than the 1-hour retention window. Do NOT conflate the lock TTL (`COMMIT_GATE_TTL_SECONDS`, 600s — "is a held lock dead?") with the scratch retention window (`COMMIT_GATE_GC_MAX_AGE`, 3600s — "may aged scratch be reaped?").
+     - **Required** for any review that may exceed the 1-hour retention window (`COMMIT_GATE_GC_MAX_AGE`). Call at least once every `GC_MAX_AGE / 2` interval during long-running reviews.
 
 3. Delegate to commit-reviewer
    → Invoke commit-reviewer subagent with:
@@ -125,9 +125,11 @@ It is the only agent that stages, commits, and manages session lifecycle on beha
         durable closeout ledger and the lock was released at acquire end
         (review is lock-free), so there is nothing for the agent to release.
         On these terminal-refusal paths the gate does NOT inline-reclaim the
-        per-session private index / `meta-${UUID}` / message scratch the way
-        the success path does — those orphans are reclaimed by aged-GC /
-        next-acquire stale-meta cleanup, exactly like `could_not_land`. Report
+         per-session private index / `meta-${UUID}` / message scratch the way
+         the success path does — those orphans are reclaimed by aged-GC /
+         next-acquire scratch cleanup (both use the same GC contract:
+         `COMMIT_GATE_GC_MAX_AGE`, default 3600s, with protected-UUID skip),
+         exactly like `could_not_land`. Report
         to A that a re-acquire + re-review is required (the branch advanced
         under this session):
           * `rebased_refused` (reason `reviewed_tree_diverged`): a concurrent
@@ -163,7 +165,7 @@ It is the only agent that stages, commits, and manages session lifecycle on beha
 
 - **Consecutive failures**: If 3 consecutive commit-reviewer rejections occur for the same change scope, escalate to the operator. Do not retry indefinitely.
 - **Lock contention**: If acquire fails twice in a row due to lock contention, report to A with the holder info from status output.
-- **Crash recovery**: If C crashes or loses context, the lock TTL (10 minutes) ensures automatic cleanup. Lock-free sessions also have TTL-based stale cleanup via `.git/commit-gate/meta-*` files. On restart, check `.opencode/scripts/commit-gate.sh status` before acquiring.
+- **Crash recovery**: If C crashes or loses context, the lock TTL (`COMMIT_GATE_TTL_SECONDS`, default 600s) ensures a dead held lock is reaped automatically. Lock-free sessions' scratch (`meta-${UUID}` / `index-${UUID}` under `.git/commit-gate/`) is retained under the SAME GC contract as the rest of the gate: it is only reaped once older than the retention window (`COMMIT_GATE_GC_MAX_AGE`, default 3600s / 1 hour) AND not in the protected-UUID set (active lock UUID, `_current_uuid`, or any UUID whose `meta-*` is fresh) — so a live concurrent session is never reaped by another session's acquire. On restart, check `.opencode/scripts/commit-gate.sh status` before acquiring.
 
 ## Escape hatch
 

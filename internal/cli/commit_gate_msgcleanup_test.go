@@ -694,4 +694,182 @@ func TestCommitGate_MessageCleanup(t *testing.T) {
 			t.Fatalf("SECDATA-1 regression: heartbeat --uuid traversal overwrote victim JSON (_session_meta_path guard failed)\nbefore: %q\nafter:  %q", victimBody, after)
 		}
 	})
+
+	// ---------------------------------------------------------------------
+	// Subtest 11: acquire-time cleanup protects a LIVE concurrent session's
+	// meta-*/index-* scratch (THE concurrency-safeguard regression guard).
+	//
+	// Before this fix, cmd_acquire's pre-lock meta cleanup used the LOCK-TTL
+	// age (COMMIT_GATE_TTL_SECONDS, 600s) with NO protected-UUID set, so when
+	// session B acquired after session A's meta had aged past 600s, B's
+	// acquire `rm`'d A's meta-A + index-A. A then hit uuid_mismatch /
+	// private_index-gone on commit. _gate_gc_sweep (the canonical GC) already
+	// had the correct contract (GC-max-age 3600s + protected-UUID skip); the
+	// acquire-time cleanup had a DIVERGENT, wrong contract.
+	//
+	// This subtest proves the fix: A acquires (no heartbeat), A's meta is
+	// aged past the retention window, B acquires, and A's meta-A + index-A
+	// SURVIVE because A's UUID is in the protected set (_current_uuid, which
+	// acquire writes on success and which B has not yet overwritten when the
+	// pre-lock cleanup runs). This proves the protected-UUID skip works
+	// INDEPENDENT of heartbeat.
+	// ---------------------------------------------------------------------
+	t.Run("acquire_cleanup_protects_live_concurrent_session", func(t *testing.T) {
+		dir, dstScripts := setupScratchRepo(t)
+		seedAndCommit(t, dir, "v1\n")
+
+		// --- Session A: acquire with a real working-tree change. ---
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("v2-from-A\n"), 0o644); err != nil {
+			t.Fatalf("modify for A: %v", err)
+		}
+		uuidMsgA := genUUID(t, dstScripts)
+		msgRelA := writeAgentMsg(t, dir, uuidMsgA)
+		acqA := runGate(t, dstScripts, dir, "acquire",
+			"--paths", `["file.txt"]`,
+			"--message-file", msgRelA,
+			"--session-alias", "session-A")
+		uuidA, _ := acqA["uuid"].(string)
+		if uuidA == "" {
+			t.Fatalf("A acquire did not return a uuid: %v", acqA)
+		}
+		if status, _ := acqA["status"].(string); status != "acquired" {
+			t.Fatalf("A expected status acquired, got %v", acqA)
+		}
+		// A is now in its lock-free review phase: meta-A + index-A exist, the
+		// lock is released, _current_uuid = uuidA.
+		metaA := filepath.Join(dir, ".git", "commit-gate", "meta-"+uuidA)
+		indexA := filepath.Join(dir, ".git", "commit-gate", "index-"+uuidA)
+		if _, err := os.Stat(metaA); err != nil {
+			t.Fatalf("A meta scratch must exist after acquire: %v", err)
+		}
+		if _, err := os.Stat(indexA); err != nil {
+			t.Fatalf("A index scratch must exist after acquire: %v", err)
+		}
+
+		// A does NOT heartbeat. Age A's meta past the GC retention window
+		// (DEFAULT_GC_MAX_AGE=3600s) so the only thing that can save A is the
+		// protected-UUID skip, not the age gate.
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(metaA, old, old); err != nil {
+			t.Fatalf("chtimes meta-A: %v", err)
+		}
+
+		// --- Session B: acquire with its own working-tree change. ---
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("v3-from-B\n"), 0o644); err != nil {
+			t.Fatalf("modify for B: %v", err)
+		}
+		uuidMsgB := genUUID(t, dstScripts)
+		msgRelB := writeAgentMsg(t, dir, uuidMsgB)
+		acqB := runGate(t, dstScripts, dir, "acquire",
+			"--paths", `["file.txt"]`,
+			"--message-file", msgRelB,
+			"--session-alias", "session-B")
+		uuidB, _ := acqB["uuid"].(string)
+		if uuidB == "" {
+			t.Fatalf("B acquire did not return a uuid: %v", acqB)
+		}
+		if status, _ := acqB["status"].(string); status != "acquired" {
+			t.Fatalf("B expected status acquired, got %v", acqB)
+		}
+		if uuidB == uuidA {
+			t.Fatalf("test premise broken: A and B uuids collide (%s)", uuidA)
+		}
+
+		// THE concurrency-safeguard assertion: A's scratch SURVIVES B's
+		// acquire-time cleanup. Before the fix, both were `rm`'d here.
+		if _, err := os.Stat(metaA); err != nil {
+			t.Fatalf("REGRESSION: A meta-A was deleted by B's acquire-time cleanup (protected-UUID skip failed); stat err=%v", err)
+		}
+		if _, err := os.Stat(indexA); err != nil {
+			t.Fatalf("REGRESSION: A index-A was deleted by B's acquire-time cleanup (protected-UUID skip failed); stat err=%v", err)
+		}
+	})
+
+	// ---------------------------------------------------------------------
+	// Subtest 12: heartbeat refreshes the per-session meta mtime (pins the
+	// open question EMPIRICALLY, resolving the blast radius of the bug).
+	//
+	// Open question: does cmd_heartbeat refresh meta-* mtime? If YES, a
+	// heartbeating session is protected by the fresh-meta rule and the bug
+	// only bit sessions that stopped heartbeating; if NO, every long-running
+	// session was exposed. This subtest OBSERVES the answer: it forces a
+	// stale meta mtime, heartbeats, and checks the mtime was refreshed. It
+	// then confirms a heartbeating session's scratch survives a concurrent
+	// acquire (protected by the fresh meta in addition to _current_uuid).
+	// ---------------------------------------------------------------------
+	t.Run("acquire_cleanup_heartbeat_refreshes_meta_mtime", func(t *testing.T) {
+		dir, dstScripts := setupScratchRepo(t)
+		seedAndCommit(t, dir, "v1\n")
+
+		// --- Session A acquires. ---
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("v2-from-A\n"), 0o644); err != nil {
+			t.Fatalf("modify for A: %v", err)
+		}
+		uuidMsgA := genUUID(t, dstScripts)
+		msgRelA := writeAgentMsg(t, dir, uuidMsgA)
+		acqA := runGate(t, dstScripts, dir, "acquire",
+			"--paths", `["file.txt"]`,
+			"--message-file", msgRelA,
+			"--session-alias", "session-A")
+		uuidA, _ := acqA["uuid"].(string)
+		if uuidA == "" {
+			t.Fatalf("A acquire did not return a uuid: %v", acqA)
+		}
+		metaA := filepath.Join(dir, ".git", "commit-gate", "meta-"+uuidA)
+		indexA := filepath.Join(dir, ".git", "commit-gate", "index-"+uuidA)
+
+		// Force a stale starting mtime, then record it.
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(metaA, old, old); err != nil {
+			t.Fatalf("chtimes meta-A stale: %v", err)
+		}
+		infoBefore, err := os.Stat(metaA)
+		if err != nil {
+			t.Fatalf("stat meta-A before heartbeat: %v", err)
+		}
+		mtimeBefore := infoBefore.ModTime()
+
+		// A heartbeats (lock-free review-phase heartbeat path).
+		hb := runGate(t, dstScripts, dir, "heartbeat", "--uuid", uuidA)
+		if status, _ := hb["status"].(string); status != "heartbeat_refreshed" {
+			t.Fatalf("expected status heartbeat_refreshed, got %v", hb)
+		}
+
+		// THE empirical observation: meta-A mtime was refreshed by heartbeat.
+		infoAfter, err := os.Stat(metaA)
+		if err != nil {
+			t.Fatalf("stat meta-A after heartbeat: %v", err)
+		}
+		mtimeAfter := infoAfter.ModTime()
+		if !mtimeAfter.After(mtimeBefore) {
+			t.Fatalf("REGRESSION/observation: heartbeat did NOT refresh meta mtime (before=%v, after=%v) — answers the open question NO", mtimeBefore, mtimeAfter)
+		}
+		// Record the answer to the open question for the test log.
+		ageAfter := time.Since(mtimeAfter)
+		t.Logf("OPEN-QUESTION ANSWER: cmd_heartbeat DOES refresh meta mtime (before=%v, after=%v, ageAfter=%v); a heartbeating session is protected by the fresh-meta rule, so the acquire-time bug only bit sessions that stopped heartbeating past the retention window", mtimeBefore, mtimeAfter, ageAfter)
+		// And confirm the refreshed meta is now within the GC retention window.
+		if ageAfter > time.Hour {
+			t.Fatalf("post-heartbeat meta age %v exceeds GC retention window — heartbeat did not make the meta fresh", ageAfter)
+		}
+
+		// --- Session B acquires; A's (now-fresh, heartbeated) scratch survives. ---
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("v3-from-B\n"), 0o644); err != nil {
+			t.Fatalf("modify for B: %v", err)
+		}
+		uuidMsgB := genUUID(t, dstScripts)
+		msgRelB := writeAgentMsg(t, dir, uuidMsgB)
+		acqB := runGate(t, dstScripts, dir, "acquire",
+			"--paths", `["file.txt"]`,
+			"--message-file", msgRelB,
+			"--session-alias", "session-B")
+		if status, _ := acqB["status"].(string); status != "acquired" {
+			t.Fatalf("B expected status acquired, got %v", acqB)
+		}
+		if _, err := os.Stat(metaA); err != nil {
+			t.Fatalf("REGRESSION: heartbeated A meta-A was deleted by B's acquire-time cleanup; stat err=%v", err)
+		}
+		if _, err := os.Stat(indexA); err != nil {
+			t.Fatalf("REGRESSION: heartbeated A index-A was deleted by B's acquire-time cleanup; stat err=%v", err)
+		}
+	})
 }

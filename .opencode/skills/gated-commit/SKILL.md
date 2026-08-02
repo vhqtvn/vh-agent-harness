@@ -216,8 +216,12 @@ These verbs are always allowed and pass through shell-guard:
 
 Heartbeat refreshes both lock metadata (if a lock dir exists) and per-session metadata
 (`meta-${UUID}` in `.git/commit-gate/`). In lock-free mode, the per-session metadata file's mtime
-is what TTL-based stale cleanup checks — so **heartbeat is required** for any review that may
-exceed the TTL window (default 10 minutes).
+is what the scratch-retention cleanups (the acquire-time cleanup AND `_gate_gc_sweep`) consult — both
+use the SAME contract (`COMMIT_GATE_GC_MAX_AGE`, default 3600s / 1 hour) with a protected-UUID skip
+(active lock UUID, `_current_uuid`, any UUID whose `meta-*` is still fresh). A live concurrent session
+is never reaped by another session's acquire, so **heartbeat is required** for any review that may
+exceed the 1-hour retention window (heartbeat refreshes the `meta-${UUID}` mtime and rewrites
+`_current_uuid`, keeping the session inside the fresh-meta protection).
 
 ```bash
 .opencode/scripts/commit-gate.sh heartbeat --uuid "<UUID>"
