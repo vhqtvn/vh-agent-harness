@@ -1,32 +1,33 @@
 package permconfig
 
 // ---------------------------------------------------------------------------
-// Dead-rule detection lint. A "dead rule" is a permission.bash entry whose
-// value can NEVER be the findLast outcome for any input it matches — i.e. a
-// later entry with a strictly broader (or identical) pattern shadows it for
-// every matching invocation. Dead rules are misleading: they claim to allow
-// (or ask) something that the actual permission resolution never grants.
+// Dead-rule detection lint tests. See dead_rule_lint.go for the detection
+// contract: a "dead rule" is a permission.bash entry whose value can NEVER be
+// the findLast outcome for any input it matches, because the trailing
+// DevShCommand scalar ("vh-agent-harness *") covers every input the entry's
+// pattern covers AND yields a DIFFERENT decision.
 //
-// The lint is GENERIC: it iterates every agent in CoreLocationRules, emits the
-// real bash block via computeBashBlock, and for each allow/ask entry BEFORE the
-// always-last DevShCommand scalar ("vh-agent-harness *") it checks whether the
-// scalar shadows it for ALL inputs the entry's pattern covers. It is NOT
-// specific to the exec-ro case — it catches any future agent that emits an
-// allow/ask that the scalar renders moot (e.g. an ExtraBash allow whose verb
-// is also a vh-agent-harness subcommand).
+// Two complementary test shapes live here:
 //
-// ONE documented class of intentional dead entries is exempt: readonly
-// command-group members (HarnessReadOnlyCommandsSet) emitted in region 2 for
-// NON-read_only agents. The HarnessReadOnlyCommands doc comment (tables.go)
-// documents this: "For non-read_only agents, [exec-ro] stays in the
-// command-group region as before (harmlessly dead — always shadowed by the
-// scalar 'vh-agent-harness *' entry — but consistent with the legacy
-// emission)." read_only agents skip these in region 2 (so no dead entry); the
-// exemption only covers the non-RO legacy retention.
+//   - TestDeadRuleLint_NoShadowedAllowOrAsk iterates every REAL agent in
+//     CoreLocationRules and asserts NONE is dead (via the shared LintDeadRules
+//     helper). This proves the real permission table is clean — but (as the
+//     row that prompted this slice notes) it would pass even if the detector
+//     were broken, because no real rule currently exercises the dead shape.
 //
-// The exemption is scoped to the audited readonly command set, so it cannot
-// mask an ACCIDENTAL dead rule (which would live in ExtraBash or a hand-added
-// allow, neither of which is in HarnessReadOnlyCommandsSet).
+//   - TestDeadRuleLint_PositiveFire synthesizes a known-shadowed-allow
+//     LocationRule (deny scalar + an ExtraBash allow on a vh-agent-harness
+//     subcommand), emits its bash block, and asserts LintDeadRules returns a
+//     finding naming the dead pattern. This proves DETECTION CAPABILITY — the
+//     test goes red if the detection branch is disabled (mutation control
+//     verified during implementation), closing the "test passes even with a
+//     broken detector" gap that NoShadowedAllowOrAsk alone could not cover.
+//
+// The one documented-intentional exemption (canonical readonly command-group
+// members emitted in region 2 for non-read_only agents) is preserved
+// structurally by computeBashBlock's policy-aware skips and the
+// redundant-but-consistent guard inside LintDeadRules; see dead_rule_lint.go
+// for detail.
 // ---------------------------------------------------------------------------
 
 import (
@@ -34,84 +35,129 @@ import (
 	"testing"
 )
 
-// patternSubsumedByDevSh reports whether EVERY input matching `pattern` is also
-// matched by the DevShCommand scalar ("vh-agent-harness *"). The scalar matches
-// the bare "vh-agent-harness" OR "vh-agent-harness <args>". A pattern is
-// subsumed iff it only matches vh-agent-harness-prefixed invocations — so a
-// wildcard "*" (which also matches `git commit`, `jq`, etc.) is NOT subsumed,
-// nor is a non-vh-agent-harness command like ".opencode/scripts/*".
-func patternSubsumedByDevSh(pattern string) bool {
-	if pattern == DevShCommand || pattern == "vh-agent-harness" {
-		return true
-	}
-	return strings.HasPrefix(pattern, "vh-agent-harness ")
-}
-
-// TestDeadRuleLint_NoShadowedAllowOrAsk detects dead permission.bash entries:
-// an allow/ask entry that the always-last DevShCommand scalar shadows for every
-// matching input, making the entry's value unreachable under findLast. Fails
-// with a diagnostic naming the agent, the dead pattern, and the shadowing
-// scalar. See the file doc comment for the one documented-intentional exemption.
+// TestDeadRuleLint_NoShadowedAllowOrAsk asserts that NO real CoreLocationRules
+// agent emits a dead allow/ask entry. Detection runs through the shared
+// LintDeadRules helper in dead_rule_lint.go. Because this iterates real data
+// only, it cannot on its own prove the detector FIRES — pair it with
+// TestDeadRuleLint_PositiveFire for capability coverage.
 func TestDeadRuleLint_NoShadowedAllowOrAsk(t *testing.T) {
-	for agent, rule := range CoreLocationRules {
-		agent, rule := agent, rule
+	for agent := range CoreLocationRules {
+		agent := agent
 		t.Run(agent, func(t *testing.T) {
-			entries := computeBashBlock(rule, agent, Features{}).entries
-
-			// Locate the always-last DevShCommand scalar. Every block has
-			// exactly one (computeBashBlock region 4a emits it unconditionally).
-			devShIdx := -1
-			devShVal := ""
-			for i, e := range entries {
-				if e.key == DevShCommand {
-					devShIdx = i
-					devShVal = e.val
-				}
-			}
-			if devShIdx < 0 {
-				t.Fatalf("agent %s: emitted block has no DevShCommand scalar %q", agent, DevShCommand)
-			}
-
-			nonReadOnly := rule.HarnessPolicy != HarnessPolicyReadOnly
-			_ = nonReadOnly // retained for clarity; no carve-out remains (see below)
-			for i, e := range entries {
-				if i >= devShIdx {
-					// Only entries BEFORE the scalar can be shadowed by it.
-					// Region 4b readonly allows (read_only agents) come AFTER
-					// the scalar and are the intended last-match winners.
-					break
-				}
-				if e.val != string(Allow) && e.val != string(Ask) {
-					continue
-				}
-				// Only consider entries whose entire match-set the scalar also
-				// covers (i.e. vh-agent-harness-prefixed verbs). A "*" wildcard
-				// or a .opencode/scripts/* entry is NOT shadowed by the scalar.
-				if !patternSubsumedByDevSh(e.key) {
-					continue
-				}
-				// If the scalar yields the SAME value, the entry is redundant
-				// (not dead-to-a-different-value) — e.g. an Allow agent's
-				// exec-ro allow under a scalar allow. Redundant-but-consistent
-				// is not a dead rule; only a value-CHANGE is misleading.
-				if devShVal == e.val {
-					continue
-				}
-				// No carve-out: ANY allow/ask entry in region 2 that the later
-				// DevShCommand scalar shadows to a DIFFERENT decision is a dead
-				// rule, for EVERY agent (read_only, allow, ask, deny). The
-				// computeBashBlock emitter now SKIPS canonical read-only verbs
-				// for read_only AND deny agents (so neither emits a dead
-				// region-2 entry). allow/ask agents keep region-2 readonly
-				// entries, but their scalar agrees (allow/ask == allow/ask), so
-				// the redundant-but-consistent guard above passes them. This
-				// lint catches the full class of dead rules; reintroducing one
-				// (e.g. a new agent with an ask/deny scalar but a region-2
-				// readonly allow) fails here rather than slipping through.
-				t.Errorf("dead rule detected for agent %s: pattern %q is shadowed by later %q for all matching inputs (entry value %q, scalar value %q)",
-					agent, e.key, DevShCommand, e.val, devShVal)
+			for _, f := range LintDeadRules(CoreLocationRules, agent) {
+				t.Errorf("%s", f)
 			}
 		})
+	}
+}
+
+// TestDeadRuleLint_PositiveFire proves the detector FIRES on a synthesized dead
+// rule — closing the gap that TestDeadRuleLint_NoShadowedAllowOrAsk (which
+// iterates real data only) cannot cover on its own.
+//
+// It constructs a deny-policy LocationRule whose ExtraBash injects an allow on a
+// vh-agent-harness-prefixed verb ("vh-agent-harness custom-verb *"). Under
+// computeBashBlock this emits the allow in region 3 (BEFORE the trailing
+// "vh-agent-harness *": "deny" scalar), so the scalar wins for every matching
+// input under findLast — the allow is dead.
+//
+// The test first pins the emitted dead SHAPE (the injected allow exists, sits
+// before the scalar, and carries the value change allow→deny), then asserts
+// LintDeadRules returns a Finding naming the dead pattern with the expected
+// fields. The shape pin is load-bearing: without it the detection assertion
+// could pass for the wrong reason (e.g. a different dead source than the
+// injected ExtraBash). A mutation that disables the detection branch (e.g.
+// commenting out the `findings = append(...)` line in LintDeadRules) makes this
+// test RED because no finding is returned — the mutation control was performed
+// during implementation.
+func TestDeadRuleLint_PositiveFire(t *testing.T) {
+	const (
+		deadAgent  = "synthesized-dead-agent"
+		deadVerb   = "vh-agent-harness custom-verb *"
+		deadScalar = "vh-agent-harness *"
+	)
+	rule := LocationRule{
+		Wildcard:      Deny,
+		Readonly:      Allow,
+		GitReadonly:   Allow,
+		HasGate:       false,
+		HarnessPolicy: HarnessPolicyDeny, // region 4a scalar emits "deny"
+		// ExtraBash injects an allow on a vh-agent-harness subcommand that is
+		// NOT a canonical read-only verb (so it survives computeBashBlock's
+		// policy skip and the protectedBashKeys collision check) and is
+		// subsumed by the trailing scalar — i.e. dead under findLast.
+		ExtraBash: []BashEntry{{Pattern: deadVerb, Decision: Allow}},
+	}
+	rules := map[string]LocationRule{deadAgent: rule}
+
+	// Sanity: the emitted bash block really has the dead shape — the injected
+	// allow BEFORE the trailing deny scalar, carrying the value change
+	// allow→deny. This pins the construction+emission contract the detection
+	// relies on; rules_test.go::TestSynthesizedDeadLocationRule_* pins the
+	// per-field shape that produces this block.
+	entries := computeBashBlock(rule, deadAgent, Features{}).entries
+	verbIdx, scalarIdx := -1, -1
+	for i, e := range entries {
+		if e.key == deadVerb {
+			verbIdx = i
+		}
+		if e.key == deadScalar {
+			scalarIdx = i
+		}
+	}
+	if verbIdx < 0 {
+		t.Fatalf("emitted block missing the injected ExtraBash allow %q", deadVerb)
+	}
+	if scalarIdx < 0 {
+		t.Fatalf("emitted block missing the trailing scalar %q", deadScalar)
+	}
+	if verbIdx >= scalarIdx {
+		t.Fatalf("injected allow %q (idx %d) must precede the scalar %q (idx %d) to be shadowed under findLast",
+			deadVerb, verbIdx, deadScalar, scalarIdx)
+	}
+	if entries[verbIdx].val != string(Allow) || entries[scalarIdx].val != string(Deny) {
+		t.Fatalf("dead shape mismatch: allow entry %q = %q, scalar %q = %q (want allow/deny)",
+			deadVerb, entries[verbIdx].val, deadScalar, entries[scalarIdx].val)
+	}
+
+	// Detection: LintDeadRules must report the dead ExtraBash entry. This is
+	// the positive fire — no real CoreLocationRules agent exercises the dead
+	// shape, so this synthesized case is the only thing proving detection
+	// capability.
+	findings := LintDeadRules(rules, deadAgent)
+	if len(findings) == 0 {
+		t.Fatalf("LintDeadRules returned no findings for synthesized dead rule; the detection branch is not firing")
+	}
+	var dead *Finding
+	for i := range findings {
+		if findings[i].Pattern == deadVerb {
+			dead = &findings[i]
+			break
+		}
+	}
+	if dead == nil {
+		t.Fatalf("LintDeadRules did not report a finding for the dead pattern %q; findings = %v",
+			deadVerb, findings)
+	}
+	if dead.Agent != deadAgent {
+		t.Errorf("finding Agent = %q, want %q", dead.Agent, deadAgent)
+	}
+	if dead.Shadow != deadScalar {
+		t.Errorf("finding Shadow = %q, want %q", dead.Shadow, deadScalar)
+	}
+	if dead.EntryValue != string(Allow) {
+		t.Errorf("finding EntryValue = %q, want %q", dead.EntryValue, string(Allow))
+	}
+	if dead.ScalarValue != string(Deny) {
+		t.Errorf("finding ScalarValue = %q, want %q", dead.ScalarValue, string(Deny))
+	}
+	// The finding's String() output must name both the dead pattern and the
+	// agent so the diagnostic is actionable when this fires on real data.
+	msg := dead.String()
+	for _, want := range []string{deadAgent, deadVerb, deadScalar, string(Allow), string(Deny)} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("finding String() = %q missing %q", msg, want)
+		}
 	}
 }
 
