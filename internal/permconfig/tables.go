@@ -380,6 +380,7 @@ var CoreTaskRules = map[string][]TaskEntry{
 		{"commit-reviewer", Allow},
 		{"ship-review", Allow},
 		{"committer", Allow},
+		{"docs-steward", Allow},
 		{"debate", Allow},
 		{"solution-brief", Allow},
 		// media-perception: dropped by Emit's present-agent filter when the
@@ -427,6 +428,7 @@ var CoreTaskRules = map[string][]TaskEntry{
 		{"commit-reviewer", Allow},
 		{"ship-review", Allow},
 		{"committer", Allow},
+		{"docs-steward", Allow},
 		{"debate", Allow},
 		{"solution-brief", Allow},
 		// media-perception: dropped by Emit's present-agent filter when the
