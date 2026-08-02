@@ -177,21 +177,27 @@ Inspect release-relevant DEFER candidates (G7) — read-only invocation of the
 deterministic release-DEFER evaluator (the same single evaluator the sanctioned
 release-tag wrapper consumes):
 
-- `node .opencode/scripts/check-defer-triggers.js --mode=release --since <last-tag>`
-  — emit one structured JSON classification per firing candidate (all
-  provenances: `source:review-defer`, `source:external-study`,
-  `source:p2-followup`, etc.) surfaced in `.local/coordinator/tasks/`. Omit `--since` when `last_tag` is null (the
-  evaluator then derives the arc itself). The script is READ-ONLY: it reads the
-  tasks directory and runs the same read-only git inspection verbs
+- `node .opencode/scripts/check-defer-triggers.js --mode=release`
+  — **MANIFEST AUTHORITY**: this mode reads the committed disposition manifest
+  at `.vh-agent-harness/release-defer-dispositions.json` ONLY (as a `HEAD:<path>`
+  blob) and performs **NO access to `.local/coordinator/tasks/`** — the
+  committed manifest is the release truth; `.local/` is promoter/provenance
+  transport only. It is NOT the surface that enumerates open cards: surfacing
+  cards from `.local/coordinator/tasks/` is what `--mode=release-prep` (the F4-C
+  release-preparation enumerator) does — a different mode, used during release
+  prep, not the G7 release-time gate. `--mode=release` derives its release base
+  itself (`release_base.value` is derived on read from the last reachable tag),
+  so there is no `--since <last-tag>` operand. The script is READ-ONLY: it reads
+  the committed manifest blob and runs the same read-only git inspection verbs
   (`git describe --tags --abbrev=0`, `git diff --name-only`,
   `git rev-parse --verify refs/tags/<tag>`) the agent runs elsewhere — it never
   mutates. It is NOT the `vh-agent-harness` wrapper; it is a bare `node` call
   against a read-only classifier script, which is permitted.
 - Parse the JSON envelope. The top-level `classification` is one of
-  `clear | advisory | blocker | evaluator-error`. `tasks_dir_state` reports
-  `absent | empty | present | unreadable`. `findings[]` carries per-card
-  detail; `blocking_ids`, `advisory_ids`, `evaluator_error_ids`, and
-  `resolved_ids` are pre-sorted deterministically by the evaluator.
+  `clear | disclose | blocker | evaluator-error`. `records[]` carries one
+  disposition record per `defer_id`; `blocking_ids`, `disclose_ids`,
+  `evaluator_error_ids`, and `advisories[]` are populated by the evaluator from
+  the committed manifest's disposition matrix.
 
 All of the above are read-only. If any command would mutate (e.g. you
 accidentally reach for `git tag` or a wrapper), STOP and refuse.
