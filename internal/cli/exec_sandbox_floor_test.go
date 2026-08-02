@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -343,5 +344,84 @@ func TestApplyFloorToRequest_DualRootBypass(t *testing.T) {
 	}
 	if mode3 != execsandbox.ModeOff || net3 != execsandbox.NetAllow {
 		t.Fatalf("dual-root no-floor: mode=%q net=%q, want off/allow (no floor = no clamp)", mode3, net3)
+	}
+}
+
+// TestApplyFloorToRequest_FloorSafetyInvariant_FVBinding is the concrete
+// proof↔code binding for the formal-verification S1 pilot
+// (tmp/formal-verification-pilot/SandboxFloor.lean, checked green by Lean 4.32.2;
+// see tmp/formal-verification-pilot/FIDELITY-BINDING.md).
+//
+// It materializes the Lean safety invariant
+//
+//	floor_le_effective : ∀ requested floor, rank floor ≤ rank (ApplyFloor requested floor)
+//
+// as an EXHAUSTIVE Go matrix over the full 3×3 (requested, floor) grid: for
+// every pair, the effective mode's rank is ≥ the floor's rank — a caller can
+// NEVER downgrade below the floor.
+//
+// RED-ON-DIVERGENCE: this test goes RED the moment ApplyFloor drops the max
+// (flipped to min, or the floor simply ignored) — exactly the divergence the
+// proof forbids. It was verified RED against a deliberately-broken ApplyFloor
+// (max→min) before being left GREEN on the faithful implementation.
+//
+// ANTI-LAUNDERING: a proof of the model is not a proof of the code. The Lean
+// theorem proves the modeled `max`; this test is the cheapest concrete recheck
+// that the Go `ApplyFloor`/`applyFloorToRequest` upholds the never-below-floor
+// HALF of that law (floor_le_effective: effective rank ≥ floor rank). It does
+// NOT pin maximality (effective ≤ max(requested, floor)), so it would not catch
+// an impl that always returns the floor/strict — only an impl that lets the
+// caller downgrade below the floor, which is the load-bearing divergence.
+// INFORM-only: never gates commits, releases, doctor, or update.
+func TestApplyFloorToRequest_FloorSafetyInvariant_FVBinding(t *testing.T) {
+	// rankOf mirrors execsandbox.modeRank (internal/execsandbox/floor.go) and the
+	// Lean `rank` (SandboxFloor.lean): off < best-effort < strict.
+	rankOf := func(m execsandbox.SandboxMode) int {
+		switch m {
+		case execsandbox.ModeStrict:
+			return 2
+		case execsandbox.ModeBestEffort:
+			return 1
+		case execsandbox.ModeOff:
+			return 0
+		}
+		return 0
+	}
+
+	// One fixture per floor value, exactly as the Lean `floor` argument ranges
+	// over {off, bestEffort, strict}. "" means an absent exec_sandbox block ⇒ no
+	// floor (ModeOff).
+	floorFixture := map[execsandbox.SandboxMode]string{
+		execsandbox.ModeOff:        "",
+		execsandbox.ModeBestEffort: "best-effort",
+		execsandbox.ModeStrict:     "strict",
+	}
+	roots := make(map[execsandbox.SandboxMode]string, len(floorFixture))
+	for floor, val := range floorFixture {
+		root := t.TempDir()
+		if val != "" {
+			writeFloorRunShape(t, root, val)
+		}
+		roots[floor] = root
+	}
+
+	// The full 3×3 matrix the Lean `floor_le_effective_all_pairs` evaluates.
+	for _, floor := range []execsandbox.SandboxMode{execsandbox.ModeOff, execsandbox.ModeBestEffort, execsandbox.ModeStrict} {
+		for _, requested := range []execsandbox.SandboxMode{execsandbox.ModeOff, execsandbox.ModeBestEffort, execsandbox.ModeStrict} {
+			name := fmt.Sprintf("requested=%s/floor=%s", requested, floor)
+			t.Run(name, func(t *testing.T) {
+				effective, _, err := applyFloorToRequest(requested, execsandbox.NetDeny, roots[floor], roots[floor])
+				if err != nil {
+					t.Fatalf("applyFloorToRequest: unexpected error: %v", err)
+				}
+				// THE INVARIANT (Lean: rank floor ≤ rank effective).
+				if rankOf(effective) < rankOf(floor) {
+					t.Errorf("FV binding violated: requested=%s floor=%s -> effective=%s; "+
+						"rank(effective)=%d < rank(floor)=%d (caller downgraded below the floor; "+
+						"ApplyFloor must be MAX, not MIN)",
+						requested, floor, effective, rankOf(effective), rankOf(floor))
+				}
+			})
+		}
 	}
 }
