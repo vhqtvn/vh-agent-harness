@@ -44,12 +44,13 @@ type PAProbeInput struct {
 }
 
 // GeneratePAProbes assembles a well-formed F1PAProbeSummary from explicit
-// per-target inputs. It is PURE: it never mutates the caller's slices (every
-// slice field is deep-copied via copyStrings). It assigns stable probe IDs
-// (PA-P1, PA-P2, ... in deterministic input order after a stable sort),
-// normalizes whitespace on scalar fields, validates the result enum, and
-// returns producer errors for inputs whose result-specific requirements are
-// not met (so a well-formed input set produces output that passes
+// per-target inputs. It is PURE: it never mutates the caller's slices — every
+// slice field is copied and deduped on that copy (CheckedScope via
+// paSortedDedupedScope; EvidenceRefs via paDedupedRefs). It assigns stable
+// probe IDs (PA-P1, PA-P2, ... in deterministic input order after a stable
+// sort), normalizes whitespace on scalar fields, validates the result enum,
+// and returns producer errors for inputs whose result-specific requirements
+// are not met (so a well-formed input set produces output that passes
 // validatePASummary).
 func GeneratePAProbes(inputs []PAProbeInput) (*F1PAProbeSummary, []string) {
 	var producerErrs []string
@@ -94,8 +95,8 @@ func GeneratePAProbes(inputs []PAProbeInput) (*F1PAProbeSummary, []string) {
 			FalsificationQuestion: strings.TrimSpace(in.FalsificationQuestion),
 			Result:                in.Result,
 			Method:                strings.TrimSpace(in.Method),
-			CheckedScope:          sortedCopyStrings(in.CheckedScope),
-			EvidenceRefs:          copyStrings(in.EvidenceRefs),
+			CheckedScope:          paSortedDedupedScope(in.CheckedScope),
+			EvidenceRefs:          paDedupedRefs(in.EvidenceRefs),
 			Limitation:            strings.TrimSpace(in.Limitation),
 			WeakestClaim:          strings.TrimSpace(in.WeakestClaim),
 			Confidence:            strings.TrimSpace(in.Confidence),
@@ -161,4 +162,63 @@ func paResultRank(result string) int {
 		return 3
 	}
 	return 4
+}
+
+// paSortedDedupedScope returns a sorted, deduplicated copy of s for the
+// producer's CheckedScope field. The caller's slice is never mutated (pure
+// copy); dedup runs on the copy. This closes the producer-purity gap where a
+// caller passing duplicate scope entries would emit output that fails
+// validatePASummary's firstDuplicate check (memo P1-CLI-002).
+//
+// Dedup is on EXACT string values: firstDuplicate operates on raw (untrimmed)
+// values, so the producer must dedupe on the same basis.
+//
+// Nil-vs-empty behavior is preserved: a nil input returns a non-nil empty
+// slice (matching the prior sortedCopyStrings semantics so JSON canonical
+// bytes and downstream consumers see no shape change).
+func paSortedDedupedScope(s []string) []string {
+	out := make([]string, len(s))
+	copy(out, s)
+	sort.Strings(out)
+	return paCompactAdjacentDuplicates(out)
+}
+
+// paDedupedRefs returns an order-preserving, deduplicated copy of s for the
+// producer's EvidenceRefs field. Caller order is preserved (evidence refs may
+// carry caller-meaningful ordering that the producer must not reorder). The
+// caller's slice is never mutated (pure copy); dedup runs on the copy.
+//
+// Dedup is on EXACT string values (matches firstDuplicate's raw comparison).
+// Nil input returns nil (matches the prior copyStrings semantics).
+func paDedupedRefs(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	out := make([]string, 0, len(s))
+	seen := map[string]struct{}{}
+	for _, v := range s {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+// paCompactAdjacentDuplicates compacts a sorted slice by dropping adjacent
+// duplicates in place. Used after sort.Strings for the CheckedScope path so
+// dedup is stable against the sorted order without a second allocation.
+func paCompactAdjacentDuplicates(sorted []string) []string {
+	if len(sorted) == 0 {
+		return sorted
+	}
+	w := 1
+	for r := 1; r < len(sorted); r++ {
+		if sorted[r] != sorted[r-1] {
+			sorted[w] = sorted[r]
+			w++
+		}
+	}
+	return sorted[:w]
 }
