@@ -238,6 +238,13 @@ claim:
 - `tmp/agent-runs/formal-verification/research.md` — source packet (gitignored).
 - `tmp/agent-runs/formal-verification/debate.md` — debate verdicts (gitignored).
 
+## Pilot Evidence
+
+> Pilot #1 (exec-sandbox mode-floor invariant): engine-checked green offline (Lean 4.32.2, `formal-verify/lean4:v4.32.2`, `--network=none`, exit 0); red-on-divergence demonstrated (3/9 cells RED on max→min flip; committed test `4caa3c8`); fidelity binding written. First plumbing validation — one datapoint toward the S2 two-sided health signal (catches-real-divergence side). NOT yet S2-sufficient (one pilot, one-sided test).
+
+**Note for mathlib/TLAPS pilots:**
+> `omega` treats `Nat.max` as opaque — the headline `floor ≤ effective` law could not be proved via `omega` and required direct `if`-cases (the proof is `Nat.le_max_left`-level conceptually but needs case-splitting in practice under Lean core without mathlib).
+
 ---
 
 ```behavioral-closure
@@ -247,5 +254,4 @@ result: not-demonstrable
 *Honesty caveat: The design's internal consistency is review-verifiable, not runtime-proven. The
 formal-verification paradigm itself (engines prove models, not code) is the load-bearing limitation
 the fidelity-binding design addresses but does not eliminate. No load-bearing code path ran — this
-is a design product only. No engine ran; per this design's own Degradation rule, that maps to
-`result: not-demonstrable` / `verdict: inconclusive`, never `proven`.*
+is a design product only. (Pilot #1 ran the engine offline, but this design token reflects the core capability design, not the subsequent pilot run).*
