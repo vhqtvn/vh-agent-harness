@@ -38,11 +38,13 @@ converge on correctness without blocking edits:
 1. **Hybrid split-commit conflict discipline (gate-enforced).** The commit-gate
    O1 preflight refuses an `acquire` whose `--paths` mixes
    `docs/planning/backlog.md` with any other path — so a backlog change can
-   never `cas_conflict` a code commit. The rejection message is the teaching:
-   agents learn split-commit at the commit boundary. On `cas_conflict` for a
-   backlog-only commit, re-read from the new HEAD, re-apply only your rows, and
-   retry. Dirty backlog edits are **preserved before any restore** — never
-   blind-revert `backlog.md`. See [PROMOTER_RUNBOOK.md](PROMOTER_RUNBOOK.md).
+   never content-tangle (land as `could_not_land`) a code commit. The rejection
+   message is the teaching: agents learn split-commit at the commit boundary.
+   On `could_not_land` for a backlog-only commit (the backlog content-tangle —
+   another session's backlog edit landed first), re-read from the new HEAD,
+   re-apply only your rows, and retry. Dirty backlog edits are **preserved
+   before any restore** — never blind-revert `backlog.md`. See
+   [PROMOTER_RUNBOOK.md](PROMOTER_RUNBOOK.md).
 2. **Intake curation.** DEFER findings and p2 follow-ups NEVER become backlog
    rows directly. They land in `.local/coordinator/tasks/` as
    conditional candidates and reach the backlog only after a trigger fires AND
@@ -52,11 +54,16 @@ converge on correctness without blocking edits:
    only; never a commit hook; never blocking).
 
 The **promoter** curates candidates, batch-promotes a cycle's consolidated
-status transitions (normalize + archive + one backlog commit), and runs the
-narrow eventual-consistency pass (normalize `--check`, holding-area ↔ backlog
+status transitions (normalize + archive), and runs the narrow
+eventual-consistency pass (normalize `--check`, holding-area ↔ backlog
 reconciliation, blind-revert-symptom detection) that repairs residual drift.
 It is a curator and cycle-consolidator, not the sole writer — agents write
-their own rows.
+their own rows. A normalizer quarter-boundary sweep that spans `backlog.md`
+**and** `docs/planning/archive/**` lands as **two reviewed commits back to
+back** — `backlog.md` alone first, then the `archive/**` companions — because
+the same O1 preflight above refuses any acquire mixing the ledger with another
+path (no archive-companion carveout). See the `backlog` skill ("Two-commit
+normalizer protocol") and the committer runbook for the full procedure.
 
 See [PROMOTER_RUNBOOK.md](PROMOTER_RUNBOOK.md) for the promoter procedure,
 the eventual-consistency pass, conflict resolution, and the Definition of
