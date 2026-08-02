@@ -960,8 +960,8 @@ FIRST, or add a manifest disposition record. This is DISTINCT from the JS
 manifest override ceremony above (`--override-release-version` +
 `--override-manifest-sha`): use the override matching the surface that refused.
 The v0.19.0 ceremony took the destructive `rm` branch when the non-destructive
-override existed; this guidance prevents that recurrence (decision memo
-`researches/decisions/2026-08-02-defer-liveness-provenance-scope-divergence.md`).
+override existed; this guidance prevents that recurrence (see the
+defer-liveness provenance-scope divergence decision memo).
 
 ### Completeness scope (do not overclaim)
 
