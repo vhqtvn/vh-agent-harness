@@ -282,11 +282,12 @@ On success:
   "wrapper_result": {
     "ok": true,
     "tag": "vX.Y.Z",
-    "commit": "<sha>",
+    "commit": "<validated-tag-target-sha>",
     "pushed": true,
     "error": null,
     "disclosures": ["<disclosed finding id>", "..."],
-    "accepted_overrides": ["<overridden finding id>", "..."]
+    "accepted_overrides": ["<overridden finding id>", "..."],
+    "head_drift": false
   }
 }
 ```
@@ -313,7 +314,7 @@ mode):
   "commit": "<HEAD sha or null>",
   "changelog": null,
   "note": null,
-  "wrapper_result": { "ok": false, "tag": null, "commit": null, "pushed": false, "error": null, "disclosures": [], "accepted_overrides": [] },
+  "wrapper_result": { "ok": false, "tag": null, "commit": null, "pushed": false, "error": null, "disclosures": [], "accepted_overrides": [], "head_drift": false },
   "error": "<the single, specific reason for refusing>"
 }
 ```
@@ -814,6 +815,25 @@ git.
 > committer's job via the Prepare delegations). The agent MUST refuse when the
 > wrapper/tag mechanism is absent or exits non-zero — there is no fallback to
 > raw git.
+
+> **Tag-ready → tag HEAD-drift guard (pin-to-M, never silent).** The wrapper
+> captures the validated commit (the manifest commit M, = HEAD before any gate
+> ran) and creates the annotated tag with that EXPLICIT commit argument
+> (`git tag -a ... "$VERSION" "$HEAD_SHA"`) — never bare HEAD — so a concurrent
+> landing between the tag-ready assertion and the tag mutation cannot silently
+> re-target the manifest pin. This closes the v0.15.0 incident's defect class
+> (tag target `40e5f74` while a concurrent commit `c3dcf29` landed on main,
+> requiring operator history surgery to preserve the intended pin-to-M): the
+> wrapper now performs that pin internally, with no surgery and no fallback to
+> raw git. Right before the mutation the wrapper also re-reads HEAD and, if it
+> advanced past the validated commit, prints a LOUD stderr warning and reports
+> `"head_drift": true` in `wrapper_result`. The tag is STILL cut at the
+> validated commit M (the concurrent commit is NOT part of this release; it
+> lands in the next). On `head_drift: true`, surface it prominently in the
+> closeout (a concurrent commit landed during the ceremony and was excluded);
+> the release itself is correct and MUST NOT be rolled back for drift alone.
+> The wrapper additionally verifies, after creation, that the tag's target
+> equals the validated commit and refuses before any push if it does not.
 
 ---
 
