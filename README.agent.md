@@ -1553,6 +1553,24 @@ are reported before any `git tag` invocation:
   CANNOT cure this class — it never authorizes a schema-invalid manifest or a
   stale handshake.
 
+**Two independent DEFER gates; every firing card is dispositioned.** The JS
+manifest gate above and the Go all-live defer-liveness gate (`checkDeferLiveness`,
+G0c, `internal/cli/release_gate.go`) are TWO INDEPENDENT surfaces over the same
+card pool. The manifest provenance policy widens to the Go gate's breadth: EVERY
+firing card the release-prep enumerator surfaces gets an explicit, committed
+disposition regardless of provenance (`source:review-defer`,
+`source:external-study`, `source:p2-followup`, any source; frequently a
+non-blocking `disclose`, NOT an automatic blocker). When the GO gate refuses
+mid-ceremony, the NON-DESTRUCTIVE escape hatch is the
+`VH_HARNESS_DEFER_OVERRIDE_IDS` env var (comma-separated task_ids; surfaced in
+the gate's FAIL detail). **Do NOT `rm` transport cards to clear the Go gate** —
+use `VH_HARNESS_DEFER_OVERRIDE_IDS`, or add a manifest disposition record. Full
+recovery guidance lives in the release-readiness G7 ceremony doc
+(`.vh-agent-harness/overlays/harness-dogfood/agents/harness-release-readiness.md`)
+and the releaser prompt (`templates/overlays/release/agents/releaser.md`); the
+two-gate topology and the v0.19.0 incident it prevents are recorded in decision
+memo `researches/decisions/2026-08-02-defer-liveness-provenance-scope-divergence.md`.
+
 ### The manifest (project-owned, committed, fresh-checkout-visible)
 
 `.vh-agent-harness/release-defer-dispositions.json` is a schema-v1 JSON file

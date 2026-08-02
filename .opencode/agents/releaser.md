@@ -936,6 +936,33 @@ values only (Invariant 7). Per the default-adopted operator free choice,
 overridden findings DO appear in release notes, wrapper output, and CI — the
 disclosure always names the override ID, approver, and rationale.
 
+### Go defer-liveness gate recovery (`VH_HARNESS_DEFER_OVERRIDE_IDS`)
+
+The JS manifest gate (the ceremony above) and the Go all-live defer-liveness
+gate (`checkDeferLiveness`, fires at G0c / tag time) are TWO INDEPENDENT
+surfaces over the same card pool. The manifest provenance policy widens to the
+Go gate's breadth — EVERY firing card the release-prep enumerator surfaces
+gets an explicit, committed disposition (`source:review-defer`,
+`source:external-study`, `source:p2-followup`, any source; frequently a
+non-blocking `disclose`, NOT an automatic blocker) — so both surfaces see the
+same cards. When the GO gate refuses mid-ceremony (a firing card in
+`.local/coordinator/tasks/` has no closed status, no manifest entry, AND no
+override), the NON-DESTRUCTIVE operator escape hatch is the
+`VH_HARNESS_DEFER_OVERRIDE_IDS` env var (comma-separated task_ids), surfaced in
+the gate's FAIL detail at the moment it is needed. A listed card is
+disposition-satisfied for the duration of the release; the transport card
+STAYS on disk for later curation.
+
+**Do NOT `rm` transport cards to clear the Go gate.** `rm` is the sanctioned
+RETIRE path for a genuinely-done card (destructive; loses the card from the
+curation pool), not a ceremony-unblock. Reach for `VH_HARNESS_DEFER_OVERRIDE_IDS`
+FIRST, or add a manifest disposition record. This is DISTINCT from the JS
+manifest override ceremony above (`--override-release-version` +
+`--override-manifest-sha`): use the override matching the surface that refused.
+The v0.19.0 ceremony took the destructive `rm` branch when the non-destructive
+override existed; this guidance prevents that recurrence (decision memo
+`researches/decisions/2026-08-02-defer-liveness-provenance-scope-divergence.md`).
+
 ### Completeness scope (do not overclaim)
 
 The manifest attests: "promoter/operator confirmed release relevance and

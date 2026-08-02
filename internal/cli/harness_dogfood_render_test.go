@@ -408,7 +408,14 @@ func assertG7GateContent(t *testing.T, label, got string) {
 		{"G7 blocker id G7_ReleaseDeferGate", "G7_ReleaseDeferGate"},
 		{"checklist header bumped to G0–G7", "G0–G7"},
 		{"source:review-defer candidate selection", "source:review-defer"},
-		{"source:p2-followup exclusion", "source:p2-followup"},
+		// Widened provenance scope (option b): the release-readiness G7 gate now
+		// dispositions EVERY firing card the release-prep enumerator surfaces, not
+		// just source:review-defer. The pre-widening policy did NOT enumerate
+		// source:external-study at all (it was the un-anticipated provenance in the
+		// v0.19.0 incident), so pinning "source:external-study" here fails on any
+		// regression that re-narrows the scope. See decision memo
+		// researches/decisions/2026-08-02-defer-liveness-provenance-scope-divergence.md.
+		{"external-study release-relevant (widened scope)", "source:external-study"},
 		{"deterministic evaluator invocation", "check-defer-triggers.js --mode=release"},
 		{"wrapper authority wording (scripts/release-tag.sh)", "scripts/release-tag.sh"},
 		{"advisory scope fence (G7 is ADVISORY)", "G7 itself is ADVISORY"},

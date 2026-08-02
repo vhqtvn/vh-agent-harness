@@ -178,8 +178,9 @@ deterministic release-DEFER evaluator (the same single evaluator the sanctioned
 release-tag wrapper consumes):
 
 - `node .opencode/scripts/check-defer-triggers.js --mode=release --since <last-tag>`
-  — emit one structured JSON classification per `source:review-defer` candidate
-  in `.local/coordinator/tasks/`. Omit `--since` when `last_tag` is null (the
+  — emit one structured JSON classification per firing candidate (all
+  provenances: `source:review-defer`, `source:external-study`,
+  `source:p2-followup`, etc.) surfaced in `.local/coordinator/tasks/`. Omit `--since` when `last_tag` is null (the
   evaluator then derives the arc itself). The script is READ-ONLY: it reads the
   tasks directory and runs the same read-only git inspection verbs
   (`git describe --tags --abbrev=0`, `git diff --name-only`,
@@ -594,11 +595,27 @@ the sole release authority):
 | Record `release_relevance: no` + `disposition: disclose` (any metadata) | WARNING (`G7_ReleaseDeferGate`, disclose) |
 | Record with valid `override` (release-version-scoped + manifest-SHA-bound + wrapper-confirmed) | WARNING (`G7_ReleaseDeferGate`, disclose with accepted_override) |
 
-**Provenance scope:** only `source:review-defer` records are release-relevant.
-`source:p2-followup` records are excluded by construction — they are never
-carried by the committed manifest and never surface in the release envelope.
-(The `.local/coordinator/tasks/` intake that the promoter mode reads at commit
-time accepts both provenances; release mode does not.)
+**Provenance scope (all-sources dispositioned — release manifest widened to
+the Go defer-liveness gate's breadth):** EVERY firing card the release-prep
+enumerator surfaces gets an explicit, committed disposition, regardless of
+provenance (`source:review-defer`, `source:external-study`,
+`source:p2-followup`, or any other source). The release-prep enumerator
+surfaces firing cards from all sources; the committed manifest must carry a
+disposition record for each. There is NO provenance-based exclusion at
+release time. (`source:p2-followup` was previously excluded by construction
+— never authored into the manifest; that exclusion is REMOVED by this
+policy: such cards now get an explicit disposition, frequently a
+non-blocking `disclose`.) `source:external-study` is release-relevant:
+INCLUDED in release prep with an explicit disposition — frequently a
+non-blocking `disclose` (acknowledge the study's existence in the release
+record without blocking), escalating to `block` only when the card's content
+actually contradicts the release; it is NOT an automatic blocker. The
+manifest-scope row is widened to match the Go all-live defer-liveness gate's
+breadth so the two surfaces agree on WHICH cards exist for release (see
+decision memo `researches/decisions/2026-08-02-defer-liveness-provenance-scope-divergence.md`);
+the Go gate itself is UNCHANGED. (The `.local/coordinator/tasks/` intake that
+promoter mode reads at commit time accepts all provenances; release mode now
+dispositions all of them too.)
 
 **Absence policy (manifest-authoritative, OPERATOR-CONFIRMED):** a MISSING
 committed manifest is a hard evaluator-error — the manifest is the release
@@ -633,6 +650,32 @@ confirmation:
    override.
 5. Overridden findings DO appear in release notes, wrapper output, and CI
    (default adopted): always disclose override ID, approver, and rationale.
+
+**Go defer-liveness gate recovery (`VH_HARNESS_DEFER_OVERRIDE_IDS`):** the JS
+manifest gate (this G7 surface + the sanctioned wrapper) and the Go all-live
+defer-liveness gate (G0c, `checkDeferLiveness` at `internal/cli/release_gate.go`)
+are TWO INDEPENDENT surfaces over the same card pool. Under the all-sources
+provenance policy above, the two surfaces now agree on WHICH cards exist for
+release; they remain independent on vocabulary and failure mode. When the GO
+gate refuses mid-ceremony (a firing card in `.local/coordinator/tasks/` has no
+closed status, no manifest entry, and no operator override), the
+NON-DESTRUCTIVE escape hatch is the `VH_HARNESS_DEFER_OVERRIDE_IDS` env var
+(declared at `internal/cli/release_gate.go`; surfaced in the FAIL detail at the
+moment it is needed). A card listed there (comma-separated task_ids) is treated
+as disposition-satisfied for the duration of the release; the transport card
+STAYS on disk for later curation. **Do NOT `rm` transport cards to clear the Go
+gate** — `rm` is the sanctioned RETIRE path for a card whose disposition is
+genuinely "done, forget it" (destructive; loses the card from the curation
+pool). Reach for `VH_HARNESS_DEFER_OVERRIDE_IDS` FIRST, or add a manifest
+disposition record. The two recovery paths are DISTINCT: the JS manifest gate's
+override is the `--override-release-version` + `--override-manifest-sha` ceremony
+above; the Go gate's override is `VH_HARNESS_DEFER_OVERRIDE_IDS`. Use the one
+matching the surface that refused (a Go-gate FAIL surfaces
+`VH_HARNESS_DEFER_OVERRIDE_IDS` in its own detail; a JS-gate refuse surfaces the
+manifest override ceremony). This runbook complement exists because the v0.19.0
+ceremony took the destructive `rm` branch when the non-destructive override
+existed (decision memo
+`researches/decisions/2026-08-02-defer-liveness-provenance-scope-divergence.md`).
 
 **Evaluation:**
 
