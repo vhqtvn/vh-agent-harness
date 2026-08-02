@@ -695,9 +695,15 @@ export default function transform({ context }) {
   - exec-ro **executes the command exactly as given or DENIES** — it never
     rewrites the command. On DENY it prints a human-readable notice to stderr and
     exits non-zero (no prompt, since the outer invocation is allowlisted).
-  Use exec-ro when an agent wants prompt-free read-only inspection (git or
-  non-git). Use `exec` for anything mutating, anything with shell plumbing, or
-  anything exec-ro's allowlist does not cover.
+  Use `exec-ro` when an agent wants prompt-free read-only inspection (git or
+  non-git). If `exec-ro` DENIES a command, the command was not proven read-only
+  and was not executed: DENY is final, so do not rewrite or rerun it through
+  another verb. For separately identified, explicitly granted host-local
+  read-code work, use `vh-agent-harness exec-sandbox` when the calling role has
+  the grant AND the applicable mode-floor (`exec_sandbox.min_mode`) supplies the
+  required containment; it does NOT follow a command into `proxy`/`docker_compose`
+  backends. Use `exec` for genuine mutation, anything with shell plumbing, or
+  runtime/backend execution.
 - **Run a command under a kernel-enforced HOST-LOCAL Linux sandbox:** `vh-agent-harness exec-sandbox [--sandbox=off|best-effort|strict] [--net=deny|allow|ask] -- <cmd>`. An optional **mode floor** (`exec_sandbox.min_mode` in `run-shape.yml`) can clamp the effective mode UP so a caller can never run below the configured minimum (see "Mode floor" below).
 
   **Two execution planes (read this).** The exec commands look like one family
@@ -843,8 +849,9 @@ export default function transform({ context }) {
   of truth (seeded on install, `project_owned`). Agents edit it **freely** under
   the hybrid split-commit discipline: re-read from disk before editing, edit
   only your own task rows (stable IDs), and **commit backlog separately from
-  code** so a concurrent backlog edit can't `cas_conflict` your code commit. On
-  `cas_conflict`, re-read from the new HEAD, re-apply your row, and retry — **do
+  code** so a concurrent backlog edit can't collide with your code commit. On
+  a concurrent backlog race, re-read from the new HEAD, re-apply your row, and
+  retry — **do
   NOT revert `backlog.md`** (that discards a collaborator's update); in
   particular, `commit-gate.sh revert docs/planning/backlog.md` is the
   blind-revert anti-pattern on the ledger. Load the `backlog` skill before
@@ -956,20 +963,34 @@ export default function transform({ context }) {
   `.git/commit-gate/closeouts.log` (gitignored runtime state; never committed)
   that survives the transient per-session metadata cleanup. The ledger is the
   substrate for the `head-progress` doctor check (the HEAD-staleness WARN).
-  Recorded `status` values:
+  Recorded `status` values (every record also carries the **`head_at_acquire`**
+  field — the acquire-time HEAD the committer pinned as the review diff base;
+  S1: the reviewer diffs against this anchor, not bare HEAD, so a concurrent
+  committer moving HEAD can't slip an unrequested file into the reviewed scope):
   - `committed` — the closeout landed and advanced HEAD (the normal success).
   - `no_head_progress` — the closeout landed but HEAD did **not** advance past
     the reference it was built on (the pre/post-HEAD-equal canary from the
     vh-solara field report). Structurally unreachable via a normal
     acquire→commit (a `commit-tree` always produces a new object, and the
     `no_changes` guard blocks no-op trees); it emits on the genuine post==pre
-    edge / fault condition. **Distinct from `cas_conflict`** (concurrent HEAD
-    movement the CAS retry loop handles) and from `error` (gate-internal
-    failure).
-  - `could_not_land` — the closeout could not land at all due to a content
-    tangle (the same-file conflict the CAS 3-way merge cannot reconcile). Also
-    **distinct from `cas_conflict`**: `cas_conflict` is transient (retryable);
-    `could_not_land` is terminal (reason `merge_failed`/`write_tree_failed`).
+    edge / fault condition. Distinct from the terminal failures below, which
+    did **not** land at all.
+  - `could_not_land` — terminal: the closeout could not land due to a content
+    tangle (the same-file conflict the CAS 3-way merge cannot reconcile; reason
+    `merge_failed`/`write_tree_failed`). `post_commit_head` is `current_head`
+    (the branch did not move on this session's behalf).
+  - `rebased_refused` — terminal (S2, fail-closed): the CAS 3-way merge
+    reconciled the reviewed tree against a concurrent winner's HEAD, but the
+    merged tree **differs** from the tree the reviewer approved (reason
+    `reviewed_tree_diverged`). The gate REFUSES to land a tree the reviewer
+    never saw and requires re-acquire + re-review; `post_commit_head` is
+    `current_head` (the branch moved on the winner's behalf, not this
+    session's). A terminal sibling of `could_not_land`.
+  Concurrent-HEAD movement the CAS retry loop can still reconcile never reaches
+  the ledger as a failure — it retries until the merge reproduces the reviewed
+  tree (`committed`) or exhausts into a transient `error`/`cas_retry_exhausted`
+  stdout status (not a ledger entry). The pre-S1 `cas_conflict` status is no
+  longer emitted; its content-tangle path is now `could_not_land`.
   The durable ledger is the cheap near-term surfacing mitigation for the ~6h
   commit-freeze symptom (Pattern 4 same-file tangle); it does not address the
   root cause (worktree/lease isolation — long-term).
