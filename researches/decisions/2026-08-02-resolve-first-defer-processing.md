@@ -197,6 +197,43 @@ classification precision, whitelist-tag fidelity, falsifier detection,
 resolve-stick rate, pile-shrink rate, false-positive and recovery behavior, and
 authority containment. This memo only AUTHORS the pilot; it does NOT run one.
 
+### Is the pilot-run obligation a prose-only DEFER? (No — it is S2-gate-owned)
+
+A reader hitting the S2 record in isolation should not have to ask "is this a
+defer parked in prose? Does it need a `.local/coordinator/tasks/` card?" The
+answer is no, and the reasoning is load-bearing:
+
+- **The pilot-run obligation is owned by the S2-promotion-gate mechanism, NOT
+  the defer-card mechanism.** This S2 record plus the `behavioral-closure`
+  token are a committed milestone-gate record in canon — identical in form to
+  how `contract-invariant-audit` and `formal-verification` recorded their own
+  S2-holds. A milestone gate that withholds promotion pending evidence is a
+  first-class control surface; it is neither deferred work nor work lost in
+  prose.
+- **No `.local/coordinator/tasks/` card is created, and there is no rule-#1
+  violation.** Rule-#1 ("prose-only defers MUST be logged as draft + trigger")
+  targets deferred *work* that would otherwise vanish from the record; a
+  committed gate-record is neither deferred work nor prose. The apparent
+  contradiction dissolves under the skill's own **decision procedure** (not
+  rule-#1 read literally): there is no actionable-now work being parked, only
+  an evidence threshold that promotion is correctly holding against.
+- **The `operator-reserved-signoff` whitelist tag does NOT apply here.** That
+  tag requires the enabling brief to be DONE with only the sign-off deferred;
+  here the entire S1 pilot *run* — the evidence itself — is undone. So carding
+  this would be an **invalid-tag manufactured card**, the exact thing
+  resolve-first forbids. "No card" is therefore the self-consistent outcome,
+  not an oversight.
+
+The pilot *run* itself is the separate operator-triggered step on the
+S2-promotion path toward `proven` — consistent with the `not-demonstrable`
+behavioral-closure verdict already on record: the crux was not demonstrable on
+an authoring-only slice, and promotion cannot complete until a live run
+supplies the evidence the gate is holding for.
+
+(Dogfood note: applying the skill's own decision procedure to its own pilot
+obligation made "no card" fall out of the definition rather than out of a
+special case — the property the skill claims for any candidate.)
+
 ## Non-goals (held)
 
 - The back end (`check-defer-triggers.js`, doctor #12 / release-prep liveness,
