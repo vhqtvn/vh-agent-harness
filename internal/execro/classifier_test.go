@@ -1,9 +1,12 @@
 package execro
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vhqtvn/vh-agent-harness/internal/runshape"
 )
 
 // TestClassify covers every classification branch called out in the exec-ro
@@ -247,6 +250,61 @@ func TestClassify_DenyNoticeFooter(t *testing.T) {
 	got := Classify("git commit", repoRoot)
 	if !strings.Contains(got.Notice, "active floor: none") {
 		t.Errorf("deny notice with no floor should render 'active floor: none': %q", got.Notice)
+	}
+}
+
+// TestClassify_DenyNoticeFooter_NamedFloor pins the NON-"none" branch of the
+// floor-aware deny footer landed in commit 2b903a1: when repoRoot carries a
+// real .vh-agent-harness/run-shape.yml with exec_sandbox.min_mode set to a
+// non-empty value, activeFloor (via runshape.FindMinMode) MUST surface that
+// named floor in the deny footer instead of "none". The sibling
+// TestClassify_DenyNoticeFooter above pins only the "none" branch (bare
+// tempdir, no run-shape); this test pins the load-bearing named-floor branch
+// that was only manually verified when the footer became floor-aware.
+//
+// The fixture mirrors the real on-disk schema that runshape.LoadMinMode /
+// FindMinMode decode (exec_sandbox decoded as a generic map, min_mode looked
+// up as a string — see internal/runshape.runShapeYAML / minModeYAML and
+// runshape.TestFindMinMode, which uses the identical minimal fixture). We use
+// the package's exported DirName / FileName constants so the fixture lands
+// exactly where FindMinMode reads; no fields are invented. We do NOT exercise
+// the MAX-over-chain walk here (that is runshape's own contract test) — this
+// is a single-level fixture asserting the floor string reaches the footer.
+func TestClassify_DenyNoticeFooter_NamedFloor(t *testing.T) {
+	cases := []struct {
+		name string
+		mode string // a valid non-empty exec_sandbox.min_mode value
+	}{
+		{"strict", "strict"},
+		{"best-effort", "best-effort"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			// Write the run-shape at <repoRoot>/.vh-agent-harness/run-shape.yml
+			// using the real schema FindMinMode decodes. This is the same
+			// minimal fixture runshape.TestFindMinMode writes.
+			dir := filepath.Join(repoRoot, runshape.DirName)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", dir, err)
+			}
+			body := "exec_sandbox:\n  min_mode: " + tc.mode + "\n"
+			if err := os.WriteFile(filepath.Join(dir, runshape.FileName), []byte(body), 0o644); err != nil {
+				t.Fatalf("write run-shape: %v", err)
+			}
+			// Same DENY command shape the existing "none" assertion uses (a
+			// repo mutation → DENY); only the repoRoot differs (real floor).
+			got := Classify("git commit", repoRoot)
+			if got.Allow {
+				t.Fatalf("Classify(%q) unexpectedly allowed under repoRoot with a floor", "git commit")
+			}
+			want := "active floor: " + tc.mode
+			if !strings.Contains(got.Notice, want) {
+				t.Errorf("deny notice with floor %q should render %q: %q", tc.mode, want, got.Notice)
+			}
+			// The shared decision-ladder footer must still be present.
+			assertDenyFooterLadder(t, got.Notice)
+		})
 	}
 }
 
