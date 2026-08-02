@@ -1,0 +1,11 @@
+// resolve-first-pilot overlay pack — skills-only pilot for the resolve-first
+// DEFER-processing capability (S1 overlay, advisory / INFORMS only).
+//
+// This pack contributes a skill only (skills/resolve-first/ + its references/
+// runbook). It wires NO agent, NO command, NO permission surface, and NO gate.
+// The skill is instruction-only (no deterministic helper ships), so it runs
+// under the existing broad skill-discovery surface and contributes nothing to
+// the permission map. This file is a no-op JSONC shell so the pack is
+// well-formed for discovery; a skills-only pack may legitimately contribute
+// nothing to opencode.jsonc.
+{}

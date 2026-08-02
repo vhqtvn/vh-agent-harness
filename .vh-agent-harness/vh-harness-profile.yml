@@ -6,5 +6,6 @@ overlays:
     - contract-invariant-audit-pilot
     - formal-verification-pilot
     - harness-dogfood
+    - resolve-first-pilot
 capabilities:
     - core/media-perception
