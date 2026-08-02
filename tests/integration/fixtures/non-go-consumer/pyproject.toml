@@ -1,0 +1,29 @@
+# Synthetic non-Go consumer tree identity marker.
+#
+# This fixture is the consumer-identity half of the P1-TESTS-001 regression
+# fixture (TestConsumerRenderVerifierFixture). A faithful consumer render is
+# assembled at runtime by assembleNonGoConsumer() in
+# consumer_render_verifier_fixture_test.go: it copies this pyproject.toml into a
+# fresh temp dir OUTSIDE the repo, creates a `.git/` marker there, and assembles
+# the consumer's `.opencode/` (scripts + commands + resolved agents/build.md)
+# from the repo's RENDERED .opencode/ tree.
+#
+# Why a pyproject.toml and deliberately NOT a go.mod: this is the crux of the
+# b69fb1f regression pin. Pre-b69fb1f, the consumer-render verifiers anchored
+# repo-root detection on go.mod (a Go-SPECIFIC manifest); a non-Go consumer
+# (Python/Node) with no go.mod anywhere in the ancestor chain made findRepoRoot
+# return null and the verifier exit 1. b69fb1f re-anchored on `.git` (every
+# consumer render is a git repo, regardless of language). This fixture is the
+# stable "non-Go consumer" identity that exercises the polyglot anchor; the
+# `.git` marker is created at runtime (git refuses to track a nested `.git`
+# entry, and findRepoRoot only needs the entry to exist).
+#
+# NOTE: a `.git` entry is intentionally NOT committed here. The test creates it
+# at runtime (os.Mkdir) inside the temp consumer root. findRepoRoot checks
+# existence via fs.existsSync, which is satisfied equally by a directory or a
+# file, so a plain empty `.git/` directory is sufficient.
+
+[project]
+name = "synthetic-non-go-consumer"
+version = "0"
+description = "Synthetic non-Go consumer tree fixture for the consumer-render verifier regression pin (P1-TESTS-001)."
