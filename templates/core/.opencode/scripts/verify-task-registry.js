@@ -117,6 +117,33 @@ function main() {
             cwd: "/verification",
         });
 
+        // ------------------------------------------------------------------
+        // Baseline: an empty / all-healthy registry reports NO quarantine and
+        // ZERO degraded cards. The live coordinator registry starts in this
+        // state (defer + transport cards only, none degraded); the assertion
+        // guards against a regression where a healthy registry is misreported
+        // as degraded, and anchors the degraded_count===quarantine.length
+        // invariant at the empty-quarantine boundary.
+        // ------------------------------------------------------------------
+        const baselineList = listCoordinationTasks(coordinatorSessionID, {
+            cwd: "/verification",
+        });
+        if (baselineList.quarantine.length !== 0) {
+            throw new StateError(
+                `Baseline: expected empty quarantine on an all-healthy registry, got ${baselineList.quarantine.length} entries: ${baselineList.quarantine.map((entry) => entry.card_id).join(", ")}.`,
+            );
+        }
+        if (baselineList.degraded_count !== 0) {
+            throw new StateError(
+                `Baseline: expected degraded_count 0 on an all-healthy registry, got ${baselineList.degraded_count}.`,
+            );
+        }
+        if (baselineList.degraded_count !== baselineList.quarantine.length) {
+            throw new StateError(
+                "Baseline: degraded_count must equal quarantine.length (both 0 here).",
+            );
+        }
+
         const primary = saveCoordinationTask(
             coordinatorSessionID,
             {
@@ -1832,6 +1859,146 @@ function main() {
             );
         }
 
+        // ------------------------------------------------------------------
+        // D1. readCoordinationTask(<corrupt id>) must propagate the
+        // SyntaxError-wrapped StateError. A corrupt-id read is NOT a bulk
+        // scan, so it has no quarantine safety net — it must surface the
+        // underlying parse failure so a caller can distinguish a missing card
+        // from a corrupt one. The error is a StateError whose message is
+        // prefixed "Malformed JSON state file:" and whose cause is the
+        // original SyntaxError.
+        // ------------------------------------------------------------------
+        let d1Threw = false;
+        let d1Error = null;
+        try {
+            readCoordinationTask(
+                coordinatorSessionID,
+                syntaxCorruptID,
+                { cwd: "/verification" },
+            );
+        } catch (error) {
+            d1Threw = true;
+            d1Error = error;
+        }
+        if (!d1Threw) {
+            throw new StateError(
+                "Case D1: expected readCoordinationTask to throw on a corrupt card id.",
+            );
+        }
+        if (!(d1Error instanceof StateError)) {
+            throw new StateError(
+                `Case D1: expected StateError, got ${d1Error && d1Error.constructor ? d1Error.constructor.name : d1Error}.`,
+            );
+        }
+        if (!String(d1Error.message || "").startsWith("Malformed JSON state file:")) {
+            throw new StateError(
+                `Case D1: expected message to start with "Malformed JSON state file:", got "${d1Error.message}".`,
+            );
+        }
+        if (!(d1Error.cause instanceof SyntaxError)) {
+            throw new StateError(
+                "Case D1: expected StateError.cause to be a SyntaxError (the wrapped parse failure).",
+            );
+        }
+
+        // ------------------------------------------------------------------
+        // D2. A NON-SyntaxError filesystem error must THROW, not quarantine
+        // (rethrow guarantee). isCoordinationCardSyntaxError returns false
+        // when the cause is not a SyntaxError, so the scan rethrows instead
+        // of emitting a quarantine entry. We trigger a real fs error by
+        // creating a DIRECTORY at a `<id>.json` card path: readFileSync then
+        // throws EISDIR (POSIX; root-proof — unlike EACCES, root cannot bypass
+        // EISDIR). EACCES/ENOENT/TOCTOU follow the identical non-SyntaxError
+        // path. Cleanup is inline (try/finally) so a failing assertion cannot
+        // poison the rest of the suite, and the id is tracked in
+        // createdTaskIDs as belt-and-suspenders.
+        // ------------------------------------------------------------------
+        const d2DirID = "verification-d2-fs-error-fixture-card";
+        const d2DirPath = taskCardPath(d2DirID);
+        createdTaskIDs.push(d2DirID);
+        fs.mkdirSync(d2DirPath, { recursive: true });
+        let d2Threw = false;
+        let d2Error = null;
+        try {
+            try {
+                listCoordinationTasks(coordinatorSessionID, {
+                    cwd: "/verification",
+                });
+            } catch (error) {
+                d2Threw = true;
+                d2Error = error;
+            }
+            if (!d2Threw) {
+                throw new StateError(
+                    "Case D2: expected listCoordinationTasks to THROW on a non-SyntaxError fs error (directory-as-card), but it did not throw.",
+                );
+            }
+            if (!(d2Error instanceof StateError)) {
+                throw new StateError(
+                    `Case D2: expected StateError (rethrow guarantee), got ${d2Error && d2Error.constructor ? d2Error.constructor.name : d2Error}.`,
+                );
+            }
+            // The discriminator: the cause must NOT be a SyntaxError. This is
+            // exactly what keeps the error out of quarantine and forces the
+            // rethrow.
+            if (d2Error.cause instanceof SyntaxError) {
+                throw new StateError(
+                    "Case D2: cause must NOT be a SyntaxError (fs errors must rethrow, not quarantine).",
+                );
+            }
+            // Confirm it is a genuine fs error: EISDIR is the POSIX code for
+            // "directory where a file was expected" (portable across the dev
+            // environment; this is what the directory-as-card fixture raises).
+            if (!d2Error.cause || d2Error.cause.code !== "EISDIR") {
+                throw new StateError(
+                    `Case D2: expected cause.code "EISDIR" (directory-as-card fs error), got ${d2Error.cause && d2Error.cause.code}.`,
+                );
+            }
+        } finally {
+            removeIfExists(d2DirPath);
+        }
+
+        // Recovery: after removing the directory, the scan works again and
+        // the fixture does not linger in quarantine (it never produced a
+        // quarantine entry — it threw).
+        const d2Recovery = listCoordinationTasks(coordinatorSessionID, {
+            cwd: "/verification",
+        });
+        const d2Lingering = d2Recovery.quarantine.find(
+            (entry) => entry.card_id === d2DirID,
+        );
+        if (d2Lingering) {
+            throw new StateError(
+                "Case D2: directory fixture must NOT linger in quarantine after cleanup.",
+            );
+        }
+
+        // ------------------------------------------------------------------
+        // F1. Null-safety of listCoordinationTaskCards /
+        // resolveRecurrenceDedup against task:null syntax entries. Both
+        // helpers share the same `!entry.degraded && entry.task` short-circuit
+        // filter (a syntax entry is degraded:true / task:null and is excluded
+        // before any .map(e => e.task) projection). They are not exported, so
+        // null-safety is asserted indirectly through listCoordinationTasks:
+        // with the corrupt sibling on disk, tasks[] must contain ZERO
+        // null/undefined slots and every returned task must carry a
+        // non-empty string task_id. (resolveRecurrenceDedup's identical
+        // short-circuit is covered structurally — a binary-dependent live
+        // recurrence test would be fragile.)
+        // ------------------------------------------------------------------
+        for (const task of syntaxList.tasks) {
+            if (task === null || task === undefined) {
+                throw new StateError(
+                    "Case F1: tasks[] must contain no null/undefined slots (syntax entry projected out).",
+                );
+            }
+            if (typeof task.task_id !== "string" || !task.task_id.length) {
+                throw new StateError(
+                    "Case F1: every task in tasks[] must carry a non-empty string task_id.",
+                );
+            }
+        }
+
         // Case 10: degraded-core repair branch (lifecycle-exit recovery).
         // A degraded non-research card can be repaired in place via repair; a
         // healthy card's task_type/status stay immutable; the research-repair
@@ -2291,6 +2458,82 @@ function main() {
         }
         if (titleRestoredRead.task.title !== "Restored title") {
             throw new StateError("Case 10i: title must be restored.");
+        }
+
+        // ------------------------------------------------------------------
+        // Case 10 (recovery re-scan): a degraded card repaired in place must
+        // LEAVE quarantine[] on the next listCoordinationTasks scan, and
+        // degraded_count must drop by exactly one. Case 10a proved repair
+        // restores the single-card read; this proves the quarantine ledger
+        // tracks the recovery on re-enumeration (the closed loop:
+        // quarantine -> repairCoordinationTask -> re-scan).
+        // ------------------------------------------------------------------
+        const recoveryCard = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Quarantine recovery re-scan card",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "build",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                success_criteria: ["Card leaves quarantine after repair."],
+                validation_plan: ["List before and after repair."],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(recoveryCard.task.task_id);
+
+        // Snapshot the quarantine baseline for this case BEFORE degrading.
+        const recoveryBeforeDegrade = listCoordinationTasks(coordinatorSessionID, {
+            cwd: "/verification",
+        });
+        const recoveryBaselineDegraded = recoveryBeforeDegrade.degraded_count;
+
+        // Degrade -> the card must appear in quarantine[] on re-scan and
+        // degraded_count must rise by exactly one.
+        degradeCard(recoveryCard.task.task_id, (data) => {
+            data.task_type = "";
+        });
+        const recoveryAfterDegrade = listCoordinationTasks(coordinatorSessionID, {
+            cwd: "/verification",
+        });
+        const recoveryEntryBefore = recoveryAfterDegrade.quarantine.find(
+            (entry) => entry.card_id === recoveryCard.task.task_id,
+        );
+        if (!recoveryEntryBefore) {
+            throw new StateError(
+                "Case 10 (recovery): expected degraded card to appear in quarantine[] before repair.",
+            );
+        }
+        if (recoveryAfterDegrade.degraded_count !== recoveryBaselineDegraded + 1) {
+            throw new StateError(
+                `Case 10 (recovery): expected degraded_count to rise by one after degrade (${recoveryBaselineDegraded} -> ${recoveryBaselineDegraded + 1}), got ${recoveryAfterDegrade.degraded_count}.`,
+            );
+        }
+
+        // Repair -> the card must LEAVE quarantine[] on re-scan and
+        // degraded_count must drop back to the baseline.
+        repairCoordinationTask(
+            coordinatorSessionID,
+            recoveryCard.task.task_id,
+            { task_type: "implementation" },
+            { cwd: "/verification" },
+        );
+        const recoveryAfterRepair = listCoordinationTasks(coordinatorSessionID, {
+            cwd: "/verification",
+        });
+        const recoveryEntryAfter = recoveryAfterRepair.quarantine.find(
+            (entry) => entry.card_id === recoveryCard.task.task_id,
+        );
+        if (recoveryEntryAfter) {
+            throw new StateError(
+                "Case 10 (recovery): expected repaired card to LEAVE quarantine[] after re-scan.",
+            );
+        }
+        if (recoveryAfterRepair.degraded_count !== recoveryBaselineDegraded) {
+            throw new StateError(
+                `Case 10 (recovery): expected degraded_count to drop back to baseline (${recoveryBaselineDegraded}) after repair, got ${recoveryAfterRepair.degraded_count}.`,
+            );
         }
 
         // Case 11: deleteCoordinationTask — destructive single-card removal.
