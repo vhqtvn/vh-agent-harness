@@ -388,6 +388,63 @@ only AFTER (a) O1 is decided, (b) a resolve-first pilot actually runs and record
 positive pile-shrink evidence, and (c) a mandatory persisted trace + session-end
 rule is specified so Tier 0 does not recreate the prohibited invisible defer.
 
+#### O2 addendum — Tier-0 re-grounding input correction (2026-08-03)
+
+> **Scope of this note:** APPEND-ONLY addendum to the O2 open decision. It
+> records an INPUT for a FUTURE Tier-0 re-grounding pass. It does NOT re-open,
+> re-ground, or resolve O2 — Tier 0 stays parked at `not-demonstrable`, and the
+> §4 Claim-1 falsification record above is unchanged.
+
+**Measurement (from the 2026-08-03 defer-triage closeout):** of 49 `.local`
+cards, 36 had no grammar-legal trigger AND zero resolve-first whitelist tags (the
+"no-trigger" subset). Under STEP-0 premise-verification (the §5 pre-condition
+that §5 line 271 marks "~1/3 evaporate here"), only **4 of those 36 (~11%)
+evaporated** — i.e. their premise had decayed. The owner had predicted ~1/3
+(~12) would evaporate. **The gap is the finding: most no-trigger cards turned
+out to be operator-gated research / observability BY DESIGN, not obsolete
+debt.**
+
+**Two-direction correction to the Tier-0 reasoning:**
+
+1. **Weakens the "quality gate stops invalid cards" claim (v2).** The
+   invalid-card rate in the CURRENT pile is ~11% (4/36), not the ~30% the older
+   reasoning assumed. A quality-gate tier would therefore catch far fewer invalid
+   cards than the older reasoning projected — weakening the premise that a new
+   tier is needed to stop invalid cards.
+2. **Strengthens a different reading.** The real gap was missing VOCABULARY for
+   operator-gated items — now supplied by the resolve-first whitelist tag set
+   (`blocked-on-absent-evidence` / `pure-future-watch`, etc.) plus the explicit
+   `mechanical-trigger:none` marker — NOT a missing tier. The 32 survivors are
+   legitimately operator-gated research/observability; they were never invalid
+   debt, only unclassifiable under the old vocabulary.
+
+> **⚠ Critical input directive (load-bearing for the future re-grounding).** When
+> the Tier-0 re-grounding pass eventually runs, the **~11% figure (4/36) MUST be
+> its input.** It MUST NOT inherit the ~30% estimate from the older censuses.
+> Those older censuses measured **terminal-status pollution** — a DIFFERENT
+> failure mode (cards left in a terminal `done`/`cancelled` status clogging the
+> pile) that `/task-delete` + lifecycle hygiene now cover. The two figures are
+> **NOT interchangeable**: ~11% is "fraction of no-trigger cards whose PREMISE
+> decayed under STEP 0"; ~30% is "fraction of the pile that was terminal-status
+> pollution." Feeding the re-grounding the 30% figure would import a
+> wrong-mechanism, stale input and rebuild the Tier-0 case against a failure mode
+> the pile no longer has.
+
+**Evidence base (after-state, from the triage closeout):**
+- Triaged: 36 of 49 candidates had no grammar-legal trigger + zero resolve-first
+  whitelist tags.
+- STEP-0 result: 4 evaporated (~11%); 32 survived as live operator-gated
+  research/observability (now tagged `blocked-on-absent-evidence` /
+  `pure-future-watch` with `mechanical-trigger:none`).
+- Pile after-state: grammar-legal triggers 19/49 (39%) → 30/45 (67%);
+  resolve-first whitelist tags 0 → 16; pile 49 → 45; checker `2/49` → `8/45`
+  triggers met.
+
+**Net effect on O2:** the O2 recommendation (do NOT build Tier 0 on the strength
+of this memo alone) and the §4 Claim-1 `not-demonstrable` verdict both stand
+unchanged. This addendum only corrects the INPUT figure a future re-grounding
+must start from.
+
 ### O3 — Re-tagging the existing pile (the live decay)
 
 34/49 live cards carry triggers that can never mechanically fire. They are the
