@@ -559,8 +559,8 @@ manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`:
 
 1. Run the strict evaluator with the SAME `last_tag` the report carries. The
    canonical release-time invocation binds the release version:
-   `node .opencode/scripts/check-defer-triggers.js --mode=release --since <last-tag> --release-version <intended>`
-   (omit `--since` when `last_tag` is null; pass `--override-confirmed-version
+   `node .opencode/scripts/check-defer-triggers.js --mode=release --release-version <intended>`
+   (pass `--override-confirmed-version
    <intended>` ONLY when the wrapper ceremony has confirmed an override for a
    record with `disposition: override_required`). The script is read-only (see
    INVARIANTS #2 and the EVIDENCE COMMANDS note above).
