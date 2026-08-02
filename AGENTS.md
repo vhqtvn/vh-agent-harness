@@ -278,7 +278,7 @@ When making changes:
 - For multi-session coordination work, classify the task as `short`, `medium`, or `long` before fanning out. Use `docs/coordination/TASK_MODES.md` and `docs/coordination/RUNTIME_MODEL.md` to decide whether `.opencode/state/` is enough or whether a local runtime layer under `.local/coordinator/` is justified.
 - Use `repo-explorer` as a path finder and call-graph tracer first. Ask for exact full file bodies only through an explicit read command when needed.
 - For read-only shell inspection, prefer narrow commands such as `ls`, `find`, `grep`, `sed -n`, `head`, `tail`, `jq`, and `git grep`. Avoid `cat` dumps for exploration.
-- Prefer the standard command templates under `.opencode/commands/` when they fit the task: `coordination`, `harness`, `write-task`, `research`, `solution-brief`, `task-ready`, `task-update`, `task-repair`, `task-list`, `task-open`, `resume-task`, `task-closeout`, `task-review`, `repo-map`, `read-files`, `draft-plan`, `approve-plan`, `plan-save`, `plans`, `adopt-plan`, `implement`, `implement-goal`, `workstream-start`, `workstream-open`, `workstream-update`, `workstream-clear`, `backlog-cleanup`, `docs-sync`, `ship-review`, and `commit-review`.
+- Prefer the standard command templates under `.opencode/commands/` when they fit the task: `coordination`, `harness`, `write-task`, `research`, `solution-brief`, `task-ready`, `task-update`, `task-repair`, `task-list`, `task-open`, `resume-task`, `task-closeout`, `task-delete`, `task-review`, `repo-map`, `read-files`, `draft-plan`, `approve-plan`, `plan-save`, `plans`, `adopt-plan`, `implement`, `implement-goal`, `workstream-start`, `workstream-open`, `workstream-update`, `workstream-clear`, `backlog-cleanup`, `docs-sync`, `ship-review`, and `commit-review`.
 - Commit gate rule for every agent/session: before any `git commit` attempt, run `commit-reviewer` (typically via `/commit-review`) on the exact slice, read the reviewer response, and stop when it returns blocked/split guidance.
 - **Escape hatch:** If the gated-commit mechanism locks up, the operator can bypass it: `rm -rf .git/commit-gate.lock/ && git reset --mixed` clears the lock and index, then `SKIP_COMMIT_GATE=1 git commit ...` commits directly. This is operator-only — agents must never use this path.
 - When using `/commit-review`, always provide a `Feature summary` and `Exact file list`. Prefer naming the `Primary lane` and any relevant repo rules/docs up front. If the review intentionally spans more than 8 files, include `File-cap override` with a short reason. Use `docs/coordination/PROMPT_TEMPLATE.md` or `.github/prompts/commit-review.prompt.md` for the repo-standard request shape.
@@ -294,6 +294,7 @@ When making changes:
   - `/resume-task <id>` to bootstrap an execution session from that card
   - `/task-closeout <id>` to persist a local closeout report
   - `/task-review <id>` to record the coordinator-side decision after reviewing the result
+  - `/task-delete <id>` to destroy one unpromoted transport card and its report directory (irreversible hard-rm, NOT a lifecycle status or gate bypass)
 - Prefer repo-local OpenCode skills under `.opencode/skills/` for reusable workflows that should be discoverable through the native `skill` tool, but do not assume automatic selection; name the skill explicitly when it matters to correctness, cost, or operational safety.
 - Do not mix runtime routing, semantics, and promotion claims into one undisciplined change. Hand off between specialists when crossing boundaries.
 - Any component or configuration promotion, rollback, or profile change must name the affected manifests or profiles and the exact evidence that justifies it.
@@ -355,11 +356,18 @@ trigger fires AND the promoter applies the promotion Definition of Ready:
   (or another approved predicate), `studied:YYYY-MM-DD`.
 - **Holding area is transport, not truth.** Unpromoted candidates may be lost —
   this is intentionally fine, because they are not trusted work yet. Do not
-  create a parallel committed ledger for them. **Retiring a transport card is
-  `rm` of the gitignored file** (`.local/coordinator/tasks/<card>.json`):
-  this is the SANCTIONED retire path, not a workaround — there is no cancel/drop
-  command for these cards, and the file is gitignored transport (not committed
-  truth), so deleting it loses nothing durable.
+  create a parallel committed ledger for them. **Retiring an unpromoted
+  transport card is destructive hard removal, not a lifecycle status, tombstone,
+  archive, or durable record.** `/task-delete <task_id>` is the sanctioned
+  validated single-card wrapper over that removal mechanic: it removes the
+  gitignored card and its local report directory. It does NOT mark the task
+  cancelled and must NOT be used to bypass a promotion, review, or closeout
+  gate. Direct `rm` of the gitignored file
+  (`.local/coordinator/tasks/<card>.json`) remains a sanctioned retire
+  path equivalent to the wrapper for operators who know exactly what they are
+  doing; the wrapper exists to make the single-card removal safe, validated, and
+  observable. The file is gitignored transport (not committed truth), so
+  deleting it loses nothing durable.
 - **Fog vs ticket (triage test).** A finding is **ticket-ready** when you can
   state the question precisely now — even if blocked. A finding is **fog** when
   you cannot yet phrase it that sharply: in-scope, but not yet specifiable. Fog

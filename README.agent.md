@@ -866,6 +866,23 @@ export default function transform({ context }) {
   against backlog rows, and lands backlog changes as a backlog-only commit; and
   (c) the **`backlog` skill** as the agent's procedure reference. Code commits
   never wait on a backlog blob.
+- **Retire unpromoted transport cards with `/task-delete <id>`** (validated
+  destructive single-card wrapper). A DEFER/fog candidate in
+  `.local/coordinator/tasks/` that should never reach execution is removed
+  (card + local report directory) via `/task-delete <id> [force]`. It is
+  irreversible hard removal, NOT a lifecycle status — it does not mark the task
+  cancelled, create a tombstone/archive, edit `backlog.md`, or bypass
+  `/task-review` / `/task-closeout`. A `draft`, `ready`, or `cancelled` card is
+  freely disposable; a `working`, `reported`, `blocked`, or `completed` card is
+  refused without an explicit `force` because its report directory may carry
+  evidence a coordinator gate still needs. It rejects wildcard/path-like/
+  multiple-id/whitespace-separated input before any filesystem mutation, and
+  confines removal to the transport roots. The command surfaces the card
+  (id, title, status, owner, report dir) to the operator *before* the
+  destructive call and prints the post-removal `removed` summary after. Direct
+  `rm` of the gitignored file remains an equivalent operator path; the wrapper
+  makes single-card removal safe, validated, and observable. No `commit`
+  follows — the transport is gitignored.
 
 ### Refresh & migration
 
@@ -1657,6 +1674,22 @@ checkout, produced at runtime rather than seeded on install.
   gitignore vector, and an actor who can delete a single card can also delete
   the committed marker. The full rationale is recorded in
   `templates/migrations/v0.16.0.md`.
+- **`/task-delete` is the sanctioned single-card removal wrapper.** It destroys
+  one transport card and its local report directory (irreversible hard-rm). It
+  does NOT route through `updateCoordinationTask` (the write chokepoint that
+  creates the adoption marker) — deletion is an rm, not a write — so it neither
+  creates nor removes the marker, and the "seven public coordinator-task ops"
+  count above (the write-producers) is unchanged. The accepted-tradeoff row
+  above (whole-dir loss detected, selective single-card loss not) is exactly why
+  `/task-delete` ships as a validated, observable wrapper rather than a silent
+  rm: it rejects wildcard/path-like/multiple-id/whitespace-separated input
+  before any filesystem mutation, confines removal to the transport roots
+  (physical, not lexical — symlink escapes are refused), surfaces the card to
+  the operator before the destructive call, handles a degraded or malformed
+  card without strict-validation blocking and reports its condition honestly,
+  and refuses a `working`, `reported`, `blocked`, or `completed` card without
+  an explicit `force` so it cannot bypass a pending review, closeout, or
+  decision gate.
 
 ### Release ceremony: note → readiness artifact → manifest (releaser-owned)
 
