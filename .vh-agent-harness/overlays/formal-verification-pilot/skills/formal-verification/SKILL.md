@@ -1,6 +1,6 @@
 ---
 name: formal-verification
-description: Agent-authored formal proofs, engine-checked. Lean4 for pure-logic, algebraic, and simple state-machine invariants; TLAPS for the SAFETY invariants of concurrent-system models (safety-only — liveness/temporal is out of pilot). Use when an agent is asked to PROVE such an invariant by authoring a proof a rigorous engine mechanically checks. The design-time product — the proof/spec text, the model↔code fidelity binding, and the red-on-divergence code-level test — is fully producible with NO engine installed; the engine check is an OPTIONAL confirmation that waits on operator-provisioned Lean4/TLAPS. Outputs INFORM only and never gate commits, releases, doctor, or updates. A proof of a model is never laundered into a proof of the code. Do NOT use for liveness/temporal properties, Iris-grade concurrent separation logic, model-checking (TLC), current-commit review, or as a substitute for repo-specific live verification.
+description: Agent-authored formal proofs an engine checks. Use when asked to PROVE a provable invariant — pure-logic, algebraic, state-machine (Lean4), or concurrency SAFETY (TLAPS). Engine routing, scope, and INFORMS-only authority are in the body.
 compatibility: opencode
 ---
 
@@ -22,6 +22,24 @@ anti-laundering binding is the pilot's success criterion (see "THE CRUX" and
 **S1 overlay pilot.** This is an experimental overlay skill. Core promotion is
 NOT authorized. The eight S2 evidence classes are unmet until a real pilot runs
 (see "S2 record"). Nothing here enters `templates/core/`.
+
+## Scope and authority (recognition detail)
+
+The frontmatter description is intentionally lean (it loads every turn); the
+scope/authority detail it carried lives here and in the deeper sections below.
+
+- **Authority:** outputs INFORM only and never gate commits, releases, doctor,
+  or updates (see "Authority — INFORMS ONLY"). A proof of a model is never
+  laundered into a proof of the code (see "Anti-over-claim rule").
+- **No-engine design-time product:** the proof/spec text, the model↔code
+  fidelity binding, and the red-on-divergence code-level test are fully
+  producible with NO engine installed; the engine check is an OPTIONAL
+  confirmation that waits on operator-provisioned Lean4/TLAPS (see "Capability
+  property").
+- **Do NOT use for:** liveness/temporal properties, Iris-grade concurrent
+  separation logic, model-checking (TLC), current-commit review, or as a
+  substitute for repo-specific live verification (see "Honest scope + climbing
+  path" and "The Paradigm").
 
 ## Authority — INFORMS ONLY (design condition 1)
 
@@ -344,6 +362,21 @@ binding, reporting a model proof as a code proof, and treating a green engine
 check as code correctness are all FORBIDDEN. When the engine did not run, the
 honest answer is `result: not-demonstrable` / `verdict: inconclusive` — never
 `proven`, never a block.
+
+## Number-evidence: observed, not traced
+
+A verification claim that carries a NUMBER (a pass/fail count, a coverage
+figure, a red-cell tally) must state an OBSERVED number with its method — the
+flip applied, the test name run, the revert performed — not a TRACED number. A
+trace is a reasoning artifact, not an observation, and it MUST state its scope:
+a self-consistent trace at the WRONG SCOPE survives review and silently
+substitutes for the observation that was never made.
+
+Canonical instance — the exec-sandbox pilot (commit `95e2954`): an isolated
+trace of `ApplyFloor` counted 3/9 red cells and passed review, but the real
+caller invokes `ApplyFloor` twice; the observed flip gave 6/9. The trace was
+self-consistent; its scope was wrong. State the method and the scope; cite the
+observation, not the trace.
 
 ## References
 

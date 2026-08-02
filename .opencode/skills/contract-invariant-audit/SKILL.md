@@ -1,6 +1,6 @@
 ---
 name: contract-invariant-audit
-description: Proactive contract/invariant audit of a declared existing surface across repository history — not the current diff. Use when auditing an existing bounded surface for latent contract or invariant defects, producing a disposition-complete invariant ledger, or running a milestone audit across unchanged or cross-history code. Outputs INFORM only and never gate commits, releases, doctor, or updates. Ships a deterministic manifest and completeness helper that does discovery and accounting only. Do NOT use for current-commit review, ordinary bug diagnosis, complexity triage, proving test or semantic coverage, or establishing a hard gate.
+description: Proactive contract/invariant audit of a declared existing surface across repository history (not the current diff). Use when auditing for latent contract/invariant defects, a disposition-complete ledger, or a milestone audit.
 compatibility: opencode
 ---
 

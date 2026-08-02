@@ -1,6 +1,6 @@
 ---
 name: resolve-first
-description: "Front-gate classifier that biases a DEFER / follow-up candidate toward RESOLVE-NOW at card-creation time, before any card enters `.local/coordinator/tasks/`. Use when deciding the disposition of a DEFER finding, a p2 follow-up, a review DEFER, or any candidate that would otherwise be parked — emit one of exactly three legal outputs — landed-this-session, decided-to-verdict, or defer-with-trigger. A candidate classifier only; it never certifies a resolution, NEVER lowers edit-review/ownership gates, and the existing back end (check-defer-triggers.js trigger grammar + promotion Definition of Ready + doctor defer-liveness / release-prep liveness) reads state directly and never trusts the skill's self-report. Instruction-only — no deterministic helper ships with the skill. Do NOT use it as a resolution certificate, as a way to weaken edit-review/ownership, or to re-label parking as 'resolve later'."
+description: "Front-gate classifier for DEFER / follow-up triage at card-creation. Use when deciding a candidate's disposition — resolve-now vs. drive-to-verdict vs. defer-with-trigger — before it enters `.local/coordinator/tasks/`."
 compatibility: opencode
 ---
 

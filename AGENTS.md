@@ -226,6 +226,10 @@ outcome).
   a code path ran). Asserting the mechanism without observing the outcome is
   `result: skipped`, not `proven`.
 
+- **Provable-invariant crux:** when the crux is a provable concurrency or
+  state-machine invariant, the `formal-verification` skill authors an
+  engine-checked proof whose result feeds this crux model.
+
 
 ## Output expectations for agents
 
@@ -383,6 +387,9 @@ trigger fires AND the promoter applies the promotion Definition of Ready:
 - **Reviewer DEFER never becomes a direct backlog row.** A `/commit-review`
   DEFER finding is captured to `.local/` and curated later; it is not
   transcribed into `backlog.md` in the same slice.
+- **DEFER/follow-up triage:** when deciding a candidate's disposition at
+  card-creation (resolve-now vs. drive-to-verdict vs. defer-with-trigger), the
+  `resolve-first` skill is the front-gate classifier for that triage.
 
 ### Picking contract (R1)
 
