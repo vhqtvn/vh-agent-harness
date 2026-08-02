@@ -221,11 +221,20 @@ The review MUST be treated as BLOCKED (release lock, report failure to A) if ANY
 9. **Commit `docs/planning/backlog.md` ALONE.** The shared task-status ledger must NEVER travel in the same commit as code/docs changes — the commit-gate O1 preflight refuses an `acquire` whose `--paths` mixes `docs/planning/backlog.md` with any other path (status `path_error` / `backlog_must_commit_separately`). If a worker hands you a mixed path set, do NOT attempt to stage it: tell the worker to load the `backlog` skill and split — commit code first (without the ledger), then re-read `docs/planning/backlog.md` from disk and commit the backlog alone (backlog-only acquire). This is the W2/split-commit enforcement that keeps a concurrent backlog edit from `cas_conflict`-ing a clean code commit.
    - **The backlog normalizer is the one case where `backlog.md` and a set of companion paths change together as one transaction.** A normalizer run (`vh-agent-harness exec node .opencode/scripts/normalize-backlog.js`, or `/backlog-cleanup`) writes `docs/planning/backlog.md` together with companion paths under `docs/planning/archive/` (managed archive files like `backlog-archive-<period>.md` and `archive/index.md`, including creates / removes). **This is NOT an exception to the rule above — there is no carveout in `commit-gate.sh`, no privileged archive path class, and the normalizer-managed archive companions are NOT ordinary "code/docs" changes.** The generic "commit code first" instruction above applies to a code + backlog mix handed to you by a worker; for a backlog + archive mix from a normalizer run, follow the two-commit protocol below instead. See the `backlog` skill for the full version.
    - **Two-commit normalizer protocol (treat the output as one transaction):**
+     - **You (the committer) cannot run `normalize-backlog.js`** — your profile
+       denies `vh-agent-harness *` and bare `node` is not in your allowlist. The
+       normalized working tree (`backlog.md` rewrite + archive companions, plus
+       the `--check` validation) must be prepared by **build**
+       (`vh-agent-harness exec node .opencode/scripts/normalize-backlog.js`) or
+       the **operator host-side** BEFORE the closeout is handed to you. The
+       "run the normalizer" / "rerun the normalizer" steps below are executed by
+       build/host, not by you — you only land the already-prepared two-commit
+       transaction. This documents the current permission split (no carve-out).
      1. Commit `docs/planning/backlog.md` alone (backlog-only acquire).
      2. Immediately commit only the changed, created, or removed `docs/planning/archive/**` companions as one archive-companion commit.
-     - Run `node .opencode/scripts/normalize-backlog.js --check` over the complete working tree **before the first commit and again after the second**.
+     - Build/host runs `node .opencode/scripts/normalize-backlog.js --check` over the complete working tree **before the first commit and again after the second** — request the run from build/host (or have the worker include both passes in the handoff).
      - **Do not stop, hand off, close out, or report the normalization complete between the two commits** — they are one logical transaction.
-     - If a `cas_conflict` occurs, re-read the ledger, rerun the normalizer over the complete working tree, and recompute both exact path sets before retrying. Do NOT revert the archive companions to unblock.
+     - If a `cas_conflict` occurs, re-read the ledger, have build/host rerun the normalizer over the complete working tree, and recompute both exact path sets before retrying. Do NOT revert the archive companions to unblock.
 
 ## Input from A
 

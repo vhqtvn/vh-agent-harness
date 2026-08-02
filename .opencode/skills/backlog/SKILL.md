@@ -118,6 +118,18 @@ with another path (status `path_error` / `backlog_must_commit_separately`),
 there is no archive-companion carveout, and the normalizer's archive companions
 are NOT ordinary "code/docs" changes that could ride alongside unrelated work.
 
+**Build/host prestep — who runs the normalizer.** The committer agent's
+permission profile denies both `vh-agent-harness *` and bare `node`, so the
+committer **cannot run `normalize-backlog.js` itself** — neither the write pass
+nor the `--check` pass. The normalizer must be run by **build**
+(`vh-agent-harness exec node .opencode/scripts/normalize-backlog.js`) or by the
+**operator host-side** BEFORE the closeout is handed to the committer. The
+committer then lands the already-normalized two-commit transaction (backlog-only
+commit + archive-companion commit) against the working tree build/host prepared.
+This documents the current permission split — it is NOT a carve-out: do not
+relax the committer profile from a doc edit (that is a separate coordinator
+decision).
+
 Treat the normalizer output as **one work-cycle transaction** landed through
 **two reviewed commits, back to back**:
 
