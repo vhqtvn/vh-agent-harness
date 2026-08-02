@@ -4,6 +4,7 @@ features:
 overlays:
     - auto-classifier-pilot
     - contract-invariant-audit-pilot
+    - formal-verification-pilot
     - harness-dogfood
 capabilities:
     - core/media-perception

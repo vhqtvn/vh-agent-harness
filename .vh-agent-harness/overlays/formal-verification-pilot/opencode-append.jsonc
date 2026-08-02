@@ -1,0 +1,15 @@
+// formal-verification-pilot overlay pack — skills-only pilot for the
+// agent-authored formal-verification capability (S1 overlay, advisory /
+// INFORMS only).
+//
+// This pack contributes a SKILL only (skills/formal-verification/) plus its
+// references/. It wires NO agent, NO command, NO permission surface, NO helper,
+// and NO gate. The skill is instruction-first; it authors proof/spec text,
+// a model↔code fidelity binding, and a red-on-divergence test that are all
+// producible with NO engine installed, and treats the engine check as an
+// OPTIONAL confirmation step that waits on operator-provisioned Lean4/TLAPS
+// (a separate infra step — see .opencode/repo-configs/formal-verification-config.json).
+// No permission addition is required here. This file is a no-op JSONC shell so
+// the pack is well-formed for discovery; a skills-only pack may legitimately
+// contribute nothing to opencode.jsonc.
+{}

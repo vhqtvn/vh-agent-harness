@@ -22,6 +22,20 @@
       "overlay_pack": "contract-invariant-audit-pilot",
       "source_relative_path": "skills/contract-invariant-audit/scripts/manifest-helper.js",
       "rendered_digest": "sha256:68b7be0de17bbe8ef119baf5c7a71f9785364759b4ad5626ef29e2a80e0b2705"
+    },
+    {
+      "destination_path": ".opencode/skills/formal-verification/SKILL.md",
+      "producer_kind": "overlay_skill",
+      "overlay_pack": "formal-verification-pilot",
+      "source_relative_path": "skills/formal-verification/SKILL.md",
+      "rendered_digest": "sha256:63fcd27f5c5bec48849e63dd8305f54d98c67df7946b21dd350580be10174e28"
+    },
+    {
+      "destination_path": ".opencode/skills/formal-verification/references/pilot-runbook.md",
+      "producer_kind": "overlay_skill",
+      "overlay_pack": "formal-verification-pilot",
+      "source_relative_path": "skills/formal-verification/references/pilot-runbook.md",
+      "rendered_digest": "sha256:f7e3e103fe2f6d7a62cd4e18a4c5c163c0fa8fa220614f3b38ba2237fc4b4d93"
     }
   ]
 }
