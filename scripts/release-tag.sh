@@ -58,13 +58,21 @@
 #                                  skipped in push-only mode).
 #
 # Output: exactly ONE valid JSON object on stdout, nothing else.
-#   success: {"ok":true,"tag":"vX.Y.Z","commit":"<HEAD-sha>","pushed":false,
-#             "error":null,"disclosures":[...],"accepted_overrides":[...]}
+#   success: {"ok":true,"tag":"vX.Y.Z","commit":"<validated-tag-target-sha>",
+#             "pushed":false,"error":null,"disclosures":[...],
+#             "accepted_overrides":[...],"head_drift":false}
 #   refusal: {"ok":false,"tag":"vX.Y.Z|null","commit":"<sha>|null","pushed":false,
-#             "error":"<reason>","disclosures":[...],"accepted_overrides":[...]}
+#             "error":"<reason>","disclosures":[...],"accepted_overrides":[...],
+#             "head_drift":false}
 # `disclosures` and `accepted_overrides` are ALWAYS present (both `null` in
 # --push-only mode, which skips the DEFER gate; otherwise they carry the
 # evaluator's disclosures and any operator-approved overrides).
+# `head_drift` is ALWAYS present (boolean). It is `true` only on a tag cut AFTER
+# the tag-ready->tag drift check detected HEAD had advanced past the validated
+# commit during the gate window — the tag is still PINNED to the validated
+# commit (see the drift-detection block near the mutation), but the operator is
+# informed a concurrent commit landed and is NOT part of this release. `false`
+# otherwise (including every refusal path before the mutation, which did not pin).
 # On any validation failure the script prints the refusal JSON and exits non-zero.
 # Refuses (non-zero) if the tag already exists (create flow only; push-only
 # INVERTS this check), so re-running after a failure is safe.
@@ -119,11 +127,14 @@ json_str() {
 }
 
 emit() {
-  # ok tag commit pushed error disclosures accepted_overrides
+  # ok tag commit pushed error disclosures accepted_overrides head_drift
   # (booleans as bare true/false; nulls via json_str; disclosures/overrides are
-  # pre-rendered JSON array literals, or the literal "null")
-  printf '{"ok":%s,"tag":%s,"commit":%s,"pushed":%s,"error":%s,"disclosures":%s,"accepted_overrides":%s}\n' \
-    "$1" "$(json_str "$2")" "$(json_str "$3")" "$4" "$(json_str "$5")" "${6:-null}" "${7:-null}"
+  # pre-rendered JSON array literals, or the literal "null"). head_drift defaults
+  # to false: only the post-drift-check emits (mutation success/failure and the
+  # pin-verification failure) pass a real $HEAD_DRIFTED value; every earlier
+  # refusal path leaves it false (no pin attempted).
+  printf '{"ok":%s,"tag":%s,"commit":%s,"pushed":%s,"error":%s,"disclosures":%s,"accepted_overrides":%s,"head_drift":%s}\n' \
+    "$1" "$(json_str "$2")" "$(json_str "$3")" "$4" "$(json_str "$5")" "${6:-null}" "${7:-null}" "${8:-false}"
 }
 
 VERSION="${1-}"
@@ -836,11 +847,72 @@ if [ "$PARSED_OK" = "1" ]; then
   fi
 fi
 
-# --- mutation: create the annotated tag from the message file ---
+# --- tag-ready -> tag HEAD-drift detection (pin-to-validated-commit) ---
+#
+# The release ceremony establishes tag-ready state against ONE specific commit
+# — HEAD_SHA, captured above (before any gate ran). Every readiness gate (the
+# DEFER manifest handshake at HEAD, G0/G0b/G0c, and the G1-G5 artifact
+# handshake bound to HEAD^/HEAD^^) validated THIS commit. The window between
+# that tag-ready assertion and the `git tag -a` mutation is non-trivial (~15s+
+# for G0's `go test ./...`), and in a dogfood repo where build agents run
+# concurrently, a concurrent landing CAN advance HEAD mid-window.
+#
+# Before this guard, `git tag -a <version>` (no explicit commit) resolved HEAD
+# at mutation time, so a concurrent commit silently re-targeted the tag off the
+# validated manifest commit M onto whatever main pointed at mid-window. This is
+# the v0.15.0 incident's defect class: tag target 40e5f74 while a concurrent
+# study commit c3dcf29 landed on main, requiring operator history surgery to
+# preserve the intended pin-to-M.
+#
+# Fix — PIN + DETECT, never silent:
+#   - Re-read HEAD at the mutation boundary. If it advanced past HEAD_SHA, set
+#     HEAD_DRIFTED=true and print a LOUD stderr warning naming both SHAs so the
+#     operator sees the concurrent landing (the tag is never silently
+#     re-targeted).
+#   - The tag is ALWAYS created with the EXPLICIT validated commit argument
+#     (`git tag -a ... "$VERSION" "$HEAD_SHA"`), so the tag target is the
+#     manifest-pinned commit M regardless of any drift. This preserves the
+#     pin-to-M the incident required surgery to achieve, without surgery.
+#   - Post-creation, the tag's actual target is verified to equal HEAD_SHA
+#     (defense-in-depth: confirms the explicit-commit pin took effect; if it
+#     somehow did not, the wrapper refuses before any push).
+# A concurrent landing's commit is NOT included in this release; it lands in
+# the NEXT release. The operator sees the drift warning and can decide whether
+# to re-cut a release that includes it.
+HEAD_DRIFTED=false
+CURRENT_HEAD=""
+if ! CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null); then
+  emit false "$VERSION" "" false \
+    "head-drift check: git rev-parse HEAD failed at the mutation boundary (cannot verify the tag-ready commit is still current)" \
+    "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+  exit 1
+fi
+if [ "$CURRENT_HEAD" != "$HEAD_SHA" ]; then
+  HEAD_DRIFTED=true
+  printf '[release-tag] HEAD-DRIFT DETECTED between tag-ready and tag: the validated commit was %s, but current HEAD is %s (a concurrent commit landed during the tag-ready window). The tag will be PINNED to the validated commit %s (manifest-pinned M); the concurrent commit is NOT part of this release.\n' \
+    "$HEAD_SHA" "$CURRENT_HEAD" "$HEAD_SHA" >&2
+fi
 
+# --- mutation: create the annotated tag from the message file, PINNED to the validated commit ---
+#
+# The tag is created with the EXPLICIT validated commit (HEAD_SHA) — never bare
+# HEAD — so a concurrent landing between tag-ready and tag cannot silently
+# re-target the manifest pin. See the HEAD-drift detection block above.
 TAG_ERR=""
-if ! TAG_ERR=$(git tag -a -F "$MSG_FILE" "$VERSION" 2>&1 1>/dev/null); then
-  emit false "$VERSION" "" false "git tag -a failed: ${TAG_ERR}" "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+if ! TAG_ERR=$(git tag -a -F "$MSG_FILE" "$VERSION" "$HEAD_SHA" 2>&1 1>/dev/null); then
+  emit false "$VERSION" "" false "git tag -a failed: ${TAG_ERR}" "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON" "$HEAD_DRIFTED"
+  exit 1
+fi
+
+# Defense-in-depth: verify the created annotated tag points at the validated
+# commit. This confirms the explicit-commit pin took effect; if it did not
+# (e.g. a future git regression or an unexpected ref state), refuse BEFORE any
+# push rather than ship a tag at the wrong commit.
+TAGGED_SHA="$(git rev-parse -q --verify "refs/tags/${VERSION}^{commit}" 2>/dev/null)" || TAGGED_SHA=""
+if [ "$TAGGED_SHA" != "$HEAD_SHA" ]; then
+  emit false "$VERSION" "$TAGGED_SHA" false \
+    "post-tag pin verification failed: tag ${VERSION} target (${TAGGED_SHA}) does not match the validated commit (${HEAD_SHA}); refusing before push" \
+    "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON" "$HEAD_DRIFTED"
   exit 1
 fi
 
@@ -850,11 +922,11 @@ PUSHED=false
 if [ "${RELEASE_TAG_PUSH-0}" = "1" ]; then
   PUSH_ERR=""
   if ! PUSH_ERR=$(git push origin "$VERSION" 2>&1 1>/dev/null); then
-    # tag was created locally but the requested push failed
-    emit false "$VERSION" "$HEAD_SHA" false "tag ${VERSION} created locally but git push failed: ${PUSH_ERR}" "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+    # tag was created locally (at the validated commit) but the requested push failed
+    emit false "$VERSION" "$HEAD_SHA" false "tag ${VERSION} created locally but git push failed: ${PUSH_ERR}" "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON" "$HEAD_DRIFTED"
     exit 1
   fi
   PUSHED=true
 fi
 
-emit true "$VERSION" "$HEAD_SHA" "$PUSHED" "" "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+emit true "$VERSION" "$HEAD_SHA" "$PUSHED" "" "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON" "$HEAD_DRIFTED"
