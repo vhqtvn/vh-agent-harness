@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "engine": "none",
+  "provisioning": "direct-binary",
+  "binary_path": "",
+  "docker_image": "",
+  "onUnavailable": "defer"
+}
