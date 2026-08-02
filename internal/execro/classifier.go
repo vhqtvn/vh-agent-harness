@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/permconfig"
+	"github.com/vhqtvn/vh-agent-harness/internal/runshape"
 )
 
 // Verdict is the classifier decision for one command. When Allow is false,
@@ -28,14 +29,62 @@ type Verdict struct {
 	Notice string
 }
 
-// denyFooter is appended to every DENY notice. It explains the allowlist→deny
-// asymmetry (exec-ro can only hard-deny; it cannot ask) and points the operator
-// at the bare-command alternative, which DOES prompt through the normal
-// permission table.
-const denyFooter = "\n(exec-ro is allowlisted in opencode.jsonc so opencode never prompts for it; " +
-	"exec-ro itself is the only gate and denies anything it cannot prove is read-only. " +
-	"To run a pipeline, a mutating command, or anything with shell metacharacters, " +
-	"invoke the bare command directly — it will route through the normal permission table.)"
+// denyFooter is appended to every DENY notice. It is the operator/agent-facing
+// decision tree that exec-ro emits at its decision moment. exec-ro is
+// allowlisted in opencode.jsonc as `vh-agent-harness exec-ro *`, so opencode
+// NEVER prompts for it — which makes this footer the ONLY routing guidance an
+// agent receives when exec-ro denies. The footer MUST therefore present the
+// full read-only execution ladder (exec-ro → exec-sandbox → full exec) with
+// the two load-bearing caveats:
+//   - exec-sandbox is HOST-LOCAL only — it does NOT follow a command into
+//     proxy/docker_compose backends.
+//   - exec-sandbox requires an applicable mode-floor (exec_sandbox.min_mode)
+//     supplied by the project's run-shape.yml; preserved/upgrade run-shapes
+//     may lack it.
+//
+// The footer reads the active floor via runshape.FindMinMode(repoRoot) so the
+// guidance names the real containment level (or "none" when no floor exists or
+// is unreadable). repoRoot is the absolute project root (lm.dir in runExecRo).
+// This is a read-only advisory: DENY stays DENY regardless of the floor value.
+// The footer routes, it never rewrites or auto-reruns.
+//
+// The mutation rung keeps an explicit bare-command pointer so a genuine
+// mutation (e.g. `npm install`) denied by exec-ro still has an actionable next
+// step (invoke the bare command, which DOES prompt through the normal
+// permission table). The footer thus serves BOTH audiences: read-only work
+// that exec-sandbox should handle, and genuine mutation that full exec /
+// bare-command should handle.
+func denyFooter(repoRoot string) string {
+	floor := activeFloor(repoRoot)
+	return "\n(exec-ro is allowlisted in opencode.jsonc, so opencode will not prompt after this " +
+		"denial; exec-ro is the final gate.)\n" +
+		"- The command was not proven read-only by exec-ro; it was not executed. " +
+		"(DENY stays DENY — never rewritten, never auto-rerun.)\n" +
+		"- If the intended work is read-only/read-code and should run on the host, " +
+		"consider a separate explicit 'vh-agent-harness exec-sandbox' invocation — " +
+		"when the calling role has the grant AND the applicable mode-floor supplies " +
+		"the required containment (active floor: " + floor + ").\n" +
+		"- exec-sandbox does NOT follow a command into proxy or docker_compose backends.\n" +
+		"- For backend-executed work, use backend-native containment or hand off to an authorized role.\n" +
+		"- For genuinely mutating work, use the proper executable/editing role — " +
+		"do not disguise mutation as read-only.\n" +
+		"- To use the normal permission path for work that must execute rather than remain " +
+		"read-only, invoke the bare command directly."
+}
+
+// activeFloor returns the most-restrictive exec_sandbox.min_mode floor found by
+// walking the ancestor chain from repoRoot (runshape.FindMinMode takes the MAX
+// over the entire chain so a weakening child cannot mask a stricter parent), or
+// "none" when no run-shape with an exec_sandbox block exists, when FindMinMode
+// errors, or when the floor is empty. This is a read-only advisory for the deny
+// footer; it never gates a transition.
+func activeFloor(repoRoot string) string {
+	_, minMode, err := runshape.FindMinMode(repoRoot)
+	if err != nil || minMode == "" {
+		return "none"
+	}
+	return minMode
+}
 
 // metachars are the shell metacharacters that exec-ro conservatively refuses.
 // Because exec-ro is a fast string-level heuristic (spoofable by complex shell)
@@ -79,7 +128,7 @@ var metacharNames = map[string]string{
 // given or exits non-zero with the notice.
 func Classify(cmd, repoRoot string) Verdict {
 	if strings.TrimSpace(cmd) == "" {
-		return Verdict{Allow: false, Notice: "exec-ro: empty command." + denyFooter}
+		return Verdict{Allow: false, Notice: "exec-ro: empty command." + denyFooter(repoRoot)}
 	}
 	if idx := strings.IndexAny(cmd, metachars); idx >= 0 {
 		name := metacharNames[string(cmd[idx])]
@@ -88,7 +137,7 @@ func Classify(cmd, repoRoot string) Verdict {
 			Notice: "exec-ro: command contains a shell metacharacter (" + name + ") " +
 				"that exec-ro cannot safely classify. " +
 				"For pipelines, sequences, redirects, or command substitution, " +
-				"run the bare command directly." + denyFooter,
+				"run the bare command directly." + denyFooter(repoRoot),
 		}
 	}
 	tokens := strings.Fields(cmd)
@@ -131,12 +180,12 @@ func ClassifyArgs(target string, args []string, repoRoot string) Verdict {
 // ClassifyArgs may pass an empty target and must still fail-closed).
 func classifyTokens(tokens []string, repoRoot string) Verdict {
 	if len(tokens) == 0 {
-		return Verdict{Allow: false, Notice: "exec-ro: empty command." + denyFooter}
+		return Verdict{Allow: false, Notice: "exec-ro: empty command." + denyFooter(repoRoot)}
 	}
 	if tokens[0] == "git" {
 		return classifyGit(tokens, repoRoot)
 	}
-	return classifyNonGit(tokens)
+	return classifyNonGit(tokens, repoRoot)
 }
 
 // classifyGit runs the Go walkGitGlobals port over tokens (tokens[0]=="git") and
@@ -145,7 +194,7 @@ func classifyTokens(tokens []string, repoRoot string) Verdict {
 func classifyGit(tokens []string, repoRoot string) Verdict {
 	w := walkGitGlobals(tokens, repoRoot)
 	if w.deny != "" {
-		return Verdict{Allow: false, Notice: "exec-ro: " + w.deny + "." + denyFooter}
+		return Verdict{Allow: false, Notice: "exec-ro: " + w.deny + "." + denyFooter(repoRoot)}
 	}
 	if w.infoOnly {
 		// Terminal read-only info request (git --help / git --version).
@@ -153,14 +202,14 @@ func classifyGit(tokens []string, repoRoot string) Verdict {
 	}
 	verb := w.verb
 	if verb == "" {
-		return Verdict{Allow: false, Notice: "exec-ro: no git verb recognized." + denyFooter}
+		return Verdict{Allow: false, Notice: "exec-ro: no git verb recognized." + denyFooter(repoRoot)}
 	}
 	if permconfig.GitMutationVerbsSet[verb] {
 		return Verdict{
 			Allow: false,
 			Notice: "exec-ro: git verb '" + verb + "' is a repo mutation and must go through " +
 				"the commit-gate wrapper (.opencode/scripts/commit-gate.sh). " +
-				"exec-ro denies all mutations." + denyFooter,
+				"exec-ro denies all mutations." + denyFooter(repoRoot),
 		}
 	}
 	if permconfig.GitReadonlyVerbs[verb] {
@@ -178,7 +227,7 @@ func classifyGit(tokens []string, repoRoot string) Verdict {
 			return Verdict{
 				Allow: false,
 				Notice: "exec-ro: git subcommand flag '" + flag + "' " + gitWriteFlagRationale[flag] +
-					"; not permitted under exec-ro's read-only contract." + denyFooter,
+					"; not permitted under exec-ro's read-only contract." + denyFooter(repoRoot),
 			}
 		}
 		return Verdict{Allow: true}
@@ -186,7 +235,7 @@ func classifyGit(tokens []string, repoRoot string) Verdict {
 	return Verdict{
 		Allow: false,
 		Notice: "exec-ro: git verb '" + verb + "' is not in the read-only set; " +
-			"default-deny." + denyFooter,
+			"default-deny." + denyFooter(repoRoot),
 	}
 }
 
@@ -194,7 +243,9 @@ func classifyGit(tokens []string, repoRoot string) Verdict {
 // (excluding vh-agent-harness-prefixed entries so the exec-ro self-entry does
 // not create a nesting loophole). A match ALLOWs subject to the per-binary
 // write/exec flag denylist (scanNonGitWriteFlags); anything else DEFAULT-DENIES
-// with a notice listing the allowed binaries.
+// with a notice listing the allowed binaries. repoRoot threads through to the
+// shared denyFooter so the decision-tree footer can name the active sandbox
+// floor.
 //
 // The per-binary denylist runs INSIDE the exec-ro classifier ONLY (after the
 // readonly match). The readonly group entry (tables.go) is intentionally left
@@ -202,12 +253,12 @@ func classifyGit(tokens []string, repoRoot string) Verdict {
 // permission.bash emission for ALL agents, and widening it (e.g. to `sed *` or
 // `sed --sandbox *`) would emit a broader prompt-free rule for every agent and
 // reopen the write vector at the L2 layer. The flag rules are exec-ro-internal.
-func classifyNonGit(tokens []string) Verdict {
+func classifyNonGit(tokens []string, repoRoot string) Verdict {
 	patterns := readonlyInspectionPatterns()
 	for _, p := range patterns {
 		if matchReadonlyPattern(tokens, p) {
 			if notice := scanNonGitWriteFlags(tokens); notice != "" {
-				return Verdict{Allow: false, Notice: notice + denyFooter}
+				return Verdict{Allow: false, Notice: notice + denyFooter(repoRoot)}
 			}
 			return Verdict{Allow: true}
 		}
@@ -224,7 +275,7 @@ func classifyNonGit(tokens []string) Verdict {
 		Allow: false,
 		Notice: "exec-ro: command '" + tokens[0] + "' is not in the read-only inspection set " +
 			"(allowed binaries: " + strings.Join(bins, ", ") + "). " +
-			"For commands outside the read-only surface, run the bare command directly." + denyFooter,
+			"For commands outside the read-only surface, run the bare command directly." + denyFooter(repoRoot),
 	}
 }
 

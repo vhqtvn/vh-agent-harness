@@ -193,10 +193,37 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-// TestClassify_DenyNoticeFooter asserts every deny notice carries the denyFooter
-// explanation (the allowlist→deny asymmetry + bare-command suggestion). This is
-// the operator-facing contract: exec-ro can only hard-deny, so the notice must
-// explain WHY and point at the alternative.
+// assertDenyFooterLadder checks the shared exec-ro deny-footer decision ladder
+// that every DENY notice MUST carry. exec-ro is allowlisted in opencode.jsonc
+// (opencode never prompts for it), so this footer is the ONLY routing guidance
+// an agent receives at the deny moment — it MUST present the full read-only
+// execution ladder (exec-ro → exec-sandbox → full exec) with the host-local +
+// mode-floor caveats, and keep an actionable mutation pointer (bare command).
+// DENY stays DENY: the footer routes, it never rewrites or auto-reruns.
+func assertDenyFooterLadder(t *testing.T, notice string) {
+	t.Helper()
+	want := []string{
+		"exec-ro is allowlisted in opencode.jsonc",
+		"DENY stays DENY",
+		"exec-sandbox",
+		"active floor:",
+		"does NOT follow a command into proxy or docker_compose",
+		"proper executable/editing role",
+		"invoke the bare command directly",
+	}
+	for _, w := range want {
+		if !strings.Contains(notice, w) {
+			t.Errorf("deny notice missing shared footer substring %q: %q", w, notice)
+		}
+	}
+}
+
+// TestClassify_DenyNoticeFooter asserts every deny notice carries the decision
+// ladder footer. This is the operator-facing contract: exec-ro can only
+// hard-deny (opencode never prompts for it), so the footer is the ONLY routing
+// guidance an agent sees at the deny moment. It also locks that a repo with no
+// exec_sandbox floor (a bare tempdir) renders the floor as "none" — the ladder
+// must be specific, never claim a floor or grant that does not exist.
 func TestClassify_DenyNoticeFooter(t *testing.T) {
 	repoRoot := t.TempDir()
 	denied := []string{
@@ -212,9 +239,14 @@ func TestClassify_DenyNoticeFooter(t *testing.T) {
 			t.Errorf("Classify(%q) unexpectedly allowed", cmd)
 			continue
 		}
-		if !strings.Contains(got.Notice, "bare command") {
-			t.Errorf("Classify(%q) deny notice missing bare-command suggestion: %q", cmd, got.Notice)
-		}
+		assertDenyFooterLadder(t, got.Notice)
+	}
+	// A repo with no exec_sandbox block (bare tempdir → FindMinMode returns "")
+	// must render the floor as "none". The ladder must NOT claim universal
+	// grant or floor availability (preserved/upgrade run-shapes may lack it).
+	got := Classify("git commit", repoRoot)
+	if !strings.Contains(got.Notice, "active floor: none") {
+		t.Errorf("deny notice with no floor should render 'active floor: none': %q", got.Notice)
 	}
 }
 
@@ -254,9 +286,7 @@ func TestClassify_ConfigGlobalDeny(t *testing.T) {
 			if !strings.Contains(got.Notice, "config/exec-affecting") {
 				t.Errorf("Classify(%q) deny notice missing the config/exec-affecting rationale: %q", tc.cmd, got.Notice)
 			}
-			if !strings.Contains(got.Notice, "bare command") {
-				t.Errorf("Classify(%q) deny notice missing bare-command suggestion: %q", tc.cmd, got.Notice)
-			}
+			assertDenyFooterLadder(t, got.Notice)
 		})
 	}
 }
@@ -321,9 +351,7 @@ func TestClassify_WriteFlagDeny(t *testing.T) {
 			if !strings.Contains(got.Notice, "read-only contract") {
 				t.Errorf("Classify(%q) deny notice missing the read-only-contract rationale: %q", tc.cmd, got.Notice)
 			}
-			if !strings.Contains(got.Notice, "bare command") {
-				t.Errorf("Classify(%q) deny notice missing bare-command suggestion: %q", tc.cmd, got.Notice)
-			}
+			assertDenyFooterLadder(t, got.Notice)
 		})
 	}
 }
@@ -422,9 +450,7 @@ func TestClassify_NonGitWriteFlagDeny(t *testing.T) {
 					t.Errorf("Classify(%q) deny notice missing the '--sandbox required' message: %q", tc.cmd, got.Notice)
 				}
 			}
-			if !strings.Contains(got.Notice, "bare command") {
-				t.Errorf("Classify(%q) deny notice missing bare-command suggestion: %q", tc.cmd, got.Notice)
-			}
+			assertDenyFooterLadder(t, got.Notice)
 		})
 	}
 }

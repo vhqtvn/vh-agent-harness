@@ -41,9 +41,21 @@ Unlike ` + "`vh-agent-harness exec`" + ` (which routes through the shell-guard p
 and may prompt), exec-ro is allowlisted in opencode.jsonc as ` + "`vh-agent-harness exec-ro *`" + `
 so opencode NEVER prompts for it. exec-ro itself is therefore the ONLY gate: its
 internal classifier hard-denies git mutations, out-of-repo reads, shell
-metacharacters, and any command it cannot prove is read-only. The deny notice
-explains WHY and suggests the bare-command alternative (which DOES prompt through
-the normal permission table).
+metacharacters, and any command it cannot prove is read-only. DENY stays DENY —
+exec-ro never rewrites or auto-reruns a denied command. The deny notice presents
+the read-only execution DECISION LADDER so an agent knows what to do next:
+
+  1. exec-ro for commands the classifier can PROVE read-only (this command).
+  2. exec-sandbox for explicitly-granted, host-local read-code / complex
+     read-only work under a mode-floor (exec_sandbox.min_mode) — but ONLY when
+     the calling role has the grant AND the applicable floor supplies the
+     required containment. exec-sandbox does NOT follow a command into proxy or
+     docker_compose backends (it is host-local only).
+  3. full vh-agent-harness exec (or the bare command) when runtime/backend
+     execution or mutation authority is genuinely needed.
+
+The deny footer names the ACTIVE floor for the current repo so the ladder is
+specific rather than generic.
 
 Allowed: read-only git inspection (log/show/diff/status/...), read-only non-git
 binaries (ls/cat/grep/rg/jq/find/wc/head/tail/...). Denied: any git mutation
