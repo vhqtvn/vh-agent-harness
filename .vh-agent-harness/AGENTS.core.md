@@ -230,6 +230,42 @@ outcome).
   state-machine invariant, the `formal-verification` skill authors an
   engine-checked proof whose result feeds this crux model.
 
+### Verification claims: full, targeted, and transition-clean
+
+"Green" is ambiguous. When a success report or closeout claims verification,
+distinguish three SEPARATE senses and never let one stand in for another. These
+are the F4 assurance/integrity-stewardship properties (A, B1, B2); each can
+pass or fail independently.
+
+- **B1 — full verification:** the canonical full command set actually ran
+  successfully AND the result is bound to the assessed revision/tree. A
+  targeted or smoke run (a single `-run` filter, one package, a smoke probe)
+  MUST be labeled targeted or smoke and NEVER summarized as full green. If full
+  execution cannot be observed or bound to the assessed state, the result is
+  `inconclusive` or `not-demonstrable`, not green. A missing or unverifiable
+  receipt never fabricates a pass.
+- **B2 — clean transition state:** the working-tree / transition state matches
+  what was reviewed. **Cleanliness is transition-relative.** Release / tag
+  transitions require global cleanliness — the tagged commit must be exactly
+  what was verified (release G0b refuses a dirty worktree). Ordinary
+  commit-gate integrity is **exact-slice based** and MUST tolerate unrelated
+  concurrent dirt: the committed tree for the authorized slice equals the
+  reviewed/approved tree for that slice, and unrelated concurrent working-tree
+  changes are normal. Do NOT require a global clean tree at the commit
+  boundary, and never erase or revert unrelated concurrent work for a
+  cosmetically clean status.
+- **A — declared-scope coverage (structural only):** every item in the
+  declared scope should receive a terminal disposition (examined or excluded by
+  contract) before any aggregate "reviewed" or "complete" claim. Structural
+  coverage proves only that each declared item was accounted for — never that
+  it was meaningfully examined. The `behavioral-closure` token is a declaration
+  of crux consistency, not proof the cited path executed; it is distinct from
+  B1.
+
+B1 and B2 are separate controls: all canonical commands passing (B1) does not
+imply a clean tree (B2), and a clean tree (B2) does not imply the build passed
+(B1). State both independently. See `docs/coordination/CLOSEOUT_TEMPLATE.md` →
+"Success-report integrity" for the closeout-facing form.
 
 ## Output expectations for agents
 

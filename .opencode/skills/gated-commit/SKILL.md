@@ -232,6 +232,29 @@ If the lock dir exists, it also refreshes lock metadata atomically. If no lock d
 (lock-free mode), it refreshes the per-session `meta-${UUID}` file, keeping the session alive
 during long reviews.
 
+## Working-tree cleanliness (transition-relative)
+
+Working-tree cleanliness is **transition-relative** — it is NOT a single
+universal requirement. The commit gate preserves a NARROWER, harder invariant
+than "globally clean tree":
+
+> the committed tree for the authorized slice equals the reviewed/approved tree
+> for that slice (exact-slice / approved-tree identity).
+
+This intentionally **tolerates unrelated concurrent dirt**. A concurrently-dirty
+working tree is normal during concurrent sessions; unrelated files are
+mechanically excluded by the gate's private-index staging. The gate MUST NOT:
+
+- require a globally clean tree to commit (that would break the exact-slice +
+  concurrent-dirt-tolerance model);
+- erase, revert, or discard unrelated concurrent changes to obtain a
+  cosmetically clean `git status`.
+
+**Global cleanliness is a release-only invariant** (release/tag transitions,
+where the tagged commit must be exactly what was verified — release G0b). It is
+a SEPARATE control (F4-B2) from exact-slice commit integrity and from canonical
+full verification (F4-B1). Do not conflate them at the commit boundary.
+
 ## Cross-references
 
 - `.opencode/docs/git-execution-routing.md` — full routing documentation
