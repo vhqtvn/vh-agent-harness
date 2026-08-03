@@ -283,6 +283,179 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 		t.Errorf("hook Evaluate(apt-get install foo) = (%s,%v), want (Deny,nil)", act, err)
 	}
 
+	// infra-lifecycle regression matrix (Go -> node -> WASM -> evaluate()).
+	// Pins the P1-PERM-002 hardening of the shared inspector builder for the
+	// apt-install-ad-hoc / user-group-mutation / ssh-host-key-bypass / scp-upload
+	// rules. This is the same gap class as the landed git-lane fix (P1-PERM-001,
+	// f88d29f): the 4 rules now use a `command`-EXCLUDING inspector set
+	// (INFRA_LIFECYCLE_INSPECTORS) so the `command` executor builtin can no
+	// longer carve them out, and the shared chain-guard is upgraded to the full
+	// 11-op set (added \n, \r, process-sub <( / >().
+	//
+	// Anchors:
+	//   - FP fix: prose mentioning the trigger in echo/printf args is carved out
+	//     (user-group-mutation previously FP'd on the literal `usermod` token in
+	//     commit-message prose). echo/printf are used (not rg/grep) so the
+	//     inspector carve-out — not the G4 inert-literal classifier — is the path
+	//     under test.
+	//   - command carve-out closure: `command <verb>` is DENIED for all 4 verbs
+	//     (the main fix). `command -v <verb>` lookup is ALSO denied — the
+	//     documented trade-off (use which/type, still in the set).
+	//   - upgraded chain-guard: \n and process-sub <( / >( smuggled legs that
+	//     were NOT caught by the old 7-op guard are now DENIED.
+	//   - real-invocation baselines stay DENIED.
+	// Each command is passed as a single-element argv so eval.js's
+	// argv.join(" ") yields exactly the intended command string.
+	infraCases := []struct {
+		name string
+		cmd  string
+		want Action
+	}{
+		// --- FP fix: inspector carve-out preserved (echo/printf prose) -----
+		{
+			name: "echo prose with usermod token (infra FP fix)",
+			cmd:  `echo "see usermod docs"`,
+			want: Allow,
+		},
+		{
+			name: "printf prose with apt-get install token (infra FP fix)",
+			cmd:  `printf "apt-get install is banned"`,
+			want: Allow,
+		},
+		{
+			name: "echo prose with ssh -o bypass token (infra FP fix)",
+			cmd:  `echo "ref: ssh -o StrictHostKeyChecking=no is forbidden"`,
+			want: Allow,
+		},
+		{
+			name: "echo prose with scp upload token (infra FP fix)",
+			cmd:  `echo "example: scp f user@host:/x is banned"`,
+			want: Allow,
+		},
+
+		// --- command carve-out closure (THE fix: command <verb> DENIED) ----
+		{
+			// `command` is a bash builtin that EXECUTES its argument. It is in
+			// the shared INSPECTOR_FULL (kept for non-executor project-overlay
+			// rules), but the infra-lifecycle carve-out uses a SEPARATE set
+			// (INFRA_LIFECYCLE_INSPECTORS) that EXCLUDES `command`. Otherwise
+			// `command apt-get install x` is carved out at scan #1 (command in
+			// command position → allowIf matches) and the apt install runs.
+			name: "command apt-get install denied (executor verb not a safe inspector)",
+			cmd:  `command apt-get install foo`,
+			want: Deny,
+		},
+		{
+			name: "command usermod denied (executor verb not a safe inspector)",
+			cmd:  `command usermod -aG docker alice`,
+			want: Deny,
+		},
+		{
+			name: "command ssh -o bypass denied (executor verb not a safe inspector)",
+			cmd:  `command ssh -o StrictHostKeyChecking=no host`,
+			want: Deny,
+		},
+		{
+			name: "command scp upload denied (executor verb not a safe inspector)",
+			cmd:  `command scp file user@host:/path`,
+			want: Deny,
+		},
+		{
+			// Documented trade-off of excluding `command`: the benign lookup
+			// `command -v usermod` is NO LONGER carved out (denied). An agent
+			// that wants the lookup must use `which`/`type` (still in the set).
+			// Pinned so a future "fix" cannot silently re-add `command`.
+			name: "command -v usermod denied (lookup trade-off; use which/type)",
+			cmd:  `command -v usermod`,
+			want: Deny,
+		},
+
+		// --- upgraded chain-guard: smuggled legs now DENIED ----------------
+		{
+			name: "echo ; usermod denied (chain-guard semicolon)",
+			cmd:  `echo x; usermod -aG docker alice`,
+			want: Deny,
+		},
+		{
+			name: "echo && apt-get install denied (chain-guard &&)",
+			cmd:  `echo x && apt-get install foo`,
+			want: Deny,
+		},
+		{
+			name: "echo | useradd denied (chain-guard pipe)",
+			cmd:  `echo x | useradd bob`,
+			want: Deny,
+		},
+		{
+			name: "echo $(usermod) denied (chain-guard $())",
+			cmd:  `echo $(usermod -aG x y)`,
+			want: Deny,
+		},
+		{
+			// Process substitution <(...) runs the inner command with NO list
+			// separator. The OLD shared chain-guard lacked <( so this was
+			// carved out (echo satisfies the inspector carve-out) and the apt
+			// install ran. The upgraded 11-op guard now refuses the carve-out.
+			name: "echo <(apt-get install) denied (chain-guard process-sub <(), NEW with upgrade)",
+			cmd:  `echo x <(apt-get install foo)`,
+			want: Deny,
+		},
+		{
+			name: "echo >(scp upload) denied (chain-guard process-sub >(), NEW with upgrade)",
+			cmd:  `echo y >(scp f user@host:/p)`,
+			want: Deny,
+		},
+		{
+			// Bash treats a LITERAL newline as a statement separator. The OLD
+			// shared chain-guard lacked \n so a smuggled second leg after a
+			// newline was carved out (echo satisfies the shell-`-c` inspector
+			// carve-out) and the usermod ran. The upgraded guard now refuses it.
+			name: "echo newline usermod denied (chain-guard newline separator, NEW with upgrade)",
+			cmd:  "vh-agent-harness exec bash -c 'echo step1\nusermod -aG docker alice'",
+			want: Deny,
+		},
+		{
+			// CR is the other bash statement separator newly added to the
+			// chain-guard char class ([;\n\r&|`]). A smuggled leg after a CR
+			// must NOT escape the guard either. Pinned so the slice's "full
+			// 11-op" claim is self-verifying for both newline-class bytes.
+			name: "echo carriage-return usermod denied (chain-guard CR separator, NEW with upgrade)",
+			cmd:  "vh-agent-harness exec bash -c 'echo step1\rusermod -aG docker alice'",
+			want: Deny,
+		},
+
+		// --- real-invocation baselines (still DENIED) ---------------------
+		{
+			name: "sudo useradd denied (real invocation baseline)",
+			cmd:  `sudo useradd bob`,
+			want: Deny,
+		},
+		{
+			name: "ssh -o bypass denied (real invocation baseline)",
+			cmd:  `ssh -o StrictHostKeyChecking=no host`,
+			want: Deny,
+		},
+		{
+			name: "scp upload denied (real invocation baseline)",
+			cmd:  `scp file user@host:/path`,
+			want: Deny,
+		},
+	}
+	for _, c := range infraCases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, _, evalErr := h.Evaluate(context.Background(), []string{c.cmd})
+			if evalErr != nil {
+				t.Fatalf("Evaluate(%q) error %v; want verdict %s (no bridge error)", c.cmd, evalErr, c.want)
+			}
+			// Assert the EXACT verdict: deny cases must be Deny (not Ask/Allow),
+			// so a carve-out regression cannot mask as an allow.
+			if got != c.want {
+				t.Errorf("Evaluate(%q) = %s; want %s", c.cmd, got, c.want)
+			}
+		})
+	}
+
 	// git-mutation-bypass regression matrix (Go -> node -> WASM -> evaluate()).
 	// The first two anchors are the FP fix: descriptive prose containing git
 	// tokens inside echo/printf args is now carved out by the inspector allowIf
