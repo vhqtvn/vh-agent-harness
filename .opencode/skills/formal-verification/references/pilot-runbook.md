@@ -11,7 +11,7 @@ This pilot is **instruction-only**. There is no bundled helper and no bundled
 engine. The design-time product (proof/spec text + fidelity binding +
 red-on-divergence test) is producible with NO engine installed; the engine check
 is an OPTIONAL confirmation that waits on operator-provisioned Lean4 / TLAPS (a
-separate infra step — see `.opencode/repo-configs/formal-verification-config.json`).
+separate infra step — see `.opencode/repo-configs/formal-verification-config.json`). *(Note: TLAPS is not currently supported/evidenced; a requested proof problem may be evaluated as a future pilot.)*
 
 ## 0. Confirm the design-time product needs no engine
 
@@ -28,10 +28,10 @@ it does not apply, so the run ledger has no silent gaps):
 - **candidate invariant** — the property to prove, stated precisely (the crux
   claim, not a vague goal).
 - **classification branch** — the seconds-fast decision tree result: `(a) Lean4`
-  / `(b) Lean4` / `(c) TLAPS` / `(d) honest-exit`. Record the branch AND the
+  / `(b) Lean4` / `(c) Honest exit (TLAPS unsupported)` / `(d) honest-exit`. Record the branch AND the
   one-line reasoning (e.g. "real interleavings must be modeled → TLAPS, not a
-  sequential Lean encoding").
-- **engine target** — `lean4` / `tlaps` / `none`, and the pinned tag the operator
+  sequential Lean encoding"). *(Note: TLAPS is not currently supported/evidenced; a requested proof problem may be evaluated as a future pilot.)*
+- **engine target** — `lean4` / `none` (TLAPS unsupported), and the pinned tag the operator
   provisioned (or `none` — the engine is optional for the design-time product).
 - **model↔code scope** — the code locations the model's transitions/variables
   map to (the surface the fidelity binding will cover).
@@ -70,7 +70,7 @@ proceed.
 Produce all three; none requires an engine to be reachable:
 
 1. **The proof / spec text** — the formal artifact the agent authors (Lean4 proof
-   script, or TLA+ spec + proof obligation). This is the primary work product.
+   script, or TLA+ spec + proof obligation). This is the primary work product. *(Note: TLAPS is not currently supported/evidenced; a requested proof problem may be evaluated as a future pilot.)*
 2. **The fidelity-binding artifact** — a declared mapping from each model
    transition / variable to the code location it represents. Reviewable. Part of
    the design-time product.
@@ -89,6 +89,8 @@ binding is invalid — re-author it so the divergence is observable, or record t
 candidate as `not-demonstrable`.
 
 ## 4. (Optional) Engine check — only if operator-provisioned Lean4 / TLAPS reachable
+
+*(Note: TLAPS is not currently supported/evidenced; a requested proof problem may be evaluated as a future pilot.)*
 
 If and only if the operator has provisioned a pinned engine, run the authored
 proof through it. The engine config comes from
@@ -148,7 +150,7 @@ Apply the stop/reshape conditions (SKILL.md):
   laundering surface) and cannot be re-authored to do so → the candidate is
   `not-demonstrable`, not a forced `proven`.
 - The classification forced a sequential Lean encoding onto a concurrent
-  invariant (erasing interleavings) → re-classify to TLAPS or honest-exit.
+  invariant (erasing interleavings) → re-classify to honest-exit. *(Note: TLAPS is not currently supported/evidenced; a requested proof problem may be evaluated as a future pilot.)*
 - A liveness / temporal claim was accepted into a proof path → re-route to
   honest-exit (d); liveness is OUT of pilot.
 
