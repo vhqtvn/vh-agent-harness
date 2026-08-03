@@ -70,11 +70,14 @@ const (
 // This field is ADDITIVE: it carries the zero value "" (normalized to
 // WriteNotAttempted at plan time) on outcomes produced by older code, so a
 // reader built against this struct never sees a state it cannot interpret. It
-// does NOT change substrate.Apply's return semantics — Apply still returns an
-// error only for walk/plan/lineage failures; a live-write failure sets
-// WriteState=WriteFailed (and a Note) and returns normally. Lifting a
-// live-write failure into an Apply error / lineage halt is tracked separately
-// (P1-SUBSTRATE-001).
+// does NOT change substrate.Apply's ERROR return semantics — Apply still returns
+// an error only for walk/plan/lineage-write failures; a live-write failure sets
+// WriteState=WriteFailed (and a Note) and returns normally (nil error), because
+// a partial application is a distinct, recoverable state from a hard failure.
+// What DID change (P1-SUBSTRATE-001) is the PROVENANCE consequence: when any
+// outcome is WriteFailed, Apply now gates lineage (does NOT advance it) and
+// records GenerationFullyApplied=false on the report. The typed Note string
+// remains diagnostics-only — never a correctness signal.
 type WriteState string
 
 const (
@@ -109,6 +112,17 @@ type ApplyReport struct {
 	LineagePath  string // absolute path to the written lineage.yml
 	Proposals    []schema.Proposal
 	RendererName string
+	// GenerationFullyApplied reports whether the generation completed every live
+	// write it attempted. It is false when ANY FileOutcome carries
+	// WriteState == WriteFailed (a live-write failure). When false, Apply does
+	// NOT advance lineage: the prior lineage record is left byte-for-byte intact
+	// and LineagePath stays "". Provenance consumers gate ONLY on this typed
+	// signal — lineage must never claim a generation that did not fully apply
+	// (P1-SUBSTRATE-001). Apply still returns a nil error in that case: a
+	// partial application (some files wrote, some did not) is a distinct,
+	// recoverable state from the hard failures (walk/plan/lineage-write) that
+	// return an error.
+	GenerationFullyApplied bool
 	// Orphans are the report-only preserved-orphan findings (overlay skills
 	// whose producing source has been removed but whose rendered copy is still
 	// on disk). Populated by the seam (internal/cli/seam.go) after Apply; it is
@@ -120,7 +134,10 @@ type ApplyReport struct {
 // Apply runs the seam: it walks the staged tree, classifies every candidate via
 // S2, plans all per-class outcomes (validating fail-closed BEFORE any write so a
 // mis-authored ownership map aborts without touching the live tree), then
-// executes the writes. Finally it writes the D3-B lineage file.
+// executes the writes. When (and only when) the generation fully applied (no
+// live-write failure) it writes the D3-B lineage file; a partially-failed
+// generation leaves the prior lineage byte-for-byte intact and keeps
+// report.LineagePath "" (P1-SUBSTRATE-001).
 //
 // Atomicity contract: the live tree is never churned. The render happened in
 // staging (a scratch directory), never in ProjectRoot. project_owned files are
@@ -128,6 +145,14 @@ type ApplyReport struct {
 // platform_armed files are overwritten only with a clean schema-reconciled value;
 // a needs-decision conflict leaves the project instance untouched (a proposal is
 // emitted instead). A fail-closed unclassified path aborts before any write.
+//
+// Return semantics: Apply returns an error ONLY for the hard failures that abort
+// the pipeline or break provenance (walk/plan/lineage-write). A live-write
+// failure is NOT a hard error — it is a partial application (a distinct,
+// recoverable state): Apply returns nil, records GenerationFullyApplied=false on
+// the report, and skips the lineage write. Callers that gate downstream
+// side-effects on generation success MUST read report.GenerationFullyApplied,
+// not just the error.
 func Apply(r Renderer, opts ApplyOptions) (*ApplyReport, error) {
 	// 1. Enumerate staged candidate files (sorted, deterministic).
 	staged, err := walkStaged(opts.StagingDir)
@@ -172,15 +197,53 @@ func Apply(r Renderer, opts ApplyOptions) (*ApplyReport, error) {
 	}
 
 	// Dry-run stops here: the plan (report.Outcomes/Proposals) is the preview;
-	// nothing is written and lineage is left untouched.
+	// nothing is written and lineage is left untouched. GenerationFullyApplied is
+	// true on a dry-run because a dry-run executes no write (so none can fail):
+	// the field describes the EXECUTED generation, and a dry-run executed
+	// nothing. (At this point every outcome is still WriteNotAttempted, so this
+	// is the constant true; spelled explicitly rather than via anyWriteFailed to
+	// state the invariant directly.)
+	report.GenerationFullyApplied = true
 	if opts.DryRun {
 		return report, nil
 	}
 
 	// 3. EXECUTE writes from the plan. Owned/armed files are only ever written
 	//    with their final value (never transiently clobbered then restored).
+	//    Execution CONTINUES across per-file live-write failures: a failed write
+	//    is recorded as WriteState=WriteFailed on that outcome (writeArmedManaged)
+	//    and execution proceeds to the next file. This makes partial application
+	//    a real, observable state (some files wrote, some did not) rather than
+	//    aborting the whole generation at the first failed write. The
+	//    generation-level completeness check immediately below is what gates
+	//    lineage on it.
 	for i := range planned {
 		executeOutcome(opts, &planned[i])
+	}
+
+	// 3a. Generation-level completeness (P1-SUBSTRATE-001). A generation is
+	//     FULLY APPLIED iff NO outcome reports WriteState=WriteFailed. When any
+	//     live write failed, the generation did not fully apply and lineage MUST
+	//     NOT advance for it — this is the load-bearing provenance property: a
+	//     lineage record is the authority for "the last SUCCESSFUL render", so
+	//     it must never claim a generation whose writes did not all land. Apply
+	//     leaves the prior lineage record byte-for-byte intact (writes nothing),
+	//     keeps LineagePath "", records GenerationFullyApplied=false on the
+	//     report, and returns normally (nil error). A partial application is a
+	//     distinct, recoverable state from the hard failures (walk/plan/
+	//     lineage-write) that return an error.
+	//
+	//     Downstream gating is deliberately ASYMMETRIC: lineage advance (here,
+	//     in Apply) and the rendered-outputs manifest persist (in the seam, the
+	//     record correlated with lineage's render id) both gate on this signal.
+	//     The seam's OTHER post-apply side effects (proposal ledger, run-shape
+	//     seed, AGENTS.md compose, agent-model seed) are INTENTIONALLY best-
+	//     effort and run regardless: they are idempotent/diagnostic and do not
+	//     claim generation-level success. Reuses the typed FileOutcome.WriteState
+	//     (v1.1) — there is no parallel mechanism.
+	report.GenerationFullyApplied = !anyWriteFailed(planned)
+	if !report.GenerationFullyApplied {
+		return report, nil
 	}
 
 	// 4. WRITE lineage (D3-B). lineage.yml is the S1 authority. (The renderer
@@ -453,6 +516,20 @@ func writeArmedManaged(opts ApplyOptions, o *FileOutcome) {
 }
 
 // --- small helpers ---
+
+// anyWriteFailed reports whether any outcome in the plan recorded a live-write
+// failure (WriteState == WriteFailed). It is the generation-level completeness
+// predicate Apply gates lineage on: a generation is fully applied iff no
+// outcome failed. Reuses the typed FileOutcome.WriteState field (v1.1) — there
+// is deliberately no parallel mechanism.
+func anyWriteFailed(outcomes []FileOutcome) bool {
+	for i := range outcomes {
+		if outcomes[i].WriteState == WriteFailed {
+			return true
+		}
+	}
+	return false
+}
 
 func fileExists(p string) bool {
 	info, err := os.Stat(p)

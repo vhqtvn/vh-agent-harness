@@ -122,7 +122,15 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	if sp := summarizeProposals(report.Proposals); sp != "" {
 		fmt.Fprintln(out, sp)
 	}
-	fmt.Fprintf(out, "lineage: %s\n", report.LineagePath)
+	// Lineage advance is gated on a fully-applied generation (P1-SUBSTRATE-001):
+	// when any live write failed, substrate.Apply did NOT write lineage and
+	// LineagePath is "". Surface that distinctly instead of printing an empty
+	// path, so the operator knows the install did not record a successful render.
+	if !report.GenerationFullyApplied {
+		fmt.Fprintf(out, "incomplete: one or more live writes failed; lineage was NOT advanced. Fix the failing write and re-run.\n")
+	} else if report.LineagePath != "" {
+		fmt.Fprintf(out, "lineage: %s\n", report.LineagePath)
+	}
 	printNextStepsFooter(out, target)
 	return nil
 }

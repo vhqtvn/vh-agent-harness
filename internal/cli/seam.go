@@ -246,6 +246,12 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	// (.vh-agent-harness/proposals.jsonl). The live instance is left untouched
 	// (apply wrote nothing for it); the ledger is the durable, reviewable record
 	// an operator lists via `vh-agent-harness proposals`. Append-only across updates.
+	//
+	// This runs BEFORE and INDEPENDENTLY of the generation-complete manifest
+	// gate below: a proposal is an armed-conflict record (WriteNotAttempted — a
+	// needs-decision outcome), not a success record, so it is correct to append
+	// it even on a partially-failed generation. A ledger entry's presence does
+	// NOT claim the generation fully applied.
 	if n := len(report.Proposals); n > 0 {
 		records := make([]proposals.Record, 0, n)
 		for _, o := range report.Outcomes {
@@ -295,14 +301,13 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	}
 
 	// Persist the rendered-outputs manifest after a non-dry-run apply (and after
-	// the post-apply side effects above) — but ONLY when no currently-rendered,
-	// manifest-tracked overlay-skill destination reports WriteFailed (the gate
-	// enforced immediately below). The manifest is the provenance record that
-	// lets a FUTURE run distinguish a real orphan (source removed) from a
-	// merely-deselected pack, so it must never claim a generation whose tracked
-	// overlay-skill writes did not all land. It carries the lineage's
-	// last-successful-update id as its successful_render_id so the two records
-	// stay correlated.
+	// the post-apply side effects above) — but ONLY when the generation fully
+	// applied (the gate enforced immediately below). The manifest is the
+	// provenance record that lets a FUTURE run distinguish a real orphan (source
+	// removed) from a merely-deselected pack, so it must never claim a
+	// generation whose tracked overlay-skill writes did not all land. It carries
+	// the lineage's last-successful-update id as its successful_render_id so the
+	// two records stay correlated.
 	//
 	// Lifecycle: NextManifest merges the fresh skill records (this render) with
 	// stale prior records whose source is still missing but whose destination is
@@ -312,26 +317,26 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	// tree writes are real and orphan reporting will simply be one generation
 	// stale until the next non-dry-run apply that passes the gate.
 	//
-	// Blocker #1 gate (P1-LINEAGE-002 v1.1, option (c)): correlate the
-	// manifest-tracked overlay-skill destinations with the apply outcomes by
-	// normalized destination path. If ANY tracked overlay-skill destination
-	// FAILED its live write (substrate.WriteFailed), do NOT persist the manifest
-	// — leave the prior manifest byte-for-byte intact — so provenance never
-	// claims a generation that did not fully apply for the tracked skills. Only
-	// FAILED tracked overlay-skill destinations gate the persist: a failed
-	// NON-skill managed destination is reported but does NOT gate (the manifest
-	// tracks overlay skills only). This preserves substrate.Apply's return
-	// semantics (it still returns nil here) — lifting a live-write failure into
-	// an Apply error / lineage halt is tracked separately (P1-SUBSTRATE-001).
-	trackedSkillDest := make(map[string]bool, len(skillRecords))
-	for _, sr := range skillRecords {
-		trackedSkillDest[renderstate.NormalizeDestination(sr.DestinationPath)] = true
-	}
-	for _, o := range report.Outcomes {
-		if o.WriteState == substrate.WriteFailed && trackedSkillDest[renderstate.NormalizeDestination(o.Path)] {
-			fmt.Fprintf(os.Stderr, "seam: warning: rendered-outputs manifest NOT persisted — a tracked overlay-skill destination (%s) failed its live write; the prior manifest is left intact and orphan reporting stays one generation behind (see P1-SUBSTRATE-001)\n", o.Path)
-			return report, nil
+	// Generation-level gate (P1-SUBSTRATE-001, subsuming the P1-LINEAGE-002 v1.1
+	// tracked-overlay-skill gate). When the generation did not fully apply
+	// (substrate.Apply reported GenerationFullyApplied=false — at least one live
+	// write failed), substrate.Apply already did NOT advance lineage, and the
+	// manifest must NOT persist either: it is correlated with lineage's
+	// last-successful-update id, and persisting it now would claim a render id
+	// for a generation whose writes did not all land. Leave the prior manifest
+	// byte-for-byte intact; orphan reporting stays one generation behind until a
+	// fully-applied run. This is STRICTER than the v1.1 gate (which gated only
+	// on tracked overlay-skill destinations): any live-write failure now gates,
+	// because lineage — which the manifest correlates with — also gates on any
+	// failure.
+	if !report.GenerationFullyApplied {
+		failed := failedWriteOutcomes(report.Outcomes)
+		paths := make([]string, len(failed))
+		for i, o := range failed {
+			paths[i] = o.Path
 		}
+		fmt.Fprintf(os.Stderr, "seam: warning: generation did not fully apply — %d live write(s) failed (%s); lineage NOT advanced and rendered-outputs manifest NOT persisted (prior records left intact). Re-run after fixing the underlying write failure.\n", len(failed), strings.Join(paths, ", "))
+		return report, nil
 	}
 
 	renderID := ""
@@ -343,6 +348,20 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 		fmt.Fprintf(os.Stderr, "seam: warning: rendered-outputs manifest write failed (%v); orphan reporting will be stale until the next successful update\n", werr)
 	}
 	return report, nil
+}
+
+// failedWriteOutcomes returns the subset of outcomes whose typed live-write
+// state is WriteFailed. It is the diagnostic helper for the generation-level
+// manifest/lineage gate (P1-SUBSTRATE-001), surfacing WHICH files failed so the
+// operator-facing warning can name them. Reuses FileOutcome.WriteState (v1.1).
+func failedWriteOutcomes(outcomes []substrate.FileOutcome) []substrate.FileOutcome {
+	var failed []substrate.FileOutcome
+	for _, o := range outcomes {
+		if o.WriteState == substrate.WriteFailed {
+			failed = append(failed, o)
+		}
+	}
+	return failed
 }
 
 // overlaySkillSourceChecker implements renderstate.SourceChecker for the
@@ -504,9 +523,12 @@ exec_sandbox:
 
 // seedRunShapeDefault writes the default run-shape.yml at
 // <target>/.vh-agent-harness/run-shape.yml when (and only when) it is absent.
-// The .vh-agent-harness/ directory already exists at this point (substrate.Apply
-// wrote lineage.yml into it). A present file is preserved byte-for-byte (S4 is
-// project_owned).
+// The .vh-agent-harness/ directory usually already exists at this point
+// (managed writes and/or a prior lineage write create it). Under a partially-
+// failed generation (P1-SUBSTRATE-001) Apply may NOT write lineage, but the
+// managed writes that did land + earlier runs keep the dir present; a missing
+// dir is handled by MkdirAll, so this seed is best-effort regardless. A present
+// file is preserved byte-for-byte (S4 is project_owned).
 func seedRunShapeDefault(target string) error {
 	rsPath := filepath.Join(target, runshape.DirName, runshape.FileName)
 	if _, err := os.Stat(rsPath); err == nil {
@@ -531,9 +553,9 @@ func seedRunShapeDefault(target string) error {
 // the sorted LIVE .opencode-relative paths contributed by overlays and the
 // per-FILE renderstate records for overlay-rendered SKILLS (the provenance
 // material the rendered-outputs manifest persists after a non-dry-run apply,
-// gated on no tracked overlay-skill destination reporting WriteFailed).
-// Non-skill overlay units (agents/commands, permission packs) are NOT recorded:
-// v1 orphan detection is overlay-skill-scoped only.
+// gated on the generation fully applying — see the manifest persist block in
+// seamApply). Non-skill overlay units (agents/commands, permission packs) are
+// NOT recorded: v1 orphan detection is overlay-skill-scoped only.
 func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswers map[string]string, target string) ([]string, []renderstate.Record, map[string]bool, error) {
 	// Fold in the project.config.json-sourced tokens (mission/architecture/db).
 	// project.config.json is project_owned and read LIVE from the target so the

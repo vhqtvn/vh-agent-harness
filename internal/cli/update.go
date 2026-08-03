@@ -257,6 +257,13 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 	if report.LineagePath != "" {
 		fmt.Fprintf(out, "lineage: %s\n", report.LineagePath)
 	}
+	// Lineage advance is gated on a fully-applied generation (P1-SUBSTRATE-001):
+	// when any live write failed, substrate.Apply did NOT write lineage. Surface
+	// that distinctly so the operator knows the update did not record a
+	// successful render and the prior lineage is the standing authority.
+	if !report.GenerationFullyApplied {
+		fmt.Fprintf(out, "incomplete: one or more live writes failed; lineage was NOT advanced (the prior lineage is the standing authority). Fix the failing write and re-run.\n")
+	}
 	// Preserved orphan overlay skills (P1-LINEAGE-002). A non-empty
 	// report.Orphans means previously-rendered skill files whose overlay source
 	// was removed are still sitting on disk. Two modes:

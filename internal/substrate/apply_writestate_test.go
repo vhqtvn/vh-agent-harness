@@ -35,6 +35,12 @@ func TestWriteState_DryRun_AllNotAttempted(t *testing.T) {
 			t.Errorf("dry-run outcome %q: WriteState = %q, want %q", o.Path, o.WriteState, WriteNotAttempted)
 		}
 	}
+	// A dry-run executes no write, so no write failed: the generation flag is
+	// true (the field describes the EXECUTED generation; a dry-run executed
+	// nothing, so nothing failed). Pinned so the flag does not silently flip.
+	if !report.GenerationFullyApplied {
+		t.Errorf("dry-run: GenerationFullyApplied must be true (nothing attempted, nothing failed); got false")
+	}
 }
 
 // TestWriteState_LiveApply_SuccessAndNonWriteRoutes confirms the typed state on
@@ -92,17 +98,24 @@ func TestWriteState_LiveApply_SuccessAndNonWriteRoutes(t *testing.T) {
 	}
 }
 
-// TestApply_LiveWriteFailure_ReturnsNilError_SetsWriteFailed is the
-// apply-before-persist ordering + return-semantics lock for P1-LINEAGE-002 v1.1.
-// A live write failure is injected DETERMINISTICALLY (not via chmod): a regular
+// TestApply_LiveWriteFailure_LineageNotAdvanced is the load-bearing provenance
+// lock for P1-SUBSTRATE-001 (the #1 ship-review blocker, deferred twice). A
+// live-write failure is injected DETERMINISTICALLY (not via chmod): a regular
 // FILE is placed at <live>/.opencode so MkdirAll for every .opencode/... dest
-// fails. Apply MUST still return a nil error (return semantics UNCHANGED in this
-// slice — lifting a live-write failure into an Apply error is P1-SUBSTRATE-001),
-// the failed routes MUST carry WriteState=WriteFailed, the successful routes
-// (under .vh-agent-harness/, whose dir is not blocked) MUST carry
-// WriteState=WriteSucceeded, and lineage.yml MUST still be written (the gap
-// P1-SUBSTRATE-001 will close).
-func TestApply_LiveWriteFailure_ReturnsNilError_SetsWriteFailed(t *testing.T) {
+// fails. Apply MUST:
+//   - return a nil error (a partial application is a distinct, recoverable
+//     state from a hard walk/plan/lineage failure; ERROR return semantics are
+//     unchanged),
+//   - record WriteState=WriteFailed on the blocked routes and WriteSucceeded on
+//     the unblocked routes (partial application is a REAL, observable state —
+//     the writes that could land, did),
+//   - report GenerationFullyApplied=false (the typed generation-level signal),
+//   - NOT advance lineage: LineagePath is "" and no lineage.yml is written.
+//
+// This is the CRUX of the slice: lineage must never claim a generation that did
+// not fully apply. v1.1 left this gap (lineage advanced on partial failure);
+// this test pins the closed behavior.
+func TestApply_LiveWriteFailure_LineageNotAdvanced(t *testing.T) {
 	live := t.TempDir()
 	staging := t.TempDir()
 
@@ -121,10 +134,12 @@ func TestApply_LiveWriteFailure_ReturnsNilError_SetsWriteFailed(t *testing.T) {
 		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-test",
 		TemplateSource: "templates/core",
 	})
-	// Return semantics UNCHANGED: Apply returns nil even though live writes failed.
+	// ERROR return semantics UNCHANGED: Apply returns nil even though live
+	// writes failed (partial application is not a hard error).
 	if err != nil {
-		t.Fatalf("Apply must return nil on live-write failure in v1.1 (return semantics unchanged); got %v", err)
+		t.Fatalf("Apply must return nil on live-write failure (partial application is not a hard error); got %v", err)
 	}
+	// Partial application is real: some routes failed, some succeeded.
 	var failed, succeeded int
 	for _, o := range report.Outcomes {
 		switch o.WriteState {
@@ -140,13 +155,133 @@ func TestApply_LiveWriteFailure_ReturnsNilError_SetsWriteFailed(t *testing.T) {
 	if succeeded == 0 {
 		t.Errorf("expected at least one WriteSucceeded outcome (the unblocked .vh-agent-harness/* writes); got %+v", report.Outcomes)
 	}
-	// Lineage MUST still be written — this is the gap P1-SUBSTRATE-001 will close
-	// (lineage must not advance for a generation that did not fully apply).
-	if report.LineagePath == "" {
-		t.Errorf("expected lineage.yml to still be written (v1.1 does NOT gate lineage — that is P1-SUBSTRATE-001)")
+	// Generation-level typed signal.
+	if report.GenerationFullyApplied {
+		t.Errorf("GenerationFullyApplied must be false when any live write failed")
 	}
-	if _, statErr := os.Stat(lineage.FilePath(live)); statErr != nil {
-		t.Errorf("lineage.yml not written: %v", statErr)
+	// Lineage MUST NOT advance: no LineagePath, no lineage.yml on disk (first
+	// install — no prior lineage existed). This is the load-bearing property.
+	if report.LineagePath != "" {
+		t.Errorf("LineagePath must be empty (lineage not advanced); got %q", report.LineagePath)
+	}
+	if _, statErr := os.Stat(lineage.FilePath(live)); statErr == nil {
+		t.Errorf("lineage.yml must NOT be written when the generation did not fully apply")
+	}
+}
+
+// TestApply_PartialFailure_PriorLineagePreserved is the lineage-stability crux
+// for the UPDATE path: when a prior lineage record exists and a subsequent
+// apply partially fails, the prior lineage MUST be preserved byte-for-byte
+// (lineage did not advance for the failed generation). This proves the
+// load-bearing property holds across an update, not just a first install.
+func TestApply_PartialFailure_PriorLineagePreserved(t *testing.T) {
+	live := t.TempDir()
+	staging := t.TempDir()
+
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+
+	// First: a fully-applied apply establishes a lineage record.
+	if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render (first): %v", err)
+	}
+	first, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-test",
+		TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("first Apply: %v", err)
+	}
+	if !first.GenerationFullyApplied {
+		t.Fatalf("first apply must be fully applied (no failures); got GenerationFullyApplied=false")
+	}
+	priorLineageBytes, err := os.ReadFile(lineage.FilePath(live))
+	if err != nil {
+		t.Fatalf("read prior lineage: %v", err)
+	}
+
+	// Now inject a partial-write failure for the second apply: replace a managed
+	// FILE with a DIRECTORY of the same name. managedUpToDate sees the dir as
+	// not-a-file -> routes to ActionManagedOverwrite; writeArmedManaged's
+	// MkdirAll(dir-of-dest) succeeds but WriteFile fails (dest is a directory)
+	// -> WriteFailed. Other managed files still write normally. This is a
+	// genuine partial failure (some files write, one does not) that does not
+	// require blocking a whole top-level dir the first apply already created.
+	const blockedRel = ".opencode/agents/build.md"
+	blockedPath := filepath.Join(live, filepath.FromSlash(blockedRel))
+	if err := os.RemoveAll(blockedPath); err != nil {
+		t.Fatalf("remove managed file to plant blocker: %v", err)
+	}
+	if err := os.MkdirAll(blockedPath, 0o755); err != nil {
+		t.Fatalf("plant dir-at-dest: %v", err)
+	}
+
+	staging2 := t.TempDir()
+	if err := r.Render(staging2, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render (second): %v", err)
+	}
+	second, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging2,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-test",
+		TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("second Apply must return nil (partial application is not a hard error); got %v", err)
+	}
+	if second.GenerationFullyApplied {
+		t.Errorf("second apply: GenerationFullyApplied must be false (partial failure)")
+	}
+	if second.LineagePath != "" {
+		t.Errorf("second apply: LineagePath must be empty (lineage not advanced); got %q", second.LineagePath)
+	}
+	// Confirm the injected failure is actually a WriteFailed (so the test is
+	// exercising what it claims — a real partial failure, not a no-op).
+	sawBlockedFailure := false
+	for _, o := range second.Outcomes {
+		if o.Path == blockedRel && o.WriteState == WriteFailed {
+			sawBlockedFailure = true
+		}
+	}
+	if !sawBlockedFailure {
+		t.Errorf("expected the blocked managed file %q to report WriteFailed; the test is not exercising a real partial failure", blockedRel)
+	}
+	// CRUX: the prior lineage record is preserved byte-for-byte — lineage did
+	// not advance for the failed generation.
+	afterLineageBytes, err := os.ReadFile(lineage.FilePath(live))
+	if err != nil {
+		t.Fatalf("read lineage after failed apply: %v", err)
+	}
+	if string(afterLineageBytes) != string(priorLineageBytes) {
+		t.Errorf("lineage must be byte-for-byte preserved across a partially-failed apply (lineage stability crux)")
+	}
+}
+
+// TestApply_FullyApplied_GenerationFlagTrue confirms the positive case: a
+// clean apply with no live-write failures reports GenerationFullyApplied=true
+// and advances lineage normally. This guards against the generation flag
+// accidentally flipping false on a successful apply (which would silently
+// break install/update lineage recording).
+func TestApply_FullyApplied_GenerationFlagTrue(t *testing.T) {
+	live := t.TempDir()
+	staging := t.TempDir()
+
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+	if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	report, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-test",
+		TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !report.GenerationFullyApplied {
+		t.Errorf("a fully-applied apply must report GenerationFullyApplied=true; got false")
+	}
+	if report.LineagePath != lineage.FilePath(live) {
+		t.Errorf("lineage must advance on a fully-applied apply; LineagePath=%q", report.LineagePath)
 	}
 }
 

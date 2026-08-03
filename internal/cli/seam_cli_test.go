@@ -86,6 +86,106 @@ func TestSeamUpdate_FailClosedOnBadOverlay(t *testing.T) {
 
 // --- seam install: lineage -----------------------------------------------
 
+// TestSeamInstall_PartialWriteFailure_LineageNotAdvanced (P1-SUBSTRATE-001) is
+// the CLI-level proof that the install path through Apply does NOT advance
+// lineage when the generation did not fully apply. A regular FILE is planted at
+// <target>/.opencode (where a directory is expected) so every .opencode/* live
+// write fails inside Apply, while the .vh-agent-harness/* writes (under a
+// different top-level dir) succeed — a genuine partial application. Install
+// MUST NOT hard-error (Apply returns nil; partial application is not a hard
+// failure), MUST NOT write lineage, and MUST surface the incomplete-generation
+// state to the operator. (The manifest non-persistence half of the provenance
+// contract is covered by TestSeamOrphan_ManifestGated_OnNonSkillWriteFailure.)
+func TestSeamInstall_PartialWriteFailure_LineageNotAdvanced(t *testing.T) {
+	target := t.TempDir()
+	// Deterministically block every write under .opencode/: a regular file
+	// where a directory is expected makes os.MkdirAll(<target>/.opencode/...) fail.
+	if err := os.WriteFile(filepath.Join(target, ".opencode"), []byte("BLOCKER-not-a-directory"), 0o644); err != nil {
+		t.Fatalf("plant blocker: %v", err)
+	}
+
+	installFl = newInstallFlags()
+	installFl.target = target
+	var out string
+	var runErr error
+	stderr := captureStderr(t, func() {
+		cmd, buf := newOutCmd()
+		runErr = runInstall(cmd, []string{})
+		out = buf.String()
+	})
+	// Install MUST NOT hard-error: a partial application is a distinct,
+	// recoverable state from a hard walk/plan failure; Apply returns nil.
+	if runErr != nil {
+		t.Fatalf("install must NOT hard-error on partial write failure (Apply returns nil); got %v", runErr)
+	}
+	// Lineage MUST NOT advance: no lineage.yml written on a partially-failed
+	// first install (there is no prior lineage to preserve — there must simply
+	// be none). This is the load-bearing provenance property at the CLI level.
+	if pathExists(t, lineage.FilePath(target)) {
+		t.Errorf("lineage.yml must NOT be written when the install generation did not fully apply")
+	}
+	// The operator-facing stdout summary MUST surface the incomplete state.
+	if !strings.Contains(out, "incomplete:") {
+		t.Errorf("install summary must surface the incomplete-generation state; got:\n%s", out)
+	}
+	// The seam stderr warning MUST fire naming the failed writes.
+	if !strings.Contains(stderr, "did not fully apply") {
+		t.Errorf("install must emit the generation-did-not-fully-apply warning on stderr; got:\n%s", stderr)
+	}
+}
+
+// TestSeamUpdate_PartialWriteFailure_LineageStability (P1-SUBSTRATE-001) is the
+// CLI-level proof for the UPDATE path: when a prior lineage exists and a
+// subsequent update partially fails, the prior lineage is preserved
+// byte-for-byte (lineage stability across an update). It also confirms the
+// existing proposal/seed side effects still run on a partially-failed update
+// (they are best-effort and do not claim generation-level success).
+func TestSeamUpdate_PartialWriteFailure_LineageStability(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root) // establishes the prior lineage
+
+	priorLineageBytes, err := os.ReadFile(lineage.FilePath(root))
+	if err != nil {
+		t.Fatalf("read prior lineage after install: %v", err)
+	}
+
+	// Inject a partial-write failure: replace a managed agent FILE with a
+	// DIRECTORY so its WriteFile fails (EISDIR). Other writes still succeed.
+	agentFile := filepath.Join(root, ".opencode", "agents", "build.md")
+	if err := os.RemoveAll(agentFile); err != nil {
+		t.Fatalf("remove agent file: %v", err)
+	}
+	if err := os.MkdirAll(agentFile, 0o755); err != nil {
+		t.Fatalf("plant blocker dir at agent file path: %v", err)
+	}
+
+	var out string
+	var runErr error
+	stderr := captureStderr(t, func() {
+		out, runErr = seamUpdateOut(t, root)
+	})
+	if runErr != nil {
+		t.Fatalf("update must NOT hard-error on partial write failure; got %v (out=%q)", runErr, out)
+	}
+
+	// CRUX: prior lineage preserved byte-for-byte (lineage stability across an
+	// update with a partially-failed generation).
+	afterLineageBytes, err := os.ReadFile(lineage.FilePath(root))
+	if err != nil {
+		t.Fatalf("read lineage after partially-failed update: %v", err)
+	}
+	if string(afterLineageBytes) != string(priorLineageBytes) {
+		t.Errorf("prior lineage must be byte-for-byte preserved across a partially-failed update (lineage stability crux)")
+	}
+	// The update summary MUST surface the incomplete state.
+	if !strings.Contains(out, "incomplete:") {
+		t.Errorf("update summary must surface the incomplete-generation state; got:\n%s", out)
+	}
+	if !strings.Contains(stderr, "did not fully apply") {
+		t.Errorf("update must emit the generation-did-not-fully-apply warning on stderr; got:\n%s", stderr)
+	}
+}
+
 // TestSeamInstall_WritesLineage confirms the seam install path writes a lineage
 // record that records the embed-fs renderer and the harness/<version> ref (the
 // seam's content-origin tag), distinct from the legacy shim lineage.

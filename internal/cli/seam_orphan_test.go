@@ -469,18 +469,28 @@ func TestSeamOrphan_ManifestSkipped_OnTrackedSkillWriteFailure(t *testing.T) {
 	}
 }
 
-// TestSeamOrphan_ManifestPersisted_OnNonSkillWriteFailure (scope boundary for
-// blocker #1): a failed NON-skill managed destination must NOT gate the manifest.
-// The gate fires ONLY on failed TRACKED overlay-skill destinations; a regular
-// managed file (here a rendered agent) failing its write leaves the manifest
-// persist path intact. This keeps the v1.1 gate tightly scoped to the orphan-
-// skill provenance contract and avoids collateral suppression.
-func TestSeamOrphan_ManifestPersisted_OnNonSkillWriteFailure(t *testing.T) {
+// TestSeamOrphan_ManifestGated_OnNonSkillWriteFailure (P1-SUBSTRATE-001): the
+// generation-wide manifest gate. A failed NON-skill managed destination NOW
+// gates the manifest too — superseding the v1.1 narrow scope (which gated only
+// on tracked overlay-skill destinations). The rationale: the manifest
+// correlates with lineage's last_successful_update_id, and lineage now gates on
+// ANY live-write failure (a generation that did not fully apply does not
+// advance). Persisting the manifest with fresh skill records against the PRIOR
+// lineage's render id would make the manifest claim a render id for a
+// generation whose writes did not all land. So the manifest must NOT persist
+// whenever the generation did not fully apply, regardless of WHICH file failed.
+//
+// This test flips the v1.1 assertion (which required a non-skill failure to NOT
+// gate): under the generation-wide gate, a failed agent write gates the
+// manifest exactly as a failed skill write does.
+func TestSeamOrphan_ManifestGated_OnNonSkillWriteFailure(t *testing.T) {
 	root := renderBaseline(t)
 	writeTestSkillPack(t, root, "second-skill", "# second-skill\n")
 	// Deterministically break a NON-skill managed write: turn a rendered agent
-	// file into a DIRECTORY so its WriteFile fails (EISDIR). All tracked skill
-	// writes still succeed.
+	// file into a DIRECTORY so its WriteFile fails (EISDIR). This makes the
+	// generation partially fail (one non-skill write fails; tracked skill writes
+	// succeed), which under the generation-wide gate must suppress the manifest
+	// persist.
 	agentFile := filepath.Join(root, ".opencode", "agents", "build.md")
 	if err := os.RemoveAll(agentFile); err != nil {
 		t.Fatalf("remove agent file: %v", err)
@@ -489,21 +499,53 @@ func TestSeamOrphan_ManifestPersisted_OnNonSkillWriteFailure(t *testing.T) {
 		t.Fatalf("plant blocker dir at agent file path: %v", err)
 	}
 
-	out, err := seamUpdateOut(t, root)
+	// Snapshot the raw manifest bytes before the failing update; the gate must
+	// leave the prior manifest byte-for-byte intact (not merely decode to the
+	// same entry set).
+	manifestPath := renderstate.FilePath(root)
+	beforeBytes, err := os.ReadFile(manifestPath)
 	if err != nil {
-		t.Fatalf("update must succeed: %v (out=%q)", err, out)
+		t.Fatalf("read manifest bytes before failing update: %v", err)
 	}
 
-	// Gate did NOT fire for the non-skill failure → manifest persisted with the
-	// freshly rendered second-skill.
+	var out string
+	var uerr error
+	stderr := captureStderr(t, func() {
+		out, uerr = seamUpdateOut(t, root)
+	})
+	if uerr != nil {
+		t.Fatalf("update must succeed (Apply returns nil on live-write failure; partial application is not a hard error): %v (out=%q)", uerr, out)
+	}
+
+	// Generation-wide gate fired: the freshly-rendered second-skill is NOT
+	// recorded (the manifest was not persisted).
 	dests := manifestDestSet(t, root)
-	if !dests[".opencode/skills/second-skill/SKILL.md"] {
-		t.Errorf("a failed NON-skill dest must NOT gate the manifest; second-skill missing (gate fired wrongly)")
+	if dests[".opencode/skills/second-skill/SKILL.md"] {
+		t.Errorf("manifest must NOT persist when the generation did not fully apply (second-skill was recorded → gate did not fire)")
+	}
+	// ghost-skill remains recorded (the baseline manifest was left untouched).
+	if !dests[".opencode/skills/ghost-skill/SKILL.md"] {
+		t.Errorf("baseline ghost-skill record must remain in the untouched prior manifest")
+	}
+	// Byte-intact guarantee: the prior manifest is left exactly as it was.
+	afterBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest bytes after failing update: %v", err)
+	}
+	if !bytes.Equal(beforeBytes, afterBytes) {
+		t.Errorf("manifest must be byte-for-byte intact after a partially-failed generation (gate must skip persist entirely); bytes differ (before=%d after=%d)", len(beforeBytes), len(afterBytes))
 	}
 	// The non-skill write really did fail: build.md is still a directory.
 	info, err := os.Stat(agentFile)
 	if err != nil || !info.IsDir() {
 		t.Errorf("precondition check failed: non-skill write should have failed (build.md still a dir); got info=%v err=%v", info, err)
+	}
+	// The generation-wide warning fires on stderr and names the failed path.
+	if !strings.Contains(stderr, "did not fully apply") {
+		t.Errorf("update must emit the generation-did-not-fully-apply warning on stderr; got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, filepath.ToSlash(".opencode/agents/build.md")) {
+		t.Errorf("the generation warning must name the failed managed path; got:\n%s", stderr)
 	}
 }
 
