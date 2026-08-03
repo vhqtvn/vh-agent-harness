@@ -177,7 +177,7 @@ Inspect release-relevant DEFER candidates (G7) — read-only invocation of the
 deterministic release-DEFER evaluator (the same single evaluator the sanctioned
 release-tag wrapper consumes):
 
-- `node .opencode/scripts/check-defer-triggers.js --mode=release`
+- `node .opencode/scripts/check-defer-triggers.mjs --mode=release`
   — **MANIFEST AUTHORITY**: this mode reads the committed disposition manifest
   at `.vh-agent-harness/release-defer-dispositions.json` ONLY (as a `HEAD:<path>`
   blob) and performs **NO access to `.local/coordinator/tasks/`** — the
@@ -468,7 +468,7 @@ ordinary G6 clearance, and would leave the S2 verdict visibly `PENDING`.)
 
 A release MUST NOT ship with unaddressed, release-relevant DEFER findings. G7
 is the release-side counterpart to the commit-time DEFER mechanism
-(`check-defer-triggers.js` in promoter mode, which stays non-blocking by hard
+(`check-defer-triggers.mjs` in promoter mode, which stays non-blocking by hard
 non-goal). Where the commit-time mechanism intentionally leaves DEFERs as
 non-blocking transport, G7 surfaces them at the release boundary so the
 operator decides with full information. The AUTHORITATIVE enforcement lives in
@@ -501,7 +501,7 @@ manifest. There is no env switch and no legacy fallback.
   when `release_base.kind=root` for the first tag, the SAME `last_tag` the rest
   of the report uses) — authoritative for "the manifest handshake matches the
   commit being tagged." Joined to the manifest by the deterministic evaluator
-  (`.opencode/scripts/check-defer-triggers.js --mode=release`), which emits one
+  (`.opencode/scripts/check-defer-triggers.mjs --mode=release`), which emits one
   structured classification that pins `evaluated_commit` / `evaluated_tree` /
   `manifest_parent_commit` to `HEAD^` (the manifest-only child commit's parent)
   and refuses on any drift.
@@ -559,7 +559,7 @@ manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`:
 
 1. Run the strict evaluator with the SAME `last_tag` the report carries. The
    canonical release-time invocation binds the release version:
-   `node .opencode/scripts/check-defer-triggers.js --mode=release --release-version <intended>`
+   `node .opencode/scripts/check-defer-triggers.mjs --mode=release --release-version <intended>`
    (pass `--override-confirmed-version
    <intended>` ONLY when the wrapper ceremony has confirmed an override for a
    record with `disposition: override_required`). The script is read-only (see
@@ -1015,7 +1015,7 @@ to force a confirmation round is the anti-pattern this rule exists to prevent.
   confirmation round).
 - G6 cross-checked every S2 hold against its joined evidence record; a `PENDING`
   or disagreed hold forced `ready: no` + null handoff (no bypass).
-- G7 ran the deterministic release-DEFER evaluator (`check-defer-triggers.js
+- G7 ran the deterministic release-DEFER evaluator (`check-defer-triggers.mjs
   --mode=release`) and consumed its classification verbatim; a `blocker` or
   `evaluator-error` classification forced `ready: no` + null handoff (no bypass).
   G7 did NOT hand-classify triggers, and did NOT normalize existing unsupported

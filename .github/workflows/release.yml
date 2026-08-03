@@ -59,7 +59,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tmp
-          node .opencode/scripts/check-defer-triggers.js \
+          node .opencode/scripts/check-defer-triggers.mjs \
             --mode=release \
             --release-version "${GITHUB_REF_NAME}" \
             | tee tmp/release-defer-evaluator.json

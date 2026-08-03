@@ -29,7 +29,7 @@
 //
 // No external package dependencies (Node stdlib only). ESM (matches the repo's
 // .opencode/package.json "type": "module" convention used by normalize-backlog.js
-// and check-defer-triggers.js).
+// and check-defer-triggers.mjs).
 //
 // AUTHORITY: advisory / INFORMS only. This helper is NOT wired into any commit,
 // release, doctor, or update path. Its exit codes describe accounting

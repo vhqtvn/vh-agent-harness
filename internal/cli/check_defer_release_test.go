@@ -1,9 +1,9 @@
 package cli
 
 // Shared release-mode evaluator helpers + the PROMOTER-MODE byte-identical
-// guard for check-defer-triggers.js.
+// guard for check-defer-triggers.mjs.
 //
-// The evaluator (templates/core/.opencode/scripts/check-defer-triggers.js) has
+// The evaluator (templates/core/.opencode/scripts/check-defer-triggers.mjs) has
 // TWO modes:
 //   - PROMOTER mode (default, no --mode flag): human-readable, exit 0, never
 //     blocking. This is the commit-time DEFER check that reads .local/ and
@@ -49,7 +49,7 @@ func releaseCardNotes(source, trigger, studied string) []string {
 
 // setupReleaseEvalRepo creates an isolated scratch git repo with a prior tag
 // (v0.1.0) and controlled post-tag changes, plus a copy of the TEMPLATE
-// check-defer-triggers.js at <scratch>/.opencode/scripts/. The repo's HEAD has:
+// check-defer-triggers.mjs at <scratch>/.opencode/scripts/. The repo's HEAD has:
 //   - fileA.go and dir/fileC.go CHANGED since v0.1.0 (in the release arc)
 //   - fileB.go UNCHANGED since v0.1.0 (NOT in the release arc)
 //
@@ -65,7 +65,7 @@ func setupReleaseEvalRepo(t *testing.T) (scratch, scriptPath, tasksDir string) {
 	}
 
 	root := findModuleRoot(t)
-	src := filepath.Join(root, "templates", "core", ".opencode", "scripts", "check-defer-triggers.js")
+	src := filepath.Join(root, "templates", "core", ".opencode", "scripts", "check-defer-triggers.mjs")
 	body, err := os.ReadFile(src)
 	if err != nil {
 		t.Fatalf("read template script %s: %v", src, err)
@@ -75,7 +75,7 @@ func setupReleaseEvalRepo(t *testing.T) (scratch, scriptPath, tasksDir string) {
 	// Copy script to <scratch>/.opencode/scripts/ so the script's
 	// __dirname-based repoRoot() (path.resolve(__dirname, "..", ".."))
 	// resolves to <scratch>, keeping the run hermetic.
-	scriptPath = filepath.Join(scratch, ".opencode", "scripts", "check-defer-triggers.js")
+	scriptPath = filepath.Join(scratch, ".opencode", "scripts", "check-defer-triggers.mjs")
 	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
 		t.Fatalf("mkdir scripts dir: %v", err)
 	}

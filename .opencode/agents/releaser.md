@@ -642,7 +642,7 @@ an earlier release-prep HEAD^ and MUST be recomputed):
 4. **Re-verify the handshake read-only** by running the evaluator against the
    new HEAD (= M):
    ```sh
-   vh-agent-harness exec bash -c 'node .opencode/scripts/check-defer-triggers.js \
+   vh-agent-harness exec bash -c 'node .opencode/scripts/check-defer-triggers.mjs \
      --mode=release --release-version <vX.Y.Z>'
    ```
    (Add `--override-confirmed-version <vX.Y.Z>` ONLY when an override has been
@@ -925,7 +925,7 @@ single-path child of the note commit N); M = manifest-only child commit
 4. **Re-run the manifest evaluator** against M to confirm the handshake passes
    before tagging:
    ```sh
-   node .opencode/scripts/check-defer-triggers.js --mode=release \
+   node .opencode/scripts/check-defer-triggers.mjs --mode=release \
      --release-version <vX.Y.Z>
    ```
    (Add `--override-confirmed-version <vX.Y.Z>` only when an override has been

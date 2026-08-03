@@ -11,12 +11,12 @@ import (
 )
 
 // TestCheckDeferTriggersScriptLoads is a regression guard for a
-// dead-on-arrival import bug. templates/core/.opencode/scripts/check-defer-triggers.js
+// dead-on-arrival import bug. templates/core/.opencode/scripts/check-defer-triggers.mjs
 // once imported repoRoot() from "../../plugins/shell-guard-core.js" — one "../"
 // too many — so node resolved it to <repo-root>/plugins/shell-guard-core.js
 // (which does not exist) and threw ERR_MODULE_NOT_FOUND before main() ran. The
 // entire R6 promotion-aid referenced canonically in AGENTS.md as
-// `node .opencode/scripts/check-defer-triggers.js` was therefore dead, and the
+// `node .opencode/scripts/check-defer-triggers.mjs` was therefore dead, and the
 // bug shipped to every consumer via the templates/core embed.
 //
 // This smoke test copies the TEMPLATE script (source of truth, independent of
@@ -31,7 +31,7 @@ func TestCheckDeferTriggersScriptLoads(t *testing.T) {
 	}
 
 	root := findModuleRoot(t)
-	src := filepath.Join(root, "templates", "core", ".opencode", "scripts", "check-defer-triggers.js")
+	src := filepath.Join(root, "templates", "core", ".opencode", "scripts", "check-defer-triggers.mjs")
 	body, err := os.ReadFile(src)
 	if err != nil {
 		t.Fatalf("read template script %s: %v", src, err)
@@ -41,7 +41,7 @@ func TestCheckDeferTriggersScriptLoads(t *testing.T) {
 	// __dirname-based repoRoot() (path.resolve(__dirname, "..", ".."))
 	// resolves to <scratch>, keeping the run hermetic and cwd-robust.
 	scratch := t.TempDir()
-	dst := filepath.Join(scratch, ".opencode", "scripts", "check-defer-triggers.js")
+	dst := filepath.Join(scratch, ".opencode", "scripts", "check-defer-triggers.mjs")
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		t.Fatalf("mkdir scratch scripts dir: %v", err)
 	}

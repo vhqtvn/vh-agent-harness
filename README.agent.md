@@ -858,7 +858,7 @@ export default function transform({ context }) {
   editing. DEFER / p2 / follow-up findings route to the holding area
   (`.local/coordinator/tasks/` via `/write-task` with Notes provenance),
   never directly to a backlog row; the promoter promotes them only after the
-  predicate checker (`.opencode/scripts/check-defer-triggers.js`,
+  predicate checker (`.opencode/scripts/check-defer-triggers.mjs`,
   promoter-use-only, never blocking) confirms the trigger and the Definition of
   Ready is met. Run `/backlog-cleanup` (or `vh-agent-harness exec node
   .opencode/scripts/normalize-backlog.js`) to tidy/archive after a batch edit.
@@ -1617,7 +1617,7 @@ for the declared release arc. The full schema, disposition matrix, freshness
 handshake, and override semantics live in
 `.vh-agent-harness/overlays/harness-dogfood/agents/harness-release-readiness.md`
 (G7 section) and in the evaluator source at
-`templates/core/.opencode/scripts/check-defer-triggers.js`. Highlights:
+`templates/core/.opencode/scripts/check-defer-triggers.mjs`. Highlights:
 
 - `release_base: {kind:"tag"|"root", value:<tag>|null}` — the start of the
   release arc. `kind:"root"` (whole history) is used for the very first release;

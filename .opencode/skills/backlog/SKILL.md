@@ -193,7 +193,7 @@ is the date the finding was produced, for staleness awareness.
 A candidate reaches `backlog.md` only when **all** of the following hold:
 
 1. **Trigger fired OR operator override.** The predicate checker
-   (`.opencode/scripts/check-defer-triggers.js`) confirms the `trigger:` line
+   (`.opencode/scripts/check-defer-triggers.mjs`) confirms the `trigger:` line
    is currently met, OR the operator explicitly marks
    `override:operator` in Notes.
 2. **Concrete area.** The candidate names the repo boundary it belongs to
@@ -211,7 +211,7 @@ records what is missing on the task card.
 
 ### Predicate checker (promoter-use-only)
 
-`.opencode/scripts/check-defer-triggers.js` reads the task cards, regexes for
+`.opencode/scripts/check-defer-triggers.mjs` reads the task cards, regexes for
 `trigger:` lines in Notes, and reports which candidates' conditions are
 currently met. It supports a small predicate vocabulary (`path_touched(<path>)`,
 `after_tag(<tag>)`). It is:
@@ -244,7 +244,7 @@ executing a stale plan.
 
 - `docs/planning/backlog.md` — the ledger itself
 - `.opencode/scripts/normalize-backlog.js` — executable format spec (sections, statuses, columns, dup-ID rejection)
-- `.opencode/scripts/check-defer-triggers.js` — promotion predicate checker (promoter-use-only)
+- `.opencode/scripts/check-defer-triggers.mjs` — promotion predicate checker (promoter-use-only)
 - `docs/coordination/PROMOTER_RUNBOOK.md` — promoter procedure: curation, batch-promote, hybrid CAS preservation
 - `docs/coordination/BLOCKER_POLICY.md` — p2 follow-ups route to the holding area
 - `.opencode/skills/gated-commit/SKILL.md` — the commit layer this discipline depends on (commit backlog separately from code; `commit-gate.sh revert` is the anti-pattern on `backlog.md`)

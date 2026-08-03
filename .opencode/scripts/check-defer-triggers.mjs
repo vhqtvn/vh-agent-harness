@@ -1,5 +1,5 @@
-// check-defer-triggers.js — predicate evaluator for DEFER / p2 / follow-up
-// candidates held in .local/{{COORDINATOR_DIR}}/tasks/.
+// check-defer-triggers.mjs — predicate evaluator for DEFER / p2 / follow-up
+// candidates held in .local/coordinator/tasks/.
 //
 // THREE MODES, ONE EVALUATOR. The predicate primitives (repoRoot, resolveSince,
 // changedPathsSince, isSafeRef, tagExists, parsePredicate, evaluatePredicate,
@@ -63,7 +63,7 @@
 //       the release arc lack a disposition and emits draft stub manifest records
 //       to convert. This is that tool.
 //     - DISTINCT from --mode=release: release-prep READS
-//       .local/{{COORDINATOR_DIR}}/tasks/ (silencer-immune — ALL files, no prefix or
+//       .local/coordinator/tasks/ (silencer-immune — ALL files, no prefix or
 //       extension filter) to discover what still needs disposing. It NEVER
 //       writes the manifest (federated authority: the releaser authors M); it
 //       emits draft stub records as stdout JSON.
@@ -94,10 +94,10 @@
 //
 // USAGE:
 //   # Promoter mode (human-readable, always exit 0)
-//   node .opencode/scripts/check-defer-triggers.js [--since <ref>] [--tasks <dir>]
+//   node .opencode/scripts/check-defer-triggers.mjs [--since <ref>] [--tasks <dir>]
 //
 //   # Release mode — MANIFEST AUTHORITY (reads committed manifest ONLY)
-//   node .opencode/scripts/check-defer-triggers.js --mode=release \
+//   node .opencode/scripts/check-defer-triggers.mjs --mode=release \
 //       [--release-version <vX.Y.Z>] [--override-confirmed-version <vX.Y.Z>]
 //
 //   --override-confirmed-version is supplied by the authorized release wrapper
@@ -138,8 +138,8 @@ function repoRoot() {
 // The coordinator dir token is rendered by the harness on `update`; at
 // runtime the literal here is the real dir name. Mirrors state-lib.js's
 // localCoordinatorRoot() pattern (path.join(repoRoot(), ".local",
-// "{{COORDINATOR_DIR}}")).
-const COORDINATOR_DIR = "{{COORDINATOR_DIR}}";
+// "coordinator")).
+const COORDINATOR_DIR = "coordinator";
 
 function defaultTasksDir() {
     return path.join(repoRoot(), ".local", COORDINATOR_DIR, "tasks");
@@ -189,7 +189,7 @@ function parseArgs(argv) {
             if (v !== null) options.overrideConfirmedVersion = v;
         } else if (a === "--help" || a === "-h") {
             process.stdout.write(
-                "usage: check-defer-triggers.js [--mode promoter|release|release-prep] [--since <ref>] [--tasks <dir>]\n" +
+                "usage: check-defer-triggers.mjs [--mode promoter|release|release-prep] [--since <ref>] [--tasks <dir>]\n" +
                 "                                  [--release-version <vX.Y.Z>]\n" +
                 "                                  [--override-confirmed-version <vX.Y.Z>]\n" +
                 "  Predicate evaluator for DEFER/p2/follow-up candidates.\n" +
@@ -202,7 +202,7 @@ function parseArgs(argv) {
                 "    signal: an override_required record is honored only when\n" +
                 "    override.release_version == --release-version == --override-confirmed-version.\n" +
                 "  --mode=release-prep: F4-C mechanical enumerator. Reads\n" +
-                "    .local/{{COORDINATOR_DIR}}/tasks/ (silencer-immune) to find OPEN defer cards\n" +
+                "    .local/coordinator/tasks/ (silencer-immune) to find OPEN defer cards\n" +
                 "    whose path_touched target re-fires in the release diff without a\n" +
                 "    disposition; emits draft stub manifest records. Exit 1 = missing\n" +
                 "    dispositions; exit 2 = evaluator error.\n" +
@@ -1140,7 +1140,7 @@ function mainPromoter(options) {
 // in the release arc lack a disposition, and emits draft stub manifest records
 // to convert. This is that tool.
 //
-// It READS .local/{{COORDINATOR_DIR}}/tasks/ (silencer-immune — ALL files, no prefix or
+// It READS .local/coordinator/tasks/ (silencer-immune — ALL files, no prefix or
 // extension filter, mirroring the Go claims.loadLivenessCards) and the committed
 // manifest's defer_id set. It NEVER WRITES the manifest (federated authority:
 // the releaser authors M). It emits a JSON envelope on stdout:

@@ -50,7 +50,7 @@ converge on correctness without blocking edits:
    conditional candidates and reach the backlog only after a trigger fires AND
    the promotion Definition of Ready is met (concrete area + file scope +
    validation plan + clear slice + provenance). The promoter runs the
-   `check-defer-triggers.js` predicate checker as a review aid (promoter-use-
+   `check-defer-triggers.mjs` predicate checker as a review aid (promoter-use-
    only; never a commit hook; never blocking).
 
 The **promoter** curates candidates, batch-promotes a cycle's consolidated

@@ -364,7 +364,7 @@ fi
 
 # --- release DEFER gate (authoritative hard enforcement) ---
 #
-# The deterministic evaluator at .opencode/scripts/check-defer-triggers.js is
+# The deterministic evaluator at .opencode/scripts/check-defer-triggers.mjs is
 # the SINGLE source of DEFER classification truth. G7 in harness-release-
 # readiness consumes the same evaluator ADVISORY-only; THIS gate is
 # AUTHORITATIVE: a blocker or evaluator-error classification REFUSES the
@@ -396,7 +396,7 @@ fi
 
 DEFER_OUTPUT=""
 DEFER_EXIT=0
-DEFER_OUTPUT=$(node .opencode/scripts/check-defer-triggers.js "${DEFER_ARGS[@]}" 2>/dev/null) || DEFER_EXIT=$?
+DEFER_OUTPUT=$(node .opencode/scripts/check-defer-triggers.mjs "${DEFER_ARGS[@]}" 2>/dev/null) || DEFER_EXIT=$?
 
 # Extract disclosures + accepted_overrides + classification + sorted IDs from
 # the evaluator JSON. Best-effort: if the output is unparseable, fall back to

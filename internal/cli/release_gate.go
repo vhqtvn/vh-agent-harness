@@ -373,7 +373,7 @@ func countReleasedNotes(notes []claims.NoteClaim) (released, aboutToRelease int)
 //
 // Federated authority: the GATE+G0c refuse; the RELEASER/OPERATOR dispose; the
 // manifest M is the releaser's (the committed disposition record rechecked by
-// the release-mode evaluator in check-defer-triggers.js). Doctor #12 reads the
+// the release-mode evaluator in check-defer-triggers.mjs). Doctor #12 reads the
 // manifest only for manifest_entry(c) — it does NOT validate the handshake
 // (that is the release-mode evaluator's job).
 //
@@ -408,7 +408,7 @@ type recurrenceReport struct {
 // surface. It never returns an error: an uncomputable diff (no prior tag on a
 // greenfield repo, or a transient git failure) yields an empty report (no
 // blockers) — fail-SAFE (the release-mode manifest evaluator in
-// check-defer-triggers.js is the independent second enforcement surface). The
+// check-defer-triggers.mjs is the independent second enforcement surface). The
 // release-context threading (G0c passes PRIOR_TAG via the
 // VH_HARNESS_DEFER_DIFF_SINCE env var) takes precedence over the self-derived
 // git describe, so the tag-time gate and the predicate agree on the boundary.

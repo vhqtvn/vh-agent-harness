@@ -381,7 +381,7 @@ trigger fires AND the promoter applies the promotion Definition of Ready:
 - **Promotion Definition of Ready (DoR):** a candidate reaches `backlog.md`
   only if ALL of: trigger has fired (or operator override) + concrete area +
   file scope + validation plan + clear slice + provenance Notes. Run the
-  predicate checker (`node .opencode/scripts/check-defer-triggers.js`) as a
+  predicate checker (`node .opencode/scripts/check-defer-triggers.mjs`) as a
   promotion-review aid — it is **promoter-use-only**, never wired into a commit
   hook, never blocking.
 - **Reviewer DEFER never becomes a direct backlog row.** A `/commit-review`

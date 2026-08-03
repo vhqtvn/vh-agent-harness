@@ -416,7 +416,7 @@ func assertG7GateContent(t *testing.T, label, got string) {
 		// regression that re-narrows the scope. See decision memo
 		// researches/decisions/2026-08-02-defer-liveness-provenance-scope-divergence.md.
 		{"external-study release-relevant (widened scope)", "source:external-study"},
-		{"deterministic evaluator invocation", "check-defer-triggers.js --mode=release"},
+		{"deterministic evaluator invocation", "check-defer-triggers.mjs --mode=release"},
 		{"wrapper authority wording (scripts/release-tag.sh)", "scripts/release-tag.sh"},
 		{"advisory scope fence (G7 is ADVISORY)", "G7 itself is ADVISORY"},
 		{"wrapper-authoritative restatement", "AUTHORITATIVE"},

@@ -4,7 +4,7 @@ package cli
 //
 // scripts/release-tag.sh is the sanctioned release-tag wrapper (PROJECT-LOCAL,
 // not templates/core). It invokes the deterministic release-DEFER evaluator
-// (.opencode/scripts/check-defer-triggers.js --mode=release) BEFORE the
+// (.opencode/scripts/check-defer-triggers.mjs --mode=release) BEFORE the
 // `git tag -a` mutation. Release mode is manifest-authority ONLY (the legacy
 // .local/-scan release path has been RETIRED); the manifest-mode wrapper tests
 // live in release_tag_manifest_test.go.
@@ -96,7 +96,7 @@ func copyHarnessBinaryToCeremony(t *testing.T, destDir string) {
 
 // setupReleaseTagRepo creates an isolated scratch git repo with:
 //   - scripts/release-tag.sh copied from the repo source (project-local)
-//   - .opencode/scripts/check-defer-triggers.js copied from the TEMPLATE with
+//   - .opencode/scripts/check-defer-triggers.mjs copied from the TEMPLATE with
 //     {{COORDINATOR_DIR}} rendered to "coordinator" (simulating the rendered
 //     artifact that `vh-agent-harness update` produces)
 //   - .local/coordinator/tasks/ ready for test-written cards
@@ -126,7 +126,7 @@ func setupReleaseTagRepo(t *testing.T) (scratch, wrapper, tasksDir, msgFile stri
 	}
 	// Copy the TEMPLATE evaluator and render the coordinator token (what
 	// `vh-agent-harness update` produces for .opencode/scripts/).
-	evalSrc := filepath.Join(root, "templates", "core", ".opencode", "scripts", "check-defer-triggers.js")
+	evalSrc := filepath.Join(root, "templates", "core", ".opencode", "scripts", "check-defer-triggers.mjs")
 	evalBody, err := os.ReadFile(evalSrc)
 	if err != nil {
 		t.Fatalf("read evaluator template %s: %v", evalSrc, err)
@@ -143,7 +143,7 @@ func setupReleaseTagRepo(t *testing.T) (scratch, wrapper, tasksDir, msgFile stri
 		t.Fatalf("write wrapper: %v", err)
 	}
 	// Write rendered evaluator at <scratch>/.opencode/scripts/.
-	evalDst := filepath.Join(scratch, ".opencode", "scripts", "check-defer-triggers.js")
+	evalDst := filepath.Join(scratch, ".opencode", "scripts", "check-defer-triggers.mjs")
 	if err := os.MkdirAll(filepath.Dir(evalDst), 0o755); err != nil {
 		t.Fatalf("mkdir .opencode/scripts: %v", err)
 	}

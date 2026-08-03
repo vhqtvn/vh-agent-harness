@@ -56,7 +56,7 @@ func setupReleaseTagManifestRepo(t *testing.T, spec manifestSpec) (scratch, wrap
 	if err != nil {
 		t.Fatalf("read wrapper: %v", err)
 	}
-	evalSrc := filepath.Join(root, "templates", "core", ".opencode", "scripts", "check-defer-triggers.js")
+	evalSrc := filepath.Join(root, "templates", "core", ".opencode", "scripts", "check-defer-triggers.mjs")
 	evalBody, err := os.ReadFile(evalSrc)
 	if err != nil {
 		t.Fatalf("read evaluator template: %v", err)
@@ -71,7 +71,7 @@ func setupReleaseTagManifestRepo(t *testing.T, spec manifestSpec) (scratch, wrap
 	if err := os.WriteFile(wrapper, wrapperBody, 0o755); err != nil {
 		t.Fatalf("write wrapper: %v", err)
 	}
-	evalDst := filepath.Join(scratch, ".opencode", "scripts", "check-defer-triggers.js")
+	evalDst := filepath.Join(scratch, ".opencode", "scripts", "check-defer-triggers.mjs")
 	if err := os.MkdirAll(filepath.Dir(evalDst), 0o755); err != nil {
 		t.Fatalf("mkdir .opencode/scripts: %v", err)
 	}
@@ -142,7 +142,7 @@ func setupReleaseTagManifestRepo(t *testing.T, spec manifestSpec) (scratch, wrap
 // (always-on post-retirement; no env switch required). Optional extra args
 // are appended after $1 (for --override-* flags).
 //
-// cwd is <scratch> so the wrapper resolves .opencode/scripts/check-defer-triggers.js
+// cwd is <scratch> so the wrapper resolves .opencode/scripts/check-defer-triggers.mjs
 // and the manifest under .vh-agent-harness/release-defer-dispositions.json
 // relative to the scratch repo root — the wrapper references them by relative
 // path, so it MUST be launched from there.

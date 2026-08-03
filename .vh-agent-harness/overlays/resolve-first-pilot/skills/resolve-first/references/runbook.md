@@ -151,7 +151,7 @@ tag is wrong.
 The scoreboard is read off observers that already exist, never off the skill's
 self-report:
 
-- **Card-pile side:** run `check-defer-triggers.js` over `.local/coordinator/tasks/`.
+- **Card-pile side:** run `check-defer-triggers.mjs` over `.local/coordinator/tasks/`.
   Is the pile shrinking over releases (candidates being resolved/driven-to-verdict)
   or flat/growing (rationalization + re-defer churn)? A flat or growing pile is
   the falsifier signal that the front gate is not changing behavior.

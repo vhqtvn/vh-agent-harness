@@ -16,7 +16,7 @@ that own those transitions (edit-review/ownership, `/debate` / `/solution-brief`
 and `/write-task`).
 
 It is **distinct from the back end**: the back end
-(`check-defer-triggers.js` trigger grammar + the promotion Definition of Ready +
+(`check-defer-triggers.mjs` trigger grammar + the promotion Definition of Ready +
 doctor #12 / release-prep liveness) governs how a parked card is *promoted and
 released*. This skill governs whether a card is *created at all*. The two
 compose — the front gate does NOT replace, lower, or trust away the back end.
@@ -24,7 +24,7 @@ compose — the front gate does NOT replace, lower, or trust away the back end.
 **S1 overlay pilot.** This is an experimental overlay skill. Core promotion is
 NOT authorized. The skill is instruction-only (no deterministic helper ships);
 the two-sided scoreboard it predeclares is read off observers that already exist
-(`check-defer-triggers.js`, git history) — none are created here. Nothing in this
+(`check-defer-triggers.mjs`, git history) — none are created here. Nothing in this
 skill enters `templates/core/`.
 
 ## Authority — INFORMS ONLY
@@ -50,7 +50,7 @@ detections, and the scoreboard. Concretely:
   This is the same read-state-directly discipline the back end already enforces
   (see `researches/decisions/2026-07-30-defer-liveness-release-gate.md`).
 - The scoreboard is read off deterministic observers that already exist
-  (`check-defer-triggers.js`, git history), NEVER off the skill's own emitted
+  (`check-defer-triggers.mjs`, git history), NEVER off the skill's own emitted
   outputs. The skill predeclares what those observers mean; it does not produce
   them.
 
@@ -84,7 +84,7 @@ landed or decided this session.
 
 ## The mechanism — front gate composes with (does NOT replace) the back end
 
-The existing back end STAYS unchanged: the `check-defer-triggers.js` trigger
+The existing back end STAYS unchanged: the `check-defer-triggers.mjs` trigger
 grammar, the promotion Definition of Ready, and doctor #12 / release-prep
 liveness all remain exactly as-is. This skill adds a front gate at
 card-creation that emits **exactly three legal outputs**. **"Resolve later" is
@@ -119,7 +119,7 @@ attempt and is forbidden (see falsifier "Rationalization engine").
 - As a way to weaken edit-review or ownership classification "to resolve it
   faster" — that is a named falsifier, never permitted.
 - As a substitute for the back end — promotion and release-liveness are still
-  governed by `check-defer-triggers.js`, the DoR, and doctor #12.
+  governed by `check-defer-triggers.mjs`, the DoR, and doctor #12.
 - To re-label parking as "resolve later" with no this-session landing — there is
   no such output.
 
@@ -160,7 +160,7 @@ carry exactly one of these tags in `owner_notes[]`, plus a real trigger, plus
 
 ### Trigger grammar (what the back end actually parses)
 
-The back end (`check-defer-triggers.js`) is a deliberately tiny predicate
+The back end (`check-defer-triggers.mjs`) is a deliberately tiny predicate
 engine. It parses **exactly two** trigger predicates, both requiring an
 argument:
 
@@ -259,7 +259,7 @@ not a defer — go back to branch (1) or (2).
 ## Two-sided health scoreboard (predeclared — read off deterministic observers, NEVER self-report)
 
 The skill predeclares what a healthy front gate looks like. Health is read off
-**deterministic observers that already exist** — `check-defer-triggers.js` (the
+**deterministic observers that already exist** — `check-defer-triggers.mjs` (the
 card pile and its trigger states) and git history (whether resolve-now edits
 stuck) — **never off the skill's own emitted outputs.** The skill does not
 score itself.

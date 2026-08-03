@@ -1,6 +1,6 @@
 package cli
 
-// MANIFEST-AUTHORITY release-mode tests for check-defer-triggers.js.
+// MANIFEST-AUTHORITY release-mode tests for check-defer-triggers.mjs.
 //
 // Release mode reads the committed manifest at
 // .vh-agent-harness/release-defer-dispositions.json ONLY (no .local/ access).
