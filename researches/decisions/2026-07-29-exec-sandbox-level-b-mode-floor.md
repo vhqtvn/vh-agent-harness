@@ -216,3 +216,50 @@ Slice 2 grants the (now-contained) verb.
 - `doctor` = HEALTHY.
 - `behavioral-closure` crux: an agent granted exec-sandbox cannot escape the
   strict floor and can still run read-code + tmp-write.
+
+## Follow-up: exec-ro DENY discoverability (2026-08, landed as `2b903a1`)
+
+The Jul-29 decisions settle the floor + grant but not a separate follow-on
+question the slice surfaced: when `exec-ro` denies a read-only command, how
+does the agent learn the next rung? A `solution-brief`
+(`docs/coordination/exec-sandbox-brief.md`, untracked transport, now folded
+here as provenance and deleted from `docs/coordination/`) informed the
+landed slice. Durable findings kept here:
+
+- **Direction (O2+O1+O4) and rejected alternatives.** The fix surfaces the
+  ladder IN the exec-ro DENY notice (made floor-aware), not via plugins or
+  opencode toasts — the logic lives strictly in the CLI notice so it is
+  authoritative regardless of plugin/session state. DENY stays DENY (no
+  auto-rerun, no command rewriting). This was chosen over grant-broadening
+  and over plugin/toast surfacing.
+- **Refuted grant-gap hypothesis (provenance for decision 4).** The
+  exact-three Level-B grant was re-confirmed as INTENTIONAL, not a gap. The
+  slice explicitly rejected broadening the grant to fix discoverability;
+  decision 4 stands unchanged.
+- **Mechanism reuse.** The floor-aware DENY notice reuses the existing
+  `internal/runshape.FindMinMode(repoRoot)` to read `exec_sandbox.min_mode`
+  best-effort (falls back to `"none"` when run-shape/key absent), so the
+  notice reports the active floor without a new config reader.
+- **Durable-doc contradictions resolved by the slice (X1, X3, X4).** Three
+  sites had drifted against the floor + grant reality and were re-aligned in
+  slice `2b903a1`:
+  - **X1** `templates/core/.vh-agent-harness/AGENTS.core.md` — exec-family
+    paragraph reframed as a ladder (`exec-ro` → `exec-sandbox` → `exec`).
+  - **X3** `templates/core/.opencode/docs/agents/read-only-execution-policy.md`
+    — "Failure behavior rule" distinguishes an exec-ro DENY from a real
+    permission denial and inserts the escalation ladder plus the
+    `proxy`/`docker_compose` backend limitations.
+  - **X4** `templates/core/.opencode/docs/agents/permission-templates.md`
+    — stale `vh-agent-harness exec ...` audit-runner block replaced with
+    `vh-agent-harness exec-sandbox *: allow` for Level-B agents.
+- **Drift site flagged but already correct (X2).** `README.agent.md` — `exec-ro`
+  bullet presents `exec-sandbox` as the middle rung instead of jumping straight
+  to `exec`. The brief flagged X2 as a drift site alongside X1/X3/X4, but its
+  `exec-sandbox` ladder framing was already corrected by the earlier `a2e8d3d`
+  slice ("feat(exec-sandbox): enforce binary-side mode-floor and net-floor");
+  `2b903a1` confirmed X2, did not change it.
+
+The brief also specified prompt reinforcement (one bullet each in
+`researcher.md.tmpl`, `repo-explorer.md`, `media-perception.md` pointing at
+the read-only-execution-policy doc); that is implementation detail, not
+design rationale, and is not repeated here.
