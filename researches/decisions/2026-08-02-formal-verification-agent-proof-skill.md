@@ -3,7 +3,7 @@
 **Date:** 2026-08-02
 **Status:** Proposed S1 Overlay Pilot (Design-Only, operator-signed-off 2026-08-02). No skill code
 lands in this memo; this is the design spec a future slice authors from.
-**Paradigm:** Agent-authored proofs, engine-checked (Lean4 + TLAPS safety-invariants).
+**Paradigm:** Agent-authored proofs, engine-checked (Lean4-core; TLAPS is deferred/unsupported).
 **Supersedes (paradigm axis):** the earlier TLC/model-checking-centric draft that lived at
 `tmp/2026-08-02-tiered-formal-verification-skill-design-brief.md` (gitignored scratch, now deleted).
 The TLC-first conclusion is **SUPERSEDED** — TLC/model-checking puts the *reasoning* in the engine
@@ -38,6 +38,16 @@ allows an agent to author proofs checked mechanically by a rigorous engine. This
 the precise boundaries of authority, configuration, degradation, and the critical model-fidelity
 binding required to prevent laundering a model proof into a code-behavior proof.
 
+## S2 Deferral — Current Release Model
+
+This section documents the current S2-deferral and adoption state (per the release-model debate).
+
+- **S2 remains deferred:** The capability operates as an S1 pilot (Lean4-core only). It does not score S2.
+- **Re-eval trigger:** The evaluation for S2 promotion is triggered by the **first consuming-repo pilot reaching a real proof attempt** (operator-curated).
+- **No calendar backstop:** The harness is "always-growing" for now; there is no scheduled sunset or calendar-driven review for this deferral.
+- **Adoption/intake:** **For now**, all adopters are operator-managed and intake is the operator's direct channel. **No public request path exists.**
+- **Anti-staleness / Cross-references:** These constraints describe the current pilot/adoption model, not a permanent boundary. They are grounded in the S2-bar debate and the release-model debate.
+
 ## Authority & S1 Containment
 
 **INFORMS ONLY.** Every output informs; the skill never gates, blocks, approves, promotes, releases,
@@ -61,8 +71,8 @@ The paradigm is fixed: the agent WRITES the proof; the engine only provides a ri
 mechanically checks it.
 - **Lean4 (dependent type theory)** is the primary engine for pure-logic, algebraic, and simple
   state-machine invariants.
-- **TLAPS (TLA+ Proof System)** is the engine for the **SAFETY invariants** of concurrent-system
-  models. It is expressly for safety-only, NOT temporal/liveness reasoning.
+- **TLAPS (TLA+ Proof System)** is a deferred engine for the **SAFETY invariants** of concurrent-system
+  models. It is expressly for safety-only, NOT temporal/liveness reasoning. **(Note: TLAPS is currently unsupported/evidenced; it is deferred as a future pilot.)**
 - **TLC/Model-Checking** is NOT permitted, as an engine brute-forcing the state space means the
   engine reasons, violating the agent-authored paradigm.
 - **Property-Test Prefilter:** Property testing is exposed as an advisory
@@ -159,10 +169,10 @@ two-file field-merge convention at `.opencode/repo-configs/`.
   ```json
   {
     "enabled": true,
-    "engine": "lean4", // lean4 | tlaps | none
+    "engine": "lean4", // lean4 | none (tlaps deferred)
     "provisioning": "docker-image", // direct-binary | docker-image
     "binary_path": "",
-    "docker_image": "leanprovercommunity/mathlib4:v4.32.2", // illustrative; operator MUST pin to a real checked tag — :latest is forbidden by the Provisioning Constraint
+    "docker_image": "leanprovercommunity/lean4:v4.32.2", // illustrative; operator MUST pin to a real checked tag — :latest is forbidden by the Provisioning Constraint
     "onUnavailable": "defer"
   }
   ```
@@ -180,20 +190,18 @@ A seconds-fast decision tree the agent runs:
    prove a <= c").
 2. **(b) Simple state-machine invariant** -> **Lean4** (e.g., "A single-threaded bounded counter
    begins in [0,max]; inc/dec preserve bound").
-3. **(c) Concurrent-protocol safety invariant** -> **TLAPS** (e.g., "For a lock protocol, no
+3. **(c) Concurrent-protocol safety invariant** -> **Honest exit (TLAPS unsupported)** (e.g., "For a lock protocol, no
    reachable state has two owners").
 4. **(d) Honest exit to property-test-prefilter-or-no-proof** -> Liveness, underspecified
    heuristics, or disproportionate-cost claims.
 
 *The Boundary:* A Lean encoding of a transition system becomes the wrong tool versus TLA+ when real
-interleavings/concurrency must be modeled. A sequential Lean encoding erases them, necessitating
-TLAPS.
+interleavings/concurrency must be modeled. A sequential Lean encoding erases them; this marks the boundary for deferring to TLAPS.
 
 ## Honest Scope + Climbing Path
 
-- **Provable NOW:** Pure-logic, algebraic, simple state-machine invariants, and concurrent-protocol
-  safety invariants via TLAPS.
-- **The Frontier:** Iris-grade concurrent separation logic and liveness/temporal proofs (out of
+- **Provable NOW:** Pure-logic, algebraic, simple state-machine invariants (Lean4-core).
+- **The Frontier (OUT of pilot / unsupported):** Concurrent-protocol safety invariants (TLAPS), Iris-grade concurrent separation logic and liveness/temporal proofs (out of
   pilot scope — see The Paradigm: LIVENESS is OUT). Do not over-promise.
 - **Climbing Path:** Run the S1 pilot on a bounded set of real candidate bugs, establish the
   baseline value, collect S2 evidence, and evaluate cost before expanding to harder concurrency

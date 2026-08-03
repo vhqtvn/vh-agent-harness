@@ -21,14 +21,14 @@
       "producer_kind": "overlay_skill",
       "overlay_pack": "contract-invariant-audit-pilot",
       "source_relative_path": "skills/contract-invariant-audit/scripts/manifest-helper.js",
-      "rendered_digest": "sha256:68b7be0de17bbe8ef119baf5c7a71f9785364759b4ad5626ef29e2a80e0b2705"
+      "rendered_digest": "sha256:47d6f5d61a212d2627c39647457a0092c0c4ca0de30b975a01913923f7b860b9"
     },
     {
       "destination_path": ".opencode/skills/formal-verification/SKILL.md",
       "producer_kind": "overlay_skill",
       "overlay_pack": "formal-verification-pilot",
       "source_relative_path": "skills/formal-verification/SKILL.md",
-      "rendered_digest": "sha256:eb34ce3103278215ce9af3d39e932b3585e19b31dc9ef95437b503a641d05e20"
+      "rendered_digest": "sha256:a47ea700508c211ad4a2fc076ee402e95a260d266566350f0d60fff3fdf5675d"
     },
     {
       "destination_path": ".opencode/skills/formal-verification/references/pilot-runbook.md",
@@ -42,14 +42,14 @@
       "producer_kind": "overlay_skill",
       "overlay_pack": "resolve-first-pilot",
       "source_relative_path": "skills/resolve-first/SKILL.md",
-      "rendered_digest": "sha256:2454cb308ba55a88b0f40d72073aec876310cd5ef69e9a460ba3fdbf7905ba98"
+      "rendered_digest": "sha256:d75a1f6df7f93fd5abb6c1663f081576f80e3bada90542b102b18e7e9e9bcaaf"
     },
     {
       "destination_path": ".opencode/skills/resolve-first/references/runbook.md",
       "producer_kind": "overlay_skill",
       "overlay_pack": "resolve-first-pilot",
       "source_relative_path": "skills/resolve-first/references/runbook.md",
-      "rendered_digest": "sha256:1d9a0108d537a87a4d427fb43ae95fc4ee587dcbdcd3c3d33f18c17d10f0770b"
+      "rendered_digest": "sha256:7eb5b91026d4e3d48846324d46f209144b3b91b510b30dfd6305bd66a36370fe"
     }
   ]
 }

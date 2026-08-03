@@ -1,6 +1,6 @@
 ---
 name: formal-verification
-description: Agent-authored formal proofs an engine checks. Use when asked to PROVE a provable invariant — pure-logic, algebraic, state-machine (Lean4), or concurrency SAFETY (TLAPS). Engine routing, scope, and INFORMS-only authority are in the body.
+description: Agent-authored formal proofs an engine checks. Use when asked to PROVE a provable invariant — pure-logic, algebraic, or state-machine (Lean4-core). Engine routing, scope, and INFORMS-only authority are in the body.
 compatibility: opencode
 ---
 
@@ -22,6 +22,14 @@ anti-laundering binding is the pilot's success criterion (see "THE CRUX" and
 **S1 overlay pilot.** This is an experimental overlay skill. Core promotion is
 NOT authorized. The eight S2 evidence classes are unmet until a real pilot runs
 (see "S2 record"). Nothing here enters `templates/core/`.
+
+## Current release model — temporary
+
+This block describes the current pilot/adoption model, not a permanent capability constraint.
+
+- **Scope:** Lean4-core is the supported route (pure-logic, algebraic, simple state-machine). TLAPS and mathlib are **not currently supported/evidenced; a requested proof problem may be evaluated as a future pilot.**
+- **S2 scoring:** The skill authors Lean4 pilots and **does not score S2**. S2 remains deferred. While the harness is continuously developing, there is **no sunset or calendar backstop** for that deferral. *(Anti-staleness trigger: when "always-growing → matures," replace this no-sunset statement with the then-current S2 lifecycle rule).*
+- **Adoption/intake:** **For now**, adopters are operator-managed and intake is the operator's direct channel; **no public request path exists**. *(Anti-staleness trigger: when "managed adopters → public/unmanaged," replace this managed-only/no-public-intake statement with the actual public intake).*
 
 ## Scope and authority (recognition detail)
 
@@ -73,11 +81,11 @@ rigorous language and mechanically checks it.** Do not re-open it.
 
 - **Lean4 (dependent type theory)** is the primary engine for pure-logic,
   algebraic, and simple state-machine invariants.
-- **TLAPS (TLA+ Proof System)** is the engine for the **SAFETY invariants** of
+- **TLAPS (TLA+ Proof System)** is a deferred engine for the **SAFETY invariants** of
   concurrent-system models. It is expressly **safety-only**. **Liveness /
   temporal / eventual-settlement reasoning is OUT of the pilot** — TLAPS is not
   used for it, and there is no liveness engine in this pilot. State this
-  honestly when asked; do not silently accept a liveness claim.
+  honestly when asked; do not silently accept a liveness claim. *(Note: TLAPS is not currently supported/evidenced; a requested proof problem may be evaluated as a future pilot.)*
 - **TLC / model-checking is NOT permitted.** An engine that brute-forces the
   state space is doing the *reasoning*, which violates the agent-authored
   paradigm. If a candidate would require model-checking to "prove," that is the
@@ -230,16 +238,16 @@ Run this decision tree before authoring anything. Record the chosen branch.
 - **(b) Simple state-machine invariant → Lean4.**
   *Example:* "a single-threaded bounded counter starts in `[0, max]`; `inc` /
   `dec` preserve the bound."
-- **(c) Concurrent-protocol SAFETY invariant → TLAPS.**
+- **(c) Concurrent-protocol SAFETY invariant → Honest exit (TLAPS unsupported).**
   *Example:* "for a lock protocol, no reachable state has two owners."
+  *(Note: TLAPS is not currently supported/evidenced; a requested proof problem may be evaluated as a future pilot.)*
 - **(d) Honest exit → `property-test-prefilter` or `no-proof`.**
-  Liveness / temporal / eventual-settlement, underspecified heuristics, or
-  disproportionate-cost claims. Do NOT force a proof; record the exit reason.
+  Liveness / temporal / eventual-settlement, underspecified heuristics, disproportionate-cost claims, or requested engines that are unsupported (e.g. TLAPS/mathlib). Do NOT force a proof; record the exit reason.
 
 **The boundary — when Lean is the wrong tool vs TLA+:** a Lean encoding of a
 transition system becomes the wrong tool when **real interleavings / concurrency
 must be modeled.** A sequential Lean encoding *erases* the interleavings, so it
-cannot represent the concurrent behavior; that is exactly when TLAPS is required.
+cannot represent the concurrent behavior; that is the boundary for deferring to TLAPS.
 One line each side:
 
 - Lean side — "the invariant is a property of values / a single-threaded
@@ -250,9 +258,9 @@ One line each side:
 ## Honest scope + climbing path
 
 - **Provable NOW:** pure-logic, algebraic, and simple state-machine invariants
-  (Lean4); concurrent-protocol **safety** invariants (TLAPS).
-- **The Frontier (OUT of pilot):** Iris-grade concurrent separation logic;
-  liveness / temporal / eventual-settlement proofs. Do not over-promise. Say "out
+  (Lean4).
+- **The Frontier (OUT of pilot / unsupported):** Concurrent-protocol **safety** invariants (TLAPS); Iris-grade concurrent separation logic;
+  liveness / temporal / eventual-settlement proofs; mathlib. Do not over-promise. Say "out
   of pilot" and route to (d) when asked.
 - **Climbing path:** run this S1 pilot on a bounded set of real candidate
   invariants, establish the baseline value, collect S2 evidence, and evaluate
@@ -316,8 +324,7 @@ respect all seven:
    provisioning only, never a networked build (see "Authority" and "Engine-invocation
    config").
 2. **Fixed paradigm** — the agent authors the proof; the engine only checks.
-   Lean4 for pure-logic/algebraic/simple state-machine; TLAPS for concurrent
-   safety only; TLC/model-checking excluded; property-test is advisory prefilter
+   Lean4 for pure-logic/algebraic/simple state-machine; concurrent-protocol SAFETY invariants route to honest exit (TLAPS unsupported/deferred); TLC/model-checking excluded; property-test is advisory prefilter
    only (see "The Paradigm").
 3. **No-engine design-time product** — the proof/spec, fidelity binding,
    classification, and red-on-divergence test are producible with no engine
