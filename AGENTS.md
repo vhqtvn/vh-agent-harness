@@ -534,3 +534,12 @@ either way.
 
 Plain Go on the host — `run-shape.yml` uses `backend: host-shell`. Build/test
 with `go build` / `go test` (or `make`). No container required.
+
+## Coordination cross-reference
+
+Before interrupting the operator for a decision, follow the **Pre-Operator-Ask
+Routing Canon** (`vh-agent-harness docs opencode-session-workflow`):
+self-resolve avoidable asks (re-derive, investigate, act-if-reversible) first,
+and ask the operator only for named protected decisions that survive that
+triage. It is INFORMS-only and does not lower any `p0`/ownership/permission/
+review/transition gate.
