@@ -320,6 +320,17 @@ var CoreLocationRules = map[string]LocationRule{
 		// Level-B grant: exec-sandbox lets media-perception run perception
 		// tooling under kernel containment (strict floor).
 		ReadOnlyExtraAllows: []string{ExecSandboxCommand}},
+	// worker-read-only: dynamic-worker pilot (Pilot 1). A prompt-scoped
+	// read-only leaf that complements — does not displace — durable
+	// specialists. NOT gate-exempt. NOT a Level-B agent: it carries NO
+	// exec-sandbox grant, so its charter is bounded inspection via the
+	// canonical read-only shell + read_only harness surface only —
+	// deliberately narrower than researcher/repo-explorer/media-perception,
+	// which may run contained code. Deny-all task (no outbound delegation).
+	// Inbound edges from build, coordination, and project-coordinator live in
+	// CoreTaskRules and are dropped by Emit's present-agent filter when
+	// core/worker-read-only is unselected (mirrors media-perception).
+	"worker-read-only": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	// Cluster leaves (commit-reviewer-a..d) — the corpus ships these as full
 	// agent blocks. They carry the leafBaseRule (deny wildcard, allow
 	// readonly/git_readonly, deny gate, allow devSh) and a deny-all task rule.
@@ -368,6 +379,10 @@ var CoreTaskRules = map[string][]TaskEntry{
 		// media-perception: dropped by Emit's present-agent filter when the
 		// capability is unselected (the agent block is not rendered).
 		{"media-perception", Allow},
+		// worker-read-only: dropped by Emit's present-agent filter when
+		// core/worker-read-only is unselected (the agent block is not
+		// rendered).
+		{"worker-read-only", Allow},
 	},
 	"coordination": {
 		{"*", Deny},
@@ -386,6 +401,9 @@ var CoreTaskRules = map[string][]TaskEntry{
 		// media-perception: dropped by Emit's present-agent filter when the
 		// capability is unselected.
 		{"media-perception", Allow},
+		// worker-read-only: dropped by Emit's present-agent filter when
+		// core/worker-read-only is unselected.
+		{"worker-read-only", Allow},
 	},
 	"planner": {
 		{"*", Deny},
@@ -418,6 +436,12 @@ var CoreTaskRules = map[string][]TaskEntry{
 	"media-perception": {
 		{"*", Deny},
 	},
+	// worker-read-only: dynamic-worker pilot leaf. Deny-all task; no
+	// outbound delegation. Rendered only when core/worker-read-only is
+	// selected (present-agent filter drops the inbound edges otherwise).
+	"worker-read-only": {
+		{"*", Deny},
+	},
 	"project-coordinator": {
 		{"*", Deny},
 		{"build", Allow},
@@ -434,6 +458,9 @@ var CoreTaskRules = map[string][]TaskEntry{
 		// media-perception: dropped by Emit's present-agent filter when the
 		// capability is unselected.
 		{"media-perception", Allow},
+		// worker-read-only: dropped by Emit's present-agent filter when
+		// core/worker-read-only is unselected.
+		{"worker-read-only", Allow},
 	},
 	"debate": {
 		{"*", Deny},

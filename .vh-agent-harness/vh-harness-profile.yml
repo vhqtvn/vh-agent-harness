@@ -9,3 +9,4 @@ overlays:
     - harness-dogfood
 capabilities:
     - core/media-perception
+    - core/worker-read-only

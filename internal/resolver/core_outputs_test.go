@@ -154,14 +154,20 @@ func TestCompileCoreSelectionPlan_CoreCatalogMediaSelected(t *testing.T) {
 	if !reflect.DeepEqual(plan.ActiveLivePaths, wantActive) {
 		t.Errorf("ActiveLivePaths = %v, want %v", plan.ActiveLivePaths, wantActive)
 	}
-	if len(plan.InactiveLivePaths) != 0 {
-		t.Errorf("InactiveLivePaths should be empty when media-perception selected, got %v", plan.InactiveLivePaths)
+	// worker-read-only is also a CoreOutputs-declaring capability in the real
+	// catalog; it is NOT selected here, so its single owned path is inactive.
+	wantInactive := map[string]bool{
+		".opencode/agents/worker-read-only.md": true,
+	}
+	if !reflect.DeepEqual(plan.InactiveLivePaths, wantInactive) {
+		t.Errorf("InactiveLivePaths = %v, want %v", plan.InactiveLivePaths, wantInactive)
 	}
 }
 
 func TestCompileCoreSelectionPlan_CoreCatalogMediaUnselected(t *testing.T) {
-	// Integration: the real CoreCatalog with media-perception NOT selected
-	// (the default install profile does not select it).
+	// Integration: the real CoreCatalog with NO opt-in capability selected
+	// (the default install profile selects neither media-perception nor
+	// worker-read-only).
 	c := CoreCatalog()
 	selected, err := Resolve(nil, c)
 	if err != nil {
@@ -169,11 +175,12 @@ func TestCompileCoreSelectionPlan_CoreCatalogMediaUnselected(t *testing.T) {
 	}
 	plan := CompileCoreSelectionPlan(c, selected)
 	if len(plan.ActiveLivePaths) != 0 {
-		t.Errorf("ActiveLivePaths should be empty when media-perception unselected, got %v", plan.ActiveLivePaths)
+		t.Errorf("ActiveLivePaths should be empty when no opt-in capability is selected, got %v", plan.ActiveLivePaths)
 	}
 	wantInactive := map[string]bool{
 		".opencode/agents/media-perception.md":       true,
 		".opencode/skills/media-perception/SKILL.md": true,
+		".opencode/agents/worker-read-only.md":       true,
 	}
 	if !reflect.DeepEqual(plan.InactiveLivePaths, wantInactive) {
 		t.Errorf("InactiveLivePaths = %v, want %v", plan.InactiveLivePaths, wantInactive)

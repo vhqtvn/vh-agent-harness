@@ -300,5 +300,30 @@ func CoreCatalog() *Catalog {
 				".opencode/skills/media-perception/SKILL.md",
 			},
 		},
+		CapabilityManifest{
+			ID:       "core/worker-read-only",
+			Provides: []string{"worker-read-only"},
+			// The dynamic-worker pilot (Pilot 1): a prompt-scoped read-only
+			// worker that complements — does not displace — durable
+			// specialists. "process is value → named specialist; prompt is
+			// scope → worker-read-only." Self-contained; no capability-level
+			// hard_deps. Opt-in: not in any profile preset. Inbound caller
+			// edges (build, coordination, project-coordinator →
+			// worker-read-only) live in permconfig.CoreTaskRules and are
+			// dropped by Emit's present-agent filter when this capability is
+			// unselected (so an unselected capability leaves no dangling task
+			// edge). researcher does NOT carry an edge: worker-read-only is
+			// not a perception specialist and a researcher already holds the
+			// read-only inspection surface itself.
+			//
+			// CoreOutputs gate the single core-corpus file this capability
+			// owns by selection. Declared as a LIVE (suffix-stripped) path,
+			// source-relative to templates/core. When the capability is
+			// unselected the renderer skips this source file and the CLI
+			// treats any prior-version on-disk file as inactive residue.
+			CoreOutputs: []string{
+				".opencode/agents/worker-read-only.md",
+			},
+		},
 	)
 }

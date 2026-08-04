@@ -923,6 +923,7 @@ func TestEmit_PresentAgentFilterNoopWhenAllPresent(t *testing.T) {
 			`"debate": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
 			`"solution-brief": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
 			`"media-perception": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
+			`"worker-read-only": { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }`,
 		}, ",\n    "), 1)
 	out := mustEmit(t, full, nil, Features{})
 	var root map[string]any
@@ -1305,5 +1306,123 @@ func TestEmit_MediaPerceptionLeafWildcardAlwaysPreserved(t *testing.T) {
 	mpTask := agents["media-perception"].(map[string]any)["permission"].(map[string]any)["task"].(map[string]any)
 	if mpTask["*"] != "deny" {
 		t.Fatalf(`media-perception.task["*"] = %v, want "deny" (always preserved)`, mpTask["*"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// core/worker-read-only capability: present-agent filter contract.
+// ---------------------------------------------------------------------------
+//
+// worker-read-only is the dynamic-worker pilot leaf (opt-in read-only). Its
+// inbound caller set is {build, coordination, project-coordinator} — the
+// spec's delegateFrom list. researcher does NOT carry an edge (it is not a
+// perception specialist; a researcher already holds the read-only inspection
+// surface itself). This is the load-bearing difference from media-perception
+// (whose caller set additionally includes researcher), so it is asserted
+// explicitly below.
+
+// workerReadOnlyCallers is the canonical inbound caller set for the
+// core/worker-read-only capability (mirrors CoreTaskRules). researcher is
+// intentionally ABSENT — see the header note.
+var workerReadOnlyCallers = []string{"build", "coordination", "project-coordinator"}
+
+// workerReadOnlyConfig is the minimal agent roster exercising the
+// worker-read-only filter: the 3 callers + researcher (present so we can
+// prove it gets NO edge) + the worker-read-only leaf.
+const workerReadOnlyConfig = `{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": { "bash": { "__placeholder__": "deny" } },
+  "agent": {
+    "build":              { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "coordination":       { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "project-coordinator":{ "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "researcher":         { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "worker-read-only":   { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }
+  }
+}`
+
+// TestEmit_WorkerReadOnlyPresentKeepsInboundEdges: when the worker-read-only
+// agent block is PRESENT (capability selected), the three inbound caller
+// edges render as allow, researcher does NOT gain an edge (the caller set is
+// narrower than media-perception), and worker-read-only's own task block is
+// the deny-all wildcard only (read-only leaf, no outbound delegation).
+func TestEmit_WorkerReadOnlyPresentKeepsInboundEdges(t *testing.T) {
+	out := mustEmit(t, workerReadOnlyConfig, nil, Features{})
+	var root map[string]any
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	agents := root["agent"].(map[string]any)
+	// Sanity: worker-read-only rendered.
+	if _, ok := agents["worker-read-only"]; !ok {
+		t.Fatalf("worker-read-only agent block missing from output")
+	}
+	// Each declared caller carries worker-read-only: allow.
+	for _, caller := range workerReadOnlyCallers {
+		blk, ok := agents[caller]
+		if !ok {
+			t.Fatalf("caller %q missing from output", caller)
+		}
+		task := blk.(map[string]any)["permission"].(map[string]any)["task"].(map[string]any)
+		if task["worker-read-only"] != "allow" {
+			t.Fatalf(`%s.task["worker-read-only"] = %v, want "allow" (agent present)`, caller, task["worker-read-only"])
+		}
+	}
+	// researcher is present in the fixture but must NOT carry a worker-read-only
+	// edge (the caller set is exactly the delegateFrom list, which excludes
+	// researcher). This is the load-bearing difference from media-perception.
+	rTask := agents["researcher"].(map[string]any)["permission"].(map[string]any)["task"].(map[string]any)
+	if v, ok := rTask["worker-read-only"]; ok {
+		t.Fatalf(`researcher.task["worker-read-only"] = %v, want ABSENT (researcher is not a declared caller; delegateFrom excludes it)`, v)
+	}
+	// worker-read-only itself: deny-all only, no outbound edges.
+	wTask := agents["worker-read-only"].(map[string]any)["permission"].(map[string]any)["task"].(map[string]any)
+	if wTask["*"] != "deny" {
+		t.Fatalf(`worker-read-only.task["*"] = %v, want "deny"`, wTask["*"])
+	}
+	for target := range wTask {
+		if target != "*" {
+			t.Fatalf(`worker-read-only.task[%q] must NOT exist (read-only leaf, deny-all only); got: %v`, target, wTask[target])
+		}
+	}
+}
+
+// TestEmit_WorkerReadOnlyAbsentDropsInboundEdges: when the worker-read-only
+// agent block is ABSENT (capability unselected), all three inbound caller
+// edges are dropped by the present-agent filter so no caller carries a
+// dangling allow entry.
+func TestEmit_WorkerReadOnlyAbsentDropsInboundEdges(t *testing.T) {
+	// workerReadOnlyConfigStripped is workerReadOnlyConfig with the
+	// worker-read-only agent entry removed.
+	const workerReadOnlyConfigStripped = `{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": { "bash": { "__placeholder__": "deny" } },
+  "agent": {
+    "build":              { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "coordination":       { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "project-coordinator":{ "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } },
+    "researcher":         { "permission": { "bash": {"__placeholder__":"deny"}, "task": {"__placeholder__":"deny"} } }
+  }
+}`
+	out := mustEmit(t, workerReadOnlyConfigStripped, nil, Features{})
+	var root map[string]any
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	agents := root["agent"].(map[string]any)
+	// Sanity: worker-read-only is absent.
+	if _, ok := agents["worker-read-only"]; ok {
+		t.Fatalf("worker-read-only agent block must NOT render in the absent fixture")
+	}
+	// Each caller drops its worker-read-only edge.
+	for _, caller := range workerReadOnlyCallers {
+		blk, ok := agents[caller]
+		if !ok {
+			t.Fatalf("caller %q missing from output", caller)
+		}
+		task := blk.(map[string]any)["permission"].(map[string]any)["task"].(map[string]any)
+		if v, ok := task["worker-read-only"]; ok {
+			t.Fatalf(`%s.task["worker-read-only"] = %v, want ABSENT (agent gated out → graceful degradation)`, caller, v)
+		}
 	}
 }

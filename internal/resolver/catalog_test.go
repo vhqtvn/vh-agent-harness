@@ -14,9 +14,14 @@ func TestCoreCatalog_ValidatesClean(t *testing.T) {
 func TestCoreCatalog_SeedCapabilities(t *testing.T) {
 	c := CoreCatalog()
 	got := c.IDs()
-	want := []string{"core/debate", "core/gated-commit", "core/media-perception"} // sorted
-	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
-		t.Fatalf("IDs: expected %v, got %v", want, got)
+	want := []string{"core/debate", "core/gated-commit", "core/media-perception", "core/worker-read-only"} // sorted
+	if len(got) != len(want) {
+		t.Fatalf("IDs: expected %d (%v), got %d (%v)", len(want), want, len(got), got)
+	}
+	for i, id := range want {
+		if got[i] != id {
+			t.Fatalf("IDs[%d]: expected %q, got %q (want=%v, got=%v)", i, id, got[i], want, got)
+		}
 	}
 	for _, id := range want {
 		if _, ok := c.Get(id); !ok {
@@ -124,9 +129,10 @@ func TestCoreCatalog_MediaPerceptionCoreOutputs(t *testing.T) {
 }
 
 func TestCoreCatalog_OtherCapabilitiesHaveNoCoreOutputs(t *testing.T) {
-	// Only core/media-perception declares CoreOutputs in this slice.
-	// core/gated-commit and core/debate retain their current unconditional
-	// behavior (empty CoreOutputs = not gated by selection).
+	// Only the opt-in leaf capabilities (core/media-perception,
+	// core/worker-read-only) declare CoreOutputs. core/gated-commit and
+	// core/debate retain their current unconditional behavior (empty
+	// CoreOutputs = not gated by selection).
 	c := CoreCatalog()
 	for _, id := range []string{"core/gated-commit", "core/debate"} {
 		m, ok := c.Get(id)
@@ -136,6 +142,57 @@ func TestCoreCatalog_OtherCapabilitiesHaveNoCoreOutputs(t *testing.T) {
 		if len(m.CoreOutputs) != 0 {
 			t.Errorf("%s should have empty CoreOutputs (retains unconditional behavior), got %v", id, m.CoreOutputs)
 		}
+	}
+}
+
+func TestCoreCatalog_WorkerReadOnlyProvides(t *testing.T) {
+	c := CoreCatalog()
+	// core/worker-read-only owns a single prompt-scoped read-only worker leaf.
+	for _, agent := range []string{"worker-read-only"} {
+		owner, owned := c.CapabilityForAgent(agent)
+		if !owned || owner != "core/worker-read-only" {
+			t.Fatalf("agent %q should be owned by core/worker-read-only (got owner=%q owned=%v)", agent, owner, owned)
+		}
+	}
+	m, ok := c.Get("core/worker-read-only")
+	if !ok {
+		t.Fatalf("missing core/worker-read-only")
+	}
+	if len(m.HardDeps) != 0 {
+		t.Fatalf("core/worker-read-only should have no capability-level hard_deps, got %v", m.HardDeps)
+	}
+	// Opt-in: worker-read-only must NOT be a baseline agent (it is a
+	// capability-provided agent, not a universal one).
+	for _, b := range c.BaselineAgents() {
+		if b == "worker-read-only" {
+			t.Fatalf("worker-read-only must not be a baseline agent; baseline=%v", c.BaselineAgents())
+		}
+	}
+}
+
+func TestCoreCatalog_WorkerReadOnlyCoreOutputs(t *testing.T) {
+	// core/worker-read-only declares CoreOutputs for the single core-corpus
+	// file it owns (the agent definition), gated by selection. The path must
+	// match the actual templates/core path (LIVE / suffix-stripped form) and
+	// validate clean.
+	c := CoreCatalog()
+	m, ok := c.Get("core/worker-read-only")
+	if !ok {
+		t.Fatalf("missing core/worker-read-only")
+	}
+	want := []string{
+		".opencode/agents/worker-read-only.md",
+	}
+	if len(m.CoreOutputs) != len(want) {
+		t.Fatalf("CoreOutputs length: got %d, want %d (%v)", len(m.CoreOutputs), len(want), m.CoreOutputs)
+	}
+	for i, p := range want {
+		if m.CoreOutputs[i] != p {
+			t.Errorf("CoreOutputs[%d]: got %q, want %q", i, m.CoreOutputs[i], p)
+		}
+	}
+	if errs := m.Validate(); len(errs) != 0 {
+		t.Fatalf("worker-read-only CoreOutputs should validate clean, got: %+v", errs)
 	}
 }
 

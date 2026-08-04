@@ -470,7 +470,10 @@ func TestReadOnly_FindLast_ScalarPolicies(t *testing.T) {
 // ship-review, docs-steward); plan was migrated from ask to read_only in a
 // follow-up (it was the last non-read_only scalar agent that was actually
 // read-only in spirit). That is 18 core read_only agents.
-// harness-release-readiness is the 19th read_only agent overall but is
+// worker-read-only (the dynamic-worker pilot leaf, core/worker-read-only) is
+// the 19th core read_only agent — a pure read-only leaf with NO exec-sandbox
+// grant, added to this regression list so it stays read_only.
+// harness-release-readiness is the 20th read_only agent overall but is
 // overlay-managed (the .vh-agent-harness release pack), so it is NOT in
 // CoreLocationRules and is not asserted here.
 var readOnlySpecialists = []string{
@@ -483,6 +486,9 @@ var readOnlySpecialists = []string{
 	"ship-review", "docs-steward",
 	// plan migration (ask → read_only):
 	"plan",
+	// dynamic-worker pilot leaf (core/worker-read-only): pure read-only, no
+	// exec-sandbox.
+	"worker-read-only",
 }
 
 // TestReadOnly_RoleRegression_SpecialistsAreReadOnly: all 18 core read_only

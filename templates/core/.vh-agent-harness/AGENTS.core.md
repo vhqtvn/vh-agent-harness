@@ -307,6 +307,7 @@ When making changes:
   - `commit-reviewer` for tiered cascade review of a change slice (config-driven tiered cascade with fail-fast escalation)
   - `ship-review` for final whole-change read-only review before merge or promotion
   - `media-perception` (opt-in via the `core/media-perception` capability) for perceiving media handed over as a `path:` or `url:` locator when no compatible capability is exposed to the caller — read-only leaf, returns one consolidated report with `capability_status: available | unavailable | uncertain`, never fabricates observations
+  - `worker-read-only` (opt-in via the `core/worker-read-only` capability) for prompt-scoped bounded read-only inspection, path tracing, evidence extraction, and state observation when the dispatch itself completely defines the scope and no durable specialist process is required — read-only leaf, deny-all task (no outbound delegation), candidate-only return
   <!-- PROJECT: add project-specific specialists here (e.g. domain auditors, builder roles, runtime/registry guardians, deployment roles). -->
 - Agent usage guidance:
   - use `researcher` when the task depends on facts: existing patterns, docs, API behavior, version constraints, prior decisions, or contradictions
@@ -339,6 +340,34 @@ When making changes:
 - Do not mix runtime routing, semantics, and promotion claims into one undisciplined change. Hand off between specialists when crossing boundaries.
 - Any component or configuration promotion, rollback, or profile change must name the affected manifests or profiles and the exact evidence that justifies it.
 - Any docs-only checkpoint or backlog update must preserve history and reflect actual code and validation state, not intent alone.
+
+## Dynamic worker routing (process vs prompt)
+
+The routing decision between a named durable specialist and the dynamic worker
+rests on one distinction: **process is value; prompt is scope.**
+
+- When the task's value is a named specialist's established process, authority
+  boundary, or return contract, route to that specialist. The repeatable
+  process IS the value.
+- When the dispatch prompt itself completely bounds a focused read-only
+  inspection task (locate paths, extract evidence, observe state, compare
+  existing files or behavior) and NO durable specialist process is required,
+  route to the `worker-read-only` dynamic worker (opt-in via the
+  `core/worker-read-only` capability). The prompt IS the scope.
+
+The dynamic worker complements durable specialists; it does not displace them.
+The durable-specialist keep-list is fixed: `coordination`,
+`project-coordinator`, `build`, `researcher`, `debate`, `planner`,
+`repo-explorer`, `docs-steward`, `commit-message`, `commit-reviewer` (plus its
+tier cascade), `ship-review`, and `committer`. None of these is displaced by
+the worker — if the dispatch actually needs one of those processes, route to
+the specialist instead and the worker returns `specialist_route_required`.
+
+The worker is read-only, carries no outbound delegation, and returns
+candidate-only material; a later executor, reviewer, policy, or gate decides
+whether anything based on its output takes effect. `worker-execute` (an
+editable dynamic worker) is deliberately deferred pending edit-fence evidence;
+only `worker-read-only` ships in this pilot.
 
 ## Compaction-summary discipline
 

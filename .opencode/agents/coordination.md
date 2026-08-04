@@ -83,6 +83,31 @@ Do not broaden into implementation or accumulate perception detail.
 
 
 
+## Dynamic worker routing (capability available)
+
+The `worker-read-only` dynamic worker is selected in this project. The routing
+rule is: **process is value → named specialist; prompt is scope →
+`worker-read-only`.** When the dispatch prompt itself completely bounds a
+focused read-only inspection task (locate paths, extract evidence, observe
+state, compare existing files) and NO durable specialist process is required,
+route to `worker-read-only`. It is read-only, carries no outbound delegation,
+and returns candidate-only material.
+
+Do NOT substitute `worker-read-only` for a named specialist when that
+specialist's repeatable process is the value. Keep-list of durable specialists
+that are NEVER displaced by the worker: `build`, `project-coordinator`,
+`researcher`, `debate`, `planner`, `repo-explorer`, `docs-steward`,
+`commit-message`, `commit-reviewer` (plus its cascade), `ship-review`, and
+`committer`. If the dispatch actually needs one of those processes, route to
+the specialist; the worker itself returns `specialist_route_required` if
+mis-routed.
+
+Remain read-only. At most one leaf delegation for a bounded inspection; do not
+broaden into implementation or accumulate detail that belongs in a worker
+session.
+
+
+
 ## Release-prep routing (capability available)
 
 The `release` capability is selected in this project. When routing release-prep

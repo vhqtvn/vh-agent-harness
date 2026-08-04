@@ -105,9 +105,9 @@ func TestMergeCatalogs_ReleasePackShapeMirrorsEmbedded(t *testing.T) {
 		t.Errorf("merged catalog missing core/release")
 	}
 	// Baseline (8) + core seed capabilities (gated-commit, debate,
-	// media-perception) + release.
-	if got := len(merged.IDs()); got != 4 {
-		t.Errorf("merged catalog id count: got %d, want 4 (gated-commit, debate, media-perception, release)", got)
+	// media-perception, worker-read-only) + release.
+	if got := len(merged.IDs()); got != 5 {
+		t.Errorf("merged catalog id count: got %d, want 5 (gated-commit, debate, media-perception, worker-read-only, release)", got)
 	}
 }
 

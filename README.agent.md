@@ -111,15 +111,16 @@ override to force-render a pack regardless of capability resolution.
 
 ### Opt-in core capabilities
 
-The catalog ships three capabilities today. Two are pulled in by the
-`supervised` preset (`core/gated-commit`, `core/debate`); the third is opt-in
-only:
+The catalog ships four capabilities today. Two are pulled in by the
+`supervised` preset (`core/gated-commit`, `core/debate`); the other two are
+opt-in only:
 
 | Capability ID | Provides | In preset? | What it does |
 | --- | --- | --- | --- |
 | `core/gated-commit` | `commit-message`, `commit-reviewer`, `commit-reviewer-a..d`, `committer` | `supervised` | The gated-commit protocol (commit-message drafting, tiered cascade review, committer-exclusive git mutations). |
 | `core/debate` | `debate`, `debate-proposer`, `debate-critic`, `debate-synth`, `solution-brief` | `supervised` | The multi-model debate pipeline plus the solution-brief wrapper. |
 | `core/media-perception` | `media-perception` (agent + caller-facing skill) | none (opt-in) | A single read-only perception specialist that inspects media (image, diagram, chart, video, document/PDF, audio). For local media, callers pass BOTH `@file <path>` (bytes) and `path:` (locator); for remote media, `url:`. Parent-session attachments do NOT auto-propagate to a task child. |
+| `core/worker-read-only` | `worker-read-only` (dynamic worker leaf) | none (opt-in) | A prompt-scoped read-only worker leaf for bounded repository inspection, path tracing, evidence extraction, and state observation when the dispatch itself completely defines the scope and no durable specialist process is required. `delegateFrom` is `build`, `coordination`, `project-coordinator` (researcher deliberately excluded — it is not a perception specialist, and a researcher already holds the read-only inspection surface itself). Read-only boundary: deny `edit`/`task`/`webfetch`/`skill`, deny-all task (no outbound delegation), candidate-only return; carries NO `exec-sandbox` grant, so it is deliberately narrower than `researcher`/`repo-explorer`/`media-perception`. |
 
 Select `core/media-perception` by adding it to `capabilities:`:
 
@@ -128,6 +129,23 @@ profile: minimal         # or supervised
 capabilities:
   - core/media-perception
 ```
+
+Select `core/worker-read-only` by adding it to `capabilities:`:
+
+```yaml
+profile: minimal         # or supervised
+capabilities:
+  - core/worker-read-only
+```
+
+When unselected, the worker-read-only agent block is absent from
+`opencode.jsonc` and the three inbound caller edges (`build`, `coordination`,
+`project-coordinator` → `worker-read-only`) are dropped by the permission
+emitter's present-agent filter — so an unselected capability leaves zero
+dangling edges. (Unlike `media-perception`, there is no caller-prompt
+conditional block: the routing decision between a named specialist and the
+worker is a process-vs-scope judgment the caller already carries, not a
+gated skill load.)
 
 When unselected, the agent block is absent from `opencode.jsonc` and the four
 inbound caller edges (`build`, `coordination`, `project-coordinator`,
