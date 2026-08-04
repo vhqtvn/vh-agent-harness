@@ -130,3 +130,20 @@ command: (analytical — no single command; grounded in consumed canon + this au
 reason: the analytical question is settled, not measurement-gated
 deferred-not-demonstrable: the 54 refusal-site fix list — produced by the re-scoped follow-up /research above, not by this pass
 ```
+
+---
+
+## Addendum (2026-08-04) — observed reachability defect in closure verifiers
+
+*Post sign-off. Not a re-opening of the bounded model; records a defect this audit's own artifact surfaced after the memo was first committed.*
+
+This memo was first committed as `d843ef9`, reverted from `main` by the operator to recover the v0.21.0 release ceremony, then cherry-picked back as `ccc95f8` (byte-identical). During the revert window the memo's closure token still reported success: its verifier was `git show --stat <sha>`, which tests OBJECT EXISTENCE, not REACHABILITY. An orphaned or reflog-only commit satisfies `git show` while being absent from the branch, so the verifier passed throughout a window in which the "promoted to canon" claim was false. This is a self-instance of principle #3 (durable records → recoverable meaning): a closure token is a durable record whose meaning must be recoverable from current branch state, not from object existence.
+
+**Rule for closure verifiers.** A behavioral-closure verifier MUST assert REACHABILITY — e.g. `git merge-base --is-ancestor <sha> <branch>` or `git log <branch> --oneline | grep <path>` — not object existence (`git show`, `git cat-file`). Object-existence verifiers cannot distinguish "committed and landed" from "committed and reverted."
+
+**Both-directions ledger discrepancy.** The closeout ledger (`.git/commit-gate/closeouts.log`) records `status: committed` against `post_commit_head` SHAs. The operator `git reset` escape hatch (legitimate; denied to agents by the `git-mutation-bypass` guard) mutates reachability without touching the ledger, so two discrepancies arise that nothing reconciles today:
+
+1. **entry → unreachable SHA**: an entry claims `committed` against a `post_commit_head` no longer reachable from the branch (orphaned entries; four at observation time). The ledger is a 200-entry rolling window at its cap, so these self-erase on the next few commits rather than accumulating.
+2. **branch commit → no entry**: a commit reachable on the branch has no ledger entry at all (e.g. `ccc95f8`, cherry-picked through the escape hatch and never routed through `commit-gate.sh`).
+
+Direction 2 is the load-bearing one: an unledgered commit is indistinguishable from one that bypassed review — exactly the visibility property the gate exists to provide. The reconciler's goal is **visibility** (INFO/advisory), not refusal: the escape hatch is legitimate. Tracked in `doctor-ledger-reach-reconcile` as a WARN for direction 1, an INFO/advisory listing for direction 2, plus the closure-verifier reachability rule. The check must not assume the orphan entries persist (200-window self-erasure).
