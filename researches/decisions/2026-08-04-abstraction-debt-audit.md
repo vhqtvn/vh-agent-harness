@@ -130,4 +130,4 @@ crux:
 - **Migration-note `local_adapted` typo:** releaser-owned erratum in the next release note; direction is `local_adapted` → `local_adopted` (canonical).
 - **DEFER `defer-015`:** bounded adjudication this pass — answer only whether the termination contract is genuinely unbypassable at the `doctor_behavioral_closure.go` path; correct the one adjective if not, else wording stands.
 - **`solution-brief` cannot write its own deliverable:** curated as a DEFER candidate (harness-process concern; trigger: `solution-brief` tasked with a file deliverable; 5+ observed instances; two candidate fixes recorded).
-- **Subsystem-level cannot-determine verdicts:** deliberately NOT pursued further. Both critique and rebuttal survived unfalsified; that is the legitimate answer. The eleven remaining unresolved claims stay listed with their evidence paths.
+- **Subsystem-level cannot-determine verdicts:** deliberately NOT pursued further. Both critique and rebuttal survived unfalsified; that is the legitimate answer. The ten remaining unresolved claims stay listed with their evidence paths (twelve total; #4 and #12 closed this pass).
