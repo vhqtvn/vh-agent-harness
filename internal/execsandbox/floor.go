@@ -48,7 +48,15 @@ func ApplyFloor(requested, floor SandboxMode) SandboxMode {
 // disable the containment the operator asked for).
 //
 // Empty ("") — the key-absent case — maps to ModeOff (no floor), preserving
-// standalone behavior when the operator has not configured a floor.
+// standalone behavior when the operator has not configured a floor. ParseMinMode
+// is a PURE decoder: it cannot tell absent ("") apart from an explicit
+// "off" once parsed (both are ModeOff). The absent-vs-explicit-off DISTINCTION
+// is the caller's responsibility — loadExecSandboxFloor (internal/cli) threads a
+// `present` flag from the raw FindMinMode value (raw=="" vs raw=="off") so
+// applyFloorToRequest can REFUSE an explicit --sandbox=off downgrade when no
+// floor is configured (silence is not consent to disable containment), while
+// still honoring an explicit `min_mode: off`. Do NOT assume absent+off is safe
+// here — that decision lives at the policy boundary, not in this decoder.
 func ParseMinMode(s string) (SandboxMode, error) {
 	switch s {
 	case "", "off":

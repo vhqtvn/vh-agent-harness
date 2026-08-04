@@ -184,6 +184,84 @@ func TestSandboxNetworkAllow(t *testing.T) {
 	}
 }
 
+// TestSandboxAbsentFloor_RefusesExplicitOff is the FIX-1 behavioral-closure
+// crux, observed end-to-end on the real binary + real filesystem: in a dir with
+// NO exec_sandbox.min_mode floor (an unfloored consumer), an explicit
+// --sandbox=off downgrade is REFUSED — the command exits non-zero with the
+// refuse notice and the target file OUTSIDE ./tmp/ is NEVER created.
+//
+// Before Fix 1, ParseMinMode collapsed absent and explicit-off to the same
+// ModeOff, so applyFloorToRequest(Off, ...) silently honored the downgrade and
+// the command ran FULLY UNCONTAINED (the operator-verified empirical hole: the
+// command exited 0 and created the file). This test pins the OUTCOME (file not
+// created + refuse notice), not just the mechanism — so the crux is
+// outcome-observed, not mechanism-asserted. It complements the unit-level pin
+// (internal/cli.TestApplyFloorToRequest_AbsentFloorRefusesOff) which fixes the
+// refuse at the clamp-pipeline boundary.
+func TestSandboxAbsentFloor_RefusesExplicitOff(t *testing.T) {
+	sandboxFeatureCheck(t)
+
+	// An isolated dir OUTSIDE the repo tree: FindMinMode resolves no floor
+	// (absent) — the unfloored-consumer condition.
+	iso := t.TempDir()
+
+	// The probe is OUTSIDE ./tmp/ (inside iso, not under a tmp/ subdir). Under
+	// the old (hole-open) behavior the uncontained command would CREATE it.
+	probe := filepath.Join(iso, "OUT.txt")
+	_ = os.Remove(probe)
+
+	// Explicit --sandbox=off downgrade in an unfloored dir → MUST be refused.
+	out, exit := runSandboxIn(t, iso, []string{"--sandbox=off", "--net=deny"},
+		"sh", "-c", "echo x > "+probe)
+
+	// OUTCOME 1: the command is refused (non-zero exit) and announces the refuse.
+	if exit == 0 {
+		t.Fatalf("absent floor + --sandbox=off: expected REFUSE (non-zero exit), got exit=0 — the hole is still open (the explicit downgrade ran uncontained):\n%s", out)
+	}
+	if !strings.Contains(out, "refusing --sandbox=off") {
+		t.Fatalf("absent floor + --sandbox=off: expected refuse notice ('refusing --sandbox=off'), got:\n%s", out)
+	}
+
+	// OUTCOME 2 (the load-bearing assertion): the file OUTSIDE ./tmp/ is NOT
+	// created. Before Fix 1 it WAS created (the command ran uncontained).
+	if _, err := os.Stat(probe); err == nil {
+		t.Fatalf("CRUX BROKEN: absent floor + --sandbox=off CREATED %q — the explicit downgrade ran uncontained (the file should not exist; the refuse must stop execution before the write)", probe)
+	}
+}
+
+// TestSandboxAbsentFloor_ContainedDefaultPreserved pins FIX-1's no-regression
+// to standalone behavior: in an unfloored dir, the NO-FLAG default (best-effort,
+// contained) and an explicit best-effort STILL RUN and are contained exactly as
+// before. Fix 1 refuses only absent + explicit --sandbox=off; it must not change
+// standalone contained behavior.
+func TestSandboxAbsentFloor_ContainedDefaultPreserved(t *testing.T) {
+	sandboxFeatureCheck(t)
+
+	iso := t.TempDir() // outside the repo tree => no floor
+
+	// best-effort (the no-flag default) in an unfloored dir → runs, contained.
+	// A write to a path OUTSIDE ./tmp/ under best-effort is denied by Landlock
+	// (the sandbox engages); the command fails non-zero WITHOUT creating the
+	// file. This is the unchanged standalone contained behavior Fix 1 preserves.
+	probe := filepath.Join(iso, "OUTSIDE_TMP")
+	_ = os.Remove(probe)
+	out, exit := runSandboxIn(t, iso, []string{"--sandbox=best-effort", "--net=deny"},
+		"sh", "-c", "echo x > "+probe)
+	// Under best-effort the sandbox engages (Linux has Landlock), so the write
+	// outside tmp is denied — non-zero exit and NO refuse notice (it is NOT the
+	// Fix-1 refuse; it is the kernel containment). The file must not exist.
+	if exit == 0 {
+		t.Fatalf("absent floor + best-effort: write outside tmp succeeded (exit=0) — containment regressed (best-effort must still engage the sandbox and deny the write in an unfloored dir):\n%s", out)
+	}
+	if _, err := os.Stat(probe); err == nil {
+		t.Fatalf("absent floor + best-effort: write outside tmp created %q — containment regressed (best-effort must still engage the sandbox in an unfloored dir):\n%s", probe, out)
+	}
+	// And crucially: NO Fix-1 refuse notice (best-effort is never refused).
+	if strings.Contains(out, "refusing --sandbox=off") {
+		t.Fatalf("absent floor + best-effort: Fix-1 refuse fired (must not — only explicit off is refused):\n%s", out)
+	}
+}
+
 // TestSandboxStrictFloor_DeniesP5Bypass is the CRUX integration test: in the
 // repo (which carries exec_sandbox.min_mode: strict), the P5 bypass
 // (--sandbox=off) is DENIED — the binary upgrades off -> strict, so a write

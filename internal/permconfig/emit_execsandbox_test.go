@@ -405,3 +405,116 @@ func TestExecSandbox_Emit_BuildDoesNotContainGrant(t *testing.T) {
 		t.Fatalf("build bash block has a specific %q entry — build is allow policy, ReadOnlyExtraAllows should be empty", ExecSandboxCommand)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Blast-radius anchor: the grant ships independent of any floor
+// ---------------------------------------------------------------------------
+
+// TestExecSandbox_GrantEmittedIndependentOfFloor anchors WHY the exec-sandbox
+// grant's safety cannot rest on a "paired floor" for consumers: the emitter
+// (this package) has NO knowledge of exec_sandbox.min_mode. The floor lives in
+// the PROJECT-OWNED run-shape.yml (a runtime/binary concern resolved by
+// runshape.FindMinMode at exec-sandbox invocation time), not in the permconfig
+// tables that drive emission. So the grant reaches EVERY consumer's
+// opencode.jsonc regardless of whether that consumer has configured a floor —
+// and every adopter whose already-seeded run-shape.yml lacks an exec_sandbox
+// block (the pre-Fix-2 baseline) is unfloored by default.
+//
+// This is the blast-radius fact that makes Fix 1 (the binary-side refuse on
+// absent + explicit --sandbox=off) the LOAD-BEARING close for existing adopters:
+// the seed (Fix 2) only helps NEW installs; existing adopters keep an unfloored
+// run-shape, and only Fix 1's refuse stops an explicit downgrade there. This
+// test pins that the emitter does not gate the grant on any floor signal, so
+// the safety property MUST be enforced where the floor is resolvable (the
+// binary), not here.
+func TestExecSandbox_GrantEmittedIndependentOfFloor(t *testing.T) {
+	// The emitter takes (input, packs, features) — NONE of which carry a floor
+	// signal. Emitting the granted agent's block therefore cannot depend on a
+	// floor, by construction. We assert the grant still lands in the rendered
+	// researcher block (the concrete blast-radius fact: the verb reaches the
+	// agent's permission surface unconditionally).
+	out := mustEmit(t, miniConfig, nil, Features{})
+	var root map[string]any
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	agents := root["agent"].(map[string]any)
+	granted := 0
+	for _, name := range execSandboxGrantedAgents {
+		a, ok := agents[name].(map[string]any)
+		if !ok {
+			continue // miniConfig may not carry every granted agent; that's fine.
+		}
+		bash, ok := a["permission"].(map[string]any)["bash"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if bash[ExecSandboxCommand] == "allow" {
+			granted++
+		}
+	}
+	if granted == 0 {
+		t.Fatalf("no granted agent resolved in miniConfig emit — blast-radius anchor cannot be asserted (test fixture drift); agents present: %v", agentNameList(root))
+	}
+	// The grant is emitted to at least one granted agent AND there is no floor
+	// field anywhere in the emitted permission surface (the emitter never
+	// produces one). This is the structural proof that the grant ships
+	// independent of any floor — the safety property lives at the binary, not
+	// the emitter.
+	if containsAnyFloorKey(root) {
+		t.Fatalf("emitted config contains a floor-shaped key — the emitter must NOT emit any floor signal (the floor is project-owned runtime config, resolved at exec-sandbox invocation, not at permission emission); this would change where the safety property is enforced")
+	}
+}
+
+// agentNameList returns the agent names in a parsed emit root (for
+// diagnosable failure messages only; order follows map iteration and is not
+// sorted).
+func agentNameList(root map[string]any) []string {
+	agents, ok := root["agent"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(agents))
+	for k := range agents {
+		out = append(out, k)
+	}
+	return out
+}
+
+// containsAnyFloorKey is a shallow scan for any key that looks like an
+// exec_sandbox / min_mode floor signal anywhere in the emitted config's top
+// level or one level under agent/permission. The emitter must never produce
+// such a key — the floor is a project-owned runtime concern, not a permission
+// surface. Used by TestExecSandbox_GrantEmittedIndependentOfFloor to prove the
+// emitter does not (and cannot) gate the grant on a floor.
+func containsAnyFloorKey(root map[string]any) bool {
+	floorish := func(k string) bool {
+		return strings.Contains(k, "exec_sandbox") || strings.Contains(k, "min_mode")
+	}
+	for k := range root {
+		if floorish(k) {
+			return true
+		}
+	}
+	if agents, ok := root["agent"].(map[string]any); ok {
+		for _, v := range agents {
+			a, ok := v.(map[string]any)
+			if !ok {
+				continue
+			}
+			for k := range a {
+				if floorish(k) {
+					return true
+				}
+			}
+			if perm, ok := a["permission"].(map[string]any); ok {
+				for k := range perm {
+					if floorish(k) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}

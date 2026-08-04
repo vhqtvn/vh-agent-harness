@@ -799,8 +799,17 @@ export default function transform({ context }) {
     `deny` (network becomes seccomp-impossible). `--sandbox=off` and
     `--net=allow` are silently upgraded; the caller cannot escape.
   - **best-effort floor** — clamps `--sandbox` up to at least `best-effort`.
-  - **off** (or key absent) — no floor; the flags behave as documented above.
-    Repos without the key keep running unaffected (the floor is opt-in).
+  - **explicit `off`** — no clamp; the flags behave as documented above. This is
+    a DELIBERATE opt-out (the project explicitly accepts uncontained execution).
+  - **ABSENT (no `exec_sandbox` block / no `run-shape.yml` anywhere in the
+    chain)** — the contained no-flag default (`best-effort`) and any explicit
+    stricter mode are honored exactly (standalone contained behavior). An
+    EXPLICIT `--sandbox=off` downgrade is **REFUSED** — silence is not consent
+    to disable containment. Because `run-shape.yml` is project-owned, the
+    harness cannot ship a floor with the exec-sandbox grant, so every adopter is
+    unfloored by default until they add the key; the refuse is what keeps an
+    explicit downgrade from becoming fully uncontained in an unfloored repo. To
+    disable containment deliberately, set an explicit `min_mode: off`.
   - **Discovery** — the floor root walks the ENTIRE ancestor chain from BOTH
     the real (physical, symlink-resolved) cwd AND the `--cwd` target, taking
     the MOST RESTRICTIVE floor found across the whole chain (not
@@ -809,17 +818,22 @@ export default function transform({ context }) {
     under `./tmp/`) is overridden by a stricter enclosing parent. A
     subdirectory invocation, an out-of-project `--cwd` targeting a
     strict-floored project, or a weakening child floor cannot escape an
-    enclosing parent's strict floor.
+    enclosing parent's strict floor. (An explicit `off` at any level counts as
+    a configured floor — the absent-vs-explicit-off distinction is what the
+    refuse hinges on: absent refuses the downgrade, explicit off honors it.)
   - **Fail-closed** — a present-but-BROKEN floor (wrong type, value/key typo,
     YAML syntax error, directory at the path, or unreadable file) makes
     exec-sandbox REFUSE to run uncontained rather than silently dropping the
-    floor. Only a genuinely ABSENT floor (no `exec_sandbox` block / no
-    `run-shape.yml`) resolves to `off`.
+    floor. A genuinely ABSENT floor is distinct from an explicit `off`: absent
+    refuses an explicit `--sandbox=off` (see above), while still honoring the
+    contained default and stricter modes.
   - **Seed default** — new installs seed `min_mode: strict` via
     `defaultRunShapeSeed`. On `update` from a pre-floor version, an existing
     consumer's `run-shape.yml` is preserved (project-owned), so the floor is
-    NOT retroactively applied until the consumer adds the key. Fail-closed if
-    OS primitives are unavailable under a strict floor.
+    NOT retroactively applied until the consumer adds the key (the absent-floor
+    refuse + the `exec-sandbox-floor` doctor WARN are what protect existing
+    adopters in the meantime). Fail-closed if OS primitives are unavailable
+    under a strict floor.
 
   **Seccomp policy = focused BLOCKLIST, not broad allowlist.** Default action
   is ALLOW; the blocklist covers (a) network syscalls when `--net=deny`, and
@@ -1720,10 +1734,11 @@ operator release-prep. The ceremony produces THREE sequential single-path
 (manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`.
 The release-tag wrapper's deterministic gates refuse the tag unless each
 commit binds to its predecessor exactly. The wrapper also runs **G0c**
-  (`vh-agent-harness doctor` — all 21 checks, including #12 defer-liveness,
+  (`vh-agent-harness doctor` — all 22 checks, including #12 defer-liveness,
   #13 staged-errata-content, #14 behavioral-closure, #15 dev-stale-embed,
   #16 f1-envelope, #17 f1-f2-consistency, #18 f2-pairs, #19 head-progress,
-  #20 complexity-advisory, and #21 recurrence-state) as a hard machine gate
+  #20 complexity-advisory, #21 recurrence-state, and #22 exec-sandbox-floor)
+  as a hard machine gate
   AFTER the clean-worktree
 gate (G0b) and BEFORE the readiness-pass artifact gate (G1-G5). A
 non-HEALTHY doctor refuses the tag. This makes doctor a HARD ceremony stop,

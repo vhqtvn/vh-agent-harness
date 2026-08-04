@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -83,8 +84,12 @@ func TestApplyFloorToRequest(t *testing.T) {
 		{"best-effort floor: off+deny -> best-effort+deny", beRepo, execsandbox.ModeOff, execsandbox.NetDeny, execsandbox.ModeBestEffort, execsandbox.NetDeny},
 		{"best-effort floor: strict+allow unchanged (caller stricter on mode)", beRepo, execsandbox.ModeStrict, execsandbox.NetAllow, execsandbox.ModeStrict, execsandbox.NetAllow},
 
-		// no floor (absent): requested mode+net honored exactly (standalone).
-		{"no floor: off+allow honored", noFloorRepo, execsandbox.ModeOff, execsandbox.NetAllow, execsandbox.ModeOff, execsandbox.NetAllow},
+		// no floor (absent): the contained default (best-effort, the no-flag
+		// value) and stricter modes are honored exactly (standalone behavior
+		// PRESERVED by Fix 1). An explicit --sandbox=off is REFUSED — that case
+		// is pinned in TestApplyFloorToRequest_AbsentFloorRefusesOff (it returns
+		// an error, so it cannot live in this success-only table).
+		{"no floor: best-effort+allow honored (standalone default)", noFloorRepo, execsandbox.ModeBestEffort, execsandbox.NetAllow, execsandbox.ModeBestEffort, execsandbox.NetAllow},
 		{"no floor: strict+deny honored", noFloorRepo, execsandbox.ModeStrict, execsandbox.NetDeny, execsandbox.ModeStrict, execsandbox.NetDeny},
 	}
 	for _, tc := range cases {
@@ -133,37 +138,64 @@ func TestLoadExecSandboxFloor_WalkUp(t *testing.T) {
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatalf("mkdir subdir: %v", err)
 	}
-	// From the subdir, the floor must still resolve to strict (walk-up).
-	got, err := loadExecSandboxFloor(sub)
+	// From the subdir, the floor must still resolve to strict (walk-up), and the
+	// floor is PRESENT (an explicit min_mode was configured) — distinct from the
+	// absent case (Fix 1).
+	got, present, err := loadExecSandboxFloor(sub)
 	if err != nil || got != execsandbox.ModeStrict {
 		t.Fatalf("loadExecSandboxFloor(subdir): got %q err=%v, want strict/nil (walk-up must find project floor)", got, err)
+	}
+	if !present {
+		t.Fatalf("loadExecSandboxFloor(subdir): present=false, want true (an explicit strict floor was configured; absent would be present=false)")
 	}
 }
 
 // TestLoadExecSandboxFloor_FailClosed locks the B1 fail-closed contract at the
 // CLI boundary: a present-but-broken floor (wrong-type min_mode, string typo,
 // document syntax error) refuses to run uncontained rather than silently
-// dropping to ModeOff. Absent floor => ModeOff (no floor, run fine).
+// dropping to ModeOff. Absent floor => ModeOff with present=false (Fix 1: the
+// absent case is carried as present=false so an explicit --sandbox=off can be
+// refused upstream, distinct from an explicit min_mode: off which is
+// present=true).
 func TestLoadExecSandboxFloor_FailClosed(t *testing.T) {
-	// absent floor => off (run fine)
+	// absent floor => off, present=false (Fix 1 representation: absent is
+	// distinct from explicit off).
 	none := t.TempDir()
-	got, err := loadExecSandboxFloor(none)
+	got, present, err := loadExecSandboxFloor(none)
 	if err != nil || got != execsandbox.ModeOff {
 		t.Fatalf("absent floor: got %q err=%v, want off/nil", got, err)
 	}
+	if present {
+		t.Fatalf("absent floor: present=true, want false (no exec_sandbox.min_mode block anywhere; absent must be distinguishable from explicit off)")
+	}
 
-	// valid strict => strict
+	// valid strict => strict, present=true
 	ok := t.TempDir()
 	writeFloorRunShape(t, ok, "strict")
-	got, err = loadExecSandboxFloor(ok)
+	got, present, err = loadExecSandboxFloor(ok)
 	if err != nil || got != execsandbox.ModeStrict {
 		t.Fatalf("strict floor: got %q err=%v, want strict/nil", got, err)
+	}
+	if !present {
+		t.Fatalf("strict floor: present=false, want true")
+	}
+
+	// EXPLICIT off => ModeOff, present=true (Fix 1: deliberate opt-out is
+	// PRESENT, distinct from absent). This is what still honors --sandbox=off.
+	offRepo := t.TempDir()
+	writeFloorRunShape(t, offRepo, "off")
+	got, present, err = loadExecSandboxFloor(offRepo)
+	if err != nil || got != execsandbox.ModeOff {
+		t.Fatalf("explicit off floor: got %q err=%v, want off/nil", got, err)
+	}
+	if !present {
+		t.Fatalf("explicit off floor: present=false, want true (explicit min_mode: off is a deliberate opt-out, distinct from absent)")
 	}
 
 	// string typo (VALUE) => fail-closed error
 	typo := t.TempDir()
 	writeFloorRunShape(t, typo, "strcit")
-	if _, err := loadExecSandboxFloor(typo); err == nil {
+	if _, _, err := loadExecSandboxFloor(typo); err == nil {
 		t.Fatalf("string typo min_mode value: expected fail-closed error, got nil")
 	}
 
@@ -173,28 +205,28 @@ func TestLoadExecSandboxFloor_FailClosed(t *testing.T) {
 	// catch (key-typo hole).
 	keyTypo := t.TempDir()
 	writeFloorRunShapeRaw(t, keyTypo, "exec_sandbox:\n  min_mdoe: strict\n")
-	if _, err := loadExecSandboxFloor(keyTypo); err == nil {
+	if _, _, err := loadExecSandboxFloor(keyTypo); err == nil {
 		t.Fatalf("misspelled min_mode key (min_mdoe): expected fail-closed error, got nil")
 	}
 
 	// present block, no min_mode (empty map) => fail-closed
 	emptyBlock := t.TempDir()
 	writeFloorRunShapeRaw(t, emptyBlock, "exec_sandbox: {}\n")
-	if _, err := loadExecSandboxFloor(emptyBlock); err == nil {
+	if _, _, err := loadExecSandboxFloor(emptyBlock); err == nil {
 		t.Fatalf("empty exec_sandbox block (no min_mode): expected fail-closed error, got nil")
 	}
 
 	// wrong-TYPE min_mode (sequence) => fail-closed (B1: not silently off)
 	wt := t.TempDir()
 	writeFloorRunShapeRaw(t, wt, "exec_sandbox:\n  min_mode: [strict]\n")
-	if _, err := loadExecSandboxFloor(wt); err == nil {
+	if _, _, err := loadExecSandboxFloor(wt); err == nil {
 		t.Fatalf("wrong-type min_mode (sequence): expected fail-closed error, got nil")
 	}
 
 	// document syntax error => fail-closed
 	syn := t.TempDir()
 	writeFloorRunShapeRaw(t, syn, "exec_sandbox:\n  min_mode: strict\nlifecycle: [unclosed\n")
-	if _, err := loadExecSandboxFloor(syn); err == nil {
+	if _, _, err := loadExecSandboxFloor(syn); err == nil {
 		t.Fatalf("document syntax error: expected fail-closed error, got nil")
 	}
 
@@ -205,7 +237,7 @@ func TestLoadExecSandboxFloor_FailClosed(t *testing.T) {
 	if err := os.MkdirAll(dirAtFloor, 0o755); err != nil {
 		t.Fatalf("mkdir floor-as-dir: %v", err)
 	}
-	if _, err := loadExecSandboxFloor(dirRepo); err == nil {
+	if _, _, err := loadExecSandboxFloor(dirRepo); err == nil {
 		t.Fatalf("directory at floor path: expected fail-closed error, got nil")
 	}
 }
@@ -334,16 +366,28 @@ func TestApplyFloorToRequest_DualRootBypass(t *testing.T) {
 		t.Fatalf("dual-root reverse: net = %q, want deny", net2)
 	}
 
-	// Neither root has a floor → no clamp (standalone behavior).
+	// Neither root has a floor → no clamp (standalone behavior). Use best-effort
+	// (the no-flag default) — the legitimate standalone contained mode Fix 1
+	// preserves. The absent + explicit --sandbox=off REFUSE is pinned below.
 	mode3, net3, err := applyFloorToRequest(
-		execsandbox.ModeOff, execsandbox.NetAllow,
+		execsandbox.ModeBestEffort, execsandbox.NetAllow,
 		outside, outside,
 	)
 	if err != nil {
 		t.Fatalf("dual-root no-floor: unexpected error: %v", err)
 	}
-	if mode3 != execsandbox.ModeOff || net3 != execsandbox.NetAllow {
-		t.Fatalf("dual-root no-floor: mode=%q net=%q, want off/allow (no floor = no clamp)", mode3, net3)
+	if mode3 != execsandbox.ModeBestEffort || net3 != execsandbox.NetAllow {
+		t.Fatalf("dual-root no-floor: mode=%q net=%q, want best-effort/allow (no floor = no clamp on the contained default)", mode3, net3)
+	}
+
+	// FIX 1 crux in the dual-root shape: when NEITHER root has a floor, an
+	// explicit --sandbox=off downgrade is REFUSED (consistency with the
+	// single-root refuse). Silence is not consent to disable containment.
+	if _, _, err := applyFloorToRequest(
+		execsandbox.ModeOff, execsandbox.NetAllow,
+		outside, outside,
+	); err == nil {
+		t.Fatalf("dual-root no-floor + --sandbox=off: expected refuse error (Fix 1), got nil")
 	}
 }
 
@@ -389,10 +433,14 @@ func TestApplyFloorToRequest_FloorSafetyInvariant_FVBinding(t *testing.T) {
 	}
 
 	// One fixture per floor value, exactly as the Lean `floor` argument ranges
-	// over {off, bestEffort, strict}. "" means an absent exec_sandbox block ⇒ no
-	// floor (ModeOff).
+	// over {off, bestEffort, strict}. The Lean model's `floor` is an EXPLICIT
+	// floor value — "off" here is a deliberate min_mode: off floor (present),
+	// NOT the key-absent case. The absent case is a Go-runtime policy concern
+	// (no floor configured → refuse explicit --sandbox=off, pinned separately
+	// in TestApplyFloorToRequest_AbsentFloorRefusesOff); it is not part of the
+	// Lean `floor` domain and is correctly excluded from this FV matrix.
 	floorFixture := map[execsandbox.SandboxMode]string{
-		execsandbox.ModeOff:        "",
+		execsandbox.ModeOff:        "off",
 		execsandbox.ModeBestEffort: "best-effort",
 		execsandbox.ModeStrict:     "strict",
 	}
@@ -423,5 +471,106 @@ func TestApplyFloorToRequest_FloorSafetyInvariant_FVBinding(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestApplyFloorToRequest_AbsentFloorRefusesOff is the CRUX regression pin for
+// FIX 1: when NO exec_sandbox.min_mode floor is configured (absent from the
+// entire ancestor chain), an explicit caller downgrade to --sandbox=off is
+// REFUSED. Before Fix 1, ParseMinMode collapsed absent and explicit-off to the
+// same ModeOff, so applyFloorToRequest(Off, ...) silently honored the downgrade
+// — meaning an exec-sandbox grant to a read-only agent became FULLY UNCONTAINED
+// on an explicit --sandbox=off in any unfloored consumer (empirically the
+// command exited 0 and wrote files outside ./tmp/). The refuse is what closes
+// that hole: silence is not consent to disable containment. Because the command
+// never reaches execsandbox.Run, the write outside ./tmp/ never happens — the
+// unit-level pin is the refuse error from the clamp pipeline.
+//
+// This is the load-bearing path for the behavioral-closure crux declaration.
+func TestApplyFloorToRequest_AbsentFloorRefusesOff(t *testing.T) {
+	// no-floor repo (no run-shape anywhere in the chain)
+	noFloorRepo := t.TempDir()
+
+	// PIN 1 (Fix 1 crux): absent floor + explicit --sandbox=off → REFUSED.
+	// Today (pre-Fix-1) this returned (ModeOff, NetAllow, nil) and the command
+	// ran uncontained, creating files outside ./tmp/. After Fix 1 it errors.
+	_, _, err := applyFloorToRequest(execsandbox.ModeOff, execsandbox.NetAllow, noFloorRepo, noFloorRepo)
+	if err == nil {
+		t.Fatalf("absent floor + --sandbox=off: expected refuse error (Fix 1 crux), got nil — the hole is still open (an explicit downgrade becomes fully uncontained in an unfloored repo)")
+	}
+	if !strings.Contains(err.Error(), "refusing --sandbox=off") {
+		t.Fatalf("absent floor + --sandbox=off: error %q does not name the refuse (must mention 'refusing --sandbox=off' so the operator can act)", err.Error())
+	}
+
+	// PIN 3 (no regression to standalone): absent floor + NO flag (best-effort,
+	// the no-flag default) → still CONTAINED (honored, no error, no clamp).
+	// Fix 1 must NOT change standalone contained behavior.
+	mode, net, err := applyFloorToRequest(execsandbox.ModeBestEffort, execsandbox.NetAllow, noFloorRepo, noFloorRepo)
+	if err != nil {
+		t.Fatalf("absent floor + best-effort (no-flag default): unexpected error %v (standalone contained behavior must be unchanged)", err)
+	}
+	if mode != execsandbox.ModeBestEffort || net != execsandbox.NetAllow {
+		t.Fatalf("absent floor + best-effort: mode=%q net=%q, want best-effort/allow (contained default preserved)", mode, net)
+	}
+
+	// Absent floor + explicit strict → still contained (honored). Stricter
+	// modes are never a downgrade and must remain honored.
+	mode2, _, err := applyFloorToRequest(execsandbox.ModeStrict, execsandbox.NetDeny, noFloorRepo, noFloorRepo)
+	if err != nil {
+		t.Fatalf("absent floor + strict: unexpected error %v", err)
+	}
+	if mode2 != execsandbox.ModeStrict {
+		t.Fatalf("absent floor + strict: mode=%q, want strict", mode2)
+	}
+}
+
+// TestApplyFloorToRequest_ExplicitOffFloorHonored pins FIX 1's preserved
+// opt-out: an EXPLICIT `min_mode: off` in run-shape.yml is a deliberate opt-out
+// and STILL honors --sandbox=off. This is the counterpart to the absent refuse
+// — the distinction Fix 1 draws is absent (refuse) vs explicit-off (honor),
+// NOT off-refused-vs-off-honored. Without this pin a too-broad Fix 1 that
+// refused all --sandbox=off would regress the deliberate opt-out.
+func TestApplyFloorToRequest_ExplicitOffFloorHonored(t *testing.T) {
+	// explicit min_mode: off floor (present, deliberate opt-out)
+	offRepo := t.TempDir()
+	writeFloorRunShape(t, offRepo, "off")
+
+	// PIN 2: explicit min_mode: off + --sandbox=off → honored (opt-out preserved).
+	mode, net, err := applyFloorToRequest(execsandbox.ModeOff, execsandbox.NetAllow, offRepo, offRepo)
+	if err != nil {
+		t.Fatalf("explicit min_mode: off + --sandbox=off: unexpected error %v (deliberate opt-out must still be honored)", err)
+	}
+	if mode != execsandbox.ModeOff || net != execsandbox.NetAllow {
+		t.Fatalf("explicit off floor + --sandbox=off: mode=%q net=%q, want off/allow (deliberate opt-out preserved)", mode, net)
+	}
+
+	// Sanity: an explicit off floor is reported present by the loader (distinct
+	// from absent), which is what makes the opt-out path reachable.
+	_, present, err := loadExecSandboxFloor(offRepo)
+	if err != nil || !present {
+		t.Fatalf("explicit off floor: present=%v err=%v, want present=true/nil (distinct from absent)", present, err)
+	}
+
+	// And an absent floor is present=false (the distinction Fix 1 hinges on).
+	absent := t.TempDir()
+	_, presentAbsent, err := loadExecSandboxFloor(absent)
+	if err != nil || presentAbsent {
+		t.Fatalf("absent floor: present=%v err=%v, want present=false/nil", presentAbsent, err)
+	}
+}
+
+// TestApplyFloorToRequest_InvalidFloorFailsClosed re-pins behavior 4 at the
+// applyFloorToRequest boundary: a present-but-invalid min_mode (a value typo)
+// must FAIL CLOSED (refuse to run uncontained), NOT silently collapse to
+// ModeOff. This is the fail-closed contract that pre-dates Fix 1 and must not
+// regress: Fix 1 refuses absent+off, but an invalid floor is a different
+// (already-closed) failure that still errors.
+func TestApplyFloorToRequest_InvalidFloorFailsClosed(t *testing.T) {
+	// invalid min_mode VALUE (a typo) → fail-closed at the loader → propagates
+	// through applyFloorToRequest as an error (never an uncontained run).
+	typo := t.TempDir()
+	writeFloorRunShape(t, typo, "strcit")
+	if _, _, err := applyFloorToRequest(execsandbox.ModeBestEffort, execsandbox.NetDeny, typo, typo); err == nil {
+		t.Fatalf("invalid min_mode value (strcit): expected fail-closed error from applyFloorToRequest, got nil (the operator asked for a floor we cannot honor; must refuse uncontained)")
 	}
 }

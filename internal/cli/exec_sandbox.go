@@ -194,8 +194,16 @@ func runExecSandbox(cmd *cobra.Command, args []string) error {
 // Taking the max of both ensures neither axis escapes.
 //
 // Floor contract:
-//   - floor == off (absent from both roots): no clamp — requested mode and net
-//     honored exactly (standalone behavior).
+//   - ABSENT (no exec_sandbox.min_mode block in either root): the no-flag
+//     default (best-effort) and any explicit stricter mode are honored exactly
+//     (standalone contained behavior is unchanged); an EXPLICIT --sandbox=off
+//     downgrade is REFUSED — silence is not consent to disable containment
+//     (FIX 1; see the refuse guard below). This is the load-bearing close: the
+//     grant ships to consumers whose run-shape.yml is project-owned, so the
+//     harness cannot ship a floor with the grant, and every adopter is unfloored
+//     by default until they add the key.
+//   - floor == off (explicit min_mode: off from either root): requested mode and
+//     net honored exactly (deliberate opt-out preserved).
 //   - floor == best-effort (from either root): mode clamped up to best-effort.
 //   - floor == strict (from either root): mode clamped up to strict AND net
 //     forced to deny (the Level-B containment contract).
@@ -204,13 +212,31 @@ func runExecSandbox(cmd *cobra.Command, args []string) error {
 // a floor the operator deliberately set must not be silently dropped.
 func applyFloorToRequest(reqMode execsandbox.SandboxMode, reqNet execsandbox.NetPolicy, realCWD string, repoRoot string) (execsandbox.SandboxMode, execsandbox.NetPolicy, error) {
 	floor := execsandbox.ModeOff
+	anyPresent := false
 	for _, root := range []string{realCWD, repoRoot} {
-		f, err := loadExecSandboxFloor(root)
+		f, present, err := loadExecSandboxFloor(root)
 		if err != nil {
 			return reqMode, reqNet, err
 		}
+		if present {
+			anyPresent = true
+		}
 		// Take the MAX of both floors — a strict floor from EITHER root applies.
 		floor = execsandbox.ApplyFloor(floor, f)
+	}
+	// FIX 1 (load-bearing): when NO exec_sandbox.min_mode floor is configured in
+	// any enclosing run-shape.yml (absent from BOTH roots), an explicit caller
+	// downgrade to --sandbox=off must be REFUSED. ParseMinMode collapses absent
+	// ("") and explicit-off ("off") to the same ModeOff, so without the present
+	// flag the absent case would silently honor --sandbox=off — opening the hole
+	// that an exec-sandbox grant to a read-only agent becomes fully uncontained
+	// on an explicit downgrade in any unfloored consumer. An explicit
+	// `min_mode: off` (anyPresent && floor==ModeOff) is a deliberate opt-out and
+	// STILL honors --sandbox=off (unchanged). The no-flag default (best-effort)
+	// and explicit stricter modes are unaffected: standalone contained behavior
+	// is preserved (absent + best-effort/strict = honored, contained).
+	if !anyPresent && reqMode == execsandbox.ModeOff {
+		return reqMode, reqNet, fmt.Errorf("exec-sandbox: refusing --sandbox=off: no exec_sandbox.min_mode floor is configured in any enclosing run-shape.yml, so an explicit downgrade to off is not permitted (silence is not consent to disable containment). To disable containment deliberately, set exec_sandbox.min_mode: off in .vh-agent-harness/run-shape.yml")
 	}
 	effMode := execsandbox.ApplyFloor(reqMode, floor)
 	effNet := reqNet
@@ -225,24 +251,49 @@ func applyFloorToRequest(reqMode execsandbox.SandboxMode, reqNet execsandbox.Net
 }
 
 // loadExecSandboxFloor resolves the exec_sandbox.min_mode floor for floorRoot
-// (walking up to find the enclosing run-shape). Absent file / absent key /
-// empty value => ModeOff (no floor). ANY load error (present-but-wrong-type
-// min_mode, document syntax error, unreadable file) is FAIL-CLOSED — the
-// operator asked for a floor we cannot honor, so refuse rather than silently
-// running uncontained. The schema validator (doctor) catches structural typos
-// at health-check time; this is the runtime defense-in-depth.
-func loadExecSandboxFloor(floorRoot string) (execsandbox.SandboxMode, error) {
+// (walking up to find the enclosing run-shape). Returns (floor, present, err):
+//   - present=false, floor=ModeOff, err=nil: NO exec_sandbox.min_mode block
+//     exists anywhere in the ancestor chain (the ABSENT case). This is
+//     DISTINCT from an explicit `min_mode: off`, which returns present=true.
+//   - present=true, floor=<parsed>, err=nil: an explicit floor was resolved
+//     (off|best-effort|strict). Explicit off is a deliberate opt-out
+//     (present=true, floor=ModeOff); absent is not (present=false, floor=ModeOff).
+//   - err!=nil: FAIL-CLOSED — a present-but-undecodable floor (wrong-type
+//     min_mode, document syntax error, unreadable file) refuses to run
+//     uncontained rather than silently dropping to ModeOff. The schema
+//     validator (doctor) catches structural typos at health-check time; this
+//     is the runtime defense-in-depth.
+//
+// The `present` flag is the FIX-1 representation change that distinguishes
+// ABSENT from EXPLICIT-off. FindMinMode returns raw=="" for absent (no
+// exec_sandbox block anywhere) and raw=="off" for an explicit opt-out, but
+// ParseMinMode then collapses both to ModeOff. Threading `present = raw != ""`
+// past ParseMinMode preserves the distinction so the caller
+// (applyFloorToRequest) can REFUSE an explicit --sandbox=off downgrade when no
+// floor is configured, while still honoring an explicit `min_mode: off`. The
+// distinction lives at the policy boundary (cli), not in the execsandbox
+// package, so ApplyFloor/ParseMinMode — the formal-verification surface — stay
+// pure decoders and are unchanged.
+func loadExecSandboxFloor(floorRoot string) (execsandbox.SandboxMode, bool, error) {
 	_, raw, err := runshape.FindMinMode(floorRoot)
 	if err != nil {
-		return execsandbox.ModeOff, fmt.Errorf("exec-sandbox: cannot read exec_sandbox.min_mode floor; refusing to run uncontained: %w", err)
+		return execsandbox.ModeOff, false, fmt.Errorf("exec-sandbox: cannot read exec_sandbox.min_mode floor; refusing to run uncontained: %w", err)
+	}
+	// ABSENT: no exec_sandbox.min_mode block anywhere in the chain (raw=="").
+	// Distinct from explicit off (raw=="off"). Carry present=false so the caller
+	// can refuse an explicit --sandbox=off downgrade (silence is not consent to
+	// disable containment) while leaving the contained default (best-effort) and
+	// stricter modes honored.
+	if raw == "" {
+		return execsandbox.ModeOff, false, nil
 	}
 	floor, perr := execsandbox.ParseMinMode(raw)
 	if perr != nil {
 		// Explicit-but-invalid min_mode value (e.g. a string typo like "strcit"):
 		// fail closed.
-		return execsandbox.ModeOff, fmt.Errorf("exec-sandbox: %w", perr)
+		return execsandbox.ModeOff, false, fmt.Errorf("exec-sandbox: %w", perr)
 	}
-	return floor, nil
+	return floor, true, nil
 }
 
 func parseSandboxMode(s string) (execsandbox.SandboxMode, error) {

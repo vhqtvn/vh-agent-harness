@@ -71,6 +71,7 @@ var doctorCmd = &cobra.Command{
   head-progress   last N successful closeouts advanced HEAD  WARN if post_commit_head flatlined across N closeouts (Pattern 4); SKIP greenfield
   complexity-advisory repo-snapshot scan of nominated files    WARN if candidates above threshold (advisory only; NEVER FAIL)
   recurrence-state canonical recurrence groups + defects       WARN if malformed/conflicts/uncollapsed; INFO clean; SKIP none
+  exec-sandbox-floor exec-sandbox grant carried w/o a floor     WARN if grant carried and no floor resolves (advisory only; NEVER FAIL)
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -399,6 +400,21 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	rr := checkRecurrenceState(abs)
 	fmt.Fprintln(out, "    "+rr.String())
 	applyTier(rr.tier, &problems, &warns)
+
+	// 22. exec-sandbox-floor (FIX-3 advisory — the SAFETY LAYER INFORMs).
+	//     Surfaces the residual blast radius of the exec-sandbox Level-B grant
+	//     when NO exec_sandbox.min_mode floor resolves: the grant ships to
+	//     consumers but run-shape.yml is project-owned, so every adopter is
+	//     unfloored by default. Fix 1 refuses an explicit --sandbox=off at
+	//     runtime; this WARN is the advisory that nudges the operator to durably
+	//     floor the repo (add exec_sandbox.min_mode: strict). ADVISORY ONLY:
+	//     never increments the problem count, never FAILs doctor. SKIPs cleanly
+	//     when no agent carries the grant, when the config is absent/unparseable,
+	//     or when a floor resolves (any value, including an explicit opt-out).
+	fmt.Fprintln(out, "  exec-sandbox-floor:")
+	esfr := checkExecSandboxGrantFloor(abs)
+	fmt.Fprintln(out, "    "+esfr.String())
+	applyTier(esfr.tier, &problems, &warns)
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)
