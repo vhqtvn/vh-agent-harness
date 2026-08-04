@@ -15,11 +15,13 @@ develop the harness.
 - `templates/core/` — the embedded corpus (`go:embed`). THIS is what ships into
   projects; it must stay **domain-free** (tokens only, no project specifics).
 - `corpus.go` / `core_manifest.go` — embed roots + ownership classification.
-- Embed-root reach (see `corpus.go`): only `templates/core/` renders into an
-  adopter's repo via the seam. `templates/{docs,examples,sys-prompts,migrations}/`
+- Embed-root reach (see `corpus.go`): `templates/core/` renders UNCONDITIONALLY
+  into every adopter's repo via the seam; `templates/overlays/` renders
+  CONDITIONALLY (only when the pack is listed under `overlays:` in
+  `vh-harness-profile.yml`); `templates/{docs,examples,sys-prompts,migrations}/`
   are binary/help-surface embeds served by `vh-agent-harness docs|example|sys-prompt`
-  and `help migrate` — they travel with the binary and are NOT rendered into
-  consumer repos. Conflating them causes wrong file-lists when editing docs.
+  and `help migrate` — they travel with the binary and are NEVER rendered into
+  consumer repos. Conflating these tiers causes wrong file-lists when editing docs.
 
 ## Non-negotiable rules
 
