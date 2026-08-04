@@ -64,11 +64,14 @@ const OverlaysDir = "templates/overlays"
 
 // OverlaysFS is the read-only embedded overlay packs tree. Callers read from
 // the OverlaysDir sub-directory. internal/overlay lists/opens packs from here.
-// Currently embeds three shipped packs — `auto-classifier-pilot` (opt-in
+// Currently embeds six shipped packs — `auto-classifier-pilot` (opt-in
 // auto-classifier safety pilot), `release` (Phase-3 capability-installer
-// reference), and `repo-mail` (repo-mail egress-gate wiring overlay) — plus the
-// retained .gitkeep; KnownPacks() returns ["auto-classifier-pilot", "release",
-// "repo-mail"] (sorted) and OpenPack(<name>) opens any of them.
+// reference), `repo-mail` (repo-mail egress-gate wiring overlay), and three
+// skills-only overlay pilots (`contract-invariant-audit-pilot`,
+// `formal-verification-pilot`, `resolve-first-pilot`) that are strictly
+// INFORMS-only (no agent/command/permission/gate) — plus the retained .gitkeep;
+// KnownPacks() returns the sorted directory list and OpenPack(<name>) opens any
+// of them.
 //
 //go:embed all:templates/overlays
 var OverlaysFS embed.FS

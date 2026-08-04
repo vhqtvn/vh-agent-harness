@@ -254,7 +254,7 @@ not claim it passed from prompt inspection alone.
 
 ### Shipped overlay packs
 
-Besides project packs you author under `.vh-agent-harness/overlays/`, three
+Besides project packs you author under `.vh-agent-harness/overlays/`, six
 overlay packs ship **embedded in the binary**, selectable by name with no
 vendoring:
 
@@ -282,6 +282,21 @@ vendoring:
   via dependency injection. It is **overlay-only** (no capability-manifest), so
   it is selected solely via `overlays: [repo-mail]`, and it depends on
   `auto-classifier-pilot` for the shared `scrubCredentials` helper.
+
+- `formal-verification-pilot` — a skills-only pilot for agent-authored formal
+  proofs (Lean4-core/TLAPS). It ships a SKILL plus references and is strictly
+  **INFORMS-only**: it wires no agent, no command, no permission surface, and no
+  gate. Select it via `overlays: [formal-verification-pilot]`.
+
+- `resolve-first-pilot` — a skills-only pilot for DEFER/follow-up triage at
+  card-creation. It ships an instruction-only SKILL plus a runbook and is
+  strictly **INFORMS-only**. Select it via `overlays: [resolve-first-pilot]`.
+
+- `contract-invariant-audit-pilot` — a skills-only pilot for proactive
+  contract/invariant auditing across repository history. It ships a SKILL, a
+  runbook, and a deterministic discovery/accounting helper that runs under the
+  existing broad `vh-agent-harness *` allow. It is strictly **INFORMS-only**.
+  Select it via `overlays: [contract-invariant-audit-pilot]`.
 
 Each renders into `.opencode/` on `update` exactly like a project-local pack,
 and each is opt-in (a `minimal` profile that never names it renders nothing of

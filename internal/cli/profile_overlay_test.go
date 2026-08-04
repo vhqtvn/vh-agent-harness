@@ -82,10 +82,11 @@ func TestActiveOverlays_ReturnsSelectionInOrder(t *testing.T) {
 
 // TestActiveOverlays_AllShippedPacksSelectable confirms each name reported by
 // overlay.KnownPacks (the real shipped set) round-trips through a valid profile
-// selection. The harness ships three embedded packs — `auto-classifier-pilot`,
-// `release`, and `repo-mail` — so this loop exercises all three. web-overlay remains relocated to a
-// non-shipped adoption reference under docs/adoption-examples/web/ and is NOT a
-// shipped pack.
+// selection. The harness ships six embedded packs — `auto-classifier-pilot`,
+// `contract-invariant-audit-pilot`, `formal-verification-pilot`, `release`,
+// `repo-mail`, and `resolve-first-pilot` — so this loop exercises all six.
+// web-overlay remains relocated to a non-shipped adoption reference under
+// docs/adoption-examples/web/ and is NOT a shipped pack.
 func TestActiveOverlays_AllShippedPacksSelectable(t *testing.T) {
 	shipped, err := overlay.KnownPacks()
 	if err != nil {

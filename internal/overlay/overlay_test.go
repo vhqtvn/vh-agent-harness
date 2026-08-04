@@ -9,15 +9,18 @@ package overlay
 //
 // PACK FIXTURE POLICY (2026-06-25 pre-publish clearance, updated 2026-07-01,
 // extended 2026-07-14 with the auto-classifier-pilot embed promotion, extended
-// 2026-07-27 with the repo-mail embed promotion):
-// the harness ships THREE embedded overlay packs — `auto-classifier-pilot` (the
+// 2026-07-27 with the repo-mail embed promotion, extended 2026-08-04 with the
+// three skills-only pilot embed promotions):
+// the harness ships SIX embedded overlay packs — `auto-classifier-pilot` (the
 // opt-in auto-classifier safety pilot), `release` (Phase-3
 // capability-installer overlay-integration reference implementation, the first
-// shipped pack), and `repo-mail` (the repo-mail inter-repo communication
-// protocol overlay — egress-gate wiring). web-overlay was relocated to a
-// non-shipped adoption reference under docs/adoption-examples/web/, so it is
-// NOT a shipped pack. KnownPacks therefore returns ["auto-classifier-pilot",
-// "release", "repo-mail"] (sorted). To keep
+// shipped pack), `repo-mail` (the repo-mail inter-repo communication
+// protocol overlay — egress-gate wiring), and three skills-only overlay pilots
+// (`contract-invariant-audit-pilot`, `formal-verification-pilot`,
+// `resolve-first-pilot`) that are strictly INFORMS-only (no
+// agent/command/permission/gate) and name-selectable via `overlays:` like the
+// other three. web-overlay was relocated to a non-shipped adoption reference
+// under docs/adoption-examples/web/, so it is NOT a shipped pack. To keep
 // exercising the Pack API + merge/render contract against a richer shape than
 // the shipped packs carry, every pack-touching test below builds a SYNTHETIC
 // pack from testing/fstest.MapFS (mirroring the on-disk layout a real pack
@@ -38,17 +41,28 @@ import (
 )
 
 // knownPackNames is the sorted list of overlay packs shipped under
-// templates/overlays. The harness ships three embedded overlay packs:
+// templates/overlays. The harness ships six embedded overlay packs:
 // `auto-classifier-pilot` (opt-in auto-classifier safety pilot, promoted to the
 // embed on 2026-07-14), `release` (Phase-3 capability-installer reference, the
-// first shipped pack), and `repo-mail` (repo-mail inter-repo communication
+// first shipped pack), `repo-mail` (repo-mail inter-repo communication
 // protocol overlay — egress-gate wiring, promoted to the embed on 2026-07-27),
-// so KnownPacks returns ["auto-classifier-pilot", "release", "repo-mail"]
+// and three skills-only overlay pilots (`contract-invariant-audit-pilot`,
+// `formal-verification-pilot`, `resolve-first-pilot`) that are strictly
+// INFORMS-only (no agent/command/permission/gate), so KnownPacks returns
+// ["auto-classifier-pilot", "contract-invariant-audit-pilot",
+// "formal-verification-pilot", "release", "repo-mail", "resolve-first-pilot"]
 // (sorted). web-overlay remains relocated to docs/adoption-examples/web/ and is
 // NOT a shipped pack, so it is deliberately absent here. (See
 // TestKnownPacks_ShipsEmbeddedPacks for the live assertion that pins this
 // fixture to reality.)
-var knownPackNames = []string{"auto-classifier-pilot", "release", "repo-mail"}
+var knownPackNames = []string{
+	"auto-classifier-pilot",
+	"contract-invariant-audit-pilot",
+	"formal-verification-pilot",
+	"release",
+	"repo-mail",
+	"resolve-first-pilot",
+}
 
 // synthWebStyleFS builds an in-memory fs.FS that mirrors the on-disk layout the
 // real web-overlay pack shipped: agent/command/skill UNIT files plus the three
@@ -164,9 +178,7 @@ func TestOpenPackFor_FallsBackToEmbedded(t *testing.T) {
 // --- KnownPacks ------------------------------------------------------------
 
 // TestKnownPacks_ShipsEmbeddedPacks confirms KnownPacks lists the shipped
-// embedded overlay packs — `auto-classifier-pilot` (opt-in auto-classifier
-// safety pilot), `release` (Phase-3 capability-installer reference), and
-// `repo-mail` (repo-mail egress-gate wiring overlay). All three are
+// embedded overlay packs (see knownPackNames for the canonical list). All are
 // name-selectable out of the box. web-overlay remains relocated to a
 // non-shipped adoption reference and is deliberately absent.
 func TestKnownPacks_ShipsEmbeddedPacks(t *testing.T) {
@@ -174,7 +186,7 @@ func TestKnownPacks_ShipsEmbeddedPacks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("KnownPacks: %v", err)
 	}
-	want := []string{"auto-classifier-pilot", "release", "repo-mail"}
+	want := knownPackNames
 	if len(got) != len(want) {
 		t.Fatalf("KnownPacks: expected %v, got %v", want, got)
 	}
@@ -216,9 +228,9 @@ func TestKnownPacks_MatchesEmbeddedDir(t *testing.T) {
 
 // TestOpenPack_UnknownNamesFailClosed confirms OpenPack fails closed (wrapping
 // fs.ErrNotExist) for any name that is not a shipped pack. This is the contract
-// a profile that references a non-existent pack hits. (The shipped names today
-// are `auto-classifier-pilot`, `release`, and `repo-mail`; every name listed
-// below is deliberately NOT one of them.)
+// a profile that references a non-existent pack hits. (See knownPackNames for
+// the canonical shipped set; every name listed below is deliberately NOT one
+// of them.)
 func TestOpenPack_UnknownNamesFailClosed(t *testing.T) {
 	for _, name := range []string{"web-overlay", "anything", "acme", "acme-cockpit"} {
 		t.Run(name, func(t *testing.T) {
