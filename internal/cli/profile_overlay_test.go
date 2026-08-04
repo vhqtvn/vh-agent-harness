@@ -150,3 +150,160 @@ func TestReadProfileAnswers_MissingFileFallsBackToCorpusDefault(t *testing.T) {
 		t.Errorf("missing profile should fall back to corpus default (features.backlog=true), got %q", got)
 	}
 }
+
+// --- shipped-pilot feature activation ----------------------------------------
+//
+// The tests below cover the default-on shipped-pilot distribution mechanism
+// (see researches/decisions/2026-08-04-opt-out-pilot-distribution.md). The 3
+// pilot packs are default-on for every consumer and disable-able via
+// features: <key>: false. The mechanism lives in reconciledFeatures (render-time
+// platform-default ∪ project-wins) + featureActivatedPacks (finite feature-key
+// -> pack-name table) + the union in resolveCapabilityAnswers.
+
+// containsPack is a small helper to check a pack name is in a slice.
+func containsPack(packs []string, name string) bool {
+	for _, p := range packs {
+		if p == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestReconciledFeatures_GreenfieldReturnsPlatformDefault confirms a target with
+// no live profile (greenfield install) gets the platform default features
+// verbatim, including the 3 shipped-pilot keys (default true).
+func TestReconciledFeatures_GreenfieldReturnsPlatformDefault(t *testing.T) {
+	target := t.TempDir()
+	feats := reconciledFeatures(target)
+	for _, key := range []string{
+		"formal-verification-pilot",
+		"resolve-first-pilot",
+		"contract-invariant-audit-pilot",
+	} {
+		if !feats[key] {
+			t.Errorf("greenfield features[%q] = false, want true (platform default-on)", key)
+		}
+	}
+	if !feats["backlog"] {
+		t.Errorf("greenfield features[backlog] = false, want true (platform default)")
+	}
+}
+
+// TestReconciledFeatures_ProjectFalseOverridesDefault confirms an explicit
+// features: <key>: false in the live profile disables the default-on pilot for
+// THAT key only (the other two stay on).
+func TestReconciledFeatures_ProjectFalseOverridesDefault(t *testing.T) {
+	target := t.TempDir()
+	writeProfile(t, target, "profile: minimal\nfeatures:\n  formal-verification-pilot: false\noverlays: []\npolicy_packs: []\n")
+	feats := reconciledFeatures(target)
+	if feats["formal-verification-pilot"] {
+		t.Errorf("explicit false must disable default; features[formal-verification-pilot] = true, want false")
+	}
+	if !feats["resolve-first-pilot"] {
+		t.Errorf("unrelated pilot must stay on; features[resolve-first-pilot] = false, want true")
+	}
+	if !feats["contract-invariant-audit-pilot"] {
+		t.Errorf("unrelated pilot must stay on; features[contract-invariant-audit-pilot] = false, want true")
+	}
+}
+
+// TestReconciledFeatures_MalformedProfileReturnsPlatformDefault confirms a
+// schema-invalid live profile falls back to the platform default verbatim (all 3
+// pilots on) rather than stripping them. A broken profile must not silently
+// strip shipped pilots; doctor reports the schema error separately.
+func TestReconciledFeatures_MalformedProfileReturnsPlatformDefault(t *testing.T) {
+	target := t.TempDir()
+	writeProfile(t, target, "profile: experimental_not_in_enum\nfeatures:\n  backlog: true\noverlays: [web-overlay]\npolicy_packs: []\n")
+	feats := reconciledFeatures(target)
+	for _, key := range []string{
+		"formal-verification-pilot",
+		"resolve-first-pilot",
+		"contract-invariant-audit-pilot",
+	} {
+		if !feats[key] {
+			t.Errorf("malformed profile must fall back to platform default (3 pilots on); features[%q] = false, want true", key)
+		}
+	}
+}
+
+// TestProjectProfileAnswers_AbsentPilotKeyIsNotProjected confirms the RAW
+// projection (projectProfileAnswers) does NOT inject pilot feature keys that are
+// absent from the profile — they evaluate false at raw template lookup via Go's
+// zero value. The default-on semantics come from reconciledFeatures (which unions
+// in the platform default), NOT from the raw projection. This keeps the two
+// layers honest: raw projection = what the profile literally says; reconciled =
+// what the render actually sees.
+func TestProjectProfileAnswers_AbsentPilotKeyIsNotProjected(t *testing.T) {
+	raw := []byte("profile: minimal\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\n")
+	ans := projectProfileAnswers(raw)
+	for _, key := range []string{
+		"features.formal-verification-pilot",
+		"features.resolve-first-pilot",
+		"features.contract-invariant-audit-pilot",
+	} {
+		if v, ok := ans[key]; ok {
+			t.Errorf("absent pilot key %q must not be projected (raw lookup = zero-value false); got %q", key, v)
+		}
+	}
+}
+
+// TestFeatureActivatedPacks_DefaultOnNoOverlays confirms a consumer profile with
+// no explicit overlays and no explicit feature keys still activates the 3 pilot
+// packs via the default-on mechanism. This is the crux: a bare `profile: minimal`
+// consumer GAINS the 3 pilot skills on update without any opt-in.
+func TestFeatureActivatedPacks_DefaultOnNoOverlays(t *testing.T) {
+	target := t.TempDir()
+	writeProfile(t, target, "profile: minimal\noverlays: []\npolicy_packs: []\n")
+	_, packs, _, _, err := resolveCapabilityAnswers(target)
+	if err != nil {
+		t.Fatalf("resolveCapabilityAnswers: %v", err)
+	}
+	for _, name := range []string{
+		"formal-verification-pilot",
+		"resolve-first-pilot",
+		"contract-invariant-audit-pilot",
+	} {
+		if !containsPack(packs, name) {
+			t.Errorf("default-on pilot %q missing from renderPacks %v", name, packs)
+		}
+	}
+}
+
+// TestFeatureActivatedPacks_OptOutFalseDropsOne confirms setting a single pilot
+// feature to false drops ONLY that pilot from the render list (the other two
+// remain on).
+func TestFeatureActivatedPacks_OptOutFalseDropsOne(t *testing.T) {
+	target := t.TempDir()
+	writeProfile(t, target, "profile: minimal\nfeatures:\n  formal-verification-pilot: false\noverlays: []\npolicy_packs: []\n")
+	_, packs, _, _, err := resolveCapabilityAnswers(target)
+	if err != nil {
+		t.Fatalf("resolveCapabilityAnswers: %v", err)
+	}
+	if containsPack(packs, "formal-verification-pilot") {
+		t.Errorf("opted-out pilot must NOT render; found it in %v", packs)
+	}
+	if !containsPack(packs, "resolve-first-pilot") {
+		t.Errorf("non-opted-out pilot must still render; resolve-first-pilot missing from %v", packs)
+	}
+	if !containsPack(packs, "contract-invariant-audit-pilot") {
+		t.Errorf("non-opted-out pilot must still render; contract-invariant-audit-pilot missing from %v", packs)
+	}
+}
+
+// TestFeatureActivatedPacks_ExplicitOverlaySurvivesOptOut confirms that an
+// explicit overlays: entry for a pilot SURVIVES a features: <key>: false opt-out.
+// This proves `false` disables only the DEFAULT-on path — it is NOT a global
+// veto. An operator who explicitly lists the pack under overlays: gets it
+// regardless of the feature flag.
+func TestFeatureActivatedPacks_ExplicitOverlaySurvivesOptOut(t *testing.T) {
+	target := t.TempDir()
+	writeProfile(t, target, "profile: minimal\nfeatures:\n  formal-verification-pilot: false\noverlays: [formal-verification-pilot]\npolicy_packs: []\n")
+	_, packs, _, _, err := resolveCapabilityAnswers(target)
+	if err != nil {
+		t.Fatalf("resolveCapabilityAnswers: %v", err)
+	}
+	if !containsPack(packs, "formal-verification-pilot") {
+		t.Errorf("explicit overlays: entry must survive features:false (NOT a global veto); missing from %v", packs)
+	}
+}

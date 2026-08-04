@@ -16,6 +16,13 @@ profile: minimal
 # features: per-feature toggles (keyed; your value wins on reconcile).
 features:
   backlog: false        # enable the backlog/planning command surface
+  # Shipped default-on overlay pilots: strictly INFORMS-only skills (no
+  # agent/command/permission/gate). They ship default-on for every consumer;
+  # set any to false to opt out. See `vh-agent-harness help migrate` for the
+  # release that introduced opt-out pilot distribution.
+  formal-verification-pilot: true
+  resolve-first-pilot: true
+  contract-invariant-audit-pilot: true
 
 # overlays: project overlay packs to load, by name. Each must exist at
 # .vh-agent-harness/overlays/<name>/ (agents/, commands/, skills/,

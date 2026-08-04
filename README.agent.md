@@ -286,21 +286,34 @@ vendoring:
 - `formal-verification-pilot` — a skills-only pilot for agent-authored formal
   proofs (Lean4-core/TLAPS). It ships a SKILL plus references and is strictly
   **INFORMS-only**: it wires no agent, no command, no permission surface, and no
-  gate. Select it via `overlays: [formal-verification-pilot]`.
+  gate. It ships **default-on** for every consumer; disable it with
+  `features: formal-verification-pilot: false`. An explicit
+  `overlays: [formal-verification-pilot]` entry re-adds it even when opted out
+  (the feature flag disables only the default, not a forced re-selection).
 
 - `resolve-first-pilot` — a skills-only pilot for DEFER/follow-up triage at
   card-creation. It ships an instruction-only SKILL plus a runbook and is
-  strictly **INFORMS-only**. Select it via `overlays: [resolve-first-pilot]`.
+  strictly **INFORMS-only**. It ships **default-on** for every consumer;
+  disable it with `features: resolve-first-pilot: false`. An explicit
+  `overlays: [resolve-first-pilot]` entry re-adds it even when opted out.
 
 - `contract-invariant-audit-pilot` — a skills-only pilot for proactive
   contract/invariant auditing across repository history. It ships a SKILL, a
   runbook, and a deterministic discovery/accounting helper that runs under the
   existing broad `vh-agent-harness *` allow. It is strictly **INFORMS-only**.
-  Select it via `overlays: [contract-invariant-audit-pilot]`.
+  It ships **default-on** for every consumer; disable it with
+  `features: contract-invariant-audit-pilot: false`. An explicit
+  `overlays: [contract-invariant-audit-pilot]` entry re-adds it even when
+  opted out.
 
-Each renders into `.opencode/` on `update` exactly like a project-local pack,
-and each is opt-in (a `minimal` profile that never names it renders nothing of
-it). A project-local pack of the same name still shadows the embed wholly.
+Each renders into `.opencode/` on `update` exactly like a project-local pack.
+The three pilots (`formal-verification-pilot`, `resolve-first-pilot`,
+`contract-invariant-audit-pilot`) are **default-on**: a `minimal` profile that
+never names them still renders them because their platform-default feature
+keys are `true`. Disable any pilot by setting its feature key to `false`. The
+other three (`release`, `auto-classifier-pilot`, `repo-mail`) remain opt-in
+(a `minimal` profile that never names them renders nothing of them). A
+project-local pack of the same name still shadows the embed wholly.
 
 ### Auto-classifier configuration
 

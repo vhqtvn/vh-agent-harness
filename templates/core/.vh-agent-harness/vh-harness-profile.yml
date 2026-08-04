@@ -12,5 +12,12 @@
 profile: minimal
 features:
   backlog: true
+  # Shipped default-on overlay pilots (middle lifecycle tier, strictly
+  # INFORMS-only: skills only, no agent/command/permission/gate). Default true
+  # means every consumer gains them on update; disable any via `false`.
+  # See `vh-agent-harness help migrate` for the release that introduced this.
+  formal-verification-pilot: true
+  resolve-first-pilot: true
+  contract-invariant-audit-pilot: true
 overlays: []
 policy_packs: []

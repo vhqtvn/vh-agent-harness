@@ -126,6 +126,110 @@ func boolStr(b bool) string {
 	return "false"
 }
 
+// --- shipped-pilot feature activation ----------------------------------------
+//
+// The harness ships a small set of overlay packs as DEFAULT-ON "shipped pilots":
+// they are embedded in the binary, enabled for every consumer by default, and
+// disable-able by the consumer via the existing `features:` map. This is the
+// middle lifecycle tier documented in
+// researches/decisions/skill-lifecycle-management.md (between S1 localization
+// split and S2 overlay-pilot-then-promote): embedded, default-enabled,
+// consumer-disable-able, overlay_extension-owned, strictly INFORMS-only, NOT S2.
+// Cross-reference: researches/decisions/2026-08-04-opt-out-pilot-distribution.md.
+//
+// The activation vehicle is the SAME `features:` map the schema already
+// reconciles (platform-default base ∪ project-wins-per-key, see
+// reconcileFeaturesMap). An explicit `false` disables the DEFAULT — it is NOT a
+// global veto, because an explicit `overlays:` entry can intentionally re-add
+// the pack (the explicit list is processed first in resolveCapabilityAnswers and
+// the feature-activated additions are unioned in with dedup afterwards).
+//
+// INFORMS-only invariant: shipped pilots carry instructions only (skills). They
+// declare NO agent, command, permission, or gate. Default-on distribution
+// changes REACH, not authority — every consumer already had the option to select
+// these packs by name; default-on merely removes the opt-in step.
+
+// featurePackMap is the FINITE, EXPLICIT feature-key -> pack-name mapping for
+// shipped pilots. It is NOT a generic "feature <X> activates pack <X>" rule:
+// every shipped pilot must be listed here by its exact feature key and exact
+// pack name, so the activation surface is auditable and a new feature key never
+// silently activates a pack.
+var featurePackMap = map[string]string{
+	"formal-verification-pilot":      "formal-verification-pilot",
+	"resolve-first-pilot":            "resolve-first-pilot",
+	"contract-invariant-audit-pilot": "contract-invariant-audit-pilot",
+}
+
+// corpusDefaultFeatures reads the `features:` map from the embedded
+// platform-default profile. It is the base that project overrides apply on top
+// of. Empty map on any read/parse failure (which yields no feature-activated
+// packs — fail-safe rather than fail-open).
+func corpusDefaultFeatures() map[string]bool {
+	sub, err := fs.Sub(corpus.CoreFS, corpus.CoreDir)
+	if err != nil {
+		return map[string]bool{}
+	}
+	raw, err := fs.ReadFile(sub, harnessProfileName)
+	if err != nil {
+		return map[string]bool{}
+	}
+	var d struct {
+		Features map[string]bool `yaml:"features"`
+	}
+	if err := yaml.Unmarshal(raw, &d); err != nil {
+		return map[string]bool{}
+	}
+	return d.Features
+}
+
+// reconciledFeatures computes the effective features map at RENDER time by
+// mirroring the schema's reconcileFeaturesMap semantics directly against the
+// live profile and the embedded platform default: platform-default base, then
+// project-wins per key. This is independent of whether the file-reconcile step
+// has run (doctor reads the live profile WITHOUT reconciling), so the
+// default-on semantics hold on every render path (install, update, doctor).
+//
+// Greenfield (no live profile) -> platform default verbatim.
+// Malformed/unreadable live profile -> platform default verbatim (doctor
+// reports the schema error separately; render never trusts a malformed profile
+// but still honors the platform's shipped-pilot defaults so a broken profile
+// does not silently strip pilots).
+func reconciledFeatures(target string) map[string]bool {
+	merged := corpusDefaultFeatures()
+	raw, err := os.ReadFile(filepath.Join(target, harnessProfileName))
+	if err != nil {
+		return merged // greenfield; platform default verbatim
+	}
+	if errs := (schema.HarnessProfile{}).Validate(raw); len(errs) > 0 {
+		return merged // malformed; platform default verbatim (doctor reports error)
+	}
+	var d struct {
+		Features map[string]bool `yaml:"features"`
+	}
+	if err := yaml.Unmarshal(raw, &d); err != nil {
+		return merged
+	}
+	for k, v := range d.Features {
+		merged[k] = v // project-wins per key
+	}
+	return merged
+}
+
+// featureActivatedPacks returns the sorted pack names whose feature key is
+// present in featurePackMap AND set true in the given features map. Sorted for
+// deterministic render order (the explicit overlays: list is processed first;
+// these are appended after, deduplicated).
+func featureActivatedPacks(features map[string]bool) []string {
+	var packs []string
+	for featKey, packName := range featurePackMap {
+		if features[featKey] {
+			packs = append(packs, packName)
+		}
+	}
+	sort.Strings(packs)
+	return packs
+}
+
 // --- Capability-installer: profile-preset resolution (Phase 5 behavior flip) -
 //
 // The functions below run the capability resolver (Phase 2) against the live
@@ -343,8 +447,11 @@ func readProfileSelection(target string) []resolver.CapabilityID {
 //     a real boolean, never an absent-key zero value).
 //   - renderPacks: the pack names that must render this pass — the explicit
 //     overlays: list (profile order) UNION packs owning resolved capabilities
-//     (sorted, deduplicated). Either selection path therefore reaches the
-//     render loop.
+//     (sorted, deduplicated) UNION feature-activated shipped pilots whose
+//     feature key is true in the reconciled features map (sorted, deduplicated).
+//     Any of the three selection paths therefore reaches the render loop, and
+//     an explicit `features: <key>: false` disables only the default-on path
+//     (it is NOT a global veto; an explicit overlays: entry survives).
 //   - catalog: the merged catalog (core seeds ∪ discoverable overlay-pack
 //     manifests) used to resolve the selection. The caller needs it to compile
 //     the CoreSelectionPlan (capability-owned core-output filtering) without
@@ -427,6 +534,19 @@ func resolveCapabilityAnswers(target string) (answers map[string]string, renderP
 	}
 	sort.Strings(implied)
 	packs = append(packs, implied...)
+
+	// Shipped-pilot feature activation: packs whose feature key is true in the
+	// reconciled features map (platform-default ∪ project-wins) are unioned in
+	// AFTER the explicit overlays: list and the capability-implied packs, with
+	// the same `seen` dedup. An explicit `false` disables the DEFAULT but is
+	// NOT a global veto — an explicit overlays: entry is already in `seen` and
+	// therefore survives the opt-out (the explicit list was processed first).
+	for _, name := range featureActivatedPacks(reconciledFeatures(target)) {
+		if !seen[name] {
+			seen[name] = true
+			packs = append(packs, name)
+		}
+	}
 
 	return out, packs, catalog, set, nil
 }
