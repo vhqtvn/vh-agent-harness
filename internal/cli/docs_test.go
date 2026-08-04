@@ -13,6 +13,7 @@ import (
 // templates/docs; these keys must stay available offline from any CWD. Adding
 // or renaming a doc file changes this set intentionally.
 var wantDocKeys = []string{
+	"compaction-summary-discipline",
 	"opencode-memory-model",
 	"opencode-prompt-guide",
 	"opencode-session-workflow",
