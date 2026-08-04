@@ -98,3 +98,36 @@ ownership WRITE path. doctor Long help + README.agent.md must update in same cha
 new internal/cli/skill.go, internal/cli/doctor.go, internal/cli/update.go,
 internal/cli/guide.go, README.agent.md, templates/core/.vh-agent-harness/AGENTS.core.md,
 README.md command table (+skill row).
+
+## Lifecycle tier canon — S3 "shipped default-on overlay pilot"
+
+The skill lifecycle vocabulary originally defined two tiers (see
+`templates/core/.opencode/skills/skill-creator/references/skill-lifecycle.md`):
+
+- **S1 — Localization split**: core discipline skeleton + contracted overlay
+  localization file.
+- **S2 — Overlay-pilot-then-promote**: pilot in an overlay against a real repo
+  before promotion to `templates/core/`.
+
+A third tier was missing, and its absence caused three pilot skills
+(formal-verification, resolve-first, contract-invariant-audit) to land
+project-local by accident — the placement fell out of the vocabulary gap
+rather than being a chosen destination.
+
+**S3 — Shipped default-on overlay pilot**: a skill that ships as an embedded
+overlay pack (`templates/overlays/<pack>/`), default-enabled for every
+consumer, consumer-disable-able via `features: <feature-key>: false`, owned by
+`overlay_extension` (not `platform_managed`), and strictly INFORMS-only (no
+permission, agent, command, or gate). Default-on distribution changes reach,
+not authority.
+
+S3 is NOT S2 promotion. A shipped default-on overlay pilot remains under the
+S2-hold: no move to `templates/core/`, no maturity-signal removal (the
+`-pilot` pack suffix is retained), no transition or gating authority, no claim
+of validated consumer effectiveness, and positive real-consumer evidence
+remains required for core graduation. Default-on distribution widens the
+audience that can provide that evidence; it does not constitute the evidence
+itself.
+
+See `researches/decisions/2026-08-04-opt-out-pilot-distribution.md` for the
+design that introduced this tier.
