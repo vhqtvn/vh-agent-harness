@@ -20,9 +20,17 @@ const (
 	// overwrite.
 	ClassPlatformArmed Class = "platform_armed"
 
-	// ClassOverlayExtension: platform owns the managed blocks; the project may
-	// extend. Platform-merged, never wholesale-overwritten. Highest hand-
-	// protection that still permits platform-authored blocks.
+	// ClassOverlayExtension: platform owns the unit while its overlay pack is
+	// selected. When the pack is ACTIVE, the unit is overwritten WHOLESALE from
+	// the staged overlay corpus on every update (the same managed-overwrite
+	// mechanics as platform_managed; a byte-identical live instance is a
+	// managed-noop). When a pack is deselected the unit is simply not staged,
+	// so Apply leaves any live copy untouched. The authority for the overwrite
+	// is the overlay pack selection, not a generic render
+	// (IsMutableByGenericRender is false; see IsOverwritableBySeamApply). The
+	// pack-level "extend" semantics (deep-merging opencode-append.jsonc,
+	// injecting callable-graph snippets) live in the overlay merge/inject
+	// machinery, not in this per-file ownership class.
 	ClassOverlayExtension Class = "overlay_extension"
 
 	// ClassProjectOwned: project owns; the platform NEVER touches it on update

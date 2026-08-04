@@ -425,3 +425,53 @@ packet:
 - The `complexity-control` session memory `open-questions.md` / `decision-log.md`
   are currently blank — this triage's verdict should be recorded there as the
   Fix-3 answer (Fix 2 then defers to it per the checkpoint).
+
+---
+
+## Correction addendum (2026-08-04) — body framing superseded by the canonical "staged advisory hybrid" policy
+
+**This is an appended correction. The original body below the `---` delimiter is
+preserved verbatim as the historical record; the existing provenance header
+(above the delimiter) already records that Fix 2b landed. Only this addendum is
+new.**
+
+The body's recommendation (§5: "Fix 2 choose (b) skip/silent; Slice 4 defer")
+was ACTED ON — `complexity-policy.yml` was flipped to `enabled: false` in
+`78e3610` (both `.vh-agent-harness/` and `templates/core/`; confirmed still
+`enabled: false` at the time of this addendum). That part of the body matches
+what shipped.
+
+The body's FRAMING, however, has been superseded by the canonical complexity
+policy articulated after this triage. The body frames the silence as a
+PRECISION stopgap ("default to skip/silent UNTIL a second axis raises
+precision"; "Revisit Slice 4 only after the signal gains the agent-context
+axis"), implicitly modeling complexity as a signal that could graduate toward
+gate-worthiness as its precision improves. Current policy is sharper and more
+restrictive:
+
+- **Staged advisory hybrid — complexity signals INFORM; they NEVER gate.** This
+  is a DESIGN CONTRACT, not a temporary measure (`internal/schema/complexity_policy.go`
+  design-contract doc comment; `internal/cli/doctor_complexity.go` carries the
+  SACRED INVARIANT that check #20 is structurally incapable of returning
+  `tierFail` — it returns `tierSkip`/`tierPass`/`tierWarn` only, and NEVER
+  authorizes a transition).
+- **WARN-only is permanent design, driven by Goodhart risk**, not a precision
+  stopgap: the live `file_loc` metric is gameable (split-to-pass-LOC lowers the
+  measured signal while worsening coupling), and that gaming is invisible until
+  the agent-context axis ships. Even after that axis ships, the advisory nature
+  is the design; precision gains re-enable the ADVISORY, they do not promote it
+  to a gate. See `docs/checkpoints/2026-07-28-complexity-slice-1-framing-correction.md`
+  ("This is not a temporary state; it is the design").
+- **Resting path:** agent-context axis (axis-2) build → re-measure against the
+  S3 baseline → re-enable the ADVISORY by editing BOTH `complexity-policy.yml`
+  files (the armed-policy gotcha: `make update` does NOT propagate `enabled`
+  from the template to the armed instance, so both must be edited by hand).
+
+**Net:** read the body's §5 recommendation as the triage-time input that
+motivated Fix 2b (acted on), but read the CANONICAL policy from
+`internal/schema/complexity_policy.go` + `internal/cli/doctor_complexity.go` +
+`docs/checkpoints/2026-07-28-complexity-slice-1-framing-correction.md`, not from
+this body. The body's "Slice 4 disposition machinery — defer until precision
+improves" stance is consistent with the resting path (disposition machinery
+remains deferred), but its precision-→-gate-worthiness model is NOT current
+policy.

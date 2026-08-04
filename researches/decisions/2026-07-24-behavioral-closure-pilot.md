@@ -28,8 +28,8 @@ The structural validator lives in **`internal/cli/doctor.go`** (a new
 synchronous check, #14), NOT in `internal/cli/release_gate.go` and NOT merely
 as task-closeout prompt wording.
 
-- **Reason:** the validator must be mechanical, unbypassable, and cover
-  closeouts that NEVER reach a release. doctor is the seam health surface that
+- **Reason:** the validator must be mechanical, consistency-enforcing, and
+  cover closeouts that NEVER reach a release. doctor is the seam health surface that
   already scans `.local/coordinator/` and durable markdown; `release_gate.go`
   owns RELEASE properties (defer-liveness against shipped migration notes); the
   task-closeout command is advisory wording.

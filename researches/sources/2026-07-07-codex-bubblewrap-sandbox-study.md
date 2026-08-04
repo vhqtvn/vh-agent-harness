@@ -650,3 +650,49 @@ These updates belong in a **follow-up slice**, not in this source packet.
   `researches/decisions/` memo is NOT warranted unless the operator asks for
   a formal option-recommendation record; this packet already carries the
   recommendation inline at the operator's request.
+
+---
+
+## Correction addendum (2026-08-04) — F9 "no re-exec needed" inference refuted by the shipped architecture
+
+**This is an appended correction. The original body above is preserved verbatim
+as the historical record; only this addendum is new.**
+
+F9's load-bearing inference (body, §F9 final finding) claimed:
+
+> A Go-native trampoline that applies Landlock+seccomp in-process BEFORE exec
+> would NOT need this re-exec — an architectural simplicity win for the Go-native
+> approach.
+
+That inference is INCOMPLETE and was REFUTED by the architecture that actually
+shipped. `vh-agent-harness exec-sandbox` (the O1 Go-native Landlock+seccomp
+option this packet recommended) is itself a **two-stage re-exec trampoline**,
+structurally the SAME shape as Codex's re-exec that F9 framed as avoidable:
+
+- **Parent** (`internal/cli/exec_sandbox.go`): forks/execs the hidden internal
+  `vh-agent-harness __exec_sandbox_child` subcommand, passing the profile via
+  `VH_EXEC_SANDBOX_*` env vars, and SUPERVISES the child (stays unconfined).
+- **Child** (`internal/cli/exec_sandbox_child.go` → `internal/execsandbox`
+  `RunChild`): applies the Landlock (FS integrity) + pure-Go seccomp-BPF
+  (network + syscall hardening) filters TO ITSELF, then `syscall.Exec`s the
+  target payload (replacing the child image).
+
+**Why the re-exec is NOT avoidable in pure Go (the gap in F9's reasoning):**
+Landlock and seccomp filters apply to the CALLING PROCESS and its descendants.
+Applying them in-process to the parent BEFORE exec would confine THE HARNESS
+ITSELF (the supervising process). The filters must apply ONLY to the payload
+process tree, so the confinement has to happen in a child that then becomes the
+payload via `syscall.Exec`. This is the SAME structural reason Codex re-execs
+(isolate the confined payload from the unconfined supervisor) — F9 attributed
+the re-exec to a bwrap-specific artifact ("bwrap sets up namespaces via exec
+while seccomp is applied in-process") and concluded the Go-native path sidesteps
+it; the shipped Go-native path does not sidestep it. The parent-supervision
+model (unconfined parent supervising a self-confined child) is exactly the shape
+the shipped architecture took.
+
+**Net:** the "architectural simplicity win" F9 claimed for the Go-native option
+overstated the benefit. The real Go-native wins (per the body's comparison
+table) remain valid — single static binary / no host deps (C-STATIC), graceful
+skip (C-SKIP), lower maintenance surface (C-MAINT) — but "avoids the re-exec"
+is NOT among them. Pointers to the shipped architecture: `internal/cli/exec_sandbox.go`,
+`internal/cli/exec_sandbox_child.go`, `internal/execsandbox/`.
