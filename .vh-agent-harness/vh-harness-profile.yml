@@ -3,9 +3,6 @@ features:
     backlog: true
 overlays:
     - auto-classifier-pilot
-    - contract-invariant-audit-pilot
-    - formal-verification-pilot
     - harness-dogfood
-    - resolve-first-pilot
 capabilities:
     - core/media-perception
