@@ -1,12 +1,15 @@
 {
   "schema_version": 1,
-  "release_base": { "kind": "tag", "value": "v0.19.0" },
-  "evaluated_commit": "c0f81a3cf8547d55325eaae5a1fbaa3c79ef7471",
-  "evaluated_tree": "805b11ea86314e582aae0a0a9b036d8e3a324a9b",
-  "manifest_parent_commit": "c0f81a3cf8547d55325eaae5a1fbaa3c79ef7471",
+  "release_base": {
+    "kind": "tag",
+    "value": "v0.20.0"
+  },
+  "evaluated_commit": "9da7948a9b781d87a627c1cf4f33bc3e9579fc14",
+  "evaluated_tree": "371c0baf56a88948d1f3c394d9acaa4a288d4dfc",
+  "manifest_parent_commit": "9da7948a9b781d87a627c1cf4f33bc3e9579fc14",
   "reconciliation": {
     "status": "release-prep-pinned",
-    "scope": "Release arc: v0.19.0 (the prior tag and derived release_base) through evaluated_commit (the readiness artifact R = c0f81a3, child of the corrected release note N bc1ed71; intended release v0.20.0; SHAs recomputed live by the releaser). The v0.19.0..HEAD arc is the v0.20.0 MINOR feature arc (61 commits; 8 feat / 7 fix / 0 breaking; no `!:` subjects, no `BREAKING CHANGE:` footers) and carries real consumer-facing behavioral additions across the embedded Go binary and the re-rendered corpus (this is NOT a docs-only arc): the F4-A declared-scope coverage validator + the B1/B2/A green-distinction docs (b914b06); the /task-delete destructive single-card removal wrapper (afa92ba); two S1 overlay-skill pilots — resolve-first DEFER-processing (0f692b4) and formal-verification agent-authored proofs (0f61c2f) plus the unprovisioned-by-default formal-verification engine-invocation config (309c502); config-driven coordination product-prefixes via product-prefixes.json (2f756f6); the exec-ro denied-ladder guidance routing read-only denials to the exec-sandbox rung (2b903a1); the release-gate DEFER manifest scope widening to ALL firing cards — option b, every firing card receives an explicit committed disposition regardless of source (2c3f87f); and the release tag-pinning to the validated commit closing the silent HEAD-drift re-targeting incident class (cab169f) plus the releaser F5 portability genericization of the dogfood-local decision-memo path (54b39bd). Supporting correctness/safety fixes: the docs-steward delegate permconfig grant to coordination + project-coordinator task allowlists (1e0e487); the substrate lineage-write gated on generation completeness under live-write failure (4f34d45); shell-guard excluding the command executor from infra-lifecycle inspector carve-outs (6bb33aa); the commit-gate acquire-time meta-sweep alignment to _gate_gc_sweep (3daca70); and the F1 producer EvidenceRefs + CheckedScope dedupe (329998e). No breaking change: every edit is additive; no shipped contract, capability, profile, or ownership-class change is removed or renamed (the default consumer's opencode.jsonc gains only the additive docs-steward delegate allowlist, re-rendered automatically by update). PIN STATUS (LIVE): evaluated_commit/evaluated_tree/manifest_parent_commit are recomputed by the releaser against the real post-artifact HEAD R (c0f81a3cf8547d55325eaae5a1fbaa3c79ef7471 = the readiness artifact commit, single-path child of the corrected note N bc1ed71) during the N->R->M ceremony — R's SHA was unknowable until the readiness artifact landed as child of N, so the placeholders were the release-prep boundary (build prepares content, NEVER commits M). This M commit is the final ceremony step landing the manifest-only child of R; the handshake now passes against HEAD=M (HEAD^=R). Reconciliation: release-prep-mode scan (--mode=release-prep --release-version v0.20.0 --since v0.19.0) found 14 firing candidates lacking a disposition; the complete v0.20.0 firing set is 17 OPEN cards (14 new + 3 carry-forward from the v0.19.0 arc whose path_touched targets re-fire in this arc: defer-014-closeout-ledger-flock-absent-coverage, defer-degraded-repair-savepath-backstop-test, defer-release-ceremony-rm-rebind). All 17 classify disclose (release_relevance=no; each is a non-release-relevant test-coverage gap, doc polish, forward-looking caller-contract obligation, or release-process/research meta-finding — none describes a consumer-visible behavioral defect in shipped v0.20.0 code); zero block / override_required / yes+block; blocking_ids empty. Build-side Go gate at the release-prep HEAD: go vet ./... (clean), go build ./... (clean), gofmt -l . (empty); go test ./... is GREEN across the full build/behavior suite EXCEPT two ceremony-gated LIVE defer-liveness tests (TestDeferLivenessGate_LiveRepoIsClean, TestDeferRecurrence_LiveRepoIsClean) that read the COMMITTED manifest and are structurally red until the releaser commits the refreshed M in Phase 4 — this is the expected release-prep-window state, not a code regression (the gate's own remedy text names adding disposition records to this manifest as the resolution).",
+    "scope": "Release arc: v0.20.0 (the prior tag and derived release_base) through evaluated_commit (the readiness artifact R = 9da7948, child of the completed release note N f058f4f; intended release v0.21.0; SHAs recomputed live by the releaser against the real post-artifact HEAD R). The v0.20.0..HEAD arc is the v0.21.0 MINOR feature arc (16 commits; 3 feat / 1 fix / 0 breaking; no `!:` subjects, no `BREAKING CHANGE:` footers) and carries two consumer-relevant changes: (1) the exec-sandbox absent-floor safety fix (63c5500) — fail-open -> fail-closed for unfloored adopters running an explicit --sandbox=off (now refused, exit non-zero); the grant ships unfloored-by-default because run-shape.yml is project-owned, and the refuse + the strict seed for new installs + doctor advisory check #22 exec-sandbox-floor are the layered close; (2) opt-out pilot distribution — three skills-only strictly-INFORMS-only overlay pilots (formal-verification-pilot, resolve-first-pilot, contract-invariant-audit-pilot) ship default-on via a finite feature->pack map (reconciledFeatures: platform-default union project-wins), disable-able via features: <key>: false (disables the default only; an explicit overlays: entry survives), with doctor visibility (check #23 shipped-pilots) and the S3 shipped-default-on-overlay-pilot lifecycle tier written into canon. defer-022 (the release-migration-note obligation for the exec-sandbox absent-floor behavior change + doctor check #22 + safety framing) is SATISFIED: the disclosure landed in templates/migrations/v0.21.0.md (Summary section 1, the What-changed table row, and Watch-out #6). No breaking change: every edit is additive or a deliberate semver-compatible safety hardening; no shipped contract, capability, profile, or ownership-class change is removed or renamed (the default consumer gains the additive pilot skill directories re-rendered automatically by update, and unfloored adopters who explicitly passed --sandbox=off must now declare that intent via exec_sandbox.min_mode: off). PIN STATUS (LIVE): evaluated_commit/evaluated_tree/manifest_parent_commit are recomputed by the releaser against the real post-artifact HEAD R (9da7948 = the readiness artifact commit, single-path child of the completed note N f058f4f) during the N->R->M ceremony — R's SHA was unknowable until the readiness artifact landed as child of N, so the prior placeholders were the release-prep boundary (build prepares content, NEVER commits M). This M commit is the final ceremony step landing the manifest-only child of R; the handshake now passes against HEAD=M (HEAD^=R). Reconciliation: B1 green at the release HEAD (gofmt -l . clean, go vet ./... clean, go build ./... clean, go test ./... -count=1 EXIT=0); B2 working tree clean except this manifest path (the release-prep boundary, consumed by this commit). All records classify disclose (none block / override_required); blocking_ids empty.",
     "zero_records_confirmed": false
   },
   "records": [
@@ -35,6 +38,42 @@
       "override": null
     },
     {
+      "defer_id": "defer-021-exec-sandbox-grant-ships-unfloored-by-default",
+      "release_relevance": "no",
+      "disposition": "disclose",
+      "metadata_state": "valid",
+      "summary": "Residual defense-in-depth gap: the exec-sandbox Level-B grant ships with NO exec_sandbox.min_mode floor by default. Fix 1 refuses the explicit --sandbox=off downgrade and Fix 3 doctor-WARNs, but existing adopters' safety rests on that refuse until they add min_mode: strict.",
+      "reason": "Trigger fired for the v0.21.0 arc: path_touched targets (internal/cli/doctor_exec_sandbox_floor.go, internal/cli/exec_sandbox.go, internal/execsandbox/floor.go) were touched by the exec-sandbox fix (63c5500) between v0.20.0 and HEAD. Non-release-relevant to the opt-out pilot distribution feature: these paths are unchanged by this arc's pilot-distribution work; the re-fire is from prior exec-sandbox hardening. Disclosed for operator visibility. metadata_state=valid (clean path_touched predicate, all three targets fired).",
+      "source_ref": ".local/coordinator/tasks/defer-021-exec-sandbox-grant-ships-unfloored-by-default.json",
+      "studied_at": "2026-08-04T00:00:00Z",
+      "reviewed_at": "2026-08-04T00:00:00Z",
+      "override": null
+    },
+    {
+      "defer_id": "defer-022-exec-sandbox-absent-floor-refuse-release-migration-note",
+      "release_relevance": "yes",
+      "disposition": "disclose",
+      "metadata_state": "valid",
+      "summary": "Release-migration-note obligation for the exec-sandbox absent-floor behavior change (commit 63c5500): an explicit --sandbox=off in an unfloored consumer now exits non-zero (refused) where it previously ran fully uncontained (fail-open -> fail-closed), and doctor gained advisory check #22 exec-sandbox-floor. UPGRADES TO BLOCK at release-prep if the migration note omits the absent-floor refuse behavior change + doctor check #22 + safety framing.",
+      "reason": "Trigger fired for the v0.21.0 arc: before_milestone(next harness release) — v0.21.0 is the next release carrying 63c5500. SATISFIED: the migration note (templates/migrations/v0.21.0.md) discloses (a) the absent-floor refuse behavior change + the deliberate opt-out path (set exec_sandbox.min_mode: off); (b) the new advisory doctor check #22 exec-sandbox-floor; (c) the corrected safety framing (grant ships unfloored-by-default because run-shape.yml is project-owned; the refuse + the strict seed for new installs + the doctor WARN are the layered close) — in Summary section 1, the What-changed table row, and Watch-out #6. The disclosure obligation is met; disposition=disclose, non-blocking. metadata_state=valid (before_milestone trigger resolved for the release being cut).",
+      "source_ref": ".local/coordinator/tasks/defer-022-exec-sandbox-absent-floor-refuse-release-migration-note.json",
+      "studied_at": "2026-08-04T00:00:00Z",
+      "reviewed_at": "2026-08-04T00:00:00Z",
+      "override": null
+    },
+    {
+      "defer_id": "defer-023-exec-sandbox-best-effort-landlock-cause-pinning",
+      "release_relevance": "no",
+      "disposition": "disclose",
+      "metadata_state": "valid",
+      "summary": "Optional test hardening: pin the Landlock-denial CAUSE (not just the file-not-created outcome) in TestSandboxAbsentFloor_ContainedDefaultPreserved when the integration test is next edited.",
+      "reason": "Trigger fired for the v0.21.0 arc: path_touched(tests/integration/exec_sandbox_test.go) was touched by the exec-sandbox fix (63c5500) between v0.20.0 and HEAD. Non-release-relevant to the opt-out pilot distribution feature: the test file is unchanged by this arc's pilot-distribution work. Disclosed for operator visibility. metadata_state=valid (single clean path_touched predicate).",
+      "source_ref": ".local/coordinator/tasks/defer-023-exec-sandbox-best-effort-landlock-cause-pinning.json",
+      "studied_at": "2026-08-04T00:00:00Z",
+      "reviewed_at": "2026-08-04T00:00:00Z",
+      "override": null
+    },
+    {
       "defer_id": "defer-cas-conflict-sibling-docs",
       "release_relevance": "no",
       "disposition": "disclose",
@@ -55,6 +94,18 @@
       "reason": "Trigger fired for the v0.20.0 arc: path_touched(templates/core/.opencode/scripts/state-lib.js) is met — state-lib.js was re-rendered this arc (the F1 producer dedupe / coordination-hints / verify-coordination re-renders touch the substrate). Non-release-relevant: the restore-only payload gate structurally guarantees the backstop (a non-core-only-degraded card has no repairable core offender, so repair is refused up-front); this is a named-assertion test-coverage gap, not a behavioral defect. The expected-diagnostic design question (refused-up-front vs save-path-backstop) is the unresolved clear-slice leg. Disclosed for operator visibility. metadata_state=valid (single clean path_touched predicate).",
       "source_ref": ".local/coordinator/tasks/defer-degraded-repair-savepath-backstop-test.json",
       "studied_at": "2026-07-31T00:00:00Z",
+      "reviewed_at": "2026-08-04T00:00:00Z",
+      "override": null
+    },
+    {
+      "defer_id": "defer-doctor-wildcard-inventory-tighten",
+      "release_relevance": "no",
+      "disposition": "disclose",
+      "metadata_state": "valid",
+      "summary": "doctor* permission-wildcard inventory tighten — parked hardening (trigger = doctor gains any mutating/sub command OR evidence of a missed permission re-audit).",
+      "reason": "Trigger fired for the v0.21.0 arc: path_touched(internal/cli/doctor.go) is in the v0.20.0..HEAD diff from prior work. Non-release-relevant to the opt-out pilot distribution feature: doctor.go is unchanged by this arc's pilot-distribution work (the shipped-pilots check that touches doctor.go lands in Commit C, not yet applied). Disclosed for operator visibility. metadata_state=valid (single clean path_touched predicate).",
+      "source_ref": ".local/coordinator/tasks/defer-doctor-wildcard-inventory-tighten.json",
+      "studied_at": "2026-08-03T00:00:00Z",
       "reviewed_at": "2026-08-04T00:00:00Z",
       "override": null
     },
