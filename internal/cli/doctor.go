@@ -72,6 +72,7 @@ var doctorCmd = &cobra.Command{
   complexity-advisory repo-snapshot scan of nominated files    WARN if candidates above threshold (advisory only; NEVER FAIL)
   recurrence-state canonical recurrence groups + defects       WARN if malformed/conflicts/uncollapsed; INFO clean; SKIP none
   exec-sandbox-floor exec-sandbox grant carried w/o a floor     WARN if grant carried and no floor resolves (advisory only; NEVER FAIL)
+  shipped-pilots  shipped default-on overlay pilot enablement    INFO if advisory orphan (deselected pilot with stale files); PASS otherwise; SKIP not installed
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -415,6 +416,19 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	esfr := checkExecSandboxGrantFloor(abs)
 	fmt.Fprintln(out, "    "+esfr.String())
 	applyTier(esfr.tier, &problems, &warns)
+
+	// 23. shipped-pilots (gate-2 advisory — opt-out NEVER makes a repo
+	//     unhealthy). Surfaces the enablement state of each shipped default-on
+	//     overlay pilot (enabled-by-platform-default / disabled-by-consumer-
+	//     override / explicitly-selected) and reports advisory orphans (skill
+	//     files left on disk from a now-deselected pilot) as tierInfo — NEVER
+	//     FAIL. This is the enablement-visibility surface managed-drift cannot
+	//     provide (its byte-compare only covers platform_managed paths;
+	//     overlay_extension pilot paths are outside its scope).
+	fmt.Fprintln(out, "  shipped-pilots:")
+	spr := checkShippedPilots(abs)
+	fmt.Fprintln(out, "    "+spr.String())
+	applyTier(spr.tier, &problems, &warns)
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)

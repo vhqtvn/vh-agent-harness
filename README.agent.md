@@ -1762,10 +1762,11 @@ operator release-prep. The ceremony produces THREE sequential single-path
 (manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`.
 The release-tag wrapper's deterministic gates refuse the tag unless each
 commit binds to its predecessor exactly. The wrapper also runs **G0c**
-  (`vh-agent-harness doctor` — all 22 checks, including #12 defer-liveness,
+  (`vh-agent-harness doctor` — all 23 checks, including #12 defer-liveness,
   #13 staged-errata-content, #14 behavioral-closure, #15 dev-stale-embed,
   #16 f1-envelope, #17 f1-f2-consistency, #18 f2-pairs, #19 head-progress,
-  #20 complexity-advisory, #21 recurrence-state, and #22 exec-sandbox-floor)
+  #20 complexity-advisory, #21 recurrence-state, #22 exec-sandbox-floor,
+  and #23 shipped-pilots)
   as a hard machine gate
   AFTER the clean-worktree
 gate (G0b) and BEFORE the readiness-pass artifact gate (G1-G5). A
