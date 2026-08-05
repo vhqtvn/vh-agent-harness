@@ -35,6 +35,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vhqtvn/vh-agent-harness/internal/permconfig"
 )
 
 // baselineAgents is the 8 always-on universal agent set (CoreCatalog baseline).
@@ -633,6 +635,151 @@ func TestSeamRender_MediaPerceptionFlagParity(t *testing.T) {
 					t.Errorf("unselected: %s prompt must NOT contain enabled heading", caller)
 				}
 			}
+		}
+	}
+}
+
+// workerReadOnlyAgents is the singleton set owned by the core/worker-read-only
+// capability.
+var workerReadOnlyAgents = []string{"worker-read-only"}
+
+// workerReadOnlyCallers is the canonical inbound caller set for the
+// core/worker-read-only capability (mirrors permconfig.CoreTaskRules): the
+// three delegateFrom callers. researcher is deliberately ABSENT — a researcher
+// already holds the read-only inspection surface itself and is not a declared
+// caller for the dynamic worker. This is the load-bearing difference from
+// core/media-perception (whose caller set additionally includes researcher).
+var workerReadOnlyCallers = []string{"build", "coordination", "project-coordinator"}
+
+// TestSeamRender_WorkerReadOnly_Selected is the seam-level opt-in proof for the
+// core/worker-read-only capability (CF2): a profile declaring `profile: minimal`
+// (empty preset) plus `capabilities: [core/worker-read-only]` must render the
+// 9 ungated baseline + the single worker-read-only leaf (10 agents total), and
+// each of the three baseline callers must carry the worker-read-only: allow
+// task edge. researcher must NOT carry the edge (the deliberate-exclusion
+// contract — the differentiator vs core/media-perception, which DOES include
+// researcher). worker-read-only itself is a deny-all read-only leaf: no
+// outbound task edges AND no exec-sandbox grant in its bash block (CF1's
+// rendered-output-level residual: worker-read-only is a non-Level-B read-only
+// leaf, so it lacks the ReadOnlyExtraAllows entry that the three Level-B
+// specialists carry — this asserts the rendered block reflects that absence
+// end-to-end, not just the table).
+//
+// The unit-level present-agent filter is pinned in internal/permconfig
+// (TestEmit_WorkerReadOnly*); this test exercises the full resolver →
+// renderSeamStaging → Emit → rendered-opencode.jsonc path.
+func TestSeamRender_WorkerReadOnly_Selected(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	writeProfile(t, root, "profile: minimal\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\ncapabilities:\n  - core/worker-read-only\n")
+	if _, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("update with capabilities:[core/worker-read-only]: %v", err)
+	}
+	rendered := parseRenderedAgents(t, root)
+
+	// 9 ungated + 1 worker-read-only = 10; no other cluster resolves.
+	assertAgentsPresent(t, rendered, ungatedAgents)
+	assertAgentsPresent(t, rendered, workerReadOnlyAgents)
+	assertAgentsAbsent(t, rendered, gatedCommitAgents)
+	assertAgentsAbsent(t, rendered, debateAgents)
+	assertAgentsAbsent(t, rendered, mediaPerceptionAgents)
+	if got, want := len(rendered), len(ungatedAgents)+len(workerReadOnlyAgents); got != want {
+		t.Errorf("agent count: got %d, want %d (ungated + worker-read-only; rendered=%v)", got, want, capRenderSortedKeys(rendered))
+	}
+
+	// All three declared callers carry the worker-read-only: allow edge.
+	edges := parseRenderedTaskEdges(t, root)
+	for _, caller := range workerReadOnlyCallers {
+		if !edges[caller]["worker-read-only"] {
+			t.Errorf("%s -> worker-read-only task edge must render when core/worker-read-only is selected", caller)
+		}
+	}
+
+	// researcher is a baseline ungated agent (so it always renders) but must
+	// NOT carry a worker-read-only edge — the caller set is exactly the
+	// delegateFrom list, which excludes researcher. This is the distinguishing
+	// contract vs media-perception, which DOES grant researcher an edge.
+	if edges["researcher"]["worker-read-only"] {
+		t.Errorf("researcher -> worker-read-only task edge must NOT render (researcher is not a declared caller for the dynamic worker; delegateFrom excludes it)")
+	}
+
+	// worker-read-only itself is a deny-all leaf with no exec-sandbox grant.
+	// parseRenderedTaskEdges filters to allow-only decisions, so re-read the
+	// raw permission block to verify BOTH (a) the deny-all task wildcard
+	// landed with no outbound edge, AND (b) the bash block carries no
+	// exec-sandbox key (CF1 residual — the rendered-output-level assertion
+	// that the Level-B grant did not leak to this non-Level-B leaf).
+	cfg, err := os.ReadFile(filepath.Join(root, "opencode.jsonc"))
+	if err != nil {
+		t.Fatalf("read opencode.jsonc: %v", err)
+	}
+	var doc struct {
+		Agent map[string]struct {
+			Permission struct {
+				Bash map[string]string `json:"bash"`
+				Task map[string]string `json:"task"`
+			} `json:"permission"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(cfg, &doc); err != nil {
+		t.Fatalf("unmarshal opencode.jsonc: %v", err)
+	}
+	wro, ok := doc.Agent["worker-read-only"]
+	if !ok {
+		t.Fatalf("worker-read-only agent block missing from rendered config")
+	}
+	// (a) deny-all task: only "*" (deny) is present, no outbound delegation.
+	if wro.Permission.Task["*"] != "deny" {
+		t.Errorf(`worker-read-only.task["*"] = %q, want "deny"`, wro.Permission.Task["*"])
+	}
+	for target := range wro.Permission.Task {
+		if target != "*" {
+			t.Errorf(`worker-read-only.task[%q] must NOT exist (read-only leaf, deny-all only)`, target)
+		}
+	}
+	// (b) CF1 residual: no exec-sandbox grant in the rendered bash block.
+	// worker-read-only is a non-Level-B read-only leaf; only the three
+	// Level-B specialists (researcher, repo-explorer, media-perception)
+	// carry ReadOnlyExtraAllows:[ExecSandboxCommand]. This asserts the
+	// rendered output reflects that absence end-to-end, not just the table.
+	if val, present := wro.Permission.Bash[permconfig.ExecSandboxCommand]; present {
+		t.Errorf(`worker-read-only.bash[%q] = %q, want ABSENT (non-Level-B read-only leaf must not carry the exec-sandbox Level-B grant)`, permconfig.ExecSandboxCommand, val)
+	}
+}
+
+// TestSeamRender_WorkerReadOnly_Unselected proves the graceful-degradation
+// contract for the opt-in capability (CF2): the supervised preset (which does
+// NOT include core/worker-read-only) must render the standard 21 agents
+// WITHOUT the worker-read-only block, and no caller may carry a dangling
+// worker-read-only: allow edge. This mirrors the headline graceful-degradation
+// test for the existing clusters and the media-perception precedent.
+func TestSeamRender_WorkerReadOnly_Unselected(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	// supervised preset selects {core/gated-commit, core/debate} only —
+	// core/worker-read-only is NOT in any preset, so it stays unselected.
+	writeProfile(t, root, "profile: supervised\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\n")
+	if _, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("update with profile:supervised: %v", err)
+	}
+	rendered := parseRenderedAgents(t, root)
+
+	// Standard supervised roster (21); worker-read-only is absent.
+	assertAgentsPresent(t, rendered, ungatedAgents)
+	assertAgentsPresent(t, rendered, gatedCommitAgents)
+	assertAgentsPresent(t, rendered, debateAgents)
+	assertAgentsAbsent(t, rendered, workerReadOnlyAgents)
+	if got, want := len(rendered), len(ungatedAgents)+len(gatedCommitAgents)+len(debateAgents); got != want {
+		t.Errorf("agent count: got %d, want %d (supervised baseline; rendered=%v)", got, want, capRenderSortedKeys(rendered))
+	}
+
+	// No caller carries a dangling worker-read-only edge. researcher is checked
+	// too even though it never carries the edge when selected — this pins that
+	// unselecting does not retroactively introduce one (defense-in-depth).
+	edges := parseRenderedTaskEdges(t, root)
+	for _, caller := range append(append([]string{}, workerReadOnlyCallers...), "researcher") {
+		if edges[caller]["worker-read-only"] {
+			t.Errorf("%s -> worker-read-only task edge must NOT render when core/worker-read-only is unselected", caller)
 		}
 	}
 }
