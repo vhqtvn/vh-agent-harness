@@ -950,6 +950,29 @@ export default function transform({ context }) {
   `rm` of the gitignored file remains an equivalent operator path; the wrapper
   makes single-card removal safe, validated, and observable. No `commit`
   follows — the transport is gitignored.
+- **Model-originated skill proposals use a parallel transport,
+  `/skill-propose`.** A model that identifies a reusable workflow worth becoming
+  a repo-local skill captures it as a structured `draft` card under
+  `.local/coordinator/skill-proposals/` via `/skill-propose create` (backed by
+  the `save_skill_proposal` plan-state operation) — gitignored LOCAL CANDIDATE
+  TRANSPORT, never truth, never authority. This is the sanctioned intake
+  surface; the `/init` direct-write path (a model writing `SKILL.md` directly
+  into `.opencode/skills/`) is REJECTED. Provenance is enforced at the write
+  layer: nested `metadata.proposal-origin: model-session` stamped from the real
+  session; a top-level `created_by` is REFUSED. The human gate is load-bearing
+  and **documentation-enforced** (same pattern as task-card promotion — the
+  plan-state tool surface is one tool with an operation enum and cannot
+  distinguish human from model callers, so `set_skill_proposal_status` cannot
+  be scoped out of agent-reachable plan-state):
+  `/skill-propose accept|reject <id>` moves a `draft` to `accepted`/`rejected`
+  (terminal); a model cannot move its own proposal out of `draft`, and the
+  downstream mechanical gates (overlay authoring → S2 → pilot → evidence →
+  core promotion) hold regardless of who calls it. Acceptance
+  creates NOTHING — it only records human approval for SEPARATELY AUTHORIZED
+  overlay authoring under `.vh-agent-harness/overlays/<pack>/skills/`, followed
+  by the unchanged S2 → overlay pilot → external evidence → core promotion path.
+  `/skill-propose delete <id>` retires an unpromoted card (like `/task-delete`,
+  destructive hard removal of gitignored transport, NOT a lifecycle status).
 
 ### Refresh & migration
 
