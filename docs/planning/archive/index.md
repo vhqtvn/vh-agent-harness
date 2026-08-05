@@ -11,5 +11,5 @@ Older `done` and `cancelled` history from `docs/planning/backlog.md` lives here.
 
 ## Retrieval
 
-- Search by task ID: `rg "P0-DOCS-006" docs/planning/archive docs/checkpoints`
+- Search by a task ID from the ID column: `rg "<TASK_ID>" docs/planning/archive docs/checkpoints`
 - Search by theme or component/profile names the same way when a checkpoint path alone is not enough.
