@@ -2,14 +2,14 @@
   "schema_version": 1,
   "release_base": {
     "kind": "tag",
-    "value": "v0.20.0"
+    "value": "v0.21.0"
   },
-  "evaluated_commit": "9da7948a9b781d87a627c1cf4f33bc3e9579fc14",
-  "evaluated_tree": "371c0baf56a88948d1f3c394d9acaa4a288d4dfc",
-  "manifest_parent_commit": "9da7948a9b781d87a627c1cf4f33bc3e9579fc14",
+  "evaluated_commit": "468695df056bd6edbee85ddf47a342e0fdc9e7ad",
+  "evaluated_tree": "0f6260c9540d9b682e5701f4f82662733d12ad70",
+  "manifest_parent_commit": "468695df056bd6edbee85ddf47a342e0fdc9e7ad",
   "reconciliation": {
-    "status": "release-prep-pinned",
-    "scope": "Release arc: v0.20.0 (the prior tag and derived release_base) through evaluated_commit (the readiness artifact R = 9da7948, child of the completed release note N f058f4f; intended release v0.21.0; SHAs recomputed live by the releaser against the real post-artifact HEAD R). The v0.20.0..HEAD arc is the v0.21.0 MINOR feature arc (16 commits; 3 feat / 1 fix / 0 breaking; no `!:` subjects, no `BREAKING CHANGE:` footers) and carries two consumer-relevant changes: (1) the exec-sandbox absent-floor safety fix (63c5500) — fail-open -> fail-closed for unfloored adopters running an explicit --sandbox=off (now refused, exit non-zero); the grant ships unfloored-by-default because run-shape.yml is project-owned, and the refuse + the strict seed for new installs + doctor advisory check #22 exec-sandbox-floor are the layered close; (2) opt-out pilot distribution — three skills-only strictly-INFORMS-only overlay pilots (formal-verification-pilot, resolve-first-pilot, contract-invariant-audit-pilot) ship default-on via a finite feature->pack map (reconciledFeatures: platform-default union project-wins), disable-able via features: <key>: false (disables the default only; an explicit overlays: entry survives), with doctor visibility (check #23 shipped-pilots) and the S3 shipped-default-on-overlay-pilot lifecycle tier written into canon. defer-022 (the release-migration-note obligation for the exec-sandbox absent-floor behavior change + doctor check #22 + safety framing) is SATISFIED: the disclosure landed in templates/migrations/v0.21.0.md (Summary section 1, the What-changed table row, and Watch-out #6). No breaking change: every edit is additive or a deliberate semver-compatible safety hardening; no shipped contract, capability, profile, or ownership-class change is removed or renamed (the default consumer gains the additive pilot skill directories re-rendered automatically by update, and unfloored adopters who explicitly passed --sandbox=off must now declare that intent via exec_sandbox.min_mode: off). PIN STATUS (LIVE): evaluated_commit/evaluated_tree/manifest_parent_commit are recomputed by the releaser against the real post-artifact HEAD R (9da7948 = the readiness artifact commit, single-path child of the completed note N f058f4f) during the N->R->M ceremony — R's SHA was unknowable until the readiness artifact landed as child of N, so the prior placeholders were the release-prep boundary (build prepares content, NEVER commits M). This M commit is the final ceremony step landing the manifest-only child of R; the handshake now passes against HEAD=M (HEAD^=R). Reconciliation: B1 green at the release HEAD (gofmt -l . clean, go vet ./... clean, go build ./... clean, go test ./... -count=1 EXIT=0); B2 working tree clean except this manifest path (the release-prep boundary, consumed by this commit). All records classify disclose (none block / override_required); blocking_ids empty.",
+    "status": "released",
+    "scope": "Release arc: v0.21.0 (the prior tag and derived release_base) through evaluated_commit (the release-prep evaluation point at current HEAD 5d459cb; intended release v0.22.0). The handshake SHAs here are TENTATIVE release-prep-pinned values; the releaser recomputes the final handshake against the REAL post-artifact HEAD R (the committed readiness artifact) and commits M as the final ceremony step (child of R), after which the release-mode evaluator verifies evaluated_commit==HEAD^==R, evaluated_tree==tree(HEAD^), and HEAD^..HEAD diff == [manifest path only]. The v0.21.0..HEAD arc is the v0.22.0 MINOR feature arc (12 commits; 4 feat / 0 breaking; no !: subjects, no BREAKING CHANGE: footers) carrying four additive consumer-facing capabilities (CC borrowable #1-#4): (1) feat(compaction) compaction-summary discipline (0fe71f2); (2) feat(worker) worker-read-only dynamic worker, Pilot 1, opt-in via core/worker-read-only, deliberately read-only leaf (079aedb); (3) feat(sentinel) skill-freshness sentinel, advisory/fail-open by design (2481d85); (4) feat(skill-proposals) skill-authoring proposal transport, a new .local/coordinator/skill-proposals/ intake surface (40c4327). All four are additive; none removes or renames a shipped contract, capability, profile, or ownership class (MINOR, semver-compatible). The four named capabilities surfaced NO firing DEFER cards in the F4-C release-prep enumeration (check-defer-triggers.mjs --mode=release-prep --since v0.21.0): each is fully landed or its follow-up is already closed/disposed. The enumeration surfaced exactly TWO firing cards, both non-release-relevant and both BORN-FIRED trigger-grammar artifacts (path_touched set-membership in the release diff cannot distinguish a file being CREATED by an arc commit from a file being EDITED): defer-corpus-taskid-guard-positive-control (target internal/cli/corpus_command_taskid_guard_test.go was CREATED by 5d459cb, the same commit that filed the card; advisory positive-control coverage obligation; operator disposition is to let it self-resolve at the next tag) and defer-voided-mid-review-recovery-integration (its two bound files were CREATED by 5165c2b, after the v0.21.0 baseline; integration-validation disclosure obligation, unit-covered-only/integration-deferred, risk already durably disclosed in canon; self-resolves at the next tag). Both disposition=disclose, release_relevance=no, metadata_state=valid. No DEFER finding requires promotion; no override ceremony is needed for v0.22.0.",
     "zero_records_confirmed": false
   },
   "records": [
@@ -83,6 +83,18 @@
       "source_ref": ".local/coordinator/tasks/defer-cas-conflict-sibling-docs.json",
       "studied_at": "2026-08-03T00:00:00Z",
       "reviewed_at": "2026-08-04T00:00:00Z",
+      "override": null
+    },
+    {
+      "defer_id": "defer-corpus-taskid-guard-positive-control",
+      "release_relevance": "no",
+      "disposition": "disclose",
+      "metadata_state": "valid",
+      "summary": "Positive-control coverage obligation for the corpus task-ID-in-command-context guard (commit 5d459cb): the guard asserts the CLEAN path (no task-ID-shaped token inside an rg/grep command span under templates/core/) but does NOT inject the defect literal into an isolated fixture to prove the catching-path fires; that path was verified this slice only by a one-off synthetic-input script, not by a test that survives in the suite.",
+      "reason": "Born-fired for the v0.22.0 arc: path_touched(internal/cli/corpus_command_taskid_guard_test.go) is met only because 5d459cb CREATED that file (the same commit that filed the card) -- path_touched set-membership cannot distinguish file CREATION from EDIT, so the trigger fires at birth. Non-release-relevant to the v0.22.0 feature arc (4 additive feats): this is an advisory defense-in-depth coverage obligation for a corpus guard, not a shipped-behavior defect. Operator disposition (card owner_notes 2026-08-05): let it self-resolve at the next tag rather than touch the card -- once the release-diff baseline moves past 5d459cb, path_touched stops matching and the card self-resolves OUT of the gate firing set with no status change. Disclosed for operator visibility. metadata_state=valid (clean single path_touched predicate; born-fired is a trigger-grammar limitation, not a malformed predicate).",
+      "source_ref": ".local/coordinator/tasks/defer-corpus-taskid-guard-positive-control.json",
+      "studied_at": "2026-08-05T00:00:00Z",
+      "reviewed_at": "2026-08-05T00:00:00Z",
       "override": null
     },
     {
@@ -203,6 +215,18 @@
       "source_ref": ".local/coordinator/tasks/defer-update-allowstale-dryrun-wording.json",
       "studied_at": "2026-07-25T00:00:00Z",
       "reviewed_at": "2026-08-04T00:00:00Z",
+      "override": null
+    },
+    {
+      "defer_id": "defer-voided-mid-review-recovery-integration",
+      "release_relevance": "no",
+      "disposition": "disclose",
+      "metadata_state": "valid",
+      "summary": "Integration-validation disclosure obligation for review-commit-ticket voided-mid-review recovery: the recovery path is UNIT-covered only; a deterministic (non-wall-clock) forced-stale-heartbeat-mid-review integration test is deferred because naive timing injection is a flake source (NOT deferred because the path is believed safe). The risk is already durably disclosed in canon (researches/decisions/2026-08-04-review-commit-ticket-design.md and docs/ai/dispatch-discipline.md both carry the unit-covered-only/integration-deferred qualifier).",
+      "reason": "Born-fired for the v0.22.0 arc: the any() predicate's two members -- path_touched(researches/decisions/2026-08-04-review-commit-ticket-design.md) and path_touched(docs/ai/dispatch-discipline.md) -- are both met only because 5165c2b CREATED both files (436 insertions, new files) and 5165c2b is after the v0.21.0 baseline. path_touched set-membership cannot distinguish file CREATION from EDIT, so the trigger fires at birth (the docs came into existence, not because anyone edited the qualifier). Non-release-relevant to the v0.22.0 feature arc (4 additive feats). The card self-corrects at the next release tag: once v0.22.0 moves the diff baseline past 5165c2b, both members return not-touched and the card goes back to hold. Disclosed for operator visibility. metadata_state=valid (clean any() predicate, both members born-fired).",
+      "source_ref": ".local/coordinator/tasks/defer-voided-mid-review-recovery-integration.json",
+      "studied_at": "2026-08-04T00:00:00Z",
+      "reviewed_at": "2026-08-05T00:00:00Z",
       "override": null
     },
     {
