@@ -151,8 +151,16 @@ function parseTaskRow(line, originLabel, index) {
         unescapeTableCell(cell),
     );
     if (rawCells.length !== 7) {
+        // Branch the remedy on direction. More than seven cells means a stray
+        // unescaped pipe split a cell (escape it). Fewer than seven means a
+        // column is missing (supply it). A single hardcoded pipe-escape remedy
+        // misdirects the operator toward pipes when the row is actually short.
+        const remedy =
+            rawCells.length > 7
+                ? "escape stray pipes as \\|"
+                : "supply the missing column(s)";
         throw new BacklogError(
-            `Expected 7 cells but found ${rawCells.length} for ${rawCells[0] || "(no ID)"} in ${originLabel}: escape stray pipes as \\|`,
+            `Expected 7 cells but found ${rawCells.length} for ${rawCells[0] || "(no ID)"} in ${originLabel}: ${remedy}`,
         );
     }
     const [id, status, area, task, owner, notes, links] = rawCells;

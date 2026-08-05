@@ -1,6 +1,6 @@
 # vh-agent-harness developer tasks. The repo dogfoods its own harness; `update`
 # regenerates this repo's rendered .opencode/ from templates/core after a build.
-.PHONY: build test fmt vet check install update doctor test-auto-gate-live test-e2e-auto-gate test-e2e-auto-gate-opencode
+.PHONY: build test test-js fmt vet check install update doctor test-auto-gate-live test-e2e-auto-gate test-e2e-auto-gate-opencode
 
 # Version: bare tag on an exact-tag commit (release); <latest-tag>+dev otherwise.
 # Semver build metadata (+dev) sorts equal to the tag, not below — honest "dev build
@@ -19,7 +19,10 @@ VERSION ?= $(shell \
 build: ## Build the binary into bin/
 	go build -ldflags "-X github.com/vhqtvn/vh-agent-harness/internal/cli.Version=$(VERSION)" -o bin/vh-agent-harness ./cmd/vh-agent-harness
 
-test: ## Run the full test suite
+test-js: ## Run the JS (node --test) suite under tests/scripts/
+	node --test tests/scripts/*.test.js
+
+test: test-js ## Run the full test suite
 	go test ./...
 
 fmt: ## Format all Go sources

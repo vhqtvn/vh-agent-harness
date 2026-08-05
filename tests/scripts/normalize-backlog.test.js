@@ -137,6 +137,41 @@ test("refuses an unescaped pipe in the Task column and names the row ID", () => 
     );
 });
 
+test("a short row (fewer than seven cells) names the row ID, the count, and the missing-column remedy", () => {
+    // A four-cell row is the OTHER direction of the strict 7-cell contract: the
+    // problem is a MISSING column, not a stray pipe. The branched remedy must
+    // point at supplying the missing column(s), NOT at escaping pipes (the old
+    // single remedy misdirected the operator toward pipes for a short row).
+    const shortRow = "| P1-TEST-002 | todo | api | settle the missing-column branch |";
+    const { backlogPath } = writeFixture([shortRow]);
+    const result = runNormalizer(backlogPath);
+
+    assert.notEqual(result.status, 0, "normalizer must exit non-zero on a short row");
+    const message = `${result.stdout}\n${result.stderr}`;
+    assert.match(
+        message,
+        /P1-TEST-002/,
+        "the row ID must be present in the error so the operator can find the row",
+    );
+    assert.match(
+        message,
+        /Expected 7 cells but found 4/,
+        "the error must name the expected vs actual cell count",
+    );
+    assert.match(
+        message,
+        /supply the missing column\(s\)/,
+        "a short row must direct the operator to supply the missing column(s), not to escape pipes",
+    );
+    // Negative: the pipe-escape remedy must NOT appear for the short direction
+    // (this is the misdirection the branch exists to prevent).
+    assert.doesNotMatch(
+        message,
+        /escape stray pipes/,
+        "a short row must not suggest escaping pipes — that remedy belongs to the >7 direction only",
+    );
+});
+
 test("a properly escaped pipe parses to exactly seven cells and round-trips byte-identically", () => {
     // The Task cell now carries an ESCAPED pipe pair: `if (added \|\| upgraded)`.
     // This must parse into exactly seven cells (the `||` survives as data), the
