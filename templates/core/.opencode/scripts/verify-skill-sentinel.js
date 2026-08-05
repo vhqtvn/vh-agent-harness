@@ -8,7 +8,7 @@
 //
 // Run: `node .opencode/scripts/verify-skill-sentinel.js` (rendered tree).
 //
-// All 7 behavioral cases from the build-ready spec are covered:
+// All 10 behavioral cases are covered:
 //   1. Unchanged: skills identical -> no notice.
 //   2. Changed: one skill modified -> one restart-required notice.
 //   3. Multi-skill-change: 3 skills change -> ONE notice (aggregate-level).
@@ -16,6 +16,10 @@
 //   5. Read-error: skill unreadable -> distinct error notice.
 //   6. Dedup: two sessions, same directory, same changed aggregate -> one notice.
 //   7. Cross-directory: two projects -> independent baselines/notices.
+//   8. Fail-open: toast rejects -> handler swallows (session.created not disrupted).
+//   9. Selectivity: a second distinct changed aggregate fires a new notice.
+//  10. Retry-after-rejection: a rejected toast releases the reserved dedup key;
+//      a later session.created for the SAME aggregate retries the notice.
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -454,6 +458,101 @@ async function verifyFailOpenOnToastError() {
     }
 }
 
+// Case 9 (selectivity): a SECOND, DISTINCT changed aggregate fires a NEW
+// notice even after the first changed aggregate was deduped. This pins the
+// per-aggregate granularity of the dedup key (skillNoticeKey includes the
+// aggregate at session-state.js). A future "simplification" that collapsed
+// the key to per-directory-only would silently suppress legitimate
+// second-change notices and this case would catch it.
+async function verifyDistinctAggregateRefires() {
+    const root = sandbox("distinct");
+    const stateRoot = sandbox("distinct-state");
+    try {
+        writeSkill(root, "alpha", "# Alpha\n");
+        const { client, calls } = mockClient();
+        const handler = (await server({ client, directory: root })).event;
+
+        // Baseline session: no notice.
+        await withStateRoot(stateRoot, () => fire(handler, "ses-distinct-1", root));
+        assert(calls.length === 0, "baseline session must not fire");
+
+        // First change -> fires exactly one notice.
+        writeSkill(root, "alpha", "# Alpha (changed)\n");
+        await withStateRoot(stateRoot, () => fire(handler, "ses-distinct-2", root));
+        assert(calls.length === 1, "first changed aggregate must fire once");
+
+        // Same aggregate, re-fire with no further change -> deduped (bridges
+        // to case 6, proves the dedup Set is still active for this key).
+        await withStateRoot(stateRoot, () => fire(handler, "ses-distinct-3", root));
+        assert(calls.length === 1, "same changed aggregate must dedup across sessions");
+
+        // SECOND distinct change -> different aggregate -> different key ->
+        // new notice fires (this is the selectivity assertion).
+        writeSkill(root, "alpha", "# Alpha (changed again)\n");
+        await withStateRoot(stateRoot, () => fire(handler, "ses-distinct-4", root));
+        assert(
+            calls.length === 2,
+            `a second distinct changed aggregate must fire a new notice; got ${calls.length}`,
+        );
+        assert(warningCount(calls) === 2, "both distinct-aggregate notices must be warnings");
+
+        console.log("case 9 (distinct-aggregate re-fire): ok");
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(stateRoot, { recursive: true, force: true });
+    }
+}
+
+// Case 10 (retry after rejection): when client.tui.showToast rejects, the
+// reserved dedup key MUST be released so a subsequent session.created for the
+// SAME aggregate retries the toast. This is the rollback path for the
+// publish-before-await dedup discipline. Without the release, the key would
+// be permanently consumed and the second fire would be deduped away — the
+// OUTCOME under test is that the notice fires on retry, not merely that the
+// key was deleted.
+async function verifyRetryAfterRejection() {
+    const root = sandbox("retry");
+    const stateRoot = sandbox("retry-state");
+    try {
+        writeSkill(root, "alpha", "# Alpha\n");
+        let toastCalls = 0;
+        let shouldFail = true;
+        const flakyClient = {
+            tui: {
+                showToast: async () => {
+                    toastCalls += 1;
+                    if (shouldFail) {
+                        throw new Error("transport down");
+                    }
+                },
+            },
+        };
+        const handler = (await server({ client: flakyClient, directory: root })).event;
+
+        writeSkill(root, "alpha", "# Alpha (changed)\n");
+        // First session.created: toast rejects. Must NOT throw (fail-open),
+        // and the reserved key must be released so a retry is possible.
+        await withStateRoot(stateRoot, () => fire(handler, "ses-retry-1", root));
+        assert(toastCalls === 1, `first attempt must be made despite failure; got ${toastCalls}`);
+
+        // Second session.created, SAME aggregate: with the fix the released
+        // key allows a retry and the notice fires. Without the fix the
+        // permanently-consumed key would suppress this and toastCalls would
+        // stay at 1.
+        shouldFail = false;
+        await withStateRoot(stateRoot, () => fire(handler, "ses-retry-2", root));
+        assert(
+            toastCalls === 2,
+            `retry after rejection must re-fire the notice for the same aggregate; got ${toastCalls}`,
+        );
+
+        console.log("case 10 (retry after rejection): ok");
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(stateRoot, { recursive: true, force: true });
+    }
+}
+
 async function main() {
     ensureDir(TMP_ROOT);
     verifyHashAggregate();
@@ -467,6 +566,8 @@ async function main() {
     await verifyDedup();
     await verifyCrossDirectory();
     await verifyFailOpenOnToastError();
+    await verifyDistinctAggregateRefires();
+    await verifyRetryAfterRejection();
     console.log("skill-sentinel verification: ok");
 }
 

@@ -246,6 +246,7 @@ export const server = async ({ client, directory }) => {
             // fault) never disrupts the session.created handler — the next
             // session.created retries the comparison. ensureSessionBinding above
             // is intentionally OUTSIDE this guard so its errors still surface.
+            let reservedKey = null;
             try {
                 const current = computeSkillFingerprint(directory);
                 const notice = compareSkillFingerprint(skillBaseline, current);
@@ -261,12 +262,22 @@ export const server = async ({ client, directory }) => {
                 // re-entering the handler during the toast RPC would otherwise
                 // read a Set that still lacks the key and fire a duplicate.
                 noticedSkillKeys.add(noticeKey);
+                reservedKey = noticeKey;
                 await showSkillNoticeToast(client, directory, notice);
             } catch (_error) {
                 // Fail-open: the sentinel is advisory. Swallow so the plugin
                 // host does not log a spurious error for a transport glitch.
-                // The next session.created recomputes from current on-disk
-                // state, so a transient failure is self-healing.
+                // If a key was reserved for this event, release it so a later
+                // session.created can RETRY the toast — the synchronous
+                // reservation prevents a duplicate fire under concurrent
+                // re-entry, but a rejected publish must not permanently
+                // consume the key and silence the notice for this
+                // (directory, aggregate) for the rest of the process. (A
+                // throw before reservation leaves reservedKey null, so there
+                // is nothing to roll back.)
+                if (reservedKey !== null) {
+                    noticedSkillKeys.delete(reservedKey);
+                }
             }
         },
         "shell.env": async (input, output) => {
