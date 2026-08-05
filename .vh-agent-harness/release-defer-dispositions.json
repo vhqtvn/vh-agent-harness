@@ -2,14 +2,14 @@
   "schema_version": 1,
   "release_base": {
     "kind": "tag",
-    "value": "v0.21.0"
+    "value": "v0.22.0"
   },
-  "evaluated_commit": "615e7beb0f8766bac8ab53f48dcfc9a2568e2ed8",
-  "evaluated_tree": "38deeab8d166071087919aba4af2afc802a5f972",
-  "manifest_parent_commit": "615e7beb0f8766bac8ab53f48dcfc9a2568e2ed8",
+  "evaluated_commit": "b6af66b93d3e1a37e9fedf05296fe927f1fc9aa5",
+  "evaluated_tree": "5e053b194d4486c7b60aaa8ff8415130f67b71ad",
+  "manifest_parent_commit": "b6af66b93d3e1a37e9fedf05296fe927f1fc9aa5",
   "reconciliation": {
     "status": "released",
-    "scope": "Release arc: v0.21.0 (the prior tag and derived release_base) through evaluated_commit (the release-prep evaluation point at current HEAD 5d459cb; intended release v0.22.0). The handshake SHAs here are TENTATIVE release-prep-pinned values; the releaser recomputes the final handshake against the REAL post-artifact HEAD R (the committed readiness artifact) and commits M as the final ceremony step (child of R), after which the release-mode evaluator verifies evaluated_commit==HEAD^==R, evaluated_tree==tree(HEAD^), and HEAD^..HEAD diff == [manifest path only]. The v0.21.0..HEAD arc is the v0.22.0 MINOR feature arc (12 commits; 4 feat / 0 breaking; no !: subjects, no BREAKING CHANGE: footers) carrying four additive consumer-facing capabilities (CC borrowable #1-#4): (1) feat(compaction) compaction-summary discipline (0fe71f2); (2) feat(worker) worker-read-only dynamic worker, Pilot 1, opt-in via core/worker-read-only, deliberately read-only leaf (079aedb); (3) feat(sentinel) skill-freshness sentinel, advisory/fail-open by design (2481d85); (4) feat(skill-proposals) skill-authoring proposal transport, a new .local/coordinator/skill-proposals/ intake surface (40c4327). All four are additive; none removes or renames a shipped contract, capability, profile, or ownership class (MINOR, semver-compatible). The four named capabilities surfaced NO firing DEFER cards in the F4-C release-prep enumeration (check-defer-triggers.mjs --mode=release-prep --since v0.21.0): each is fully landed or its follow-up is already closed/disposed. The enumeration surfaced exactly TWO firing cards, both non-release-relevant and both BORN-FIRED trigger-grammar artifacts (path_touched set-membership in the release diff cannot distinguish a file being CREATED by an arc commit from a file being EDITED): defer-corpus-taskid-guard-positive-control (target internal/cli/corpus_command_taskid_guard_test.go was CREATED by 5d459cb, the same commit that filed the card; advisory positive-control coverage obligation; operator disposition is to let it self-resolve at the next tag) and defer-voided-mid-review-recovery-integration (its two bound files were CREATED by 5165c2b, after the v0.21.0 baseline; integration-validation disclosure obligation, unit-covered-only/integration-deferred, risk already durably disclosed in canon; self-resolves at the next tag). Both disposition=disclose, release_relevance=no, metadata_state=valid. No DEFER finding requires promotion; no override ceremony is needed for v0.22.0.",
+    "scope": "Release arc: v0.22.0 (the prior tag and derived release_base) through evaluated_commit (the release-prep evaluation point = the post-artifact HEAD R = b6af66b, the readiness-artifact commit; intended release v0.22.1). This is a forward-only PATCH successor to the half-finished v0.22.0: the release-evaluator stdout-fix (615e7be) landed on top of v0.22.0's manifest and a follow-up (59a9264) re-pinned v0.22.0's handshake, but the intended v0.22.0 tag-move was never executed and v0.22.0 is published/immutable (Go proxy/sumdb), so the fix ships forward as v0.22.1 under a fresh, correct manifest. v0.22.0 is left exactly where it is (no move/force/delete). The v0.22.0..HEAD arc carries exactly ONE consumer-relevant commit (615e7be fix(release-evaluator): flush stdout before exit to avoid 64KiB pipe-buffer truncation) plus ceremony bookkeeping (59a9264 chore(release): manifest re-pin, excluded from the changelog by goreleaser's ^chore: filter). The release-prep enumeration (--mode=release-prep --since v0.22.0) surfaced exactly ONE firing card: defer-trigger-checker-distinguish-nonfiring-from-hold (target templates/core/.opencode/scripts/check-defer-triggers.mjs, touched by 615e7be). The fix is ORTHOGONAL to that card (the card concerns the promoter-use-only checker's DISPLAY classification of never-firing cards; the fix concerns stdout flushing before exit); disposition=disclose, release_relevance=no, non-blocking. The 23 carry-forward records are prior-arc (v0.20.0/v0.21.0/v0.22.0) disclosures carried for continuity; none fire in this v0.22.1 arc and none are release-relevant to v0.22.1. No DEFER finding requires promotion; no override ceremony is needed for v0.22.1. The handshake SHAs here are the FINAL releaser-computed values: evaluated_commit == manifest_parent_commit == R (b6af66b), evaluated_tree == tree(R) (5e053b1); the release-mode evaluator verifies evaluated_commit==HEAD^==R and HEAD^..HEAD diff == [manifest path only] at tag time (HEAD=M, the manifest-only child of R).",
     "zero_records_confirmed": false
   },
   "records": [
@@ -203,6 +203,18 @@
       "source_ref": ".local/coordinator/tasks/defer-release-tag-pin-verify-local-tag-cleanup.json",
       "studied_at": "2026-08-02T00:00:00Z",
       "reviewed_at": "2026-08-04T00:00:00Z",
+      "override": null
+    },
+    {
+      "defer_id": "defer-trigger-checker-distinguish-nonfiring-from-hold",
+      "release_relevance": "no",
+      "disposition": "disclose",
+      "metadata_state": "valid",
+      "summary": "The promoter-use-only checker (check-defer-triggers.mjs) surfaces unparseable/malformed/absent triggers under the same [hold]/trigger-not-met flag as valid-waiting cards, making ~33 never-firing cards invisible without reading each detail parenthetical; a DISPLAY/classification improvement (distinct [unparseable]/[no-trigger]/[hold] flags), not a shipped-behavior defect. The checker is never wired into a commit hook or doctor.",
+      "reason": "Trigger fired for the v0.22.1 arc (v0.22.0..HEAD): path_touched(templates/core/.opencode/scripts/check-defer-triggers.mjs) is met — the release-evaluator stdout-flush fix (615e7be, the only consumer-relevant commit this arc) touched the embed source of this checker. Non-release-relevant: the 615e7be fix (defer process.exit(code) into the stdout write-drain callback so a slow pipe reader does not truncate the >64KiB JSON payload at the kernel pipe buffer) is ORTHOGONAL to this card's concern (distinct DISPLAY flags for the never-engaged class of triggers); the fix neither addresses nor worsens the display-classification gap, and touches the checker's emit/exit path rather than its trigger-parse/flag path. Disclosed for operator visibility. metadata_state=valid (single clean path_touched predicate; premise-verified LIVE 2026-08-04).",
+      "source_ref": ".local/coordinator/tasks/defer-trigger-checker-distinguish-nonfiring-from-hold.json",
+      "studied_at": "2026-08-04T00:00:00Z",
+      "reviewed_at": "2026-08-06T00:00:00Z",
       "override": null
     },
     {
