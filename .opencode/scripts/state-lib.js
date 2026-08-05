@@ -5401,7 +5401,14 @@ function normalizeSkillProposalId(value) {
 }
 
 function generateSkillProposalId(skillSlug) {
-    return `skill-propose-${planTimestamp()}-${slugify(skillSlug || "skill")}`;
+    // Pre-normalize so the returned proposal_id matches the on-disk filename
+    // stem (skillProposalPath also normalizes via slugify, which lowercases
+    // planTimestamp()'s capital "T"). Without this, a fresh create's returned
+    // proposal_id diverged in case from the filename until a re-normalizing
+    // update converged them. D2 fix.
+    return normalizeSkillProposalId(
+        `skill-propose-${planTimestamp()}-${slugify(skillSlug || "skill")}`,
+    );
 }
 
 function defaultSkillProposalMetadata() {

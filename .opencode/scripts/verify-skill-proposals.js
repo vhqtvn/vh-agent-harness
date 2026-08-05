@@ -93,16 +93,12 @@ function expectStateError(fn, expectedFragment) {
 }
 
 // Derive the CANONICAL proposal id from the on-disk path (always
-// slug-normalized lowercase), not from result.proposal.proposal_id. The
-// create-returned proposal_id field is NOT pre-normalized: generateSkillProposalId
-// embeds planTimestamp() (capital "T"), while the filesystem path is run through
-// normalizeSkillProposalId (slugify lowercases), so the two diverge in case
-// right after a fresh create (they converge after any update, which
-// re-normalizes). All ops normalize on use, so this is cosmetic, but it means
-// string-equality assertions and cleanup MUST use the canonical path form.
-// (Flagged as DEFER D2: generateSkillProposalId should pre-normalize so the
-// returned id equals the filename stem immediately. Not fixed here — outside
-// the B1/B2 scope of this slice.)
+// slug-normalized lowercase). generateSkillProposalId now pre-normalizes its
+// return (D2 fix), so result.proposal.proposal_id equals this path stem from
+// the moment of creation; previously the raw planTimestamp-bearing id diverged
+// in case from the slug-lowercased filename until the first re-normalizing
+// update converged them. Path-derived remains the canonical source of truth
+// for cleanup and string-equality regardless, so this helper stays.
 function canonicalProposalId(result) {
     return path.basename(result.path, ".json");
 }
@@ -219,6 +215,18 @@ function main() {
         if (!fs.existsSync(proposalCardPath(alphaID))) {
             throw new StateError(
                 "Case 1: the canonical path id must locate the on-disk card.",
+            );
+        }
+        // Pinning the D2 fix: the returned proposal_id MUST be pre-normalized
+        // (no capital "T" from planTimestamp) and equal the on-disk filename
+        // stem from the moment of creation. Before the fix,
+        // generateSkillProposalId returned the raw planTimestamp-bearing id
+        // while the filename stem was slug-lowercased, so the two diverged in
+        // case on a fresh create. alphaID is the path-derived canonical stem,
+        // so equality proves no divergence.
+        if (created.proposal.proposal_id !== alphaID) {
+            throw new StateError(
+                `Case 1: returned proposal_id must equal the normalized filename stem "${alphaID}", got "${created.proposal.proposal_id}".`,
             );
         }
         // Top-level created_by is refused at the write layer (the input is
