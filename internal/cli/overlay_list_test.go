@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vhqtvn/vh-agent-harness/internal/overlay"
 )
 
 // runOverlayListIn runs `overlay list` with the given target and args,
@@ -197,6 +199,91 @@ func TestOverlay_ReleaseDualSelectionViaCapabilities(t *testing.T) {
 	line := packLine(t, out, "release")
 	if !strings.Contains(line, "selected") {
 		t.Errorf("release should be 'selected' via capabilities:[core/release]; line=%q", line)
+	}
+}
+
+// TestOverlayList_TransitiveHardDepShowsSelected is the F4 crux made hermetic:
+// a pack (B) that PROVIDES a capability another selected pack (A) hard-deps on
+// renders transitively, so it MUST surface as 'selected' — never merely
+// 'available'. This is the render-closure semantics the documented contract
+// ("Selected = renders on the next update") promises, exercised against a clean
+// temp repo with a synthetic project-local selector pack.
+//
+// Fixture (mirrors the dogfood repo's real harness-dogfood -> core/release
+// edge, but hermetic to a temp dir):
+//   - Pack A "transitive-selector" (project-local) declares capability id
+//     "test/transitive-selector" with hard_deps: [core/release]. It is selected
+//     ONLY via `overlays:` (NOT via capabilities:).
+//   - Pack B "release" is the EMBEDDED pack whose manifest provides core/release
+//     and hard-deps on core/gated-commit. It is NOT directly selected: it is not
+//     in `overlays:` and core/release is not in `capabilities:`.
+//
+// Before the F4 fix, packSelected tested only the 3 direct signals and reported
+// `release` as `available` (the bug). After the fix, selection is membership in
+// the canonical render pack-set (resolveCapabilityAnswers output, the same
+// closure the render seam consumes), so `release` is `selected`.
+func TestOverlayList_TransitiveHardDepShowsSelected(t *testing.T) {
+	dir := t.TempDir()
+	// Materialize a project-local selector pack whose capability hard-deps on
+	// core/release. Reuses overlay.ProjectOverlaysSubdir so the path matches the
+	// real pack layout discoverPackContributions / OpenPackFor walk.
+	packDir := filepath.Join(dir, filepath.FromSlash(overlay.ProjectOverlaysSubdir), "transitive-selector")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatalf("mkdir selector pack: %v", err)
+	}
+	// Manifest: id test/transitive-selector, hard-deps on core/release (which the
+	// embedded `release` pack provides). This is the transitive edge under test.
+	manifest := "id: test/transitive-selector\n" +
+		"provides:\n" +
+		"  - transitive-selector-agent\n" +
+		"hard_deps:\n" +
+		"  - core/release\n" +
+		"optional_deps: []\n"
+	if err := os.WriteFile(filepath.Join(packDir, "capability-manifest.yml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write selector manifest: %v", err)
+	}
+
+	// Profile selects the selector pack via `overlays:` ONLY. It opts out of all
+	// default-on pilots (so the only selected packs are the selector + its
+	// transitive closure) and declares NO explicit capabilities (so core/release
+	// is reached ONLY through the selector's hard_dep closure).
+	profile := "profile: minimal\n" +
+		"features:\n" +
+		"  formal-verification-pilot: false\n" +
+		"  resolve-first-pilot: false\n" +
+		"  contract-invariant-audit-pilot: false\n" +
+		"overlays:\n" +
+		"  - transitive-selector\n" +
+		"capabilities: []\n"
+	writeProfile(t, dir, profile)
+
+	out, err := runOverlayListIn(t, dir)
+	if err != nil {
+		t.Fatalf("overlay list: unexpected error %v (out=%q)", err, out)
+	}
+
+	// `release` (embedded) must surface as selected: it renders transitively via
+	// transitive-selector -> core/release, even though it is NOT directly
+	// selected (not in overlays:, core/release not in capabilities:).
+	releaseLine := packLine(t, out, "release")
+	if !strings.Contains(releaseLine, "selected") {
+		t.Errorf("release should be 'selected' (transitive via transitive-selector -> core/release); line=%q", releaseLine)
+	}
+	if strings.Contains(releaseLine, "available") {
+		t.Errorf("release must NOT be 'available' when it renders transitively; line=%q", releaseLine)
+	}
+
+	// The directly-selected selector pack must also surface as selected.
+	selectorLine := packLine(t, out, "transitive-selector")
+	if !strings.Contains(selectorLine, "selected") {
+		t.Errorf("transitive-selector should be 'selected' (directly via overlays:); line=%q", selectorLine)
+	}
+
+	// Sanity: a pack NOT in the closure (repo-mail, which no selection reaches)
+	// must remain 'available' — the fix must not over-report unrelated packs.
+	mailLine := packLine(t, out, "repo-mail")
+	if !strings.Contains(mailLine, "available") {
+		t.Errorf("repo-mail should remain 'available' (no selection reaches it); line=%q", mailLine)
 	}
 }
 

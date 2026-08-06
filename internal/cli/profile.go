@@ -551,6 +551,37 @@ func resolveCapabilityAnswers(target string) (answers map[string]string, renderP
 	return out, packs, catalog, set, nil
 }
 
+// renderPackSet returns the canonical render pack-set for target: the pack
+// names that WILL render on the next `vh-agent-harness update`, computed by the
+// SAME closure the render seam consumes (resolveCapabilityAnswers — the explicit
+// overlays: list UNION packs owning resolved capabilities, with hard_deps closed
+// transitively, UNION feature-activated shipped pilots). It is the source of
+// truth for "selected === renders" that `overlay list` (and guide's ungated
+// hint) rely on, so a pack pulled in TRANSITIVELY via another selected pack's
+// hard_dep (e.g. release via harness-dogfood -> core/release) is reported
+// selected — not merely "available".
+//
+// The render path itself does NOT use this helper: it calls
+// resolveCapabilityAnswers directly because it also needs the capability
+// answers, the merged catalog, and the resolved set. This helper exists for the
+// DISCOVERY surfaces (overlay list, guide ungated hint) that need only pack-set
+// membership and must stay best-effort.
+//
+// ok is false when the resolver/catalog/profile-read errored; callers fall back
+// to the legacy direct signals (overlays: + capabilities: dual-selection +
+// feature pilots) to keep `overlay list` non-fatal on a broken profile. The
+// fallback can over-report a pack that fails to render only when the resolver
+// itself errored — but a broken catalog/manifest is itself a render blocker the
+// operator must fix regardless (render aborts with the same error), so a
+// degraded `overlay list` is still directionally honest.
+func renderPackSet(target string) (packs []string, ok bool) {
+	_, renderPacks, _, _, err := resolveCapabilityAnswers(target)
+	if err != nil {
+		return nil, false
+	}
+	return renderPacks, true
+}
+
 // discoverPackContributions reads capability-manifest.yml from EVERY
 // discoverable overlay pack — embedded under templates/overlays (via
 // overlay.KnownPacks) and project-local under

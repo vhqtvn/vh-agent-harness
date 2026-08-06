@@ -15,8 +15,12 @@ package cli
 // The pack list comes from overlay.KnownPacksFor (embedded UNION project-local
 // with source attribution) — NOT from rendered-outputs.json, which carries
 // provenance only for already-selected packs and therefore cannot enumerate
-// unselected ones. Selection status reuses activeOverlays / parseProfileSelection
-// / reconciledFeatures (the same signals guide + doctor consume).
+// unselected ones. Selection status is MEMBERSHIP in the canonical render
+// pack-set (renderPackSet -> resolveCapabilityAnswers output, the same closure
+// the render seam consumes), so a pack pulled in TRANSITIVELY via another
+// selected pack's hard_dep is reported selected. The render-set read is
+// best-effort: a resolver/profile error degrades to the legacy direct signals
+// (overlays / capabilities / feature pilots) so `overlay list` stays non-fatal.
 
 import (
 	"fmt"
@@ -56,11 +60,16 @@ unselected-but-shipped pack (e.g. ` + "`auto-classifier-pilot`" + `, ` + "`relea
 discovery surface that prevents a coordinator from wrongly concluding a
 shipped pack does not exist.
 
-A pack is "selected" when ANY of:
+A pack is "selected" when it will RENDER on the next ` + "`update`" + ` — the SAME
+pack-set the render seam computes, so a pack pulled in TRANSITIVELY via another
+selected pack's hard_dep (e.g. ` + "`release`" + ` renders when a selected pack declares
+` + "`hard_deps: [core/release]`" + `) is selected, not merely available. A pack reaches
+the render set when ANY of:
   - its name is listed under ` + "`overlays:`" + ` in vh-harness-profile.yml, OR
   - its capability-manifest id is listed under ` + "`capabilities:`" + ` (the
     ` + "`release`" + ` pack is dual-selectable via ` + "`core/release`" + `), OR
-  - it is a shipped default-on pilot whose feature key resolves true.
+  - it is a shipped default-on pilot whose feature key resolves true, OR
+  - another selected pack's capability hard-deps on it (transitive closure).
 
 Run ` + "`vh-agent-harness overlay docs <name>`" + ` to read a pack's README and
 learn how to configure it before enabling.`,
@@ -119,47 +128,75 @@ type enrichedPack struct {
 	Selected bool
 }
 
-// resolvePackSelection attaches a Selected flag to each enumerated pack by
-// reading the live profile once (overlays + capabilities) plus the reconciled
-// feature map. See packSelected for the selection definition. It never fails:
-// a profile that cannot be read yields no overlays/capabilities/features, so
-// every pack surfaces as available (the safe direction for discovery).
-func resolvePackSelection(target string, packs []overlay.PackInfo) []enrichedPack {
-	overlays := activeOverlays(target)
+// packSelectionState carries the once-computed selection state shared by
+// resolvePackSelection (`overlay list`) and unselectedEmbeddedPacks (guide's
+// ungated hint): the canonical render pack-set when the resolver succeeded,
+// PLUS the legacy direct signals used as a fallback when it did not. Computing
+// both once consolidates the near-duplicate profile reads the dropped F2 review
+// flagged (each function re-read the profile twice through activeOverlays /
+// parseProfileSelection / reconciledFeatures).
+type packSelectionState struct {
+	// renderSet is the canonical render pack-set (resolveCapabilityAnswers
+	// output via renderPackSet) as a membership map. nil when renderOK is false.
+	renderSet map[string]bool
+	renderOK  bool
+
+	// Legacy fallback signals (always best-effort populated): used when
+	// renderOK is false so `overlay list` stays non-fatal on a broken profile.
+	overlays     []string
+	capabilities []resolver.CapabilityID
+	features     map[string]bool
+}
+
+// loadPackSelection reads the selection state for target ONCE. Never fails: a
+// resolver/catalog/profile-read error sets renderOK=false and the legacy signals
+// (themselves best-effort) drive the answer, so `overlay list` stays non-fatal
+// on a broken profile (every pack surfaces as available in the worst case).
+func loadPackSelection(target string) packSelectionState {
 	raw, rerr := os.ReadFile(filepath.Join(target, harnessProfileName))
 	if rerr != nil {
 		raw = nil
 	}
 	_, capabilities := parseProfileSelection(raw)
-	features := reconciledFeatures(target)
-
-	out := make([]enrichedPack, 0, len(packs))
-	for _, p := range packs {
-		out = append(out, enrichedPack{
-			PackInfo: p,
-			Selected: packSelected(target, p.Name, overlays, capabilities, features),
-		})
+	st := packSelectionState{
+		overlays:     activeOverlays(target),
+		capabilities: capabilities,
+		features:     reconciledFeatures(target),
 	}
-	return out
+	packs, ok := renderPackSet(target)
+	if ok {
+		st.renderOK = true
+		st.renderSet = make(map[string]bool, len(packs))
+		for _, n := range packs {
+			st.renderSet[n] = true
+		}
+	}
+	return st
 }
 
-// packSelected reports whether packName would render on the next update for the
-// project at target. A pack is selected when ANY of:
-//   - its name is listed under `overlays:` (activeOverlays), OR
-//   - its capability-manifest id is listed under `capabilities:` (e.g. the
-//     release pack is dual-selectable via core/release — both paths converge),
-//     OR
-//   - it is a shipped default-on pilot whose feature key resolves true
-//     (reconciledFeatures + featurePackMap; an explicit `overlays:` entry
-//     already matched above and survives an opt-out).
+// isSelected reports whether packName would render on the next update for the
+// project at target, per st. Selection is MEMBERSHIP in the canonical render
+// pack-set (resolveCapabilityAnswers output — the SAME closure the render seam
+// consumes), so a pack pulled in TRANSITIVELY via another selected pack's
+// hard_dep (e.g. release via harness-dogfood -> core/release) is selected,
+// never merely "available".
 //
-// This reuses the SAME signals doctor's shipped-pilots check consumes, so the
-// status column never reports a rendering pack as merely "available" (the
-// inverse false impression this slice exists to kill). Capability-manifest
-// reads are best-effort: a pack without a manifest (skills-only INFORMS pilots)
-// contributes no capability id and falls through to the overlays/features paths.
-func packSelected(target, packName string, overlays []string, capabilities []resolver.CapabilityID, features map[string]bool) bool {
-	for _, o := range overlays {
+// When the resolver errored (renderOK=false), `overlay list` degrades to the
+// legacy direct signals: the `overlays:` list, capability-manifest
+// dual-selection (e.g. release via `capabilities: [core/release]`), and
+// feature-activated shipped pilots. The fallback can over-report a pack that
+// fails to render only when the resolver itself errored — but a broken
+// catalog/manifest is itself a render blocker the operator must fix regardless
+// (render aborts with the same error), so the degraded answer is still
+// directionally honest. Capability-manifest reads in the fallback are
+// best-effort: a pack without a manifest (skills-only pilots) contributes no
+// capability id and falls through to the overlays/features paths.
+func (st packSelectionState) isSelected(target, packName string) bool {
+	if st.renderOK {
+		return st.renderSet[packName]
+	}
+	// Fallback: resolver failed; degrade to the direct signals.
+	for _, o := range st.overlays {
 		if o == packName {
 			return true
 		}
@@ -169,7 +206,7 @@ func packSelected(target, packName string, overlays []string, capabilities []res
 	// does (project-local first, then embedded) and read its manifest id.
 	if pack, err := overlay.OpenPackFor(target, packName); err == nil {
 		if m, ok, _ := pack.ReadCapabilityManifest(); ok && m.ID != "" {
-			for _, c := range capabilities {
+			for _, c := range st.capabilities {
 				if string(c) == m.ID {
 					return true
 				}
@@ -178,11 +215,29 @@ func packSelected(target, packName string, overlays []string, capabilities []res
 	}
 	// Shipped default-on pilot (feature-activated).
 	for fk, pn := range featurePackMap {
-		if pn == packName && features[fk] {
+		if pn == packName && st.features[fk] {
 			return true
 		}
 	}
 	return false
+}
+
+// resolvePackSelection attaches a Selected flag to each enumerated pack by
+// testing membership in the canonical render pack-set (loadPackSelection). See
+// packSelectionState.isSelected for the selection definition. It never fails: a
+// broken profile yields no overlays/capabilities/features and a renderSet read
+// error degrades to those legacy signals, so every pack surfaces as available
+// in the worst case (the safe direction for discovery).
+func resolvePackSelection(target string, packs []overlay.PackInfo) []enrichedPack {
+	st := loadPackSelection(target)
+	out := make([]enrichedPack, 0, len(packs))
+	for _, p := range packs {
+		out = append(out, enrichedPack{
+			PackInfo: p,
+			Selected: st.isSelected(target, p.Name),
+		})
+	}
+	return out
 }
 
 // unselectedEmbeddedPacks returns the sorted names of shipped (embedded) packs
@@ -190,26 +245,20 @@ func packSelected(target, packName string, overlays []string, capabilities []res
 // update). It is the discovery signal guide's ungated hint surfaces so a
 // coordinator or operator learns these packs EXIST without a false-negative.
 // Returns nil when no embedded pack is unselected, or when the pack list cannot
-// be enumerated (the hint simply does not render).
+// be enumerated (the hint simply does not render). Shares loadPackSelection
+// with resolvePackSelection so both surfaces project the SAME render pack-set.
 func unselectedEmbeddedPacks(target string) []string {
 	all, err := overlay.KnownPacksFor(target)
 	if err != nil {
 		return nil
 	}
-	overlays := activeOverlays(target)
-	raw, rerr := os.ReadFile(filepath.Join(target, harnessProfileName))
-	if rerr != nil {
-		raw = nil
-	}
-	_, capabilities := parseProfileSelection(raw)
-	features := reconciledFeatures(target)
-
+	st := loadPackSelection(target)
 	var out []string
 	for _, p := range all {
 		if p.Source != overlay.PackSourceEmbedded {
 			continue // hint targets shipped (embedded) packs
 		}
-		if !packSelected(target, p.Name, overlays, capabilities, features) {
+		if !st.isSelected(target, p.Name) {
 			out = append(out, p.Name)
 		}
 	}
