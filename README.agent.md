@@ -655,7 +655,7 @@ export default function transform({ context }) {
     `Error:` line and does NOT dump the Usage/Flags block (a child failure is
     not a usage error). Genuine non-child errors (permission denials, hook
     failures, the silent `errSilent` sentinel used by diff/doctor) still exit 1.
-    (v0.22.2; see `templates/migrations/v0.22.2.md`.)
+    (v0.23.0; see `templates/migrations/v0.23.0.md`.)
   - **Git mutations are denied at both layers.** `vh-agent-harness exec git
     <mutation>` — with OR without a leading global flag (`exec git --no-pager
     commit`, `exec git -C /x push`, `exec git --git-dir=/x commit`, `exec git
