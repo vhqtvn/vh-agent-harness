@@ -34,6 +34,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(__dirname, "..", "..", "templates", "core", ".opencode", "scripts", "check-defer-triggers.mjs");
 const SCRIPT_URL = pathToFileURL(SCRIPT).href;
 
+// Promoter-mode helpers under test (6-state classification + false-READY
+// refusal). Top-level dynamic import keeps the same SCRIPT source-of-truth
+// pointer the release-mode tests above use, so a stale generated .opencode/
+// copy can never shadow the template under test.
+const { evaluateCandidate, classifyCardState } = await import(SCRIPT_URL);
+
 // Linux default pipe buffer size. The defect truncated the piped capture at
 // EXACTLY this many bytes (write() returned false here and the immediate
 // process.exit() discarded the undrained remainder).
@@ -152,4 +158,175 @@ test("emitReleasePrepResult: >64KiB payload round-trips through a tee-captured p
     );
     assert.equal(status, 1, "missing.length > 0 → blocker → exit 1");
     assert.doesNotThrow(() => JSON.parse(captured), "prep tee-captured output must be complete + parseable");
+});
+
+// ---------------------------------------------------------------------------
+// PROMOTER MODE — 6-state classification + false-READY refusal.
+//
+// The promoter path used to collapse every non-met card into a single [hold]
+// flag, so a promoter could not tell a genuine future-watch (valid-waiting)
+// from noise (no trigger / unsupported) or a broken compound
+// (malformed-compound) without reading every detail parenthetical. These
+// tests pin the six distinct `state` values and the false-READY refusal:
+// a compound any()/all() with an unparseable member must NOT surface READY
+// even when its parseable members are met.
+//
+// evaluateCandidate takes `changedPaths` as an injected Set, so these cases
+// are deterministic and do not touch git.
+// ---------------------------------------------------------------------------
+
+// Build a minimal task-card body shaped like /write-task output: only the
+// fields the evaluator reads (task_id + owner_notes).
+function promoterCard(id, notes) {
+    return { task_id: id, owner_notes: notes };
+}
+
+test("promoter classifyCardState: no trigger line → no-machine-trigger", () => {
+    const r = evaluateCandidate("tasks/plain.json", promoterCard("plain", [
+        "source:review-defer",
+        "studied:2026-04-30",
+    ]), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(r.state, "no-machine-trigger");
+    assert.equal(r.met, false);
+    assert.equal(r.mode, "none");
+    assert.deepEqual(r.details, []);
+});
+
+test("promoter classifyCardState: recognized path_touched IN diff → valid-fired (READY)", () => {
+    const r = evaluateCandidate("tasks/fired.json", promoterCard("fired", [
+        "source:review-defer",
+        "trigger:path_touched(fileA.go)",
+        "studied:2026-04-30",
+    ]), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(r.state, "valid-fired");
+    assert.equal(r.met, true);
+    assert.equal(r.details.length, 1);
+    assert.equal(r.details[0].met, true);
+    assert.equal(r.details[0].note, "touched");
+    assert.equal(r.details[0].parseState, "recognized");
+});
+
+test("promoter classifyCardState: recognized path_touched NOT in diff → valid-waiting", () => {
+    const r = evaluateCandidate("tasks/waiting.json", promoterCard("waiting", [
+        "trigger:path_touched(fileA.go)",
+    ]), "v0.1.0", new Set(["other.go"]));
+    assert.equal(r.state, "valid-waiting");
+    assert.equal(r.met, false);
+    assert.equal(r.details[0].note, "not-touched-since-ref");
+});
+
+test("promoter classifyCardState: unrecognized predicate → unsupported", () => {
+    const r = evaluateCandidate("tasks/unk.json", promoterCard("unk", [
+        "trigger:foo_bar(some-arg)",
+    ]), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(r.state, "unsupported");
+    assert.equal(r.met, false);
+    assert.equal(r.details[0].note, "unknown-predicate");
+    assert.equal(r.details[0].parseState, "unsupported");
+});
+
+test("promoter classifyCardState: single malformed-arg predicate → unsupported (detail keeps malformed-predicate)", () => {
+    // A single `||`-joined trigger is a recognized predicate with a bad arg.
+    // It is not a compound, so the card-level state is `unsupported`; the
+    // per-member detail still surfaces `malformed-predicate` (pinned by the Go
+    // promoter-mode test TestCheckDefer_PromoterMode_MalformedOrJoinTrigger).
+    const r = evaluateCandidate("tasks/malformed.json", promoterCard("malformed", [
+        "trigger:path_touched(fileA.go)||path_touched(fileB.go)",
+    ]), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(r.state, "unsupported");
+    assert.equal(r.met, false);
+    assert.equal(r.details[0].note, "malformed-predicate");
+    assert.equal(r.details[0].parseState, "malformed");
+});
+
+test("promoter classifyCardState: glob path_touched → cold-glob", () => {
+    // A glob operand can never precisely match (exact Set.has lookup), so it
+    // is surfaced cold-glob rather than silently parked as valid-waiting.
+    const rGlob = evaluateCandidate("tasks/glob.json", promoterCard("glob", [
+        "trigger:path_touched(src/*)",
+    ]), "v0.1.0", new Set(["src/auth/login.go"]));
+    assert.equal(rGlob.state, "cold-glob");
+    assert.equal(rGlob.met, false);
+
+    // A directory operand (trailing slash) is cold-glob too.
+    const rDir = evaluateCandidate("tasks/dir.json", promoterCard("dir", [
+        "trigger:path_touched(src/)",
+    ]), "v0.1.0", new Set(["src/auth/login.go"]));
+    assert.equal(rDir.state, "cold-glob");
+    assert.equal(rDir.met, false);
+});
+
+test("promoter false-READY refusal: any() compound with an unparseable member is NOT READY even when a member fires", () => {
+    // DEFECT: under the old reduction `met = details.some(d => d.met)`, this
+    // card reported READY because path_touched(fileA.go) is met and the
+    // garbage_pred(x) member was silently dropped (parsePredicate → null →
+    // met:false, ignored by .some()). The promoter would then apply the DoR to
+    // a card whose trigger grammar is broken. The fix refuses READY: the card
+    // is malformed-compound, met=false.
+    const r = evaluateCandidate("tasks/false-ready.json", promoterCard("false-ready", [
+        "trigger:any(path_touched(fileA.go), garbage_pred(x))",
+    ]), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(r.state, "malformed-compound");
+    assert.equal(r.met, false, "malformed-compound must NOT surface READY (false-READY refusal)");
+    // The firing member is still reflected in its detail (the compound IS
+    // met-able); only the card-level READY is refused.
+    const fired = r.details.find((d) => d.trigger === "path_touched(fileA.go)");
+    const garbage = r.details.find((d) => d.trigger === "garbage_pred(x)");
+    assert.equal(fired.met, true);
+    assert.equal(fired.parseState, "recognized");
+    assert.equal(garbage.met, false);
+    assert.equal(garbage.parseState, "unsupported");
+});
+
+test("promoter false-READY refusal: multi-line all() compound with an unparseable member → malformed-compound", () => {
+    // The AND form (multiple `trigger:` lines, mode "all") is also a compound.
+    // A malformed member here does not produce false-READY (AND already
+    // requires all members), but it MUST still be surfaced malformed-compound
+    // (not silently valid-waiting) so the broken grammar is visible.
+    const r = evaluateCandidate("tasks/all-malformed.json", promoterCard("all-malformed", [
+        "trigger:path_touched(fileA.go)",
+        "trigger:foo_bar(x)",
+    ]), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(r.state, "malformed-compound");
+    assert.equal(r.met, false);
+    assert.equal(r.mode, "all");
+});
+
+test("promoter regression: well-formed any() over a firing member stays valid-fired (no over-rejection)", () => {
+    // The false-READY fix must not over-reject a clean compound. Two
+    // recognized path_touched members, one firing → valid-fired → READY.
+    // (Pinned end-to-end by the Go test TestCheckDefer_PromoterMode_MalformedOrJoinTrigger
+    // line `[READY] defer-any`; this is the unit-level witness.)
+    const r = evaluateCandidate("tasks/any-clean.json", promoterCard("any-clean", [
+        "trigger:any(path_touched(fileA.go),path_touched(fileB.go))",
+    ]), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(r.state, "valid-fired");
+    assert.equal(r.met, true);
+    assert.equal(r.mode, "any");
+    const b = r.details.find((d) => d.trigger === "path_touched(fileB.go)");
+    assert.equal(b.met, false);
+    assert.equal(b.note, "not-touched-since-ref");
+});
+
+test("promoter regression: well-formed any() with no member firing → valid-waiting (not cold-glob)", () => {
+    const r = evaluateCandidate("tasks/any-waiting.json", promoterCard("any-waiting", [
+        "trigger:any(path_touched(fileA.go),path_touched(fileB.go))",
+    ]), "v0.1.0", new Set(["other.go"]));
+    assert.equal(r.state, "valid-waiting");
+    assert.equal(r.met, false);
+});
+
+test("promoter classifyCardState: precise + glob mix that does not fire → valid-waiting (precise member governs)", () => {
+    // A precise path_touched that is waiting + an incidental glob: the precise
+    // target is the real watch, so this is valid-waiting, NOT cold-glob.
+    const r = evaluateCandidate("tasks/mix.json", promoterCard("mix", [
+        "trigger:any(path_touched(fileA.go), path_touched(docs/*))",
+    ]), "v0.1.0", new Set(["other.go"]));
+    assert.equal(r.state, "valid-waiting");
+    assert.equal(r.met, false);
+});
+
+test("promoter classifyCardState unit: empty items → no-machine-trigger regardless of details", () => {
+    assert.equal(classifyCardState([], "all", []), "no-machine-trigger");
+    assert.equal(classifyCardState([], "any", []), "no-machine-trigger");
 });

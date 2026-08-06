@@ -390,7 +390,15 @@ function extractTriggers(body) {
 // by /write-task) are honored. The Notes-prefix trigger grammar is fed
 // UNMODIFIED to extractTriggers as the owner_notes[] text joined by newlines
 // — the existing `^trigger:` regex + predicate parser are unchanged.
-function evaluateCandidate(file, body, since, changedPaths) {
+//
+// Each report carries a `state` field drawn from a closed set of SIX distinct
+// trigger states (see classifyCardState) so the promoter can ORDER the holding-
+// area population instead of staring at a wall of indistinguishable [hold]
+// flags. Only the `valid-fired` state surfaces READY; every other state is
+// deliberately NOT READY. In particular `malformed-compound` refuses READY even
+// when the compound's `.some()`/`.every()` reduction would otherwise return
+// true on its parseable members — this is the false-READY refusal.
+export function evaluateCandidate(file, body, since, changedPaths) {
     const id = (body && typeof body.task_id === "string" && body.task_id)
         || path.basename(file, ".json");
     const notesText = (body && Array.isArray(body.owner_notes))
@@ -398,17 +406,112 @@ function evaluateCandidate(file, body, since, changedPaths) {
         : "";
     const trig = extractTriggers(notesText);
     if (!trig.items || trig.items.length === 0) {
-        return { id, file, met: false, mode: "none", note: "no-trigger-line", details: [] };
+        return {
+            id, file, met: false, mode: "none", note: "no-trigger-line",
+            state: "no-machine-trigger", details: [],
+        };
     }
+    // Build per-member details carrying a `parseState` (recognized|malformed|
+    // unsupported) plus the parsed `kind`/`arg` so classifyCardState can decide
+    // the card-level state without re-parsing. The printed detail line uses
+    // only {met, trigger, note} (unchanged surface), so the extra fields are
+    // non-breaking.
     const details = trig.items.map((t) => {
         const pred = parsePredicate(t);
-        if (!pred) return { trigger: t, met: false, note: "unknown-predicate" };
-        return { trigger: t, ...evaluatePredicate(pred, changedPaths) };
+        if (!pred) {
+            return {
+                trigger: t, met: false, note: "unknown-predicate",
+                parseState: "unsupported", kind: null, arg: null,
+            };
+        }
+        const ev = evaluatePredicate(pred, changedPaths);
+        const malformed = pred.kind === "malformed";
+        return {
+            trigger: t,
+            met: ev.met,
+            note: ev.note,
+            parseState: malformed ? "malformed" : "recognized",
+            kind: malformed ? null : pred.kind,
+            arg: malformed ? null : pred.arg,
+        };
     });
-    const met = trig.mode === "any"
+    const state = classifyCardState(details, trig.mode, trig.items);
+    // Only valid-fired is READY. classifyCardState already refuses
+    // malformed-compound (the false-READY defect), so this is consistent
+    // rather than a second opinion.
+    const met = state === "valid-fired";
+    return {
+        id, file, met, mode: trig.mode, note: stateNote(state),
+        state, details,
+    };
+}
+
+// Classify one candidate into a distinct trigger state. PROMOTER-USE-ONLY: this
+// is an ordering/display aid, NEVER transition authority, NEVER blocking. The
+// six states (closed set):
+//   valid-fired        recognized predicates, condition met (genuinely READY)
+//   valid-waiting      recognized predicates, condition not yet met (precise)
+//   no-machine-trigger card has no trigger line at all (plain impl/fog)
+//   unsupported        a single trigger uses an unrecognized/unparseable predicate
+//   malformed-compound a compound any()/all() has >=1 unparseable member
+//   cold-glob          trigger targets a glob/directory, not a precise path
+//
+// MALFORMED-COMPOUND is the false-READY fix. A compound (mode "any" = OR over
+// the inner predicates of one `trigger:any(...)` line, OR mode "all" = AND over
+// multiple `trigger:` lines) is reduced via Array.some()/Array.every(), which
+// SILENTLY IGNORE unparseable members. So a compound like
+// `any(path_touched(fired.go), garbage_pred(x))` — where fired.go IS in the diff
+// — reduced to READY under the old code because the firing member satisfied
+// .some() and the garbage member was silently dropped. classifyCardState
+// refuses that: ANY unparseable member in a compound forces the
+// `malformed-compound` state (NOT READY), regardless of whether other members
+// are met. A single (non-compound) unparseable trigger is `unsupported`.
+//
+// `isNonGrammarTargetJS` is defined below in the release-prep section and is a
+// top-level function declaration, so it is hoisted and reusable here as the
+// shared glob/directory detector.
+export function classifyCardState(details, mode, items) {
+    if (!items || items.length === 0) return "no-machine-trigger";
+    const isCompound = items.length > 1;
+    const hasUnparseable = details.some(
+        (d) => d.parseState === "unsupported" || d.parseState === "malformed",
+    );
+    if (isCompound && hasUnparseable) return "malformed-compound";
+    if (!isCompound && hasUnparseable) return "unsupported";
+    // All members recognized from here. Compute the boolean reduction the same
+    // way the old code did, then distinguish fired / cold-glob / waiting.
+    const met = mode === "any"
         ? details.some((d) => d.met)
         : details.every((d) => d.met);
-    return { id, file, met, mode: trig.mode, note: met ? "ready-for-dor" : "trigger-not-met", details };
+    if (met) return "valid-fired";
+    const hasNonGrammarPath = details.some(
+        (d) => d.kind === "path_touched" && isNonGrammarTargetJS(d.arg),
+    );
+    const hasPrecisePath = details.some(
+        (d) => d.kind === "path_touched" && !isNonGrammarTargetJS(d.arg),
+    );
+    // No member fired. If the card's ONLY path targets are globs/dirs (it has
+    // at least one non-grammar path_touched and no precise path_touched), it
+    // can never precisely match — surface cold-glob so the promoter does not
+    // mistake it for a genuine future-watch (valid-waiting).
+    if (hasNonGrammarPath && !hasPrecisePath) return "cold-glob";
+    return "valid-waiting";
+}
+
+// Map a card state to the human-readable `note` printed after the flag. Kept
+// distinct from the per-member `details[].note` (touched / not-touched-since-ref
+// / tag-exists / tag-missing / malformed-predicate / unknown-predicate), which
+// is unchanged and still describes each member.
+export function stateNote(state) {
+    switch (state) {
+        case "valid-fired": return "ready-for-dor";
+        case "valid-waiting": return "trigger-not-met";
+        case "no-machine-trigger": return "no-trigger-line";
+        case "unsupported": return "unsupported-trigger";
+        case "malformed-compound": return "malformed-compound-trigger";
+        case "cold-glob": return "cold-glob-trigger";
+        default: return state;
+    }
 }
 
 // ---- Release-mode primitives (strict) -------------------------------------
@@ -1121,7 +1224,12 @@ function mainPromoter(options) {
     }
 
     for (const r of reports) {
-        const flag = r.met ? "READY" : "hold";
+        // valid-fired keeps the legacy [READY] token (consumed by the Go
+        // promoter-mode test + the promoter runbook). The old catch-all
+        // [hold] is split into one distinct flag per non-ready state so the
+        // promoter can order the holding-area population instead of reading
+        // every detail parenthetical to tell waiting from broken.
+        const flag = r.state === "valid-fired" ? "READY" : r.state;
         process.stdout.write(`[${flag}] ${r.id} (${path.basename(r.file)}) — ${r.note}\n`);
         for (const d of r.details) {
             const mark = d.met ? "met" : "not-met";
@@ -1130,10 +1238,21 @@ function mainPromoter(options) {
     }
 
     const ready = reports.filter((r) => r.met).length;
+    // Per-state breakdown so the promoter can triage at a glance: which cards
+    // are genuinely waiting (apply DoR when fired), which are noise (no
+    // trigger / unsupported / cold-glob), and which need a grammar repair
+    // (malformed-compound) before they can ever be evaluated.
+    const tally = {};
+    for (const r of reports) tally[r.state] = (tally[r.state] || 0) + 1;
+    const breakdown = Object.keys(tally)
+        .sort()
+        .map((s) => `${s}=${tally[s]}`)
+        .join("  ");
     process.stdout.write(
         `\n${ready}/${reports.length} candidate(s) have triggers met. ` +
         `Promoter: apply the Definition of Ready (area + file scope + validation ` +
-        `plan + clear slice + provenance) before promoting any READY candidate.\n`,
+        `plan + clear slice + provenance) before promoting any READY candidate.\n` +
+        `State breakdown: ${breakdown}\n`,
     );
     process.exit(0);
 }
