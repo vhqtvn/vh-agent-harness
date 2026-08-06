@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
+	"github.com/vhqtvn/vh-agent-harness/internal/substrate"
 )
 
 func TestDetectHarnessState_Greenfield(t *testing.T) {
@@ -159,6 +162,59 @@ func TestWriteGuide_InstalledWithMission(t *testing.T) {
 	}
 	if strings.Contains(out, "First: write") {
 		t.Errorf("'First: write ...' should NOT render when mission present; got:\n%s", out)
+	}
+}
+
+// TestPrintDryRunPlan_ListsOverwritePaths is the regression lock for the
+// surface-at-friction fix (researches/decisions/2026-08-04-capability-discovery-
+// audit.md §6 entry 1). The destructive managed-overwrite category MUST list
+// each path it will revert — not collapse to a count. Incident 2026-08-06: an
+// approved "11 generic managed file(s)" preview reverted a 199-line skill +
+// a version bump because no path was visible. This test pins path-by-path
+// listing + the non-destructive overlay-promotion remedy.
+func TestPrintDryRunPlan_ListsOverwritePaths(t *testing.T) {
+	overwritePaths := []string{
+		".opencode/skills/vh-solara/SKILL.md",
+		".opencode/.version",
+	}
+	report := &substrate.ApplyReport{
+		Outcomes: []substrate.FileOutcome{
+			{Path: overwritePaths[0], Class: ownership.ClassPlatformManaged, Action: substrate.ActionManagedOverwrite},
+			{Path: overwritePaths[1], Class: ownership.ClassPlatformManaged, Action: substrate.ActionManagedOverwrite},
+			// A noop must NOT appear as an overwrite (it routes to its own line).
+			{Path: ".opencode/agents/build.md", Class: ownership.ClassPlatformManaged, Action: substrate.ActionManagedNoop},
+			// A seed must render under its own section (parallel structure preserved).
+			{Path: "Makefile", Class: ownership.ClassProjectOwned, Action: substrate.ActionProjectSeeded},
+		},
+	}
+	var buf bytes.Buffer
+	printDryRunPlan(&buf, "update", "<target>", report)
+	out := buf.String()
+
+	// (1) Every overwrite path must be visible, path-by-path (the load-bearing fix).
+	for _, p := range overwritePaths {
+		if !strings.Contains(out, "  "+p+"\n") {
+			t.Errorf("OVERWRITE preview must list path %q path-by-path; got:\n%s", p, out)
+		}
+	}
+	// (2) The destructive category header must flag DESTRUCTIVE.
+	if !strings.Contains(out, "Would OVERWRITE") || !strings.Contains(out, "DESTRUCTIVE") {
+		t.Errorf("OVERWRITE header must flag DESTRUCTIVE; got:\n%s", out)
+	}
+	// (3) The non-destructive overlay-promotion remedy must appear inline.
+	if !strings.Contains(out, "overlay pack source") || !strings.Contains(out, ".vh-agent-harness/overlays/<pack>/") {
+		t.Errorf("OVERWRITE section must offer the non-destructive overlay-promotion remedy; got:\n%s", out)
+	}
+	// (4) Regression: the OLD count-only form must be gone.
+	if strings.Contains(out, "generic managed file(s), force-refreshed") {
+		t.Errorf("OLD count-only OVERWRITE form must be gone; got:\n%s", out)
+	}
+	// (5) The noop + seed sections still render (parallel structure preserved).
+	if !strings.Contains(out, "Already current") {
+		t.Errorf("noop section must still render; got:\n%s", out)
+	}
+	if !strings.Contains(out, "Would SEED") {
+		t.Errorf("SEED section must still render; got:\n%s", out)
 	}
 }
 

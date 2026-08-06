@@ -279,9 +279,25 @@ func checkDrift(lm *loadedManifest) checkResult {
 		return checkResult{name: "drift", tier: tierFail, detail: fmt.Sprintf("compute failed: %v", err)}
 	}
 	if report.HasProblems() {
+		// Surface-at-friction: NAME the drifted/missing paths (capped) and
+		// surface BOTH remedies, parallel to checkManagedDrift (doctor + the
+		// seam preflight path). "unexpected" files are extras (not revert
+		// candidates), so they stay a count in the header; drifted/missing are
+		// the destructive-revert set the operator must route on.
+		var driftedPaths, missingPaths []string
+		for _, e := range report.Entries {
+			switch e.Category {
+			case drift.Drifted:
+				driftedPaths = append(driftedPaths, e.Path)
+			case drift.Missing:
+				missingPaths = append(missingPaths, e.Path)
+			}
+		}
 		return checkResult{name: "drift", tier: tierFail,
-			detail: fmt.Sprintf("%d drifted, %d missing, %d unexpected — run `vh-agent-harness update`",
-				report.Counts[drift.Drifted], report.Counts[drift.Missing], report.Counts[drift.Unexpected])}
+			detail: formatManagedDriftFail(
+				fmt.Sprintf("%d drifted, %d missing, %d unexpected",
+					report.Counts[drift.Drifted], report.Counts[drift.Missing], report.Counts[drift.Unexpected]),
+				driftedPaths, missingPaths)}
 	}
 	return checkResult{name: "drift", tier: tierPass,
 		detail: fmt.Sprintf("%d files in sync", report.Counts[drift.OK])}

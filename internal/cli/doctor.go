@@ -926,8 +926,13 @@ func checkManagedDrift(target string) checkResult {
 		return checkResult{name: "managed-drift", tier: tierFail,
 			detail: fmt.Sprintf("ownership resolve (raise-only): %v", rverr)}
 	}
+	// Surface-at-friction (researches/decisions/2026-08-04-capability-discovery-
+	// audit.md §6 entry 1): carry the drifted/missing PATHS (not just counts)
+	// into the FAIL detail so the message is self-routing. A drift an operator
+	// cannot programmatically distinguish from bit-rot gets BOTH remedies inline.
 	drifted, missing, preserved := 0, 0, 0
 	checked := 0
+	var driftedPaths, missingPaths []string
 	for path := range defaults {
 		// Resolve seeds every default path, so eff[path] is always present; its
 		// Origin records whether an override genuinely raised the class.
@@ -964,27 +969,35 @@ func checkManagedDrift(target string) checkResult {
 		if serr != nil {
 			// A managed path that fails to render is a platform/template bug.
 			drifted++
+			driftedPaths = append(driftedPaths, path)
 			continue
 		}
 		if lerr != nil {
 			if os.IsNotExist(lerr) {
 				missing++
+				missingPaths = append(missingPaths, path)
 			} else {
 				drifted++
+				driftedPaths = append(driftedPaths, path)
 			}
 			continue
 		}
 		if string(live) != string(staged) {
 			drifted++
+			driftedPaths = append(driftedPaths, path)
 		}
 	}
 	switch {
 	case drifted > 0:
 		return checkResult{name: "managed-drift", tier: tierFail,
-			detail: fmt.Sprintf("%d drifted, %d missing of %d managed — run `vh-agent-harness update`", drifted, missing, checked)}
+			detail: formatManagedDriftFail(
+				fmt.Sprintf("%d drifted, %d missing of %d managed", drifted, missing, checked),
+				driftedPaths, missingPaths)}
 	case missing > 0:
 		return checkResult{name: "managed-drift", tier: tierFail,
-			detail: fmt.Sprintf("%d missing of %d managed — run `vh-agent-harness update`", missing, checked)}
+			detail: formatManagedDriftFail(
+				fmt.Sprintf("%d missing of %d managed", missing, checked),
+				driftedPaths, missingPaths)}
 	case preserved > 0:
 		return checkResult{name: "managed-drift", tier: tierInfo,
 			detail: fmt.Sprintf("%d managed file(s) in sync; %d project-preserved (ownership override)", checked, preserved)}
@@ -992,6 +1005,68 @@ func checkManagedDrift(target string) checkResult {
 		return checkResult{name: "managed-drift", tier: tierPass,
 			detail: fmt.Sprintf("%d managed file(s) in sync", checked)}
 	}
+}
+
+// driftRecoverySuffix is the self-routing remedy block appended to every
+// managed-drift / drift FAIL detail. It surfaces BOTH remedies because the
+// harness cannot programmatically distinguish bit-rot (fix = destructive
+// `update`) from a deliberate local edit (fix = non-destructive promotion into
+// the overlay pack source). This is the surface-at-friction principle
+// (researches/decisions/2026-08-04-capability-discovery-audit.md §6 entry 1,
+// the SIGNED OFF entry): a fail-closed result must name the sanctioned
+// alternative inline so the operator routes without losing a deliberate edit.
+//
+// (1) DESTRUCTIVE: `update` re-renders drifted/missing files from the corpus,
+// discarding local edits (this is the bit-rot fix and the incident-2026-08-06
+// hazard when applied to a deliberate edit). (2) NON-DESTRUCTIVE: promote the
+// edit into the overlay pack source so `update` renders it as canonical content
+// — the file stops being "drift" and stops being reverted. The overlay source
+// path convention mirrors .opencode/ under .vh-agent-harness/overlays/<pack>/.
+const driftRecoverySuffix = " — remedies: (1) run `vh-agent-harness update` to re-render drifted/missing files from the corpus (DESTRUCTIVE: overwrites local edits); (2) if a drift is a deliberate edit, promote it into the overlay pack source at .vh-agent-harness/overlays/<pack>/ (unit files mirror .opencode/: agents/<name>.md, skills/<name>/SKILL.md, commands/<name>.md) then `vh-agent-harness update` renders it as canonical content instead of reverting it. Inspect exact bytes with `vh-agent-harness diff`."
+
+// driftDetailPathCap is the maximum number of paths per category (drifted /
+// missing) embedded inline in a FAIL detail. The detail renders as a single
+// line in the doctor/preflight table, and the recovery commands are identical
+// regardless of which specific path drifted, so capping keeps the line
+// readable while still NAMING the paths (the load-bearing fix). A truncation
+// note points at `vh-agent-harness diff` for the complete list.
+const driftDetailPathCap = 10
+
+// capPathList renders "<label>: <p1>, <p2>" for the (sorted) paths, capped at
+// driftDetailPathCap with a "(and N more — run `vh-agent-harness diff` for the
+// full list)" truncation note. Returns "" when paths is empty so callers can
+// skip empty categories cleanly.
+func capPathList(label string, paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	sort.Strings(paths)
+	if len(paths) <= driftDetailPathCap {
+		return label + ": " + strings.Join(paths, ", ")
+	}
+	return fmt.Sprintf("%s: %s (and %d more — run `vh-agent-harness diff` for the full list)",
+		label, strings.Join(paths[:driftDetailPathCap], ", "), len(paths)-driftDetailPathCap)
+}
+
+// formatManagedDriftFail renders a managed-drift FAIL detail line that NAMES the
+// drifted/missing paths (capped) and surfaces BOTH remedies via
+// driftRecoverySuffix. Shared by checkManagedDrift (doctor + preflight seam
+// path) and checkDrift (preflight legacy manifest path); summary carries the
+// count header appropriate to each caller (e.g. "3 drifted, 1 missing of 50
+// managed" or "2 drifted, 0 missing, 1 unexpected").
+func formatManagedDriftFail(summary string, driftedPaths, missingPaths []string) string {
+	var b strings.Builder
+	b.WriteString(summary)
+	if seg := capPathList("drifted", driftedPaths); seg != "" {
+		b.WriteString(" — ")
+		b.WriteString(seg)
+	}
+	if seg := capPathList("missing", missingPaths); seg != "" {
+		b.WriteString(" — ")
+		b.WriteString(seg)
+	}
+	b.WriteString(driftRecoverySuffix)
+	return b.String()
 }
 
 // overlayPermRecoveryCmd is the recovery command surfaced when the overlay-perm

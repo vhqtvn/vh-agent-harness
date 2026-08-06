@@ -307,8 +307,19 @@ func countDirEntries(dir string) int {
 // printDryRunPlan renders a --dry-run preview of an install/update: what WOULD
 // change, with nothing written. It foregrounds the decision-relevant outcomes
 // (new files seeded, your files preserved, armed-config reconciles, and any
-// conflicts) and collapses the bulk generic-overwrite to a count, so an operator
-// or agent can judge safety at a glance before applying.
+// conflicts) and lists EVERY path the apply would touch — including the
+// destructive managed-overwrite set — path-by-path, so an operator or agent can
+// judge safety at a glance before applying.
+//
+// Surface-at-friction (researches/decisions/2026-08-04-capability-discovery-
+// audit.md §6 entry 1): the overwrite set is the ONLY destructive category, and
+// substrate.ActionManagedOverwrite fires ONLY when live bytes differ from the
+// corpus (drift) or the file is absent — byte-identical files route to
+// ActionManagedNoop. So the overwrite set is exactly the destructive set and is
+// bounded (NOT bulk/noisy); collapsing it to a count hid the very paths an
+// operator needs to approve safely (incident 2026-08-06: an approved
+// "11 generic managed file(s)" preview reverted a 199-line skill + a version
+// bump because no path was visible). Listing the paths is correct and safe.
 func printDryRunPlan(out io.Writer, verb, target string, report *substrate.ApplyReport) {
 	fmt.Fprintf(out, "DRY RUN — %s plan for %s\n", verb, target)
 	fmt.Fprintln(out, "Nothing was written (lineage, run-shape seed, and AGENTS.md compose were skipped).")
@@ -316,13 +327,8 @@ func printDryRunPlan(out io.Writer, verb, target string, report *substrate.Apply
 	fmt.Fprintln(out)
 
 	byAction := map[substrate.FileAction][]string{}
-	managedOverwrite := 0
 	managedNoop := 0
 	for _, o := range report.Outcomes {
-		if o.Action == substrate.ActionManagedOverwrite {
-			managedOverwrite++
-			continue
-		}
 		if o.Action == substrate.ActionManagedNoop {
 			managedNoop++
 			continue
@@ -343,8 +349,19 @@ func printDryRunPlan(out io.Writer, verb, target string, report *substrate.Apply
 	section("Would PRESERVE — your file, left untouched", substrate.ActionProjectPreserved)
 	section("Would RECONCILE — armed config, schema-merged", substrate.ActionArmedMerged)
 	section("CONFLICT — armed config needs a decision, NOT written", substrate.ActionArmedProposal)
-	if managedOverwrite > 0 {
-		fmt.Fprintf(out, "Would OVERWRITE — %d generic managed file(s), force-refreshed from the corpus.\n", managedOverwrite)
+	// The destructive category, now listed path-by-path (was count-only). Every
+	// path here is one `update` would force-revert to the canonical corpus.
+	section("Would OVERWRITE — managed file(s) force-refreshed from the canonical corpus (DESTRUCTIVE: local edits discarded)", substrate.ActionManagedOverwrite)
+	if overwritePaths := byAction[substrate.ActionManagedOverwrite]; len(overwritePaths) > 0 {
+		// Surface the non-destructive alternative inline so the operator can
+		// route WITHOUT losing a deliberate edit. A drift the operator cannot
+		// programmatically distinguish from bit-rot gets BOTH remedies.
+		fmt.Fprintln(out, "  A file above that is a DELIBERATE local edit (not bit-rot) will be reverted by")
+		fmt.Fprintln(out, "  `update`. To keep it, promote the edit into the overlay pack source at")
+		fmt.Fprintln(out, "  .vh-agent-harness/overlays/<pack>/ (unit files mirror .opencode/:")
+		fmt.Fprintln(out, "  agents/<name>.md, skills/<name>/SKILL.md, commands/<name>.md) so `update`")
+		fmt.Fprintln(out, "  renders it as canonical content. Inspect the exact bytes first with")
+		fmt.Fprintln(out, "  `vh-agent-harness diff`.")
 	}
 	if managedNoop > 0 {
 		fmt.Fprintf(out, "Already current — %d managed file(s) byte-identical to the corpus (no write).\n", managedNoop)

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -304,5 +305,91 @@ func TestPreflight_PreservedIsNonBlocking(t *testing.T) {
 	// the signal is surfaced (not silently swallowed) while still non-blocking.
 	if !strings.Contains(out, "INFO") || !strings.Contains(out, "preserved") {
 		t.Errorf("preflight should surface the INFO/preserved managed-drift row; got:\n%s", out)
+	}
+}
+
+// TestManagedDrift_Divergent_NamesPathAndBothRemedies is the surface-at-friction
+// regression lock for the managed-drift FAIL detail (doctor + the seam preflight
+// path, which both call checkManagedDrift). The FAIL message MUST name the
+// drifted path and surface BOTH remedies — the destructive `update` AND the
+// non-destructive overlay-pack promotion — so an operator can route without
+// losing a deliberate edit. Pins researches/decisions/2026-08-04-capability-
+// discovery-audit.md §6 entry 1 (the SIGNED OFF entry).
+func TestManagedDrift_Divergent_NamesPathAndBothRemedies(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	p := findLivePlatformManagedPath(t, root)
+	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(p)),
+		[]byte("// intentionally divergent bytes\n"), 0o644); err != nil {
+		t.Fatalf("corrupt %s: %v", p, err)
+	}
+	r := checkManagedDrift(root)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL, got %s: %s", r.tier, r.detail)
+	}
+	// Names the drifted path (self-routing — the load-bearing fix).
+	if !strings.Contains(r.detail, p) {
+		t.Errorf("FAIL detail should name the drifted path %q; got %q", p, r.detail)
+	}
+	// Destructive remedy.
+	if !strings.Contains(r.detail, "vh-agent-harness update") {
+		t.Errorf("FAIL detail should name the destructive `update` remedy; got %q", r.detail)
+	}
+	// Non-destructive overlay-promotion remedy.
+	if !strings.Contains(r.detail, "overlay pack source") || !strings.Contains(r.detail, ".vh-agent-harness/overlays/<pack>/") {
+		t.Errorf("FAIL detail should name the non-destructive overlay-pack remedy; got %q", r.detail)
+	}
+}
+
+// TestCapPathList exercises the capped path listing used in managed-drift FAIL
+// details: empty → "", under-cap → sorted, over-cap → truncation note pointing
+// at `vh-agent-harness diff`.
+func TestCapPathList(t *testing.T) {
+	if got := capPathList("drifted", nil); got != "" {
+		t.Errorf("empty paths → want \"\", got %q", got)
+	}
+	got := capPathList("drifted", []string{".opencode/b.md", ".opencode/a.md"})
+	if want := "drifted: .opencode/a.md, .opencode/b.md"; got != want {
+		t.Errorf("under-cap should sort + join; want %q, got %q", want, got)
+	}
+	// Over-cap: truncate + note. driftDetailPathCap is 10.
+	paths := make([]string, driftDetailPathCap+3)
+	for i := range paths {
+		paths[i] = fmt.Sprintf(".opencode/f%02d.md", i)
+	}
+	got = capPathList("drifted", paths)
+	if !strings.Contains(got, "and 3 more") {
+		t.Errorf("over-cap should carry truncation note; got %q", got)
+	}
+	if !strings.Contains(got, "vh-agent-harness diff") {
+		t.Errorf("over-cap note should point at `vh-agent-harness diff`; got %q", got)
+	}
+}
+
+// TestFormatManagedDriftFail exercises the shared FAIL-detail formatter used by
+// both checkManagedDrift (doctor + preflight seam) and checkDrift (preflight
+// legacy): it appends BOTH remedies regardless of which category triggered,
+// and omits empty category segments.
+func TestFormatManagedDriftFail(t *testing.T) {
+	got := formatManagedDriftFail("2 drifted, 0 missing of 50 managed",
+		[]string{".opencode/a.md", ".opencode/b.md"}, nil)
+	// Counts header leads.
+	if !strings.HasPrefix(got, "2 drifted, 0 missing of 50 managed") {
+		t.Errorf("summary header should lead; got %q", got)
+	}
+	// Drifted paths named.
+	if !strings.Contains(got, "drifted: .opencode/a.md, .opencode/b.md") {
+		t.Errorf("drifted paths should be named; got %q", got)
+	}
+	// Missing segment omitted when empty.
+	if strings.Contains(got, "missing:") {
+		t.Errorf("empty missing set should not emit a missing segment; got %q", got)
+	}
+	// Both remedies.
+	if !strings.Contains(got, "vh-agent-harness update") || !strings.Contains(got, "DESTRUCTIVE") {
+		t.Errorf("destructive remedy must appear; got %q", got)
+	}
+	if !strings.Contains(got, "overlay pack source") {
+		t.Errorf("non-destructive remedy must appear; got %q", got)
 	}
 }
