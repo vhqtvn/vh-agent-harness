@@ -224,6 +224,127 @@ func TestKnownPacks_MatchesEmbeddedDir(t *testing.T) {
 	}
 }
 
+// --- KnownPacksFor (embedded + project-local union) -----------------------
+
+// TestKnownPacksFor_EmbeddedOnly confirms KnownPacksFor with a target that
+// ships no project-local packs returns every embedded pack tagged
+// PackSourceEmbedded, in the embedded-first sorted order. This is the baseline
+// enumeration that makes a shipped-but-unselected pack (e.g.
+// auto-classifier-pilot) visible rather than wrongly concluded to not exist.
+func TestKnownPacksFor_EmbeddedOnly(t *testing.T) {
+	target := t.TempDir() // no .vh-agent-harness/overlays/ here
+	got, err := KnownPacksFor(target)
+	if err != nil {
+		t.Fatalf("KnownPacksFor: %v", err)
+	}
+	if len(got) != len(knownPackNames) {
+		t.Fatalf("KnownPacksFor embedded-only count: got %d, want %d (%v)", len(got), len(knownPackNames), got)
+	}
+	for i, want := range knownPackNames {
+		if got[i].Name != want {
+			t.Errorf("KnownPacksFor[%d].Name = %q, want %q", i, got[i].Name, want)
+		}
+		if got[i].Source != PackSourceEmbedded {
+			t.Errorf("KnownPacksFor[%d].Source = %q, want %q (no project-local packs)", i, got[i].Source, PackSourceEmbedded)
+		}
+	}
+}
+
+// TestKnownPacksFor_EmptyTargetForcesEmbeddedOnly confirms target="" forces
+// embedded-only resolution (no project-local walk), mirroring OpenPackFor's
+// documented target="" semantics.
+func TestKnownPacksFor_EmptyTargetForcesEmbeddedOnly(t *testing.T) {
+	got, err := KnownPacksFor("")
+	if err != nil {
+		t.Fatalf("KnownPacksFor(\"\"): %v", err)
+	}
+	if len(got) != len(knownPackNames) {
+		t.Fatalf("KnownPacksFor(\"\") count: got %d, want %d", len(got), len(knownPackNames))
+	}
+	for _, p := range got {
+		if p.Source != PackSourceEmbedded {
+			t.Errorf("KnownPacksFor(\"\") returned non-embedded source for %q: %q", p.Name, p.Source)
+		}
+	}
+}
+
+// TestKnownPacksFor_ProjectLocalShadowsEmbedded confirms a project-local pack
+// shadows an embedded pack of the same name: the name surfaces ONCE with
+// Source=PackSourceProjectLocal, and the embedded copy is dropped. This pins
+// the project-wins resolution KnownPacksFor shares with OpenPackFor.
+func TestKnownPacksFor_ProjectLocalShadowsEmbedded(t *testing.T) {
+	target := t.TempDir()
+	// Project-local pack that shadows an embedded one.
+	shadowDir := filepath.Join(target, filepath.FromSlash(ProjectOverlaysSubdir), "release")
+	if err := os.MkdirAll(shadowDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A brand-new project-local pack not in the embed.
+	newDir := filepath.Join(target, filepath.FromSlash(ProjectOverlaysSubdir), "acme-custom")
+	if err := os.MkdirAll(newDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := KnownPacksFor(target)
+	if err != nil {
+		t.Fatalf("KnownPacksFor: %v", err)
+	}
+	// release must appear ONCE, as project-local (shadowed winner).
+	releaseCount := 0
+	for _, p := range got {
+		if p.Name == "release" {
+			releaseCount++
+			if p.Source != PackSourceProjectLocal {
+				t.Errorf("release source = %q, want %q (project-local shadows embedded)", p.Source, PackSourceProjectLocal)
+			}
+		}
+	}
+	if releaseCount != 1 {
+		t.Errorf("release should appear exactly once (shadowed); got %d occurrences in %v", releaseCount, got)
+	}
+	// acme-custom must appear as project-local.
+	found := false
+	for _, p := range got {
+		if p.Name == "acme-custom" {
+			found = true
+			if p.Source != PackSourceProjectLocal {
+				t.Errorf("acme-custom source = %q, want %q", p.Source, PackSourceProjectLocal)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("acme-custom (brand-new project-local pack) missing from %v", got)
+	}
+	// Ordering invariant: every embedded-source entry precedes every
+	// project-local-source entry; alpha within each group.
+	var embeddedNames, plNames []string
+	for _, p := range got {
+		switch p.Source {
+		case PackSourceEmbedded:
+			embeddedNames = append(embeddedNames, p.Name)
+		case PackSourceProjectLocal:
+			plNames = append(plNames, p.Name)
+		}
+	}
+	if !sortIsSorted(embeddedNames) {
+		t.Errorf("embedded group not alpha-sorted: %v", embeddedNames)
+	}
+	if !sortIsSorted(plNames) {
+		t.Errorf("project-local group not alpha-sorted: %v", plNames)
+	}
+}
+
+// sortIsSorted reports whether s is sorted ascending. (Test-local to avoid
+// importing sort here just for an assertion helper.)
+func sortIsSorted(s []string) bool {
+	for i := 1; i < len(s); i++ {
+		if s[i-1] > s[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // --- OpenPack --------------------------------------------------------------
 
 // TestOpenPack_UnknownNamesFailClosed confirms OpenPack fails closed (wrapping

@@ -234,3 +234,44 @@ func TestCountDirEntries_ErrNotExist(t *testing.T) {
 		t.Errorf("populated dir count = %d, want 3", got)
 	}
 }
+
+// TestGuide_InstalledSurfacesAvailableUnselectedPacks confirms the installed-
+// phase guide carries an UNGATED discovery hint listing shipped (embedded) packs
+// that are available but NOT selected. This is the incident 2026-08-06 fix: a
+// coordinator or operator running `guide` learns a shipped pack EXISTS before
+// authorizing a rebuild-from-scratch on the false conclusion it does not. The
+// hint is hermetic — a clean temp dir selects nothing, so release and
+// auto-classifier-pilot surface as available.
+func TestGuide_InstalledSurfacesAvailableUnselectedPacks(t *testing.T) {
+	dir := t.TempDir()
+	vh := filepath.Join(dir, ".vh-agent-harness")
+	if err := os.MkdirAll(vh, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A run-shape makes FindForRoot resolve the install root (installed phase).
+	if err := os.WriteFile(filepath.Join(vh, "run-shape.yml"),
+		[]byte("run_shape_version: \"0.1\"\nruntime:\n  backend: host-shell\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := detectHarnessState(dir)
+	if st.Phase != phaseInstalled {
+		t.Fatalf("phase = %q, want installed", st.Phase)
+	}
+	joined := strings.Join(nextSteps(st), " ")
+	if !strings.Contains(joined, "Shipped packs available but not selected") {
+		t.Errorf("installed guide should carry the ungated available-unselected hint; steps:\n%s", joined)
+	}
+	// In a clean repo, release + auto-classifier-pilot + repo-mail are unselected
+	// embedded packs (the three pilots are default-on). The hint must name at
+	// least release (a capability-bearing pack) and auto-classifier-pilot (the
+	// incident pack) so a coordinator sees they exist.
+	for _, pack := range []string{"release", "auto-classifier-pilot"} {
+		if !strings.Contains(joined, pack) {
+			t.Errorf("available-unselected hint should name %q; steps:\n%s", pack, joined)
+		}
+	}
+	// The hint must point at the discovery + enable commands.
+	if !strings.Contains(joined, "overlay list") {
+		t.Errorf("hint should point at `overlay list`; steps:\n%s", joined)
+	}
+}

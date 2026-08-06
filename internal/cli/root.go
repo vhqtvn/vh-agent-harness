@@ -53,7 +53,7 @@ Lifecycle
   install              install/adopt the harness (preview with --dry-run)
   update               re-render the corpus after a config or binary change (--dry-run)
   uninstall            remove the harness from the current project
-  overlay              scaffold/manage overlay packs (overlay new, overlay docs)
+  overlay              discover/list/docs/new overlay packs (overlay list, overlay docs, overlay new)
   self-update          download + install the latest binary (verified by checksums.txt)
 
 Orientation

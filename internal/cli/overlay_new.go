@@ -41,11 +41,16 @@ type overlayNewFlags struct {
 
 var overlayNewFl *overlayNewFlags
 
-// overlayCmd is the parent for overlay-management verbs. `overlay new` is the
-// first subcommand; future verbs (e.g. `overlay list`) hang off this parent.
+// overlayCmd is the parent for overlay-management verbs. Packs ship EMBEDDED in
+// the binary (six by default) and are also authorable project-locally under
+// .vh-agent-harness/overlays/. `overlay list` enumerates every visible pack
+// (embedded + project-local) with its source + selected status — the discovery
+// surface that prevents a shipped-but-unselected pack from being wrongly
+// concluded to not exist. `overlay docs <name>` prints any pack's README.
+// `overlay new <name>` scaffolds a fresh project-local pack.
 var overlayCmd = &cobra.Command{
 	Use:   "overlay",
-	Short: "Manage overlay packs (agents/commands/skills contributed by overlays)",
+	Short: "Manage overlay packs (list/docs/new; embedded + project-local packs)",
 	Long: `Manage overlay packs under .vh-agent-harness/overlays/. An overlay pack
 carries project-specific agents, commands, and/or skills plus an
 opencode-append.jsonc that wires them into the opencode config. A pack is
@@ -53,8 +58,28 @@ activated by listing its name under ` + "`overlays:`" + ` in
 .vh-agent-harness/vh-harness-profile.yml; ` + "`vh-agent-harness update`" + `
 then renders it into .opencode/.
 
+Packs ship EMBEDDED in the binary (selectable by name with no vendoring) AND
+may be authored project-locally. ` + "`overlay list`" + ` enumerates every pack
+visible here — embedded + project-local — with its source and selected status,
+so a shipped-but-unselected pack surfaces as "available" rather than absent.
+
 Subcommands:
-  new <name>   Scaffold a new overlay pack and wire it into the profile.`,
+  list           List every pack (embedded + project-local) with source + status
+  docs <name>    Print a pack's README documentation (any pack, selected or not)
+  new <name>     Scaffold a new project-local overlay pack and wire it into the profile`,
+	// No-args prints the parent help and exits 0 (cobra dispatches subcommands
+	// first, so `overlay list`/`docs`/`new` route to their children). An
+	// unexpected token (a typo'd verb like `overlay frob`) is surfaced as an
+	// unknown-command error with a non-zero exit rather than silently printing
+	// help and looking like success — the same idiom the root command uses. This
+	// closes the silent-false-negative path where `overlay <wrong-verb>` printed
+	// help and exited 0.
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return cmd.Help()
+		}
+		return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
+	},
 }
 
 var overlayNewCmd = &cobra.Command{

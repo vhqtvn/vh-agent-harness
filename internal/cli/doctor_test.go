@@ -359,7 +359,10 @@ func TestAutoGateConfig_SkipWhenUnselectedAndNoFiles(t *testing.T) {
 }
 
 // TestAutoGateConfig_PassWhenSelectedAndValid: overlay selected + a valid plugin
-// config + a valid LLM config → PASS (all present files shape-valid).
+// config + a valid LLM config → PASS (all present files shape-valid). The PASS
+// detail must list each validated file's level + PATH (not a bare count) so a
+// repo-scoped search can reconcile WHERE the files live (incident 2026-08-06:
+// files under ~/.config were invisible to a repo search).
 func TestAutoGateConfig_PassWhenSelectedAndValid(t *testing.T) {
 	dir := t.TempDir()
 	isolateXDG(t)
@@ -378,6 +381,45 @@ func TestAutoGateConfig_PassWhenSelectedAndValid(t *testing.T) {
 	r := checkAutoGateConfig(dir)
 	if r.tier != tierPass {
 		t.Fatalf("want PASS when selected + valid configs, got %s: %s", r.tier, r.detail)
+	}
+	// PASS detail must surface each validated file's level + path (not a bare
+	// count), so an operator can see WHERE the files live.
+	if !strings.Contains(r.detail, "project:") {
+		t.Errorf("PASS detail should list 'project:' level entries; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "auto-gate-config.json") {
+		t.Errorf("PASS detail should name the plugin config path; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "auto-gate-llm.json") {
+		t.Errorf("PASS detail should name the llm config path; got %q", r.detail)
+	}
+}
+
+// TestAutoGateConfig_PassDetailSurfacesUserLevel confirms the PASS detail lists
+// the user-level file PATH when the only present config is a user-level one
+// (under the XDG dir, the ~/.config case). This is the exact incident scenario:
+// a config under ~/.config was invisible to a repo-scoped search; the PASS
+// detail must surface the level + path so an operator (or coordinator) sees the
+// file lives outside the repo rather than assuming it is missing.
+func TestAutoGateConfig_PassDetailSurfacesUserLevel(t *testing.T) {
+	dir := t.TempDir()
+	xdgRoot := isolateXDG(t)
+	writeProfileOverlays(t, dir, "auto-classifier-pilot")
+	// A single user-level (XDG) plugin config — nothing under the project.
+	writeUserAutoGateConfig(t, xdgRoot, "plugin", `{
+	  "enabled": true, "mode": "audit"
+	}`)
+
+	r := checkAutoGateConfig(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS with a valid user-level config, got %s: %s", r.tier, r.detail)
+	}
+	// The PASS detail must surface the 'user' level + the XDG path.
+	if !strings.Contains(r.detail, "user:") {
+		t.Errorf("PASS detail should surface 'user:' level; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, xdgRoot) {
+		t.Errorf("PASS detail should contain the XDG root path %q; got %q", xdgRoot, r.detail)
 	}
 }
 

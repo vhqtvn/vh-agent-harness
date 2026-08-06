@@ -165,6 +165,20 @@ func nextSteps(st harnessState) []string {
 				"`vh-agent-harness overlay docs auto-classifier-pilot` for the full reference. "+
 				"Verify config health with `vh-agent-harness doctor`.")
 		}
+		// UNGATED discovery hint (incident 2026-08-06): surface shipped (embedded)
+		// packs that are available but NOT yet selected, so a coordinator or
+		// operator trying to enable one learns it EXISTS rather than authorizing
+		// a rebuild-from-scratch on the false conclusion it does not. This hint
+		// is unconditional in the installed phase — it renders even when the
+		// profile selects nothing — and points at the discovery + enable
+		// commands. `overlay list` is the full table (source + status).
+		if avail := unselectedEmbeddedPacks(st.ProjectRoot); len(avail) > 0 {
+			steps = append(steps, "Shipped packs available but not selected: "+
+				strings.Join(avail, ", ")+
+				". Run `vh-agent-harness overlay list` for the full table (source + status), "+
+				"or `vh-agent-harness overlay docs <name>` to read a pack's README before "+
+				"enabling it under `overlays:` in .vh-agent-harness/vh-harness-profile.yml.")
+		}
 		steps = append(steps, "Choose your agent roster in .vh-agent-harness/vh-harness-profile.yml: "+
 			"`profile:` is the preset enum (`minimal`/`coordination`/`web` → the 8-agent baseline "+
 			"only; `supervised` → baseline + the gated-commit and debate clusters); `capabilities:` "+
@@ -189,9 +203,9 @@ func nextSteps(st harnessState) []string {
 				"will NOT push a template fix into an existing copy. Re-seed manually: `rm <file>` then "+
 				"`vh-agent-harness update` (warning: this loses local edits — back the file up first).",
 			"Verify health anytime: `vh-agent-harness doctor`.",
-			"Pack documentation: run `vh-agent-harness overlay docs <name>` to read any active "+
-				"overlay pack's README (configuration reference, enablement steps) directly from "+
-				"the embedded or project-local pack.",
+			"Pack documentation: run `vh-agent-harness overlay docs <name>` to read any "+
+				"overlay pack's README (configuration reference, enablement steps) — embedded, "+
+				"project-local, selected or not — directly from the resolved pack.",
 		)
 		return steps
 	}

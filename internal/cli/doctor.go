@@ -1488,14 +1488,20 @@ func checkAutoGateConfig(target string) checkResult {
 	//    retained — its shape FAIL already covers it, and there is no doc to
 	//    merge.
 	var fails, warns []string
-	validated := 0
+	// validatedPaths collects the level + absolute path of each present file
+	// that parsed cleanly, so the PASS detail can list WHERE the files live
+	// (project-local / project / user) instead of a bare count. A repo-scoped
+	// search cannot reconcile a count; the incident 2026-08-06 burned ~4 turns
+	// because the two valid files were under ~/.config (user level), invisible
+	// to a repo search — surfacing the path here makes that level readable.
+	var validatedPaths []string
 	pluginDocs := map[string]map[string]any{} // level ("project-local"/"project"/"user") -> parsed plugin doc
 	llmDocs := map[string]map[string]any{}    // level ("project-local"/"project"/"user") -> parsed llm doc
 	for _, c := range candidates {
 		if !isRegularFile(c.path) {
 			continue // absent optional file — not a failure
 		}
-		validated++
+		validatedPaths = append(validatedPaths, fmt.Sprintf("%s: %s", c.level, c.path))
 		raw, rerr := os.ReadFile(c.path)
 		if rerr != nil {
 			fails = append(fails, fmt.Sprintf("%s: unreadable: %v", c.label(), rerr))
@@ -1573,14 +1579,18 @@ func checkAutoGateConfig(target string) checkResult {
 	// 5. Aggregate: any FAIL → tierFail; else any WARN → tierWarn; else PASS.
 	sort.Strings(fails)
 	sort.Strings(warns)
+	sort.Strings(validatedPaths)
 	switch {
 	case len(fails) > 0:
 		return checkResult{name: name, tier: tierFail, detail: strings.Join(fails, "; ")}
 	case len(warns) > 0:
 		return checkResult{name: name, tier: tierWarn, detail: strings.Join(warns, "; ")}
 	default:
+		// PASS detail lists each validated file's level + path so an operator
+		// (or coordinator) can reconcile WHERE the files live, including the
+		// user-level case (under ~/.config) that a repo-scoped search misses.
 		return checkResult{name: name, tier: tierPass,
-			detail: fmt.Sprintf("%d config file(s) shape-valid", validated)}
+			detail: fmt.Sprintf("%d config file(s) shape-valid: %s", len(validatedPaths), strings.Join(validatedPaths, "; "))}
 	}
 }
 

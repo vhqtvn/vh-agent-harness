@@ -98,7 +98,20 @@ func runOverlayDocs(cmd *cobra.Command, args []string) error {
 
 	pack, err := overlay.OpenPackFor(projectRoot, name)
 	if err != nil {
+		// Enumerate the available packs so a guessed-but-wrong name sees real
+		// alternatives instead of a bare "not found". This is the same union
+		// `overlay list` projects (embedded via KnownPacks + project-local),
+		// not rendered-outputs.json (which carries only already-selected packs
+		// and therefore cannot surface unselected-but-shipped ones).
 		fmt.Fprintf(errOut, "error: overlay: pack %q not found (neither project-local nor embedded)\n", name)
+		if avail, aErr := overlay.KnownPacksFor(projectRoot); aErr == nil && len(avail) > 0 {
+			names := make([]string, 0, len(avail))
+			for _, p := range avail {
+				names = append(names, p.Name)
+			}
+			fmt.Fprintf(errOut, "  available packs: %s\n", strings.Join(names, ", "))
+		}
+		fmt.Fprintf(errOut, "  run `vh-agent-harness overlay list` for the full table (source + status).\n")
 		return errSilent{}
 	}
 

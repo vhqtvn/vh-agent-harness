@@ -56,7 +56,10 @@ func TestOverlayDocs_ReleasePack(t *testing.T) {
 }
 
 // TestOverlayDocs_UnknownPack confirms an unknown pack name errors cleanly
-// (non-zero exit) with the not-found message.
+// (non-zero exit) with the not-found message AND enumerates the available
+// packs so a guessed-but-wrong name sees real alternatives (the false-negative
+// guard: a typo surfaces the actual shipped pack names instead of a bare
+// "not found").
 func TestOverlayDocs_UnknownPack(t *testing.T) {
 	out, err := runOverlayDocsIn(t, ".", "does-not-exist-xyz")
 	if err == nil {
@@ -64,6 +67,20 @@ func TestOverlayDocs_UnknownPack(t *testing.T) {
 	}
 	if !strings.Contains(out, "not found") {
 		t.Fatalf("overlay docs nonexistent: output missing 'not found'\nout:\n%s", out)
+	}
+	// The not-found path must enumerate real available packs (embedded via
+	// KnownPacks + project-local) so a wrong name surfaces alternatives.
+	if !strings.Contains(out, "available packs:") {
+		t.Errorf("overlay docs nonexistent: output missing 'available packs:' enumeration\nout:\n%s", out)
+	}
+	// At least the shipped auto-classifier-pilot must appear among them — it
+	// ships embedded, so it is always available even when unselected.
+	if !strings.Contains(out, "auto-classifier-pilot") {
+		t.Errorf("overlay docs nonexistent: available-packs list should include shipped auto-classifier-pilot\nout:\n%s", out)
+	}
+	// Point at `overlay list` for the full table.
+	if !strings.Contains(out, "overlay list") {
+		t.Errorf("overlay docs nonexistent: output should point at `overlay list`\nout:\n%s", out)
 	}
 }
 

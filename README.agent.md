@@ -274,7 +274,10 @@ not claim it passed from prompt inspection alone.
 
 Besides project packs you author under `.vh-agent-harness/overlays/`, six
 overlay packs ship **embedded in the binary**, selectable by name with no
-vendoring:
+vendoring. Run `vh-agent-harness overlay list` to see every pack (embedded +
+project-local) with its source and selected/available status — the discovery
+surface that prevents a shipped-but-unselected pack from being treated as
+nonexistent:
 
 - `release` — the tag-driven `releaser` workflow (the first embedded pack). It
   is selected either way and the two paths converge:
@@ -1241,6 +1244,33 @@ What `/harness` gives you:
 Reference: `docs/adoption-examples/web/` is a worked (non-shipped) overlay.
 Skeleton files: `vh-agent-harness example` lists `_pack-skeleton`.
 
+## Discovering overlay packs (`overlay list`, `overlay docs`)
+
+`vh-agent-harness overlay list` enumerates **every** pack visible to this
+project — embedded in the binary PLUS project-local under
+`.vh-agent-harness/overlays/` — one line per pack, with its source
+(`embedded` / `project-local`) and status (`selected` / `available`).
+
+`selected` = renders on the next `vh-agent-harness update`. A pack is selected
+when ANY of:
+- its name is listed under `overlays:` in `vh-harness-profile.yml`, OR
+- its capability-manifest id is listed under `capabilities:` (the `release`
+  pack is dual-selectable via `core/release` — both paths converge), OR
+- it is a shipped default-on pilot whose feature key resolves `true`.
+
+`available` = shipped/visible but not selected.
+
+This is the discovery surface that prevents a shipped-but-unselected pack from
+being wrongly concluded to **not exist**. Use it before authorizing a
+rebuild-from-scratch: a pack that ships embedded (e.g. `auto-classifier-pilot`,
+`release`, `repo-mail`) is always visible here, whether or not it is selected.
+
+`vh-agent-harness overlay docs <name>` prints any pack's README (configuration
+reference, enablement steps) — embedded, project-local, selected or not — so
+you can evaluate a pack before enabling it. Enable a pack by listing it under
+`overlays:` in `.vh-agent-harness/vh-harness-profile.yml`, then run
+`vh-agent-harness update`.
+
 ## Scaffolding an overlay pack (`overlay new`)
 
 `vh-agent-harness overlay new <pack> [--agent <n>] [--command <n>] [--skill <n>]
@@ -1700,6 +1730,39 @@ recovery guidance lives in the release-readiness G7 ceremony doc
 and the releaser prompt (`templates/overlays/release/agents/releaser.md`); the
 two-gate topology and the v0.19.0 incident it prevents are recorded in decision
 memo `researches/decisions/2026-08-02-defer-liveness-provenance-scope-divergence.md`.
+
+### Verification split: `go test ./...` (hermetic) vs `doctor` #12 at G0c (live F4-C)
+
+The defer-liveness contract is enforced at TWO deliberately separated layers.
+Confusing them re-introduces the defect this split prevents: a `go test` canary
+over the real repo duplicates the authoritative G0c check at the wrong layer
+and turns the universal dev test red during release-prep windows whenever an
+open defer card's `path_touched` target is touched by a legitimate commit.
+
+- **`go test ./...` — hermetic code + predicate contracts; no mutable
+  current-checkout state.** The defer-liveness / F4-C tests in
+  `internal/cli/release_gate_test.go` build SCRATCH-REPO fixtures
+  (`t.TempDir()` + controlled git history + controlled cards) and assert the
+  predicate's contract (active refusal, dormant/clearance paths, silencer
+  immunity, fail-closed, fog/cold advisory). They NEVER read the real working
+  tree, so editing a file in an open defer card's `path_touched` cannot turn
+  `go test` red. (`TestDeferLivenessGate_LiveRepoIsClean` /
+  `TestDeferRecurrence_LiveRepoIsClean` were removed for exactly this reason:
+  they were live-repo canaries that duplicated G0c at the go-test layer.)
+- **`doctor` check #12 (`checkDeferLiveness`) at G0c — the live F4-C /
+  defer-liveness authority, the release gate.** `scripts/release-tag.sh` runs
+  `VH_HARNESS_DEFER_DIFF_SINCE="$PRIOR_TAG" ./bin/vh-agent-harness doctor` AFTER
+  the about-to-release migration note is committed and BEFORE any `git tag -a`
+  mutation; an undisposed fired card makes doctor UNHEALTHY and refuses the
+  tag. This is where the live-repo assertion belongs.
+- **doctor may legitimately be RED between N and M (release prep).** During the
+  release-prep window — after an about-to-release note exists but before a
+  disposition lands in the committed manifest — `doctor` #12 can be UNHEALTHY
+  on an undisposed fired card. That is operational feedback to the releaser
+  (dispose the card: closed status / manifest record /
+  `VH_HARNESS_DEFER_OVERRIDE_IDS`), NOT a unit-test failure. `go test ./...`
+  stays green throughout because it is hermetic; only the release-tag wrapper
+  (G0c) treats the live state as authoritative.
 
 ### The manifest (project-owned, committed, fresh-checkout-visible)
 

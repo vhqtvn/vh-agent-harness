@@ -112,6 +112,102 @@ func OpenPack(name string) (*Pack, error) {
 	return &Pack{Name: name, FS: sub}, nil
 }
 
+// PackSource is the resolved origin of a pack: embedded in the binary, or
+// project-local under <target>/.vh-agent-harness/overlays/. It reflects which
+// copy OpenPackFor would resolve (project-local shadows embedded by name).
+type PackSource string
+
+const (
+	// PackSourceEmbedded names a pack shipped inside the binary
+	// (templates/overlays/<name>/), selectable by name with no vendoring.
+	PackSourceEmbedded PackSource = "embedded"
+	// PackSourceProjectLocal names a pack shipped by the consuming repo at
+	// <target>/.vh-agent-harness/overlays/<name>/ (the binary stays
+	// domain-free). A project-local pack shadows an embedded pack of the same
+	// name, so the project-local source wins when both are present.
+	PackSourceProjectLocal PackSource = "project-local"
+)
+
+// PackInfo is one enumerated pack with its effective source attribution. Source
+// reflects which copy OpenPackFor would open: a project-local pack shadows an
+// embedded pack of the same name (project-wins), so a shadowed name surfaces
+// with Source=PackSourceProjectLocal and the embedded copy is hidden.
+type PackInfo struct {
+	Name   string
+	Source PackSource
+}
+
+// KnownPacksFor enumerates EVERY pack visible to target: the embedded packs
+// (KnownPacks) UNION the project-local packs under
+// <target>/.vh-agent-harness/overlays/, each tagged with its effective source.
+// A project-local pack shadows an embedded pack of the same name (project-wins,
+// matching OpenPackFor), so the effective source for a shadowed name is
+// project-local and the embedded copy is dropped from the result.
+//
+// target may be "" to force embedded-only (no project-local resolution). The
+// result is sorted embedded-first (alpha within group), then project-local
+// (alpha within group), so the list is stable and grep-friendly. This is the
+// shared union both `overlay list` and the `overlay docs` not-found path
+// consume; it is the enumeration that prevents the false-negative where a
+// shipped-but-unselected pack (e.g. auto-classifier-pilot) is wrongly concluded
+// to not exist.
+func KnownPacksFor(target string) ([]PackInfo, error) {
+	embedded, err := KnownPacks()
+	if err != nil {
+		return nil, fmt.Errorf("list embedded packs: %w", err)
+	}
+	projectLocal, err := projectLocalPackNames(target)
+	if err != nil {
+		return nil, fmt.Errorf("list project-local packs: %w", err)
+	}
+	// Project-local shadows embedded by name: a shadowed embedded name is
+	// dropped; the name surfaces once as project-local.
+	shadowed := make(map[string]bool, len(projectLocal))
+	for _, n := range projectLocal {
+		shadowed[n] = true
+	}
+	var out []PackInfo
+	for _, n := range embedded {
+		if shadowed[n] {
+			continue
+		}
+		out = append(out, PackInfo{Name: n, Source: PackSourceEmbedded})
+	}
+	// Embedded-first then project-local, alpha within group. The embedded slice
+	// from KnownPacks is already sorted; preserve that order and append the
+	// sorted project-local group after it.
+	for _, n := range projectLocal {
+		out = append(out, PackInfo{Name: n, Source: PackSourceProjectLocal})
+	}
+	return out, nil
+}
+
+// projectLocalPackNames lists the immediate pack directories under
+// <target>/.vh-agent-harness/overlays/, sorted. Returns nil when target is "" or
+// the directory does not exist (no project-local packs), aligning with
+// OpenPackFor's project-local resolution (project-wins).
+func projectLocalPackNames(target string) ([]string, error) {
+	if target == "" {
+		return nil, nil
+	}
+	dir := filepath.Join(target, filepath.FromSlash(ProjectOverlaysSubdir))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 // OpenPackFor opens a named overlay pack, resolving a PROJECT-LOCAL pack at
 // <target>/.vh-agent-harness/overlays/<name>/ FIRST, then falling back to the
 // embedded overlays FS. This lets each consuming project ship its own packs
