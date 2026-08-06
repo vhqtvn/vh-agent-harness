@@ -16,8 +16,10 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 
 	"github.com/spf13/cobra"
 )
@@ -206,6 +208,39 @@ func assignGroup(id string, cmds ...*cobra.Command) {
 // Execute runs the root command and exits the process on error.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		os.Exit(exitCodeFromError(err))
 	}
+}
+
+// exitCodeFromError maps a cobra-returned error to the process exit code. It is
+// the central exit-point extractor for the exec family's child-exit-code
+// propagation (defect 2): `vh-agent-harness exec bash -c 'exit 3'` must exit 3,
+// not 1.
+//
+// When the RunE error carries a child exit code (a *exec.ExitError from
+// runtime.Runner.Run → cmd.Run, returned by `be.Exec` in runExec/runExecRo/
+// runShell), the real code is propagated. errors.As traverses cobra's wrapping
+// so the exit error is still detected here even if a future RunE wraps it.
+//
+// Everything else falls through to exit 1 unchanged: errSilent (the no-message
+// sentinel used by diff/doctor/help-migrate to force a non-zero exit with no
+// "Error:" line), genuine runtime errors (hook failures, permission denials,
+// binary-not-found *exec.Error — distinct from *exec.ExitError), and any other
+// non-exit-code-bearing error. This coexists with the existing errSilent
+// convention: errSilent is not an *exec.ExitError, so it is never misread as a
+// child exit and continues to exit 1.
+//
+// exec-sandbox is NOT routed through here: runExecSandbox calls os.Exit(code)
+// directly (exec_sandbox.go) because its two-stage re-exec trampoline yields a
+// numeric exit code rather than a Go error. That path was already correct before
+// this fix; this extractor covers exec, exec-ro, and shell.
+func exitCodeFromError(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return 1
 }

@@ -27,8 +27,9 @@ import (
 // exec-ro NEVER rewrites the command: it either executes it exactly as given or
 // exits non-zero with the notice.
 var execRoCmd = &cobra.Command{
-	Use:   "exec-ro [--] <cmd> [args...]",
-	Short: "Run a read-only command inside the harness runtime (exec-ro classifier gates it)",
+	Use:          "exec-ro [--] <cmd> [args...]",
+	Short:        "Run a read-only command inside the harness runtime (exec-ro classifier gates it)",
+	SilenceUsage: true,
 	Long: `exec-ro is a HOST-SIDE INTENT CLASSIFIER that runs BEFORE backend dispatch.
 It classifies the requested command against the host repo path, then delegates
 execution to the selected runtime backend. It is NOT proof that the backend

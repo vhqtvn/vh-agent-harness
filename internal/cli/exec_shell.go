@@ -27,6 +27,15 @@ var execFl *execFlags
 var execCmd = &cobra.Command{
 	Use:   "exec [--service <name>] [--workdir <dir>] [--tty] [--] <cmd> [args...]",
 	Short: "Run a command inside the harness runtime",
+	// SilenceUsage pins the exec family's contract that a CHILD failure (the
+	// wrapped command exited non-zero) is NOT a usage error: cobra must not dump
+	// the Usage/Flags block after the "Error: exit status N" line, which
+	// previously implied the operator mis-invoked exec when in fact the child
+	// simply failed. exec/shell/exec-ro/exec-sandbox all set this for group
+	// consistency (defect 3). SilenceErrors is intentionally NOT set here: the
+	// exec family returns genuine errors (permission denials, hook failures,
+	// child exit errors) that cobra's single "Error:" line should surface.
+	SilenceUsage: true,
 	Long: `Run a command inside the configured runtime backend (manifest.runtime.backend).
 
 The command is first evaluated by the permission gate (shell-guard); the gate is
@@ -74,8 +83,9 @@ var shellFl *shellFlags
 // shellCmd opens an interactive shell in the default (or --service) container.
 // Like exec it runs the permission gate first.
 var shellCmd = &cobra.Command{
-	Use:   "shell [--service <name>]",
-	Short: "Open an interactive shell inside the harness runtime",
+	Use:          "shell [--service <name>]",
+	Short:        "Open an interactive shell inside the harness runtime",
+	SilenceUsage: true,
 	Long: `Open an interactive shell inside the configured runtime backend.
 
 For docker_compose this is ` + "`docker compose exec <service>`" + ` with the host TTY

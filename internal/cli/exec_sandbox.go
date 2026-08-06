@@ -33,8 +33,9 @@ var (
 // because exec-ro dispatches through the runtime backend (in-container under
 // proxy/docker_compose) while exec-sandbox is host-local-only.
 var execSandboxCmd = &cobra.Command{
-	Use:   "exec-sandbox <command> [args...]",
-	Short: "Run a command under a kernel-enforced Linux sandbox (Landlock + seccomp)",
+	Use:          "exec-sandbox <command> [args...]",
+	Short:        "Run a command under a kernel-enforced Linux sandbox (Landlock + seccomp)",
+	SilenceUsage: true,
 	Long: `exec-sandbox is a HOST-LOCAL Linux sandbox front door. It does NOT resolve
 or dispatch through the configured runtime backend (host-shell / proxy /
 docker_compose) — it always runs on the host. The Landlock (filesystem

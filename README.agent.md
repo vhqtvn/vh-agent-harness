@@ -644,6 +644,15 @@ export default function transform({ context }) {
   commands are allowed; only forbidden-patterns and the commit-gate are blocked.
   Put env vars / `timeout` INSIDE the command (`exec bash -c 'FOO=1 cmd'`), never
   as a host prefix.
+  - **Exit code + output honesty (exec family):** `exec`/`exec-ro`/`shell`
+    propagate the CHILD's real exit code — `exec bash -c 'exit 3'` exits 3, not
+    1 (the child's code is the honest signal; scripts should assert the real
+    code, never `==1`-on-any-failure). `exec-sandbox` always did (it bypasses
+    cobra via `os.Exit(code)`). On a child failure the exec family prints the
+    `Error:` line and does NOT dump the Usage/Flags block (a child failure is
+    not a usage error). Genuine non-child errors (permission denials, hook
+    failures, the silent `errSilent` sentinel used by diff/doctor) still exit 1.
+    (v0.22.2; see `templates/migrations/v0.22.2.md`.)
   - **Git mutations are denied at both layers.** `vh-agent-harness exec git
     <mutation>` — with OR without a leading global flag (`exec git --no-pager
     commit`, `exec git -C /x push`, `exec git --git-dir=/x commit`, `exec git

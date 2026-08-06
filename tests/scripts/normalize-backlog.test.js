@@ -245,3 +245,85 @@ test("the rendered archive index contains no task-ID-shaped identifier", () => {
     // literal, it did not delete the section).
     assert.match(indexBody, /## Retrieval/, "the Retrieval section must still be rendered");
 });
+
+test("check mode (--check) against a clean backlog does NOT claim a normalization happened (output-honesty gate)", () => {
+    // Defect (vh-solara 2026-08-06): `--check` against a clean backlog printed
+    // "Normalized backlog at <path>" while writing NOTHING — a false mutation
+    // claim about the shared ledger. The check-mode summary's FIRST line must
+    // reflect that no write occurred (e.g. "Backlog normalization check
+    // (<path>)"), while the rest of the summary (counts, archive, pending
+    // updates) stays intact. Write mode MUST still say "Normalized backlog at".
+    //
+    // Build a clean backlog (a single well-formed row), normalize it once so
+    // the on-disk state matches the desired output, then run --check: the check
+    // must succeed (exit 0) and report up-to-date WITHOUT the "Normalized
+    // backlog at" claim.
+    const escapedRow = "| P1-CHECK-001 | todo | api | check-mode honesty row | alice | none |  |";
+    const { backlogPath } = writeFixture([escapedRow]);
+
+    // First run (write mode) lands the on-disk state so the subsequent check is
+    // up-to-date. This also pins that WRITE MODE still uses the original wording
+    // (the fix must not touch write-mode output).
+    const writeRun = runNormalizer(backlogPath);
+    assert.equal(writeRun.status, 0, `write run must succeed: ${writeRun.stderr}`);
+    assert.match(
+        writeRun.stdout,
+        /^Normalized backlog at /,
+        "WRITE mode must still open with 'Normalized backlog at <path>' (the fix gates wording on mode, write mode is unchanged)",
+    );
+
+    // Second run (check mode) on the now-clean backlog: exit 0, up-to-date.
+    const checkRun = runCheck(backlogPath);
+    assert.equal(checkRun.status, 0, `check on a clean backlog must exit 0: ${checkRun.stderr}`);
+
+    // CRUX: the check-mode output must NOT claim a normalization happened.
+    assert.doesNotMatch(
+        checkRun.stdout,
+        /Normalized backlog at /,
+        "check mode must NOT print 'Normalized backlog at' — it writes nothing, so claiming a normalization is a false mutation claim about the shared ledger",
+    );
+    // And it must use the mode-accurate phrasing instead.
+    assert.match(
+        checkRun.stdout,
+        /^Backlog normalization check \(/,
+        "check mode must open with the mode-accurate 'Backlog normalization check (<path>)' line",
+    );
+    // The rest of the summary is unchanged: the pending-updates line still
+    // reports the up-to-date state.
+    assert.match(
+        checkRun.stdout,
+        /Pending file updates: none/,
+        "check mode must still report pending-updates status (the rest of the summary is mode-independent)",
+    );
+});
+
+test("check mode (--check) against a drift-required backlog still does NOT claim a normalization happened", () => {
+    // The check-mode wording gate must hold on the OTHER check branch too:
+    // when a cleanup IS required, --check throws a BacklogError embedding the
+    // summary. That summary must ALSO not claim a write happened (the command
+    // refused to write — it only checked). We force drift by running --check
+    // BEFORE any normalization on a backlog whose desired archive index does
+    // not yet exist on disk (computeDiffState reports the missing archive files
+    // as changed).
+    const escapedRow = "| P1-CHECK-002 | todo | api | drift-trigger row | bob | none |  |";
+    const { backlogPath } = writeFixture([escapedRow]);
+
+    const checkRun = runCheck(backlogPath);
+    // A cleanup-required check exits non-zero (BacklogError) — that is the
+    // existing contract, unchanged by the wording fix.
+    assert.notEqual(checkRun.status, 0, "check on a drift-required backlog must exit non-zero");
+
+    const message = `${checkRun.stdout}\n${checkRun.stderr}`;
+    // CRUX: even in the cleanup-required branch, the embedded summary must not
+    // claim a normalization happened.
+    assert.doesNotMatch(
+        message,
+        /Normalized backlog at /,
+        "check mode (cleanup-required branch) must NOT print 'Normalized backlog at' — it refused to write, so claiming a normalization is a false mutation claim",
+    );
+    assert.match(
+        message,
+        /Backlog normalization check \(/,
+        "check mode (cleanup-required branch) must use the mode-accurate wording in the embedded summary too",
+    );
+});
