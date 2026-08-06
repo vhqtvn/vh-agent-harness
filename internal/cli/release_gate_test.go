@@ -10,7 +10,14 @@ package cli
 //   - the errata SUBSET: an open errata card fails and a staged errata card
 //     passes (the exact behavior of the former erratum_gate_test.go, now proven
 //     as a fixture of this generic gate rather than a parallel mechanism).
-//   - LIVE: the real repo (the actual release blocker) is clean today.
+//   - LIVE-repo cleanliness is NOT asserted by these tests. It is the authority
+//     of doctor check #12 (`checkDeferLiveness`) at the G0c release gate
+//     (scripts/release-tag.sh), NOT a `go test` canary. A go-test canary over
+//     the real repo would duplicate the authoritative G0c check at the wrong
+//     layer, turning the universal dev test red during release-prep windows
+//     whenever an open defer card's path_touched target is touched by a
+//     legitimate commit. `go test ./...` stays HERMETIC (scratch-repo fixtures
+//     only); the live F4-C / defer-liveness refusal surfaces at doctor/G0c.
 //
 // symptom_signature stability is parked; these tests key cards by task_id only.
 
@@ -586,31 +593,6 @@ func TestDeferLivenessGate_Matrix_CorruptMarkerFails_TasksAbsent(t *testing.T) {
 	}
 }
 
-// --- LIVE gate: the real release blocker over this repo ---
-
-// TestDeferLivenessGate_LiveRepoIsClean runs the gate against the real repo
-// (via the test CWD's git toplevel). This is the actual release blocker: if a
-// real open defer/errata card ever contradicts a real released/about-to-release
-// migration note, go test ./... fails HERE. It passes today because the only
-// card targeting a released note (errata-v0120) is staged (closed), and the
-// other open defers target code/internal surfaces, not migration notes.
-func TestDeferLivenessGate_LiveRepoIsClean(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git binary not available; cannot locate repo root for live gate")
-	}
-	repoRoot, err := repoRootFromCwd(t)
-	if err != nil {
-		t.Skipf("could not locate git working-tree root: %v", err)
-	}
-	r := checkDeferLiveness(repoRoot)
-	if r.tier == tierSkip {
-		t.Skipf("live gate unavailable in env: %s", r.detail)
-	}
-	if r.tier != tierPass {
-		t.Fatalf("live repo must be clean under the defer-liveness gate, got %s: %s", r.tier, r.detail)
-	}
-}
-
 // --- doctor check #13: staged-errata-content (the THIRD failure mode) ---
 
 // sampleErratumBody is a minimal corrective body an erratum file carries after
@@ -1107,24 +1089,5 @@ func TestDeferRecurrence_DormantWhenNoReleaseImminent(t *testing.T) {
 	}
 	if r.tier != tierPass {
 		t.Fatalf("want PASS (dormant) when no release imminent, got %s: %s", r.tier, r.detail)
-	}
-}
-
-// TestDeferRecurrence_LiveRepoIsClean runs the gate against the real repo. It
-// must not FAIL (v0.18.0 is tagged and there is no about-to-release note, so the
-// predicate is dormant). FAIL is a regression.
-func TestDeferRecurrence_LiveRepoIsClean(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git binary not available")
-	}
-	repoRoot, err := repoRootFromCwd(t)
-	if err != nil {
-		t.Skipf("could not locate git working-tree root: %v", err)
-	}
-	t.Setenv("VH_HARNESS_DEFER_DIFF_SINCE", "")
-	t.Setenv("VH_HARNESS_DEFER_OVERRIDE_IDS", "")
-	r := checkDeferLiveness(repoRoot)
-	if r.tier == tierFail {
-		t.Fatalf("live repo must not FAIL the defer-liveness gate, got FAIL: %s", r.detail)
 	}
 }
