@@ -287,6 +287,169 @@ func TestOverlayList_TransitiveHardDepShowsSelected(t *testing.T) {
 	}
 }
 
+// TestOverlayList_TransitiveHardDepParity_RenderSeam is the RENDER half of the
+// "Selected = renders" parity for the transitive-closure case — the deferred
+// coverage from the overlay-list selection fix (production landed in 39b10a2).
+//
+// Its DISPLAY twin (TestOverlayList_TransitiveHardDepShowsSelected, above) proves
+// `overlay list` reports `release` as `selected` for a selector pack that
+// hard-deps on core/release. That proves only the DISPLAY projection. The RENDER
+// half was code-verified by construction (seam.go renderSeamStaging calls
+// resolveCapabilityAnswers — the SAME function renderPackSet wraps for
+// `overlay list`) but NOT test-exercised for the transitive case. This test runs
+// the real RENDER seam (the update render path that consumes
+// resolveCapabilityAnswers' renderPacks) against the SAME fixture and asserts
+// `release` actually renders (releaser.md lands on disk + the releaser agent
+// registers). display==render is now end-to-end asserted, not just display-side.
+//
+// This is genuinely new coverage: the existing render tests select release
+// DIRECTLY (overlays:[release] in TestSeamRender_ReleaseViaOverlaysConvergesWithCapabilities
+// or capabilities:[core/release] in TestSeamRender_ReleaseViaCapabilitiesRendersPackAndClosure);
+// none exercises the TRANSITIVE path (a selector pack whose hard_dep pulls
+// release) through the real seam.
+func TestOverlayList_TransitiveHardDepParity_RenderSeam(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	// SAME fixture as the DISPLAY twin: a project-local selector pack whose
+	// capability hard-deps on core/release, selected via overlays: ONLY (NOT via
+	// capabilities:). The release pack is reached ONLY through the transitive
+	// hard_dep closure.
+	packDir := filepath.Join(root, filepath.FromSlash(overlay.ProjectOverlaysSubdir), "transitive-selector")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatalf("mkdir selector pack: %v", err)
+	}
+	manifest := "id: test/transitive-selector\n" +
+		"provides:\n" +
+		"  - transitive-selector-agent\n" +
+		"hard_deps:\n" +
+		"  - core/release\n" +
+		"optional_deps: []\n"
+	if err := os.WriteFile(filepath.Join(packDir, "capability-manifest.yml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write selector manifest: %v", err)
+	}
+	profile := "profile: minimal\n" +
+		"features:\n" +
+		"  formal-verification-pilot: false\n" +
+		"  resolve-first-pilot: false\n" +
+		"  contract-invariant-audit-pilot: false\n" +
+		"overlays:\n" +
+		"  - transitive-selector\n" +
+		"capabilities: []\n"
+	writeProfile(t, root, profile)
+
+	// 1. The pack-set the render seam consumes (resolveCapabilityAnswers — the
+	//    exact call seam.go renderSeamStaging makes) INCLUDES `release` for this
+	//    fixture. This is the render-side pack-set assertion that matches the
+	//    display's "selected" report.
+	_, packs, _, _, err := resolveCapabilityAnswers(root)
+	if err != nil {
+		t.Fatalf("resolveCapabilityAnswers (the render-seam pack-set source): %v", err)
+	}
+	if !containsPack(packs, "release") {
+		t.Errorf("render-seam pack set must INCLUDE release for the transitive fixture (display==render); got %v", packs)
+	}
+
+	// 2. Run the real render seam (the update path that consumes those packs).
+	if out, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("seam update (render) for the transitive fixture: %v (out=%q)", err, out)
+	}
+
+	// 3. release rendered transitively: the agent file lands on disk AND the
+	//    agent registers in opencode.jsonc — the observable proof the render seam
+	//    produced release, matching what `overlay list` reports as `selected`.
+	relPath := filepath.Join(root, ".opencode", "agents", "releaser.md")
+	if _, err := os.Stat(relPath); err != nil {
+		t.Errorf("releaser.md must land on disk when release renders transitively (render==display): %v", err)
+	}
+	rendered := parseRenderedAgents(t, root)
+	if !rendered["releaser"] {
+		t.Errorf("releaser agent must register in opencode.jsonc when release renders transitively; rendered=%v", rendered)
+	}
+}
+
+// TestOverlayList_FallbackOnResolverErrorStaysNonFatal covers the
+// renderOK==false fallback path in loadPackSelection/isSelected. On a resolver
+// or catalog error, `overlay list` MUST stay non-fatal (exit 0) and degrade to
+// the legacy direct selection signals (overlays: list membership + capability
+// dual-selection + feature pilots) rather than crashing, erroring, or
+// over-reporting.
+//
+// Hermetic error injection: a project-local pack with a MALFORMED
+// capability-manifest.yml. ReadCapabilityManifest errors on broken YAML (see
+// TestReadCapabilityManifest_MalformedYAMLErrors), which makes
+// discoverPackContributions fail-closed (profile.go), which makes
+// resolveCapabilityAnswers error, which makes renderPackSet return ok=false,
+// which sets renderOK=false in loadPackSelection. Enumeration (KnownPacksFor)
+// is unaffected — it reads directory names only — so the malformed pack still
+// surfaces in the list; only its selection-state computation degrades.
+//
+// This is genuinely new coverage: no existing test exercises the renderOK==false
+// branch of isSelected (every other test runs against a resolver that succeeds).
+func TestOverlayList_FallbackOnResolverErrorStaysNonFatal(t *testing.T) {
+	dir := t.TempDir()
+	// A project-local pack whose capability-manifest.yml is broken YAML. This is
+	// the fail-closed trigger: ReadCapabilityManifest returns (zero, false, err)
+	// on malformed YAML, so discoverPackContributions returns the wrapped error
+	// and the render-set read degrades to the direct signals.
+	packDir := filepath.Join(dir, filepath.FromSlash(overlay.ProjectOverlaysSubdir), "broken-manifest-pack")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatalf("mkdir broken pack: %v", err)
+	}
+	malformed := []byte("id: [unclosed\n  - badly: : : indented")
+	if err := os.WriteFile(filepath.Join(packDir, "capability-manifest.yml"), malformed, 0o644); err != nil {
+		t.Fatalf("write malformed manifest: %v", err)
+	}
+	// Profile selects broken-manifest-pack via overlays: ONLY and opts out of all
+	// default-on pilots, so the ONLY direct signal in play is the overlays:
+	// membership of broken-manifest-pack.
+	profile := "profile: minimal\n" +
+		"features:\n" +
+		"  formal-verification-pilot: false\n" +
+		"  resolve-first-pilot: false\n" +
+		"  contract-invariant-audit-pilot: false\n" +
+		"overlays:\n" +
+		"  - broken-manifest-pack\n" +
+		"capabilities: []\n"
+	writeProfile(t, dir, profile)
+
+	// F3 / renderOK=false precondition: prove the malformed manifest actually
+	// reaches the resolver before asserting the OBSERVABLE fallback below. This
+	// calls the precise layer `overlay list` consumes (renderPackSet — the same
+	// call whose `ok` becomes renderOK in loadPackSelection) and requires
+	// ok==false, packs empty. Without it, the observable assertions below could
+	// pass even if a future resolver silently ignored the malformed fixture.
+	if packs, ok := renderPackSet(dir); ok || len(packs) != 0 {
+		t.Fatalf("renderPackSet must return ok=false, packs empty for the malformed manifest (the renderOK=false precondition for the fallback under test); got ok=%v packs=%v", ok, packs)
+	}
+
+	// CRUX: `overlay list` MUST stay exit 0 — renderOK==false is non-fatal.
+	out, err := runOverlayListIn(t, dir)
+	if err != nil {
+		t.Fatalf("overlay list must stay exit 0 under a resolver error (renderOK=false fallback); got err=%v (out=%q)", err, out)
+	}
+
+	// Degrade to direct signals: broken-manifest-pack (listed under overlays:)
+	// surfaces as 'selected' via the fallback overlays: membership check — NOT via
+	// the render-set (which is nil under the fallback).
+	brokenLine := packLine(t, out, "broken-manifest-pack")
+	if !strings.Contains(brokenLine, "selected") {
+		t.Errorf("broken-manifest-pack should be 'selected' via the fallback overlays: direct signal; line=%q", brokenLine)
+	}
+
+	// No over-reporting: release (not in overlays:, not in capabilities:, not a
+	// feature pilot) MUST stay 'available' under the fallback. A degraded
+	// resolver-error path must not invent a selection the direct signals do not
+	// support — that would be the false positive this command exists to avoid.
+	releaseLine := packLine(t, out, "release")
+	if !strings.Contains(releaseLine, "available") {
+		t.Errorf("release should remain 'available' under the fallback (no direct signal selects it); line=%q", releaseLine)
+	}
+	if strings.Contains(releaseLine, "selected") {
+		t.Errorf("release must NOT be 'selected' under the fallback (over-reporting); line=%q", releaseLine)
+	}
+}
+
 // --- overlay parent command: unknown-verb non-zero exit -------------------
 
 // TestOverlay_NoArgsPrintsHelp confirms bare `vh-agent-harness overlay` (no
