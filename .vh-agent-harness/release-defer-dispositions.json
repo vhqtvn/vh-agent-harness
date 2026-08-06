@@ -2,14 +2,14 @@
   "schema_version": 1,
   "release_base": {
     "kind": "tag",
-    "value": "v0.22.0"
+    "value": "v0.22.1"
   },
-  "evaluated_commit": "b6af66b93d3e1a37e9fedf05296fe927f1fc9aa5",
-  "evaluated_tree": "5e053b194d4486c7b60aaa8ff8415130f67b71ad",
-  "manifest_parent_commit": "b6af66b93d3e1a37e9fedf05296fe927f1fc9aa5",
+  "evaluated_commit": "72913f7f78ef13ca6114e9ee208ac654aba9e66a",
+  "evaluated_tree": "3d6d067214e5eba375889c73539647b9bed2188b",
+  "manifest_parent_commit": "72913f7f78ef13ca6114e9ee208ac654aba9e66a",
   "reconciliation": {
-    "status": "released",
-    "scope": "Release arc: v0.22.0 (the prior tag and derived release_base) through evaluated_commit (the release-prep evaluation point = the post-artifact HEAD R = b6af66b, the readiness-artifact commit; intended release v0.22.1). This is a forward-only PATCH successor to the half-finished v0.22.0: the release-evaluator stdout-fix (615e7be) landed on top of v0.22.0's manifest and a follow-up (59a9264) re-pinned v0.22.0's handshake, but the intended v0.22.0 tag-move was never executed and v0.22.0 is published/immutable (Go proxy/sumdb), so the fix ships forward as v0.22.1 under a fresh, correct manifest. v0.22.0 is left exactly where it is (no move/force/delete). The v0.22.0..HEAD arc carries exactly ONE consumer-relevant commit (615e7be fix(release-evaluator): flush stdout before exit to avoid 64KiB pipe-buffer truncation) plus ceremony bookkeeping (59a9264 chore(release): manifest re-pin, excluded from the changelog by goreleaser's ^chore: filter). The release-prep enumeration (--mode=release-prep --since v0.22.0) surfaced exactly ONE firing card: defer-trigger-checker-distinguish-nonfiring-from-hold (target templates/core/.opencode/scripts/check-defer-triggers.mjs, touched by 615e7be). The fix is ORTHOGONAL to that card (the card concerns the promoter-use-only checker's DISPLAY classification of never-firing cards; the fix concerns stdout flushing before exit); disposition=disclose, release_relevance=no, non-blocking. The 23 carry-forward records are prior-arc (v0.20.0/v0.21.0/v0.22.0) disclosures carried for continuity; none fire in this v0.22.1 arc and none are release-relevant to v0.22.1. No DEFER finding requires promotion; no override ceremony is needed for v0.22.1. The handshake SHAs here are the FINAL releaser-computed values: evaluated_commit == manifest_parent_commit == R (b6af66b), evaluated_tree == tree(R) (5e053b1); the release-mode evaluator verifies evaluated_commit==HEAD^==R and HEAD^..HEAD diff == [manifest path only] at tag time (HEAD=M, the manifest-only child of R).",
+    "status": "release-prep",
+    "scope": "Release arc: v0.22.1 (the prior tag and derived release_base) through evaluated_commit (the release-prep evaluation point = current HEAD 72913f7; intended release v0.22.2). The v0.22.1..HEAD arc carries TWO consumer-relevant fix commits: 174f5ea (fix(cli): stop exec-family from collapsing child exit codes to 1 — defects 1/2/3: backlog --check false-claim, exec exit-code collapse, exec Usage dump) and 72913f7 (fix(cli): make dry-run/doctor destructive surfaces self-routing — path-by-path dry-run preview + self-routing managed-drift FAIL). PATCH bump v0.22.1->v0.22.2; zero feat/breaking. The release-prep F4-C release-diff-recurrence enumeration surfaced exactly FIVE firing cards whose path_touched targets re-fired in the v0.22.1..HEAD diff without a prior disposition: defer-025-shell-exit-code-e2e-gap (exec_shell.go, touched by 174f5ea), defer-026-execro-non1-exit-e2e-gap (exec_exit_code_test.go, touched by 174f5ea), defer-027-exec-returnpath-unwrapping-invariant (exec_ro.go + exec_shell.go, touched by 174f5ea), defer-preflight-checkdrift-e2e-test (preflight.go, touched by 72913f7), p2-v081-docclarity-helpmigrate-ux (guide.go, touched by 72913f7). All five are disclose-and-ship: explicitly NOT defects (the shipped fixes 174f5ea/72913f7 are correct), tracking deferred coverage/hardening/e2e/UX gaps that were intentionally NOT done. defer-026 claim-check performed (load-bearing, always_before(exec-ro-child-exit-code-propagation-completion-claim)): neither the v0.22.2 note nor the 174f5ea commit message represents exec-ro child-exit-code propagation as end-to-end proven — the mechanism (exitCodeFromError) is unit-guarded and e2e verification is cited for exec only (exit 3->3, 7->7); the exec-ro test honestly uses false (exit 1, masking value) with explanatory comments. The upgrade trigger did NOT fire; defer-026 stays non-blocking. The 24 carry-forward records are prior-arc (v0.20.0/v0.21.0/v0.22.0/v0.22.1) disclosures carried for continuity; none fire as F4-C blockers in this v0.22.2 arc. No DEFER finding requires promotion; no override ceremony is needed for v0.22.2. This manifest is a release-prep content update (dispositions added to clear F4-C); the handshake SHAs bind to the current release-prep HEAD 72913f7 and will be recomputed against the post-readiness-artifact HEAD R when the N->R->M ceremony completes. NOTE: the working tree is currently dirty with a separate overlay-discovery slice (11 modified + 2 new files) and a pending O1 change that are NOT part of this release-prep; the tag-time G0b clean-tree gate is expected to refuse until those are committed/stashed/excluded.",
     "zero_records_confirmed": false
   },
   "records": [
@@ -71,6 +71,42 @@
       "source_ref": ".local/coordinator/tasks/defer-023-exec-sandbox-best-effort-landlock-cause-pinning.json",
       "studied_at": "2026-08-04T00:00:00Z",
       "reviewed_at": "2026-08-04T00:00:00Z",
+      "override": null
+    },
+    {
+      "defer_id": "defer-025-shell-exit-code-e2e-gap",
+      "release_relevance": "no",
+      "disposition": "disclose",
+      "metadata_state": "valid",
+      "summary": "The shell verb defect-2 child-exit propagation is not live-exercisable end-to-end: the non-interactive permission gate denies an empty shell before be.Exec runs (runShell: empty command -> deny), so *exec.ExitError never reaches Execute() in the test context. The shared exitCodeFromError mechanism IS proven via exec (exit 3->3, 7->7) and runShell returns be.Exec's error unwrapped (structurally identical path, unit-guarded); this is an observability/e2e-coverage gap, not a correctness defect.",
+      "reason": "Trigger fired for the v0.22.2 arc (v0.22.1..HEAD): path_touched(internal/cli/exec_shell.go) is met — exec_shell.go was touched by 174f5ea (the SilenceUsage addition for defect 3). Non-release-relevant: the shared exitCodeFromError mechanism IS proven via exec (exit 3->3, 7->7) and runShell returns be.Exec's error unwrapped (structurally identical path, unit-guarded by internal/cli/exec_exit_code_test.go). This is an observability/e2e-coverage gap (shell non-1 outcome needs a pseudo-TTY test; TestShell_NonInteractiveDeniedAndNoUsageDump already documents the gate-deny-before-be.Exec limitation honestly), not a correctness defect. Disclosed for operator visibility; coverage obligation rides a future TTY-capable integration harness. metadata_state=valid (single clean path_touched predicate).",
+      "source_ref": ".local/coordinator/tasks/defer-025-shell-exit-code-e2e-gap.json",
+      "studied_at": "2026-08-06T00:00:00Z",
+      "reviewed_at": "2026-08-06T00:00:00Z",
+      "override": null
+    },
+    {
+      "defer_id": "defer-026-execro-non1-exit-e2e-gap",
+      "release_relevance": "no",
+      "disposition": "disclose",
+      "metadata_state": "valid",
+      "summary": "exec-ro defect-2 non-1 child-exit propagation is not exercised end-to-end: TestExecRo_ChildFailureNoUsageDump uses `false` (exit 1, the masking boundary value that cannot distinguish propagation from the former collapse-to-1), not a classifier-allowed child exiting a non-1 code. The shared exitCodeFromError mechanism is unit-guarded and proven via exec; this is a test-precision gap, not a correctness defect.",
+      "reason": "Trigger fired for the v0.22.2 arc (v0.22.1..HEAD): path_touched(tests/integration/exec_exit_code_test.go) is met — the file was created by 174f5ea. Non-release-relevant: the shared exitCodeFromError mechanism is unit-guarded (errors.As(*exec.ExitError) traversal, %w-chain, errSilent preservation pinned by internal/cli/exec_exit_code_test.go) and proven via exec (exit 3->3, 7->7). The exec-ro integration test (TestExecRo_ChildFailureNoUsageDump) uses `false` (exit 1, the masking boundary value), so it does NOT end-to-end distinguish exec-ro non-1 propagation from the former collapse — this is a test-precision gap, not a correctness defect. CLAIM-CHECK (load-bearing, always_before(exec-ro-child-exit-code-propagation-completion-claim)): the v0.22.2 migration note and the 174f5ea commit message were audited — NEITHER represents exec-ro child-exit-code propagation as end-to-end PROVEN. The note describes the MECHANISM (exitCodeFromError handles exec-ro, unit-guarded) and cites e2e verification only for exec (exit 3->3, 7->7); the exec-ro test honestly uses `false` (exit 1) with explanatory comments documenting the limitation. The upgrade trigger did NOT fire; defer-026 stays non-blocking. Disclose-and-ship is sufficient. metadata_state=valid (single clean path_touched predicate).",
+      "source_ref": ".local/coordinator/tasks/defer-026-execro-non1-exit-e2e-gap.json",
+      "studied_at": "2026-08-06T00:00:00Z",
+      "reviewed_at": "2026-08-06T00:00:00Z",
+      "override": null
+    },
+    {
+      "defer_id": "defer-027-exec-returnpath-unwrapping-invariant",
+      "release_relevance": "no",
+      "disposition": "disclose",
+      "metadata_state": "valid",
+      "summary": "Defect-2 correctness rests on an unpinned invariant: runExec/runExecRo/runShell must return be.Exec's error UNWRAPPED (or %w-wrapped) for errors.As to find *exec.ExitError. Today all three return paths are correct (statically verified); the gap is enforcement (no mechanical guard against a future non-%w wrap silently re-introducing the collapse), not a current defect.",
+      "reason": "Trigger fired for the v0.22.2 arc (v0.22.1..HEAD): path_touched(internal/cli/exec_ro.go) and path_touched(internal/cli/exec_shell.go) are both met — both files were touched by 174f5ea (SilenceUsage additions for defect 3). Non-release-relevant: today all three RunE handlers (runExec/runExecRo/runShell) return be.Exec's error unwrapped (statically verified), so errors.As at Execute() finds *exec.ExitError and propagates the real child exit code. The gap is enforcement (no mechanical guard — lint or direct unit test — against a future refactor wrapping the error with plain string formatting, which would silently re-collapse child exit codes to 1 while every existing test still passes), not a current defect. Disclosed for operator visibility; the invariant-naming/guard obligation rides the next touch of the RunE return paths. metadata_state=valid (clean path_touched predicates, both targets fired).",
+      "source_ref": ".local/coordinator/tasks/defer-027-exec-returnpath-unwrapping-invariant.json",
+      "studied_at": "2026-08-06T00:00:00Z",
+      "reviewed_at": "2026-08-06T00:00:00Z",
       "override": null
     },
     {
@@ -155,6 +191,18 @@
       "source_ref": ".local/coordinator/tasks/defer-p1-substrate-001-apply-caller-contract-generationflag.json",
       "studied_at": "2026-08-03T00:00:00Z",
       "reviewed_at": "2026-08-04T00:00:00Z",
+      "override": null
+    },
+    {
+      "defer_id": "defer-preflight-checkdrift-e2e-test",
+      "release_relevance": "no",
+      "disposition": "disclose",
+      "metadata_state": "valid",
+      "summary": "The legacy-manifest preflight checkDrift codepath (internal/cli/preflight.go) routes drifted/missing paths through the shared formatManagedDriftFail formatter but has NO dedicated integration test. Only the shared formatter (TestFormatManagedDriftFail) and the doctor-side checkManagedDrift (TestManagedDrift_Divergent_NamesPathAndBothRemedies) are covered end-to-end; the new path-collection loop in checkDrift is untested. The card is unrefined (no validation_plan/success_criteria).",
+      "reason": "Trigger fired for the v0.22.2 arc (v0.22.1..HEAD): path_touched(internal/cli/preflight.go) is met — preflight.go was touched by 72913f7 (the managed-drift self-routing fix, which routes the shared formatManagedDriftFail formatter's output through the destructive-surface naming path). Non-release-relevant: the 72913f7 change is ORTHOGONAL to this card's concern (a dedicated integration test for the legacy-manifest checkDrift codepath's path-collection loop); the shared formatter IS covered (TestFormatManagedDriftFail) and the doctor-side check IS covered end-to-end (TestManagedDrift_Divergent_NamesPathAndBothRemedies). This card tracks the legacy-preflight-codepath dedicated test gap only. The card is unrefined (empty owner_notes, no validation_plan, no success_criteria); disclosed for operator visibility. metadata_state=valid (the path_touched trigger is well-formed and fired correctly via the ready_criteria predicate).",
+      "source_ref": ".local/coordinator/tasks/defer-preflight-checkdrift-e2e-test.json",
+      "studied_at": "2026-08-06T00:00:00Z",
+      "reviewed_at": "2026-08-06T00:00:00Z",
       "override": null
     },
     {
@@ -287,6 +335,18 @@
       "source_ref": ".local/coordinator/tasks/p2-docs-001.json",
       "studied_at": "2026-08-03T00:00:00Z",
       "reviewed_at": "2026-08-04T00:00:00Z",
+      "override": null
+    },
+    {
+      "defer_id": "p2-v081-docclarity-helpmigrate-ux",
+      "release_relevance": "no",
+      "disposition": "disclose",
+      "metadata_state": "valid",
+      "summary": "v0.8.1 doc-clarity + help-migrate transient UX (low/cosmetic, dormant): (1) help_migrate.go shows the adopted-version note by design, so in the self-update->update transient (binary=v0.8.1 but lineage still harness/0.8.0) 'help migrate' shows the pre-update note; (2) guide.go modules-deprecated blurb could optionally note empty optional fields drop on render. Shipped artifacts verified accurate; low/cosmetic.",
+      "reason": "Trigger fired for the v0.22.2 arc (v0.22.1..HEAD): any(path_touched(internal/cli/help_migrate.go), path_touched(internal/cli/guide.go)) — path_touched(internal/cli/guide.go) is met (guide.go was touched by 72913f7, the dry-run destructive-surface self-routing fix). Non-release-relevant: the 72913f7 change to guide.go (printDryRunPlan path-by-path listing of ActionManagedOverwrite paths) is ORTHOGONAL to this card's concerns (the help-migrate adopted<binary transient UX gap and the guide.go modules-deprecated blurb enhancement). This is a low/cosmetic dormant card; the shipped artifacts (v0.8.1.md, guide.go modules-deprecated framing) are verified accurate. Disclosed for operator visibility; the UX-improvement obligation rides a future dedicated touch of help_migrate.go or guide.go. metadata_state=valid (clean any() predicate, guide.go member fired).",
+      "source_ref": ".local/coordinator/tasks/p2-v081-docclarity-helpmigrate-ux.json",
+      "studied_at": "2026-08-06T00:00:00Z",
+      "reviewed_at": "2026-08-06T00:00:00Z",
       "override": null
     },
     {
