@@ -32,25 +32,48 @@ package cli
 
 // execDenyFooter is appended to every exec/shell permission-gate DENY. The gate
 // reason (carried by the caller) explains why this specific command was denied;
-// this footer adds the never-auto-retry directive and points at the canonical
-// authority that names the sanctioned alternative for the matched rule.
+// this footer adds the never-auto-retry directive and, when authority is
+// non-empty, points at the canonical authority that names the sanctioned
+// alternative for the matched rule.
 //
-// The authority pointer is the shell-guard forbidden-patterns rules: each rule
-// carries a `why` field (and several carry an inline `alternative`) — see
-// templates/core/.opencode/repo-configs/forbidden-patterns.core.js. AGENTS.md →
-// "Shell, container, and workspace hygiene" restates the operator contract and
-// the "read the rule's why and pick the canonical alternative" discipline.
-// (docs/ai/shell-execution.md is referenced from AGENTS.md but is currently a
-// dangling reference; the plugin + AGENTS.md are the real friction-time
-// authorities, so the footer points there.)
-func execDenyFooter() string {
-	return "\n" +
+// authority is path-specific because the deny families have DIFFERENT enforcing
+// rules, so a single hardcoded pointer would be accurate for one family and
+// misleading for the other:
+//   - the shell-guard JS gate (hook) path passes shellGuardAuthority: the
+//     forbidden-patterns rules carry each matched rule's `why` (+ several carry
+//     an inline `alternative`) — see
+//     templates/core/.opencode/repo-configs/forbidden-patterns.core.js, and
+//     AGENTS.md → "Shell, container, and workspace hygiene" restates the
+//     operator contract. (docs/ai/shell-execution.md is referenced from
+//     AGENTS.md but is currently a dangling reference; the plugin + AGENTS.md
+//     are the real friction-time authorities, so the footer points there.)
+//   - the git-mutation Go backstop (denyExecGitMutationPayload) passes ""
+//     because its reason ALREADY names the canonical authority
+//     (commit-gate.sh / the committer agent / git-execution-routing.md).
+//     Pointing that path at forbidden-patterns*.js would mislead the agent: no
+//     forbidden-patterns rule fired (the Go backstop runs BEFORE the JS gate),
+//     and the sanctioned alternative for git mutations is the commit-gate, not
+//     a forbidden-patterns rule's `why`. The footer's value-add there is the
+//     never-auto-retry directive; the authority pointer is already in the
+//     reason, so it is not re-stated (an empty authority omits the second
+//     bullet rather than emit a wrong/redundant one).
+func execDenyFooter(authority string) string {
+	s := "\n" +
 		"- This denial is final: do not retry the command, paraphrase it, or route it " +
-		"through another verb or agent to get around the gate.\n" +
-		"- For the sanctioned alternative, read the matching shell-guard rule's `why` " +
-		"(.opencode/repo-configs/forbidden-patterns*.js) and AGENTS.md → " +
-		"\"Shell, container, and workspace hygiene\"."
+		"through another verb or agent to get around the gate."
+	if authority != "" {
+		s += "\n- For the sanctioned alternative, " + authority + "."
+	}
+	return s
 }
+
+// shellGuardAuthority is the sanctioned-alternative pointer for a command denied
+// by the shell-guard JS gate (the hook path in runExec/runShell): each matched
+// forbidden-patterns rule carries a `why`, and AGENTS.md restates the operator
+// contract. It is passed to execDenyFooter at the hook-deny sites.
+const shellGuardAuthority = "read the matching shell-guard rule's `why` " +
+	"(.opencode/repo-configs/forbidden-patterns*.js) and AGENTS.md → " +
+	"\"Shell, container, and workspace hygiene\""
 
 // hookErrorFooter is appended when the permission hook itself faulted. The gate
 // is fail-closed (any bridge fault → Deny by default for safety), so the message

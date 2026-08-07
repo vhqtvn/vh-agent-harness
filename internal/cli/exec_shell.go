@@ -125,10 +125,13 @@ func runExec(cmd *cobra.Command, args []string) error {
 	// only (does NOT default-deny regular exec mutations like mkdir/pytest).
 	if deny, reason := denyExecGitMutationPayload(args); deny {
 		// Surface-at-friction: the git-guard reason already names the
-		// sanctioned alternative (commit-gate + committer) and authority; the
-		// footer reinforces never-auto-retry so the agent does not retry the
-		// payload through another route.
-		fmt.Fprintln(cmd.ErrOrStderr(), "denied: "+reason+execDenyFooter())
+		// sanctioned alternative (commit-gate + committer) and authority, so
+		// the footer passes an empty authority pointer (it would otherwise
+		// misdirect to the shell-guard forbidden-patterns rules, which never
+		// fired — this Go backstop runs BEFORE the JS gate); the footer only
+		// reinforces never-auto-retry so the agent does not retry the payload
+		// through another route.
+		fmt.Fprintln(cmd.ErrOrStderr(), "denied: "+reason+execDenyFooter(""))
 		return fmt.Errorf("denied by git mutation guard: %s", reason)
 	}
 
@@ -151,8 +154,9 @@ func runExec(cmd *cobra.Command, args []string) error {
 	switch action {
 	case permission.Deny:
 		// Surface-at-friction (Fix 1): the gate reason explains why; the footer
-		// adds never-auto-retry and the sanctioned-alternative authority pointer.
-		fmt.Fprintln(cmd.ErrOrStderr(), "denied: "+reason+execDenyFooter())
+		// adds never-auto-retry and the sanctioned-alternative authority pointer
+		// (the shell-guard forbidden-patterns rule that matched).
+		fmt.Fprintln(cmd.ErrOrStderr(), "denied: "+reason+execDenyFooter(shellGuardAuthority))
 		return fmt.Errorf("denied by permission hook: %s", reason)
 	case permission.Ask:
 		// No operator loop in slice 4a -> deny-by-default. Surface-at-friction:
@@ -205,7 +209,7 @@ func runShell(cmd *cobra.Command, _ []string) error {
 	}
 	switch action {
 	case permission.Deny:
-		fmt.Fprintln(cmd.ErrOrStderr(), "denied: "+reason+execDenyFooter())
+		fmt.Fprintln(cmd.ErrOrStderr(), "denied: "+reason+execDenyFooter(shellGuardAuthority))
 		return fmt.Errorf("denied by permission hook: %s", reason)
 	case permission.Ask:
 		fmt.Fprintln(cmd.ErrOrStderr(), "permission required (ask): "+reason+

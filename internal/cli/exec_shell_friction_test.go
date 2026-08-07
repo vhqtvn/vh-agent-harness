@@ -254,3 +254,61 @@ func TestShell_AskMessageSurfaceAtFriction(t *testing.T) {
 		}
 	})
 }
+
+// TestExec_GitMutationDenySurfaceAtFriction is the direct friction-shape test
+// for the git-mutation backstop deny site (denyExecGitMutationPayload →
+// execDenyFooter), which was previously covered only transitively. Unlike the
+// sibling tests above (which drive the shell-guard hook Deny), this drives the
+// Go-binary backstop that fires BEFORE evaluateGate, so the message's authority
+// pointer is path-specific: the git-guard reason already names commit-gate.sh /
+// the committer agent, so the footer passes an empty authority (it must NOT
+// misdirect to the shell-guard forbidden-patterns rules, which never fired).
+//
+// allowHook is used deliberately: it makes the git-mutation backstop the ONLY
+// deny on this path. If the backstop ever failed to fire, the command would
+// reach the allow hook → backend → this test fails on "expected error", rather
+// than falsely passing on a hook-deny footer.
+func TestExec_GitMutationDenySurfaceAtFriction(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureManifest(t, root, "docker_compose", "dev")
+
+	rec := &recordingBackend{name: "docker_compose"}
+	runtimeCmdDeps.backendFor = func(*loadedManifest) (runtime.Backend, error) { return rec, nil }
+	runtimeCmdDeps.hook = allowHook{} // allow: the ONLY deny must be the git-mutation backstop
+	defer resetRuntimeDeps(t)
+
+	execFl.service, execFl.workdir, execFl.tty = "", "", false
+	runWithCwd(t, root, func() {
+		cmd, buf := newOutCmd()
+		err := runExec(cmd, []string{"git", "--no-pager", "commit"})
+		if err == nil {
+			t.Fatalf("runExec with git-mutation payload: expected error, got nil")
+		}
+		out := buf.String()
+		// Element 1+2: preserved denial + gate reason. The git-guard reason names
+		// the commit-gate as the sanctioned alternative (element 3) and the
+		// authority (element 4) — see denyExecGitMutationPayload.
+		wantFrictionShape(t, out, "denied:", "commit-gate")
+		// Element 5: never-auto-retry directive (from execDenyFooter).
+		if !strings.Contains(out, "do not retry") {
+			t.Errorf("never-auto-retry directive missing from message:\n%s", out)
+		}
+		// The returned error must identify the git-mutation guard (not the
+		// permission hook), proving the backstop — not the hook — denied.
+		if !strings.Contains(err.Error(), "denied by git mutation guard") {
+			t.Errorf("error must name the git mutation guard; got %q", err.Error())
+		}
+		// Accuracy (card2): the git-mutation footer must NOT cite the shell-guard
+		// forbidden-patterns rules — no forbidden-patterns rule fired (the Go
+		// backstop runs before the JS gate), and the sanctioned alternative is
+		// the commit-gate (already named in the reason). Pointing here would
+		// mislead the agent to the wrong rule.
+		if strings.Contains(out, "forbidden-patterns") {
+			t.Errorf("git-mutation footer must not misdirect to forbidden-patterns (authority is commit-gate.sh, already in the reason):\n%s", out)
+		}
+		// Backend must never be reached on a deny.
+		if len(rec.log) != 0 {
+			t.Errorf("backend reached despite git-mutation deny: %v", rec.log)
+		}
+	})
+}
