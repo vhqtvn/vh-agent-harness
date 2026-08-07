@@ -171,6 +171,15 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 			verb = "could not be compared against"
 		}
 		switch {
+		case updateAllowStaleCorpus && updateDryRun:
+			// --allow-stale-corpus + --dry-run combo: dry-run writes nothing, so
+			// the live override's "proceeding ... rendered files will reflect"
+			// wording would be misleading (no render, no write). State plainly
+			// that this is a no-write preview, then reuse the same binary-corpus
+			// caveat the bare --dry-run branch emits. The override is honored
+			// (we do not refuse), but no "proceeding" claim is made.
+			fmt.Fprintf(out, "update: --allow-stale-corpus + --dry-run: previewing only — no files will be written (dry-run), even though the embedded corpus %s the checkout's templates/core.\n", verb)
+			fmt.Fprintln(out, "update: warning: this preview represents the BINARY's embedded corpus, NOT what a rebuilt binary would render. Run `make update` (the Makefile target rebuilds first) to render from current source.")
 		case updateAllowStaleCorpus:
 			fmt.Fprintf(out, "update: --allow-stale-corpus: proceeding although the embedded corpus %s the checkout's templates/core — rendered files will reflect the BINARY's embedded corpus, NOT a rebuilt one.\n", verb)
 		case updateDryRun:

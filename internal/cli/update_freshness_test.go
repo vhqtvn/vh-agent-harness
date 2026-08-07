@@ -178,6 +178,54 @@ func TestUpdateFreshness_AllowStaleCorpusOverrides(t *testing.T) {
 	}
 }
 
+// --- --allow-stale-corpus + --dry-run combo (no misleading "proceeding") ----
+
+// TestUpdateFreshness_AllowStaleCorpusWithDryRun: when BOTH --allow-stale-corpus
+// AND --dry-run are set, the override is honored (no refuse) BUT, because dry-run
+// writes nothing, the message MUST NOT claim "proceeding"/"rendered files will
+// reflect" the way the live override does. It must clearly state it is a no-write
+// dry-run preview. The combo also must write nothing to the tree.
+func TestUpdateFreshness_AllowStaleCorpusWithDryRun(t *testing.T) {
+	abs := sourceCheckoutFixture(t)
+	mutateEmbeddedFile(t, abs, ".vh-agent-harness/AGENTS.core.md")
+
+	withAllowStaleCorpus(t, true)
+	withDryRun(t, true)
+	out, err := runUpdateTargetNonInteractive(t, abs)
+	if err != nil {
+		t.Fatalf("--allow-stale-corpus + --dry-run must not error on differs; got %v (out=%q)", err, out)
+	}
+	low := strings.ToLower(out)
+	// The combo must announce the override is active.
+	if !strings.Contains(low, "allow-stale-corpus") {
+		t.Errorf("combo must announce --allow-stale-corpus; got %q", out)
+	}
+	// The combo MUST NOT print the live-override "proceeding ... rendered files
+	// will reflect" wording — that claims a render/write that dry-run does not do.
+	if strings.Contains(low, "proceeding although") {
+		t.Errorf("combo must not claim 'proceeding' (dry-run writes nothing); got %q", out)
+	}
+	if strings.Contains(low, "rendered files will reflect") {
+		t.Errorf("combo must not claim rendered files (dry-run writes nothing); got %q", out)
+	}
+	// It MUST clearly state no writes occur.
+	if !strings.Contains(low, "no files will be written") {
+		t.Errorf("combo must state no files will be written (dry-run); got %q", out)
+	}
+	if !strings.Contains(low, "dry-run") {
+		t.Errorf("combo must identify itself as a dry-run preview; got %q", out)
+	}
+	// The binary-corpus caveat must still be present (the override does not
+	// change which corpus the preview represents).
+	if !strings.Contains(low, "binary's embedded corpus") {
+		t.Errorf("combo must still warn the preview is the BINARY's corpus; got %q", out)
+	}
+	// Dry-run writes nothing.
+	if pathExists(t, filepath.Join(abs, ".opencode")) {
+		t.Errorf("combo must not write .opencode/ (dry-run); out=%q", out)
+	}
+}
+
 // --- --dry-run warn + proceed ----------------------------------------------
 
 // TestUpdateFreshness_DryRunWarnsAndProceeds: --dry-run never refuses (it
