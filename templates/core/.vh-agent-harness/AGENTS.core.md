@@ -434,7 +434,7 @@ it would be empty, a placeholder, `none`, or a repetition of a sibling or an
 existing retained summary. This is a density rule, not a license to omit work:
 scan all nine, emit the ones with material content, omit the rest rather than
 emit a shell.
-
+{{ if .features.backlog }}
 ## Backlog tracking rules
 
 The canonical planning documents live under `docs/planning/` and `docs/checkpoints/`.
@@ -617,3 +617,4 @@ row's summary.
 - Keep each task scoped to one clear vertical slice or one focused boundary change.
 - Prefer areas that match repo boundaries (e.g. `api`, `web`, `storage`, `docs`, or the project's own package names).
 - Completed tasks must include enough notes for a reviewer to understand what changed without diff-mining the branch.
+{{ end }}

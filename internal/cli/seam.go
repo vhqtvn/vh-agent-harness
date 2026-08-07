@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"text/template"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
 	"github.com/vhqtvn/vh-agent-harness/internal/overlay"
@@ -486,14 +487,63 @@ func composeAgentsMd(target string) error {
 		}
 		return fmt.Errorf("read .vh-agent-harness/AGENTS.core.md: %w", err)
 	}
+
+	// Feature-gate the core half before composition. AGENTS.core.md carries Go
+	// text/template conditionals ({{ if .features.<x> }}...{{ end }}) that the
+	// renderer's preserve-as-is copy leaves LITERAL in the rendered file — only
+	// canonical {{UPPER_TOKEN}} sentinels are resolved during render, so the
+	// feature actions arrive here intact. Evaluate them against the reconciled
+	// feature map so features.<x>:false suppresses the matching section in the
+	// composed AGENTS.md, mirroring how permconfig/emit.go and opencode.jsonc.tmpl
+	// already honor the same flags. The mission half is project-owned and NOT
+	// templated. See flag-gated-composition-fix.md.
+	coreRendered, err := renderAgentsCoreTemplate(core, target)
+	if err != nil {
+		return fmt.Errorf("compose AGENTS.core.md feature conditionals: %w", err)
+	}
+
 	var buf bytes.Buffer
-	buf.Write(bytes.TrimRight(core, "\n"))
+	buf.Write(bytes.TrimRight(coreRendered, "\n"))
 	buf.WriteString("\n\n")
 	buf.Write(mission)
 	if err := os.WriteFile(filepath.Join(target, "AGENTS.md"), buf.Bytes(), 0o644); err != nil {
 		return fmt.Errorf("write composed AGENTS.md: %w", err)
 	}
 	return nil
+}
+
+// renderAgentsCoreTemplate evaluates the Go text/template conditionals embedded
+// in the rendered AGENTS.core.md content ({{ if .features.<x> }}...{{ end }})
+// against the reconciled feature map, so a feature the project turned off
+// (features.<x>: false in vh-harness-profile.yml) suppresses its section in the
+// composed AGENTS.md.
+//
+// The data context is INTENTIONALLY features-only: it carries a top-level
+// "features" map (map[string]bool from reconciledFeatures) so
+// {{ if .features.backlog }} resolves the BOOLEAN (not a non-empty "false"
+// string), and an unset flag is falsy via Go's default map-index behavior (a
+// missing key in map[string]bool returns the zero value false). Non-features
+// harness tokens ({{COORDINATOR_DIR}} etc.) are ALREADY resolved by the
+// renderer's SubstituteHarnessTokens pass during the preserve-as-is copy, so
+// the core half arriving here needs no project_name/project_slug/coordinator_dir
+// answers — only the feature flags remain as live template actions. If a
+// future non-features template action is added to AGENTS.core.md, widen this
+// context (mirror substrate.buildTemplateData) or it will render as <no value>.
+// A core file with NO template actions parses and executes as an identity — the
+// common case for a project's hand-authored core that carries no feature gates —
+// so this is backward-safe.
+func renderAgentsCoreTemplate(core []byte, target string) ([]byte, error) {
+	features := reconciledFeatures(target)
+	data := map[string]any{"features": features}
+	t, err := template.New("AGENTS.core.md").Parse(string(core))
+	if err != nil {
+		return nil, fmt.Errorf("parse: %w", err)
+	}
+	var out bytes.Buffer
+	if err := t.Execute(&out, data); err != nil {
+		return nil, fmt.Errorf("execute: %w", err)
+	}
+	return out.Bytes(), nil
 }
 
 // defaultRunShapeSeed is the minimal, schema-valid run-shape the seam seeds on
