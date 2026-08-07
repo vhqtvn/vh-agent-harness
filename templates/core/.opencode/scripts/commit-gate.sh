@@ -354,6 +354,55 @@ _closeout_append() {
   fi
 }
 
+# Build the protected-UUID set: the active lock's UUID, the _current_uuid
+# marker, and every UUID whose session meta-* is fresh (mtime <= max_age).
+# Echoed one UUID per line on stdout; callers collect into an array.
+#
+# THIS IS THE SINGLE SOURCE shared by _gate_gc_sweep (canonical GC at
+# no_changes/commit/release) AND the acquire-time scratch cleanup. The two
+# call sites MUST share one construction: hand-duplicating them was the root
+# cause of the 3daca70 acquire-time-sweep bug (the two copies drifted and the
+# acquire path lost the protected-UUID skip, rm'ing LIVE concurrent sessions'
+# meta-*/index-* scratch). Centralizing here means a future edit cannot
+# re-diverge the protected-UUID SET CONSTRUCTION itself — each caller still
+# independently supplies its max_age and owns its own prefix-scoped reaping,
+# so the surrounding cleanup CONTRACTS can still drift through caller-side
+# edits; this helper only guarantees the membership set they consult is
+# identical.
+#
+# Arg 1: max_age (seconds) — the SCRATCH-retention threshold
+# (COMMIT_GATE_GC_MAX_AGE, default DEFAULT_GC_MAX_AGE). NOT the lock TTL
+# (COMMIT_GATE_TTL_SECONDS): that is a different concept (LOCK staleness) and
+# must never be threaded in here. A session is "fresh" (protected) iff its
+# meta-* mtime is <= max_age.
+_protected_uuids() {
+  local max_age="$1"
+  # Active lock UUID.
+  if [[ -d "$LOCK_DIR" ]]; then
+    local lock_content lock_uuid
+    lock_content=$(cat "$LOCK_META" 2>/dev/null || echo "{}")
+    lock_uuid=$(_field_str "$lock_content" "uuid")
+    [[ -n "$lock_uuid" ]] && printf '%s\n' "$lock_uuid"
+  fi
+  # Most-recently-active session marker.
+  local cu_file="${GATE_INDEX_DIR}/_current_uuid"
+  if [[ -f "$cu_file" ]]; then
+    local cu_val
+    cu_val=$(tr -d '[:space:]' < "$cu_file" 2>/dev/null || true)
+    [[ -n "$cu_val" ]] && printf '%s\n' "$cu_val"
+  fi
+  # Fresh session-meta UUIDs (active concurrent sessions).
+  local m
+  while IFS= read -r m; do
+    [[ -z "$m" ]] && continue
+    local m_age
+    m_age=$(_file_age_seconds "$m" 2>/dev/null || echo "0")
+    if [[ $m_age -le $max_age ]]; then
+      printf '%s\n' "${m#${GATE_INDEX_DIR}/meta-}"
+    fi
+  done < <(ls -1 "${GATE_INDEX_DIR}"/meta-* 2>/dev/null)
+}
+
 # Sweep aged orphan scratch files (msg-/paths-/meta-/index-/merge-) from
 # $GATE_INDEX_DIR. Best-effort: never returns non-zero, never writes to stdout
 # (diagnostics suppressed). Two layers protect a live/concurrent session:
@@ -364,7 +413,9 @@ _closeout_append() {
 #   2. Protected-UUID skip: UUIDs from the active lock, _current_uuid, and
 #      any UUID whose meta-* session file is fresh (younger than max_age) are
 #      never removed even if their other scratch files are artificially aged
-#      (defense-in-depth for concurrent lock-free sessions).
+#      (defense-in-depth for concurrent lock-free sessions). Built via the
+#      shared _protected_uuids helper so this contract cannot drift from the
+#      acquire-time cleanup's.
 _gate_gc_sweep() {
   local max_age="${COMMIT_GATE_GC_MAX_AGE:-$DEFAULT_GC_MAX_AGE}"
 
@@ -373,31 +424,13 @@ _gate_gc_sweep() {
   # the gate must still get a chance to sweep it.
   [[ ! -d "$GATE_INDEX_DIR" && ! -d "$MSG_SCRATCH_DIR" ]] && return 0
 
-  # Build the protected-UUID set (active lock UUID + _current_uuid value).
+  # Build the protected-UUID set via the shared helper (also used by the
+  # acquire-time cleanup). See _protected_uuids for why these two call sites
+  # MUST share one construction.
   local protected_uuids=()
-  if [[ -d "$LOCK_DIR" ]]; then
-    local lock_content lock_uuid
-    lock_content=$(cat "$LOCK_META" 2>/dev/null || echo "{}")
-    lock_uuid=$(_field_str "$lock_content" "uuid")
-    [[ -n "$lock_uuid" ]] && protected_uuids+=("$lock_uuid")
-  fi
-  local cu_file="${GATE_INDEX_DIR}/_current_uuid"
-  if [[ -f "$cu_file" ]]; then
-    local cu_val
-    cu_val=$(tr -d '[:space:]' < "$cu_file" 2>/dev/null || true)
-    [[ -n "$cu_val" ]] && protected_uuids+=("$cu_val")
-  fi
-  # Also protect UUIDs with fresh session metadata (active concurrent sessions).
-  local m
-  while IFS= read -r m; do
-    [[ -z "$m" ]] && continue
-    local m_age m_uuid
-    m_age=$(_file_age_seconds "$m" 2>/dev/null || echo "0")
-    if [[ $m_age -le $max_age ]]; then
-      m_uuid="${m#${GATE_INDEX_DIR}/meta-}"
-      protected_uuids+=("$m_uuid")
-    fi
-  done < <(ls -1 "${GATE_INDEX_DIR}"/meta-* 2>/dev/null)
+  while IFS= read -r puuid; do
+    [[ -n "$puuid" ]] && protected_uuids+=("$puuid")
+  done < <(_protected_uuids "$max_age")
 
   local prefix
   for prefix in msg- paths- meta- index- merge-; do
@@ -798,36 +831,22 @@ EOF
   #
   # The protected-UUID set (active lock UUID + _current_uuid + any UUID whose
   # meta-* is fresh) is consulted so a live concurrent session is never reaped.
-  # Mirrors _gate_gc_sweep's construction (~376-400); scoped here to meta-/
-  # index- only (this is the pre-lock sweep; the full-prefix sweep still runs
-  # on no_changes/commit/release via _gate_gc_sweep).
+  # Built via the SHARED _protected_uuids helper — the acquire-time cleanup
+  # and _gate_gc_sweep MUST consult the SAME construction (hand-duplicating
+  # them was the 3daca70 bug). Scoped here to meta-/index- only (this is the
+  # pre-lock sweep; the full-prefix sweep still runs on no_changes/commit/
+  # release via _gate_gc_sweep).
   # -------------------------------------------------------------------
   if [[ -d "$GATE_INDEX_DIR" ]]; then
     local gc_max_age="${COMMIT_GATE_GC_MAX_AGE:-$DEFAULT_GC_MAX_AGE}"
-    # Build the protected-UUID set (mirrors _gate_gc_sweep).
+    # Build the protected-UUID set via the shared helper (canonical GC +
+    # acquire-time cleanup MUST consult the SAME construction). The acquire
+    # path used to hand-duplicate this and lost the protected-UUID skip — the
+    # 3daca70 bug. See _protected_uuids for the shared contract.
     local protected_uuids=()
-    if [[ -d "$LOCK_DIR" ]]; then
-      local gc_lock_content gc_lock_uuid
-      gc_lock_content=$(cat "$LOCK_META" 2>/dev/null || echo "{}")
-      gc_lock_uuid=$(_field_str "$gc_lock_content" "uuid")
-      [[ -n "$gc_lock_uuid" ]] && protected_uuids+=("$gc_lock_uuid")
-    fi
-    local gc_cu_file="${GATE_INDEX_DIR}/_current_uuid"
-    if [[ -f "$gc_cu_file" ]]; then
-      local gc_cu_val
-      gc_cu_val=$(tr -d '[:space:]' < "$gc_cu_file" 2>/dev/null || true)
-      [[ -n "$gc_cu_val" ]] && protected_uuids+=("$gc_cu_val")
-    fi
-    local gc_m
-    while IFS= read -r gc_m; do
-      [[ -z "$gc_m" ]] && continue
-      local gc_m_age gc_m_uuid
-      gc_m_age=$(_file_age_seconds "$gc_m" 2>/dev/null || echo "0")
-      if [[ $gc_m_age -le $gc_max_age ]]; then
-        gc_m_uuid="${gc_m#${GATE_INDEX_DIR}/meta-}"
-        protected_uuids+=("$gc_m_uuid")
-      fi
-    done < <(ls -1 "${GATE_INDEX_DIR}"/meta-* 2>/dev/null)
+    while IFS= read -r puuid; do
+      [[ -n "$puuid" ]] && protected_uuids+=("$puuid")
+    done < <(_protected_uuids "$gc_max_age")
 
     local meta_file
     while IFS= read -r meta_file; do
@@ -1352,16 +1371,21 @@ items = [l.strip().split('/')[-1] for l in sys.stdin if l.strip()]
 print(json.dumps(items))
 " 2>/dev/null || echo "[]")
     fi
-    # Count stale sessions (older than TTL)
-    local stale_count=0
+    # Count session-metadata files aged past the GC-retention window
+    # (COMMIT_GATE_GC_MAX_AGE) — i.e. reaping candidates _gate_gc_sweep will
+    # reap on the next sweep. This is a SCRATCH-retention concept, NOT lock
+    # staleness: do NOT re-conflate with COMMIT_GATE_TTL_SECONDS (the LOCK
+    # TTL). The cleanup paths all key off GC_MAX_AGE; the diagnostic matches
+    # so its language cannot reintroduce the TTL/GC conflation.
+    local aged_count=0
     if [[ "$sessions_json" != "[]" ]]; then
-      local ttl="${COMMIT_GATE_TTL_SECONDS:-$DEFAULT_TTL}"
-      stale_count=$(ls -1 "$GATE_INDEX_DIR"/meta-* 2>/dev/null | while IFS= read -r f; do
+      local gc_max_age="${COMMIT_GATE_GC_MAX_AGE:-$DEFAULT_GC_MAX_AGE}"
+      aged_count=$(ls -1 "$GATE_INDEX_DIR"/meta-* 2>/dev/null | while IFS= read -r f; do
         local a
         a=$(_file_age_seconds "$f" 2>/dev/null || echo "0")
-        if [[ $a -gt $ttl ]]; then echo "stale"; fi
+        if [[ $a -gt $gc_max_age ]]; then echo "aged"; fi
       done | wc -l | tr -d ' ')
-      json_out "{\"status\":\"free\",\"note\":\"session_metadata_exists\",\"sessions\":${sessions_json},\"stale_count\":${stale_count}}"
+      json_out "{\"status\":\"free\",\"note\":\"session_metadata_exists\",\"sessions\":${sessions_json},\"gc_aged_count\":${aged_count}}"
     else
       json_out "{\"status\":\"free\"}"
     fi
