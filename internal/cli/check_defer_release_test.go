@@ -385,3 +385,185 @@ func TestCheckDefer_PromoterMode_MalformedAfterTagTrigger(t *testing.T) {
 		t.Errorf("well-formed after_tag(v0.1.0) detail must show tag-exists; got:\n%s", stdout)
 	}
 }
+
+// =============================================================================
+// Release-prep (F4-C mechanical enumerator) three-provenance fixture
+// =============================================================================
+//
+// RELEASE-PREP MODE (--mode=release-prep) is distinct from the release
+// (manifest-authority) mode modeled by manifestResult in
+// check_defer_release_manifest_test.go. Release-prep is the F4-C mechanical
+// enumerator: it scans .local/<tasks>/ WITHOUT a provenance filter, finds OPEN
+// defer cards whose path_touched target re-fires in the release arc, and emits
+// the missing_disposition / draft_stub_records / advisory envelope. It reads
+// the committed manifest's defer_id set to decide which firing cards are already
+// disposed (satisfied), but it does NOT apply the disposition matrix (that is
+// release mode's job).
+
+// releasePrepResult is the parsed JSON envelope the release-prep evaluator
+// emits. Only the fields asserted by the three-provenance fixture are typed.
+type releasePrepResult struct {
+	Mode               string                   `json:"mode"`
+	Classification     string                   `json:"classification"`
+	DiffSince          string                   `json:"diff_since"`
+	MissingDisposition []map[string]interface{} `json:"missing_disposition"`
+	Advisory           *struct {
+		FiredTotal int `json:"fired_total"`
+	} `json:"advisory"`
+}
+
+// runReleasePrepEval runs the evaluator in release-prep (F4-C enumerator) mode
+// and returns (exitCode, parsedEnvelope). cwd is the scratch repo root derived
+// from the script path so the script's __dirname-based repoRoot() resolves to
+// <scratch>, keeping the run hermetic. Mirrors runReleaseEvalManifest but for
+// the release-prep mode + its envelope shape.
+func runReleasePrepEval(t *testing.T, script, tasksDir, since string) (int, releasePrepResult) {
+	t.Helper()
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatalf("node not on PATH: %v", err)
+	}
+	cmd := exec.Command(nodeBin, script,
+		"--mode=release-prep", "--tasks", tasksDir, "--since", since)
+	cmd.Dir = filepath.Dir(filepath.Dir(filepath.Dir(script))) // <scratch>
+	var outb, errb strings.Builder
+	cmd.Stdout = &outb
+	cmd.Stderr = &errb
+	timer := time.AfterFunc(30*time.Second, func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	defer timer.Stop()
+	runErr := cmd.Run()
+	exitCode := 0
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("node spawn error: %v\nstderr: %s", runErr, errb.String())
+		}
+	}
+	var result releasePrepResult
+	stdout := outb.String()
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("release-prep output must be valid JSON (exit=%d): %v\nstdout:\n%s\nstderr:\n%s",
+			exitCode, err, stdout, errb.String())
+	}
+	return exitCode, result
+}
+
+// releasePrepMissingHasID reports whether id appears among the parsed
+// missing_disposition entries' defer_id values.
+func releasePrepMissingHasID(result releasePrepResult, id string) bool {
+	for _, m := range result.MissingDisposition {
+		if v, ok := m["defer_id"].(string); ok && v == id {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCheckDefer_ReleasePrep_ThreeProvenanceDispositions proves the WIDENED
+// release-prep manifest scope end-to-end across all three DEFER provenance
+// classes: source:review-defer, source:external-study, and source:p2-followup.
+//
+// The release-prep enumerator (mainReleasePrep in check-defer-triggers.mjs)
+// scans task cards WITHOUT a provenance filter — every OPEN card whose
+// path_touched target re-fires in the release arc surfaces in
+// missing_disposition, regardless of provenance class, and needs an explicit
+// committed manifest disposition. This is the behavioral closure for the
+// widened scope (every firing card gets an explicit disposition, not only
+// source:review-defer-tagged ones) that P2-REL-001's option (b) widened and that
+// harness_dogfood_render_test.go asserts only structurally. A wrapper-level test
+// (release_tag_manifest_test.go) cannot prove the .local surfacing path because
+// the wrapper ceremony never reads task cards; only this evaluator-level fixture
+// exercises the actual enumerator.
+//
+// CRUX (behavioral closure): all three provenance classes surface in
+// missing_disposition when undisposed (phase 1), then ALL THREE clear once each
+// has a committed manifest record (phase 2).
+func TestCheckDefer_ReleasePrep_ThreeProvenanceDispositions(t *testing.T) {
+	// The three DEFER provenance classes. Each card carries the SAME firing
+	// path_touched target (fileA.go, which setupReleaseEvalRepo changes since
+	// v0.1.0) so the ONLY varying axis is the provenance class — proving the
+	// enumerator surfaces EVERY provenance, not just review-defer.
+	provenances := []struct {
+		name    string
+		source  string // owner_notes provenance tag
+		deferID string
+	}{
+		{"review-defer", "source:review-defer", "fixture-review-defer"},
+		{"external-study", "source:external-study", "fixture-external-study"},
+		{"p2-followup", "source:p2-followup", "fixture-p2-followup"},
+	}
+
+	scratch, script, tasksDir := setupReleaseEvalRepo(t)
+	for _, p := range provenances {
+		notes := releaseCardNotes(p.source, "path_touched(fileA.go)", "2026-08-02")
+		writeReleaseCard(t, tasksDir, p.deferID+".json", p.deferID, "draft", notes)
+	}
+
+	// Phase 1 — NO manifest. All three provenance classes must surface in
+	// missing_disposition (the widened scope), so release-prep BLOCKS (exit 1).
+	code1, result1 := runReleasePrepEval(t, script, tasksDir, "v0.1.0")
+	if code1 != 1 {
+		t.Fatalf("three undisposed firing cards must BLOCK (exit 1); got %d", code1)
+	}
+	if result1.Classification != "blocker" {
+		t.Fatalf("phase 1 classification = %q, want blocker", result1.Classification)
+	}
+	firedGot := -1
+	if result1.Advisory != nil {
+		firedGot = result1.Advisory.FiredTotal
+	}
+	if firedGot != len(provenances) {
+		t.Fatalf("advisory.fired_total = %d, want %d (all three provenances must fire)",
+			firedGot, len(provenances))
+	}
+	for _, p := range provenances {
+		if !releasePrepMissingHasID(result1, p.deferID) {
+			t.Errorf("%s card %q must surface in missing_disposition (widened scope — "+
+				"every provenance class is enumerated, not only review-defer); got %+v",
+				p.name, p.deferID, result1.MissingDisposition)
+		}
+	}
+
+	// Phase 2 — commit a schema-valid manifest record for each of the three
+	// IDs, reusing the canonical seed-shape builder (seededNoDiscloseInvalid →
+	// disposition=disclose, as the settled design mandates). NB: release-prep
+	// satisfies a card by defer_id PRESENCE in the committed manifest
+	// (committedManifestDeferIds reads only defer_id, not the disposition
+	// value); disclose is chosen per the design, but any schema-valid
+	// disposition would satisfy the enumerator. The committed defer_id set
+	// satisfies each card, so release-prep classifies CLEAR and none of the
+	// three remains in missing_disposition.
+	records := make([]manifestRecordSpec, 0, len(provenances))
+	for _, p := range provenances {
+		records = append(records, seededNoDiscloseInvalid(p.deferID))
+	}
+	spec := manifestSpec{
+		ReleaseBaseKind:     "tag",
+		ReleaseBaseValue:    "v0.1.0",
+		ReconciliationScope: "release arc from v0.1.0 through evaluated_commit",
+		Records:             records,
+	}
+	manifestBytes := buildManifestBytes(t, scratch, spec)
+	commitReleaseManifest(t, scratch, manifestBytes, "")
+
+	code2, result2 := runReleasePrepEval(t, script, tasksDir, "v0.1.0")
+	if code2 != 0 {
+		t.Fatalf("with committed dispositions for all three provenances, release-prep "+
+			"must PASS (exit 0); got %d", code2)
+	}
+	if result2.Classification != "clear" {
+		t.Fatalf("phase 2 classification = %q, want clear", result2.Classification)
+	}
+	for _, p := range provenances {
+		if releasePrepMissingHasID(result2, p.deferID) {
+			t.Errorf("%s card %q must NOT remain in missing_disposition after the "+
+				"manifest record; got %+v", p.name, p.deferID, result2.MissingDisposition)
+		}
+	}
+}
