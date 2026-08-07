@@ -2585,6 +2585,135 @@ function main() {
             throw new StateError("Case 10i: title must be restored.");
         }
 
+        // 10j. Non-core-only list-field degradation: a card degraded EXCLUSIVELY
+        // via a list field (files_in_scope=[]) has NO repairable offender
+        // (files_in_scope/success_criteria/validation_plan are outside
+        // DEGRADED_CORE_REPAIRABLE_FIELD_NAMES — the degraded branch is
+        // intentionally core-identity/enum-only). This pins the two documented
+        // diagnostics a non-core-only-degraded card surfaces, catching
+        // regressions in either the refusal path or the backstop:
+        //   (10j-1) REFUSED-UP-FRONT: supplying a core field the card is NOT
+        //     offending on (task_type is valid here) is rejected by the
+        //     restore-only payload gate, because repairableOffenders
+        //     (offenders ∩ DEGRADED_CORE_REPAIRABLE_FIELD_NAMES) is empty and
+        //     every supplied key is therefore "unexpected".
+        //   (10j-2) SAVE-PATH BACKSTOP: a no-op repair {} cannot be refused by
+        //     the restore-only gate (nothing unexpected, no uncovered
+        //     repairable offender), so it falls through to
+        //     updateCoordinationTask, whose ensureCoordinationTaskCoreFields
+        //     re-runs collectCoordinationTaskCoreFieldErrors and throws
+        //     "files_in_scope must contain at least one path" BEFORE
+        //     atomicWriteJson — the load-bearing backstop that keeps a
+        //     non-core-only-degraded card from silently no-op-writing a
+        //     spurious task_repaired history entry. (residual risk #1 in
+        //     repairDegradedCoordinationTaskCoreFields explicitly names this
+        //     save-path throw as the backstop for list-field offenders.)
+        // NON-GOAL: do NOT expand DEGRADED_CORE_REPAIRABLE_FIELD_NAMES to
+        // include list fields — the save-path throw is the intended backstop,
+        // not a list-field repair.
+        const listFieldDegraded = saveCoordinationTask(
+            coordinatorSessionID,
+            {
+                title: "Non-core-only list-field degradation sentinel",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "build",
+                files_in_scope: ["tests/fixtures/example-pkg/"],
+                success_criteria: ["files_in_scope offender surfaces via save-path backstop."],
+                validation_plan: ["Degrade files_in_scope only; assert both diagnostics."],
+            },
+            { cwd: "/verification" },
+        );
+        createdTaskIDs.push(listFieldDegraded.task.task_id);
+        degradeCard(listFieldDegraded.task.task_id, (data) => {
+            data.files_in_scope = [];
+        });
+        const listFieldDegradedRead = readCoordinationTask(
+            coordinatorSessionID,
+            listFieldDegraded.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (!listFieldDegradedRead.degraded) {
+            throw new StateError("Case 10j: expected degraded card after clearing files_in_scope.");
+        }
+        if (!listFieldDegradedRead.diagnostics.offending_fields.includes("files_in_scope")) {
+            throw new StateError("Case 10j: expected files_in_scope in offending fields.");
+        }
+        // The card is degraded via a NON-core field only — all 6 core
+        // identity/enum fields stay valid. This is what distinguishes 10j from
+        // 10a/10b/10g (core-field offenders) and is the precondition for the
+        // empty repairableOffenders set that drives both diagnostics below.
+        const CORE_IDENTITY_ENUM_FIELDS = [
+            "title",
+            "task_type",
+            "coordination_mode",
+            "primary_lane",
+            "status",
+            "report_envelope",
+        ];
+        for (const coreField of CORE_IDENTITY_ENUM_FIELDS) {
+            if (listFieldDegradedRead.diagnostics.offending_fields.includes(coreField)) {
+                throw new StateError(
+                    `Case 10j: core field ${coreField} must NOT be an offender (non-core-only degradation).`,
+                );
+            }
+        }
+        // 10j-1: REFUSED-UP-FRONT. Supplying task_type (a valid core field the
+        // card is NOT offending on) is rejected because repairableOffenders is
+        // empty — task_type is unexpected under the restore-only payload gate.
+        // This is the primary diagnostic a user hits when they try to repair
+        // the wrong field on a non-core-only-degraded card.
+        expectStateError(
+            () =>
+                repairCoordinationTask(
+                    coordinatorSessionID,
+                    listFieldDegraded.task.task_id,
+                    { task_type: "implementation" },
+                    { cwd: "/verification" },
+                ),
+            "Unsupported fields for degraded task repair",
+        );
+        // 10j-2: SAVE-PATH BACKSTOP. A no-op repair {} passes the restore-only
+        // gate (no unexpected field, no uncovered repairable offender) and
+        // reaches updateCoordinationTask, whose ensureCoordinationTaskCoreFields
+        // re-throws the files_in_scope core-field error BEFORE atomicWriteJson.
+        // This is the documented backstop for list-field offenders and MUST
+        // throw rather than silently no-op-write.
+        expectStateError(
+            () =>
+                repairCoordinationTask(
+                    coordinatorSessionID,
+                    listFieldDegraded.task.task_id,
+                    {},
+                    { cwd: "/verification" },
+                ),
+            "files_in_scope must contain at least one path",
+        );
+        // No-write proof: the card remains degraded with files_in_scope empty
+        // AND no spurious task_repaired history entry was appended. A
+        // regression that swallowed the save-path throw and wrote anyway would
+        // leave a task_repaired entry on a still-degraded card — this is the
+        // load-bearing backstop assertion.
+        const listFieldAfterAttempt = readCoordinationTask(
+            coordinatorSessionID,
+            listFieldDegraded.task.task_id,
+            { cwd: "/verification" },
+        );
+        if (!listFieldAfterAttempt.degraded) {
+            throw new StateError("Case 10j: card must remain degraded (no repair succeeded).");
+        }
+        const listFieldCardRaw = JSON.parse(
+            fs.readFileSync(taskCardPath(listFieldDegraded.task.task_id), "utf8"),
+        );
+        const spuriousRepairedEntries = (listFieldCardRaw.history || []).filter(
+            (entry) => entry && entry.event === "task_repaired",
+        );
+        if (spuriousRepairedEntries.length !== 0) {
+            throw new StateError(
+                `Case 10j: save-path backstop must NOT append a task_repaired history entry (found ${spuriousRepairedEntries.length}).`,
+            );
+        }
+
         // ------------------------------------------------------------------
         // Case 10 (recovery re-scan): a degraded card repaired in place must
         // LEAVE quarantine[] on the next listCoordinationTasks scan, and
