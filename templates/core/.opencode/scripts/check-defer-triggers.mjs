@@ -490,11 +490,25 @@ export function classifyCardState(details, mode, items) {
     const hasPrecisePath = details.some(
         (d) => d.kind === "path_touched" && !isNonGrammarTargetJS(d.arg),
     );
-    // No member fired. If the card's ONLY path targets are globs/dirs (it has
-    // at least one non-grammar path_touched and no precise path_touched), it
-    // can never precisely match — surface cold-glob so the promoter does not
-    // mistake it for a genuine future-watch (valid-waiting).
-    if (hasNonGrammarPath && !hasPrecisePath) return "cold-glob";
+    // A recognized, unmet NON-path predicate (e.g. after_tag whose tag is not
+    // yet present) is a legitimate future-firing condition. Its presence means
+    // the card is still a real future-watch, not dead-on-arrival the way a
+    // pure glob/directory-only watch is.
+    const hasUnmetRecognizedNonPath = details.some(
+        (d) => d.parseState === "recognized"
+            && d.kind !== "path_touched"
+            && !d.met,
+    );
+    // No member fired. A card is cold-glob only when its path_touched watch has
+    // no precise operand (at least one non-grammar path_touched and no precise
+    // path_touched) AND there is no other recognized, unmet non-path predicate
+    // that can fire later. A mixed compound like
+    // `any(path_touched(docs/*), after_tag(<absent-tag>))` therefore stays
+    // valid-waiting: the after_tag arm is a genuine future-watch even though
+    // the path_touched arm can never precisely match. Without this guard the
+    // after_tag arm would be silently collapsed into cold-glob purely because
+    // no precise path_touched member exists.
+    if (hasNonGrammarPath && !hasPrecisePath && !hasUnmetRecognizedNonPath) return "cold-glob";
     return "valid-waiting";
 }
 

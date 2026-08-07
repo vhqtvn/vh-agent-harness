@@ -326,6 +326,35 @@ test("promoter classifyCardState: precise + glob mix that does not fire → vali
     assert.equal(r.met, false);
 });
 
+test("promoter classifyCardState: glob path_touched + recognized non-path (after_tag absent) → valid-waiting (non-path arm governs, NOT cold-glob)", () => {
+    // defer-032 regression. A mixed compound
+    // `any(path_touched(docs/*), after_tag(<absent-tag>))`: the path_touched arm
+    // is a glob (can never precisely match via exact Set.has), and the after_tag
+    // arm is recognized but unmet because the tag does not exist in the repo
+    // (after_tag uses live `git rev-parse --verify refs/tags/<tag>`). The
+    // after_tag arm is a legitimate future-firing condition, so the card is NOT
+    // cold-glob — it stays valid-waiting. Pre-fix the cold-glob branch fired
+    // purely because no precise path_touched member existed, silently collapsing
+    // the after_tag future-watch into dead-on-arrival.
+    const r = evaluateCandidate("tasks/glob-aftertag.json", promoterCard("glob-aftertag", [
+        "trigger:any(path_touched(docs/*), after_tag(defer-032-absent-9f3c2a1b))",
+    ]), "v0.1.0", new Set(["docs/index.md"]));
+    assert.equal(r.state, "valid-waiting", "glob + unmet after_tag must NOT be cold-glob");
+    assert.equal(r.met, false);
+    // The glob arm is recognized, unmet (no file is literally named docs/*),
+    // and flagged path_touched.
+    const glob = r.details.find((d) => d.trigger === "path_touched(docs/*)");
+    assert.equal(glob.met, false);
+    assert.equal(glob.parseState, "recognized");
+    assert.equal(glob.kind, "path_touched");
+    // The after_tag arm is recognized, unmet (tag absent), note tag-missing.
+    const aftertag = r.details.find((d) => d.trigger === "after_tag(defer-032-absent-9f3c2a1b)");
+    assert.equal(aftertag.met, false);
+    assert.equal(aftertag.parseState, "recognized");
+    assert.equal(aftertag.kind, "after_tag");
+    assert.equal(aftertag.note, "tag-missing");
+});
+
 test("promoter classifyCardState unit: empty items → no-machine-trigger regardless of details", () => {
     assert.equal(classifyCardState([], "all", []), "no-machine-trigger");
     assert.equal(classifyCardState([], "any", []), "no-machine-trigger");
