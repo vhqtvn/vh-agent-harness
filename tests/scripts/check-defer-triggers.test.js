@@ -24,7 +24,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -176,9 +176,13 @@ test("emitReleasePrepResult: >64KiB payload round-trips through a tee-captured p
 // ---------------------------------------------------------------------------
 
 // Build a minimal task-card body shaped like /write-task output: only the
-// fields the evaluator reads (task_id + owner_notes).
-function promoterCard(id, notes) {
-    return { task_id: id, owner_notes: notes };
+// fields the evaluator reads (task_id + owner_notes), plus an optional
+// lifecycle status (defaults to omitting the field, matching the pre-status
+// cards the rest of this suite uses).
+function promoterCard(id, notes, status) {
+    const card = { task_id: id, owner_notes: notes };
+    if (status !== undefined) card.status = status;
+    return card;
 }
 
 test("promoter classifyCardState: no trigger line → no-machine-trigger", () => {
@@ -376,4 +380,187 @@ test("promoter classifyCardState: glob path_touched + recognized non-path (after
 test("promoter classifyCardState unit: empty items → no-machine-trigger regardless of details", () => {
     assert.equal(classifyCardState([], "all", []), "no-machine-trigger");
     assert.equal(classifyCardState([], "any", []), "no-machine-trigger");
+});
+
+// ---------------------------------------------------------------------------
+// LIFECYCLE DISPOSITION — completed/cancelled re-fire must NOT pollute READY.
+//
+// DEFECT: classifyCardState derived each card's state purely from trigger
+// predicates and NEVER consulted the card's lifecycle `status`, so a
+// `completed`/`cancelled` card whose watched path was re-touched (by its own
+// fix) re-fired forever as actionable READY, polluting the promotable set
+// (9/14 "READY" in a post-phase2 run were completed re-fires).
+//
+// The fix splits the predicate truth from the promotable-READY REPORTING:
+//   - `state` (six-state predicate logic in classifyCardState) is UNCHANGED —
+//     a completed card whose trigger fires is still `valid-fired` (the re-fire
+//     signal is preserved).
+//   - `met` (predicate-READY) is UNCHANGED — still true for valid-fired.
+//   - `lifecycle` (NEW) = "open" | "disposed" (completed/cancelled → disposed).
+//   - `actionable` (NEW) = met && lifecycle open — the promotable-READY signal
+//     the promoter's actionable count uses. A disposed re-fire is actionable=false.
+//
+// evaluateCandidate takes `changedPaths` as an injected Set, so these cases are
+// deterministic and do not touch git.
+// ---------------------------------------------------------------------------
+
+test("lifecycle: completed card with a FIRED trigger is valid-fired (predicate unchanged) but NOT actionable (re-fire)", () => {
+    // The watched path IS in the diff, so the predicate fires (valid-fired).
+    const r = evaluateCandidate("tasks/done.json", promoterCard("done", [
+        "source:review-defer",
+        "trigger:path_touched(fileA.go)",
+        "studied:2026-04-30",
+    ], "completed"), "v0.1.0", new Set(["fileA.go"]));
+    // Predicate truth preserved (the re-fire regression signal is NOT hidden).
+    assert.equal(r.state, "valid-fired", "predicate state must stay valid-fired (evaluation unchanged)");
+    assert.equal(r.met, true, "predicate-READY (met) must stay true so the re-fire is still visible");
+    // But it is NOT actionable READY — it is already disposed.
+    assert.equal(r.lifecycle, "disposed");
+    assert.equal(r.actionable, false, "a completed card must NOT be actionable READY even when its trigger fires");
+});
+
+test("lifecycle: cancelled card with a FIRED trigger is NOT actionable (re-fire)", () => {
+    const r = evaluateCandidate("tasks/cancelled.json", promoterCard("cancelled", [
+        "trigger:path_touched(fileA.go)",
+    ], "cancelled"), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(r.state, "valid-fired");
+    assert.equal(r.met, true);
+    assert.equal(r.lifecycle, "disposed");
+    assert.equal(r.actionable, false);
+});
+
+test("lifecycle: completed card status is case-insensitive and trimmed (Completed / Cancelled )", () => {
+    const rUpper = evaluateCandidate("tasks/done-u.json", promoterCard("done-u", [
+        "trigger:path_touched(fileA.go)",
+    ], "Completed"), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(rUpper.lifecycle, "disposed");
+    assert.equal(rUpper.actionable, false);
+
+    const rPadded = evaluateCandidate("tasks/cancelled-p.json", promoterCard("cancelled-p", [
+        "trigger:path_touched(fileA.go)",
+    ], " cancelled "), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(rPadded.lifecycle, "disposed");
+    assert.equal(rPadded.actionable, false);
+});
+
+test("lifecycle: draft/ready/working cards with a FIRED trigger stay actionable READY (no over-rejection)", () => {
+    // The fix must not over-reject a genuinely-open card. draft/ready/working
+    // are all promotable lifecycle states and must remain actionable READY when
+    // their trigger fires.
+    for (const status of ["draft", "ready", "working", "reported", "blocked"]) {
+        const r = evaluateCandidate(`tasks/${status}.json`, promoterCard(status, [
+            "trigger:path_touched(fileA.go)",
+        ], status), "v0.1.0", new Set(["fileA.go"]));
+        assert.equal(r.state, "valid-fired", `${status} must stay valid-fired`);
+        assert.equal(r.met, true, `${status} must stay predicate-READY`);
+        assert.equal(r.lifecycle, "open", `${status} must be lifecycle open`);
+        assert.equal(r.actionable, true, `${status} must be actionable READY (not over-rejected)`);
+    }
+});
+
+test("lifecycle: completed card with a NOT-fired trigger is valid-waiting + disposed (not a re-fire)", () => {
+    // A disposed card whose trigger has NOT fired is just disposed+waiting — it
+    // is not a re-fire (no watched path re-touched). It is still not actionable.
+    const r = evaluateCandidate("tasks/done-waiting.json", promoterCard("done-waiting", [
+        "trigger:path_touched(fileA.go)",
+    ], "completed"), "v0.1.0", new Set(["other.go"]));
+    assert.equal(r.state, "valid-waiting");
+    assert.equal(r.met, false);
+    assert.equal(r.lifecycle, "disposed");
+    assert.equal(r.actionable, false);
+});
+
+test("lifecycle: no-status card defaults to lifecycle open (backward compatible)", () => {
+    // A card that carries NO status field (legacy / pre-status shape) must
+    // behave exactly as before: lifecycle open, actionable when fired.
+    const r = evaluateCandidate("tasks/nostatus.json", promoterCard("nostatus", [
+        "trigger:path_touched(fileA.go)",
+    ]), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(r.state, "valid-fired");
+    assert.equal(r.lifecycle, "open");
+    assert.equal(r.actionable, true);
+});
+
+test("lifecycle: no-trigger completed card carries lifecycle + actionable=false on the early return", () => {
+    // The no-trigger early-return path must also surface lifecycle/actionable
+    // so the report shape is consistent across all states.
+    const r = evaluateCandidate("tasks/done-notrigger.json", promoterCard("done-notrigger", [
+        "source:review-defer",
+        "studied:2026-04-30",
+    ], "completed"), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(r.state, "no-machine-trigger");
+    assert.equal(r.lifecycle, "disposed");
+    assert.equal(r.actionable, false);
+});
+
+// ---------------------------------------------------------------------------
+// END-TO-END promoter subprocess: a completed card re-fires as [RE-FIRE], is
+// absent from [READY], and the actionable count excludes it. Mirrors the Go
+// setupReleaseEvalRepo pattern (hermetic scratch git repo) so the crux is
+// observed at the OUTCOME layer (rendered stdout), not just the report object.
+// ---------------------------------------------------------------------------
+
+// Build a hermetic scratch git repo with a prior tag and a post-tag change to
+// fileA.go (so path_touched(fileA.go) fires), then run the TEMPLATE script in
+// promoter mode against a tasks dir holding one completed card.
+function runPromoterWithCompletedCard() {
+    const dir = mkdtempSync(join(tmpdir(), "cdt-promoter-"));
+    // Copy the template script so __dirname-based repoRoot() resolves to dir.
+    const scriptCopy = join(dir, ".opencode", "scripts", "check-defer-triggers.mjs");
+    mkdirSync(join(dir, ".opencode", "scripts"), { recursive: true });
+    writeFileSync(scriptCopy, readFileSync(SCRIPT, "utf8"));
+
+    const tasksDir = join(dir, "tasks");
+    mkdirSync(tasksDir, { recursive: true });
+    // A completed card whose watched path (fileA.go) re-fires in the diff.
+    writeFileSync(join(tasksDir, "done-refire.json"), JSON.stringify({
+        schema_version: 1,
+        task_id: "done-refire",
+        status: "completed",
+        owner_notes: ["source:review-defer", "trigger:path_touched(fileA.go)", "studied:2026-04-30"],
+    }));
+    // An open (draft) card that also fires, to prove READY still works alongside.
+    writeFileSync(join(tasksDir, "draft-fire.json"), JSON.stringify({
+        schema_version: 1,
+        task_id: "draft-fire",
+        status: "draft",
+        owner_notes: ["source:review-defer", "trigger:path_touched(fileA.go)", "studied:2026-04-30"],
+    }));
+
+    const git = (args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+    git(["init", "-q"]);
+    git(["config", "user.email", "t@t"]);
+    git(["config", "user.name", "t"]);
+    git(["config", "commit.gpgsign", "false"]);
+    writeFileSync(join(dir, "fileA.go"), "package main\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "initial"]);
+    git(["tag", "v0.1.0"]);
+    writeFileSync(join(dir, "fileA.go"), "package main\n// changed in arc\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "changes for release"]);
+
+    const res = spawnSync("node", [scriptCopy, "--tasks", tasksDir, "--since", "v0.1.0"], {
+        encoding: "utf8",
+        cwd: dir,
+    });
+    if (res.error) throw res.error;
+    return { stdout: res.stdout, status: res.status, stderr: res.stderr };
+}
+
+test("promoter e2e: completed card re-fires as [RE-FIRE] (NOT [READY]) and is excluded from the actionable count", () => {
+    const { stdout, status, stderr } = runPromoterWithCompletedCard();
+    assert.equal(status, 0, `promoter must exit 0 (never blocking); stderr: ${stderr}`);
+    // The completed card is surfaced under the distinct RE-FIRE category.
+    assert.ok(stdout.includes("[RE-FIRE] done-refire"), `completed re-fire must render [RE-FIRE]; got:\n${stdout}`);
+    // And it must NOT appear under [READY] (the defect: it used to).
+    assert.ok(!stdout.includes("[READY] done-refire"), `completed card must NOT render [READY] (defect regressed); got:\n${stdout}`);
+    // The open draft card still renders [READY] alongside (no over-rejection).
+    assert.ok(stdout.includes("[READY] draft-fire"), `open draft card must still render [READY]; got:\n${stdout}`);
+    // The actionable count excludes the disposed re-fire: 1 actionable READY
+    // (draft-fire) out of 2 candidates.
+    assert.ok(stdout.includes("1/2 candidate(s) are actionable READY"), `actionable count must exclude the disposed re-fire; got:\n${stdout}`);
+    // The separate disposed re-fire summary line surfaces the regression signal.
+    assert.ok(stdout.includes("Disposed re-fires"), `the re-fire summary line must preserve the regression signal; got:\n${stdout}`);
+    assert.ok(stdout.includes(": 1\n"), `re-fire count must be 1; got:\n${stdout}`);
 });

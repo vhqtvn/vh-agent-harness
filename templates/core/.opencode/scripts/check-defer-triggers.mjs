@@ -406,11 +406,25 @@ export function evaluateCandidate(file, body, since, changedPaths) {
     const notesText = (body && Array.isArray(body.owner_notes))
         ? body.owner_notes.join("\n")
         : "";
+    // Lifecycle disposition (REPORTING layer, not predicate evaluation). The
+    // six-state predicate logic in classifyCardState is UNCHANGED and never
+    // consults status; this only affects the promotable-READY REPORTING so a
+    // card that is already completed/cancelled does not re-fire as actionable
+    // READY when its own fix re-touched its watched path. The predicate truth
+    // (state/met below) is preserved so the re-fire signal (watched path
+    // re-touched, possible regression) is still surfaced — just under a distinct
+    // already-disposed category instead of conflated with fresh actionable READY.
+    const statusRaw = (body && typeof body.status === "string")
+        ? body.status.trim().toLowerCase()
+        : "";
+    const disposed = statusRaw === "completed" || statusRaw === "cancelled";
+    const lifecycle = disposed ? "disposed" : "open";
     const trig = extractTriggers(notesText);
     if (!trig.items || trig.items.length === 0) {
         return {
             id, file, met: false, mode: "none", note: "no-trigger-line",
             state: "no-machine-trigger", details: [],
+            lifecycle, actionable: false,
         };
     }
     // Build per-member details carrying a `parseState` (recognized|malformed|
@@ -438,13 +452,20 @@ export function evaluateCandidate(file, body, since, changedPaths) {
         };
     });
     const state = classifyCardState(details, trig.mode, trig.items);
-    // Only valid-fired is READY. classifyCardState already refuses
-    // malformed-compound (the false-READY defect), so this is consistent
-    // rather than a second opinion.
+    // `met` is the PREDICATE-READY signal: the trigger condition is satisfied
+    // (valid-fired). classifyCardState already refuses malformed-compound (the
+    // false-READY defect), so this is consistent rather than a second opinion.
+    // `met` deliberately does NOT consult lifecycle: a completed/cancelled card
+    // whose watched path was re-touched still has a MET predicate (the re-fire
+    // regression signal is preserved). `actionable` below is the promotable-READY
+    // signal (predicate met AND lifecycle open) and is what the promoter's
+    // actionable count consumes.
     const met = state === "valid-fired";
     return {
         id, file, met, mode: trig.mode, note: stateNote(state),
         state, details,
+        lifecycle,
+        actionable: met && !disposed,
     };
 }
 
@@ -1245,7 +1266,21 @@ function mainPromoter(options) {
         // [hold] is split into one distinct flag per non-ready state so the
         // promoter can order the holding-area population instead of reading
         // every detail parenthetical to tell waiting from broken.
-        const flag = r.state === "valid-fired" ? "READY" : r.state;
+        //
+        // A valid-fired card that is already completed/cancelled is surfaced as
+        // a distinct [RE-FIRE] flag instead of [READY]: its watched path was
+        // re-touched AFTER disposal (a possible-regression signal worth seeing),
+        // but it is NOT fresh actionable work and must NOT inflate the actionable
+        // READY count. The predicate state (valid-fired) is unchanged; only the
+        // reporting flag + the actionable count consult lifecycle.
+        let flag;
+        if (r.state === "valid-fired" && r.lifecycle === "disposed") {
+            flag = "RE-FIRE";
+        } else if (r.state === "valid-fired") {
+            flag = "READY";
+        } else {
+            flag = r.state;
+        }
         process.stdout.write(`[${flag}] ${r.id} (${path.basename(r.file)}) — ${r.note}\n`);
         for (const d of r.details) {
             const mark = d.met ? "met" : "not-met";
@@ -1253,7 +1288,14 @@ function mainPromoter(options) {
         }
     }
 
-    const ready = reports.filter((r) => r.met).length;
+    // `ready` is the ACTIONABLE count: valid-fired AND lifecycle open. A
+    // completed/cancelled card whose trigger re-fired is counted separately as
+    // `refires`, NOT as ready, so the actionable set is not polluted by drained
+    // cards re-firing on their own fix.
+    const ready = reports.filter((r) => r.actionable).length;
+    const refires = reports.filter(
+        (r) => r.state === "valid-fired" && r.lifecycle === "disposed",
+    ).length;
     // Per-state breakdown so the promoter can triage at a glance: which cards
     // are genuinely waiting (apply DoR when fired), which are noise (no
     // trigger / unsupported / cold-glob), and which need a grammar repair
@@ -1265,10 +1307,13 @@ function mainPromoter(options) {
         .map((s) => `${s}=${tally[s]}`)
         .join("  ");
     process.stdout.write(
-        `\n${ready}/${reports.length} candidate(s) have triggers met. ` +
+        `\n${ready}/${reports.length} candidate(s) are actionable READY (trigger met, lifecycle open). ` +
         `Promoter: apply the Definition of Ready (area + file scope + validation ` +
         `plan + clear slice + provenance) before promoting any READY candidate.\n` +
-        `State breakdown: ${breakdown}\n`,
+        `State breakdown: ${breakdown}\n` +
+        (refires > 0
+            ? `Disposed re-fires (completed/cancelled, watched path re-touched — possible regression, NOT actionable): ${refires}\n`
+            : ""),
     );
     process.exit(0);
 }
