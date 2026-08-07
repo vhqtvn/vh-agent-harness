@@ -45,11 +45,12 @@ type releaseTagManifestResult struct {
 // manifest blob SHA, and the parent commit (P) that the manifest evaluates.
 func setupReleaseTagManifestRepo(t *testing.T, spec manifestSpec) (scratch, wrapper, manifestPath, manifestSHA, parentCommit string) {
 	t.Helper()
-	for _, bin := range []string{"bash", "git", "node"} {
+	for _, bin := range []string{"bash", "git"} {
 		if _, err := exec.LookPath(bin); err != nil {
 			t.Skipf("%s not on PATH: %v", bin, err)
 		}
 	}
+	requireNodeMinMajor(t)
 	ensureHarnessBinaryOnPath(t)
 	root := findModuleRoot(t)
 	wrapperBody, err := os.ReadFile(filepath.Join(root, "scripts", "release-tag.sh"))

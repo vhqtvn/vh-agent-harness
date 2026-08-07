@@ -25,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/vhqtvn/vh-agent-harness/internal/permission"
 )
 
 // harnessBinaryOnce builds the vh-agent-harness binary at most once per test
@@ -94,6 +96,35 @@ func copyHarnessBinaryToCeremony(t *testing.T, destDir string) {
 	}
 }
 
+// requireNodeMinMajor resolves node from PATH and skips the test (naming node,
+// the observed version, and the required bar) when node is missing, below the
+// declared permission.NodeMinMajor, or misbehaving (e.g. `node --version`
+// output cannot be parsed).
+//
+// This replaces a presence-only exec.LookPath("node") in the release-tag
+// wrapper-test setup. scripts/release-tag.sh spawns `node` (the .mjs
+// release-DEFER evaluator) inside the scratch fixture; a below-bar or
+// misbehaving node used to fall through to an opaque `JSON.parse(”)` failure
+// deep in the wrapper across ~17 ReleaseTag* tests. Gating on the shared
+// permission.NodeMinMajor source-of-truth (the same bar `harness preflight` /
+// `harness doctor` / the shell-guard bridge enforce) converts that into a
+// clean, named skip at the test boundary, while a meets-bar node runs the
+// suite unchanged.
+func requireNodeMinMajor(t *testing.T) {
+	t.Helper()
+	bin, major, err := permission.ProbeNode()
+	if err != nil {
+		t.Skipf("node >= %d unavailable for release-tag wrapper test: %v "+
+			"(install Node >= %d, or point PATH/nvm at a satisfying node)",
+			permission.NodeMinMajor, err, permission.NodeMinMajor)
+	}
+	if major < permission.NodeMinMajor {
+		t.Skipf("node %s reports major %d; release-tag wrapper tests require node >= %d "+
+			"(switch nvm alias / PATH to a satisfying node)",
+			bin, major, permission.NodeMinMajor)
+	}
+}
+
 // setupReleaseTagRepo creates an isolated scratch git repo with:
 //   - scripts/release-tag.sh copied from the repo source (project-local)
 //   - .opencode/scripts/check-defer-triggers.mjs copied from the TEMPLATE with
@@ -110,11 +141,12 @@ func copyHarnessBinaryToCeremony(t *testing.T, destDir string) {
 // Returns (scratch, wrapperPath, tasksDir, msgFile).
 func setupReleaseTagRepo(t *testing.T) (scratch, wrapper, tasksDir, msgFile string) {
 	t.Helper()
-	for _, bin := range []string{"bash", "git", "node"} {
+	for _, bin := range []string{"bash", "git"} {
 		if _, err := exec.LookPath(bin); err != nil {
 			t.Skipf("%s not on PATH: %v", bin, err)
 		}
 	}
+	requireNodeMinMajor(t)
 	ensureHarnessBinaryOnPath(t)
 	root := findModuleRoot(t)
 
