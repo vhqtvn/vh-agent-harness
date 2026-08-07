@@ -847,6 +847,183 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 		})
 	}
 
+	// --- isGateWrapperInDevShExec over-block narrowing matrix --------------
+	//
+	// Pins the narrowing of isGateWrapperInDevShExec: the broad
+	// `includes("commit-gate.sh")` deny now has ONE closed, fail-closed
+	// exception for syntactically inert static inspection (`bash -n` / `cmp`
+	// of the gate script). Neither form can execute or mutate anything.
+	//
+	// Load-bearing invariants pinned here:
+	//   - the two ALLOW forms (bash -n / cmp of commit-gate.sh) now pass the
+	//     gate end-to-end through Go -> node -> WASM -> evaluate();
+	//   - real wrapper execution of commit-gate.sh through exec is STILL
+	//     denied (the exception is narrow, not a blanket allow);
+	//   - git-mutation-bypass is intact: wrapped git mutations still DENY
+	//     regardless of this exception (scan #1 runs before the harness
+	//     branch);
+	//   - negative-grammar shapes fail closed: any shell-control syntax,
+	//     quoting, `bash -c`, or a smuggled `;`-leg keeps the DENY.
+	//
+	// Each command is passed as a single-element argv so eval.js's
+	// argv.join(" ") yields exactly the intended command string.
+	gateInspectionCases := []struct {
+		name string
+		cmd  string
+		want Action
+	}{
+		// --- MUST ALLOW: inert static inspection of the gate script --------
+		{
+			// `bash -n` validates syntax ONLY; the script never runs. This is
+			// the canonical FP the narrowing drains (previously forced through
+			// a tmp/ script indirection per AGENTS command-hygiene rule #2).
+			name: "vh-agent-harness exec bash -n commit-gate.sh allowed (inert syntax check)",
+			cmd:  `vh-agent-harness exec bash -n .opencode/scripts/commit-gate.sh`,
+			want: Allow,
+		},
+		{
+			// `bash -n -- <path>`: the optional POSIX options terminator is
+			// accepted by the closed grammar.
+			name: "vh-agent-harness exec bash -n -- commit-gate.sh allowed (-- terminator)",
+			cmd:  `vh-agent-harness exec bash -n -- .opencode/scripts/commit-gate.sh`,
+			want: Allow,
+		},
+		{
+			// `cmp` compares bytes and returns an exit code; it never executes
+			// either operand. The canonical dogfood render-check (source vs
+			// rendered commit-gate.sh) has BOTH operands ending in
+			// commit-gate.sh — the grammar requires "at least one", not
+			// "exactly one" (both-ending is fully inert).
+			name: "vh-agent-harness exec cmp source-vs-rendered commit-gate.sh allowed (inert compare)",
+			cmd:  `vh-agent-harness exec cmp templates/core/.opencode/scripts/commit-gate.sh .opencode/scripts/commit-gate.sh`,
+			want: Allow,
+		},
+		{
+			// `cmp` with one gate operand + one arbitrary operand (either
+			// order). cmp does not execute either side; this is a one-bit
+			// equality probe, negligible vs the Read tool already available.
+			name: "vh-agent-harness exec cmp commit-gate.sh other allowed (inert compare, gate first)",
+			cmd:  `vh-agent-harness exec cmp .opencode/scripts/commit-gate.sh tmp/scratch/other.sh`,
+			want: Allow,
+		},
+		{
+			name: "vh-agent-harness exec cmp other commit-gate.sh allowed (inert compare, gate second)",
+			cmd:  `vh-agent-harness exec cmp tmp/scratch/other.sh .opencode/scripts/commit-gate.sh`,
+			want: Allow,
+		},
+		{
+			// `cmp -- <a> <b>`: optional POSIX terminator accepted.
+			name: "vh-agent-harness exec cmp -- commit-gate.sh other allowed (-- terminator)",
+			cmd:  `vh-agent-harness exec cmp -- .opencode/scripts/commit-gate.sh tmp/scratch/other.sh`,
+			want: Allow,
+		},
+
+		// --- MUST DENY: real wrapper execution still blocked ----------------
+		{
+			// Direct wrapper invocation of commit-gate.sh (the committer must
+			// invoke it DIRECTLY, not through exec). Verb is the gate script
+			// path, not bash/cmp → exception does not fire → deny preserved.
+			name: "vh-agent-harness exec commit-gate.sh acquire denied (real wrapper execution)",
+			cmd:  `vh-agent-harness exec .opencode/scripts/commit-gate.sh acquire --paths-file tmp/x --message-file tmp/y --session-alias A`,
+			want: Deny,
+		},
+		{
+			// `bash -c '...commit-gate.sh...'`: the single-quote triggers the
+			// forbidden-char fail-closed in the exception, AND this is the
+			// load-bearing nested-invocation shape the broad deny was built
+			// for. Must stay denied.
+			name: "vh-agent-harness exec bash -c commit-gate.sh acquire denied (nested invocation)",
+			cmd:  `vh-agent-harness exec bash -c '.opencode/scripts/commit-gate.sh acquire --paths-file tmp/x --message-file tmp/y --session-alias A'`,
+			want: Deny,
+		},
+
+		// --- MUST DENY: git-mutation-bypass intact (scan #1 covers these) ---
+		{
+			// Wrapped git mutation past a global flag. detectWrappedGitMutation
+			// denies this (F1); the static-inspection exception is irrelevant
+			// because there is no commit-gate.sh mention AND scan #1 / F1
+			// catch the mutation first. Pinned so the narrowing cannot weaken
+			// the mutation surface.
+			name: "vh-agent-harness exec git --no-pager commit denied (git-mutation-bypass intact)",
+			cmd:  `vh-agent-harness exec git --no-pager commit -m x`,
+			want: Deny,
+		},
+		{
+			// Load-bearing evasion: a wrapped git reset buried in bash -c. The
+			// git-mutation-bypass regex matches the adjacent `git reset` and
+			// the chain-guard refuses the carve-out (the payload is not an
+			// inspector). Static-inspection exception is NOT consulted for
+			// this (no commit-gate.sh), but pinned here to prove the
+			// narrowing coexists cleanly with the mutation backstop.
+			name: "vh-agent-harness exec bash -c git reset denied (git-mutation-bypass intact)",
+			cmd:  `vh-agent-harness exec bash -c 'git reset --hard'`,
+			want: Deny,
+		},
+
+		// --- MUST DENY: negative grammar (fail-closed) ---------------------
+		{
+			// `bash -c` (NOT `bash -n`): the exception allows ONLY `bash -n`.
+			// A `cmp` of the gate buried inside bash -c is a nested payload
+			// and must NOT be carved out — the single-quote alone trips the
+			// forbidden-char fail-closed.
+			name: "vh-agent-harness exec bash -c 'cmp a commit-gate.sh' denied (bash -c not bash -n)",
+			cmd:  `vh-agent-harness exec bash -c 'cmp a .opencode/scripts/commit-gate.sh'`,
+			want: Deny,
+		},
+		{
+			// Smuggled `;`-leg after a valid `bash -n` form. The semicolon (a)
+			// trips the forbidden-char fail-closed in the exception AND (b)
+			// trips the git-mutation-bypass chain-guard at scan #1, so the
+			// composite is denied at BOTH layers. Pinned so the closed
+			// grammar cannot be evaded by appending a statement separator.
+			name: "vh-agent-harness exec bash -n commit-gate.sh; git commit denied (smuggled ; leg)",
+			cmd:  `vh-agent-harness exec bash -n .opencode/scripts/commit-gate.sh; git commit -m x`,
+			want: Deny,
+		},
+		{
+			// Bare `bash` (no -n): the exception requires exactly `bash -n`.
+			name: "vh-agent-harness exec bash commit-gate.sh denied (bare bash, no -n)",
+			cmd:  `vh-agent-harness exec bash .opencode/scripts/commit-gate.sh`,
+			want: Deny,
+		},
+		{
+			// cmp with only ONE operand: the grammar requires exactly two.
+			name: "vh-agent-harness exec cmp commit-gate.sh denied (cmp needs two operands)",
+			cmd:  `vh-agent-harness exec cmp .opencode/scripts/commit-gate.sh`,
+			want: Deny,
+		},
+		{
+			// cmp with THREE operands: the grammar requires exactly two. A
+			// trailing third token could carry a smuggled payload, so the
+			// command-must-END rule fails closed.
+			name: "vh-agent-harness exec cmp a b commit-gate.sh denied (cmp must end after two)",
+			cmd:  `vh-agent-harness exec cmp .opencode/scripts/commit-gate.sh tmp/a tmp/b`,
+			want: Deny,
+		},
+		{
+			// Quoted path: the double-quote trips the forbidden-char
+			// fail-closed. Agents must use plain unquoted paths (legitimate
+			// commit-gate.sh paths contain no spaces).
+			name: `vh-agent-harness exec bash -n "commit-gate.sh" denied (quoted path)`,
+			cmd:  `vh-agent-harness exec bash -n ".opencode/scripts/commit-gate.sh"`,
+			want: Deny,
+		},
+	}
+	for _, c := range gateInspectionCases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, _, evalErr := h.Evaluate(context.Background(), []string{c.cmd})
+			if evalErr != nil {
+				t.Fatalf("Evaluate(%q) error %v; want verdict %s (no bridge error)", c.cmd, evalErr, c.want)
+			}
+			// Assert the EXACT verdict so a carve-out regression cannot mask
+			// as the wrong action.
+			if got != c.want {
+				t.Errorf("Evaluate(%q) = %s; want %s", c.cmd, got, c.want)
+			}
+		})
+	}
+
 	// --- G4 inert-literal classifier matrix (rg/grep ONLY) ------------------
 	//
 	// The raw forbidden-pattern scanner sees forbidden literals (e.g. `/tmp`
