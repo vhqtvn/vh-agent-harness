@@ -1008,6 +1008,43 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			cmd:  `vh-agent-harness exec bash -n ".opencode/scripts/commit-gate.sh"`,
 			want: Deny,
 		},
+
+		// --- MUST DENY: bash -n grammar rejection (defer-staticinspection) ---
+		//
+		// The cmp analogs of these grammar checks ARE pinned
+		// (cmp-must-end / cmp-needs-two above); the bash -n analogs were not.
+		// Both share the SAME closed-grammar checks in
+		// isStaticGateInspectionInDevShExec:
+		//   - `i + 1 !== tokens.length` — the command must END immediately
+		//     after the single permitted path (a trailing token could carry a
+		//     smuggled second leg);
+		//   - `operand.startsWith("-")` — the single operand must be a plain
+		//     path, not an option-like token.
+		// Both fail closed (return false) so isGateWrapperInDevShExec keeps
+		// the DENY. The logic already rejects these forms correctly; these
+		// rows pin the rejection end-to-end through Go -> node -> WASM.
+		{
+			// Trailing operand (count / must-end branch). Direct analog of the
+			// cmp "must end after two" case above. The closed grammar allows
+			// exactly ONE operand after `bash -n [--]`; a trailing positional
+			// token fails the `i + 1 !== tokens.length` check → exception does
+			// not fire → deny preserved.
+			name: "vh-agent-harness exec bash -n commit-gate.sh trailing denied (bash -n must end after path)",
+			cmd:  `vh-agent-harness exec bash -n .opencode/scripts/commit-gate.sh trailing-arg`,
+			want: Deny,
+		},
+		{
+			// Option-like operand (startsWith branch). The closed grammar
+			// requires the single operand to be a plain path; any operand that
+			// starts with `-` (would be an option, not a path) fails the
+			// `operand.startsWith("-")` check even though the string mentions
+			// commit-gate.sh. Pinned so a future refactor cannot silently drop
+			// the option-guard (the only way to reach this branch for bash is
+			// a single option-like operand containing the gate substring).
+			name: "vh-agent-harness exec bash -n -commit-gate.sh denied (bash -n option-like operand, startsWith guard)",
+			cmd:  `vh-agent-harness exec bash -n -commit-gate.sh`,
+			want: Deny,
+		},
 	}
 	for _, c := range gateInspectionCases {
 		c := c
@@ -1276,6 +1313,25 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			want: Allow,
 		},
 		{
+			// RF-B fd-prefix skip (defer-037): a stderr redirect (`2> file`) is
+			// NOT stdout file-authoring. detectShellFileAuthoring returns null
+			// for this form via TWO converging fail-closed paths: (1) the
+			// closed allow-set check (hasOnlyAllowedNamedNodes) rejects the
+			// `file_descriptor` node (the `2`) because it is NOT in
+			// FILE_AUTHORING_ALLOWED_NODE_TYPES; (2) even if it were, the
+			// fd-prefix loop skips fd-prefixed file_redirects (operator first
+			// child is a NAMED file_descriptor node, not anonymous `>`/`>>`).
+			// Either way → no output redirect → null → caller falls through to
+			// the scan. No forbidden tokens → allowlist `echo *` matches →
+			// ALLOW. Pins that stderr redirects are not over-denied as file-
+			// authoring (only-adds-denials: RF-B never turns an allow into a
+			// deny here). Test pins the OUTCOME (Allow), robust to which
+			// internal path returned null.
+			name: "echo x 2> tmp/err.log allowed (RF-B fd-prefix skip, stderr redirect)",
+			cmd:  `echo x 2> tmp/err.log`,
+			want: Allow,
+		},
+		{
 			// Bare echo prose (no redirect). The inspector carve-out still
 			// exempts this from git-mutation-bypass. RF-B does NOT fire (no
 			// output redirect present). This is the FP drain for non-file-
@@ -1294,6 +1350,20 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			name: "echo x && cat > tmp/y allowed (RF-B fail-closed on chain)",
 			cmd:  `echo x && cat > tmp/y`,
 			want: Allow,
+		},
+		{
+			// RF-B fail-closed cross-boundary (defer-036): the SAME chained
+			// redirect shape as the ALLOW baseline directly above, but with a
+			// forbidden token (/tmp) in the redirect target. detectShellFileAuthoring
+			// fail-closes on the `list` (&&) root → returns null → the existing
+			// forbidden-pattern scan runs UNCHANGED and catches the /tmp token
+			// via system-tmp-access. This is the cross-boundary invariant pin:
+			// when RF-B returns null for a compound/chained form, the closed
+			// grammar must NOT weaken the scan — a formerly scan-denied command
+			// stays DENIED. (only-adds-denials: RF-B never carves scan denials.)
+			name: "echo x && cat > /tmp/y denied (RF-B fail-closed on chain, scan catches /tmp)",
+			cmd:  `echo x && cat > /tmp/y`,
+			want: Deny,
 		},
 	}
 	for _, c := range rfbCases {
