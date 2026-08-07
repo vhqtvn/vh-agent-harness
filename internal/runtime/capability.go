@@ -151,9 +151,19 @@ type UnsupportedVerbError struct {
 }
 
 // Error implements error. The message names the backend, the verb, and carries
-// the guidance, so an unsupported verb is always a clear, typed signal.
+// the guidance, so an unsupported verb is always a clear, typed signal. It also
+// carries the surface-at-friction trailer (Fix 1,
+// researches/decisions/2026-08-04-capability-discovery-audit.md §1/§9): the
+// guidance already explains why and names the sanctioned alternative (a
+// different backend or a declared lifecycle hook); the trailer points at the
+// authority (the declared capability matrix) and forbids falling back to
+// another backend, which the type structurally never does silently — this makes
+// that guarantee visible at the friction point rather than only in code comments.
 func (e *UnsupportedVerbError) Error() string {
-	return fmt.Sprintf("runtime backend %q does not support verb %q: %s", e.Backend, e.Verb, e.Guidance)
+	return fmt.Sprintf("runtime backend %q does not support verb %q: %s "+
+		"The declared capability matrix is authoritative and no backend substitutes for another; "+
+		"do not retry through a different backend.",
+		e.Backend, e.Verb, e.Guidance)
 }
 
 // IsUnsupportedVerbError reports whether err is (or wraps) an

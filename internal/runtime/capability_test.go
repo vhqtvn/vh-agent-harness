@@ -318,3 +318,44 @@ func TestCheckVerb(t *testing.T) {
 		}
 	}
 }
+
+// TestUnsupportedVerbError_SurfaceAtFriction pins Fix 1 for the capability-
+// matrix deny family (researches/decisions/2026-08-04-capability-discovery-
+// audit.md §1/§9). UnsupportedVerbError is a cannot-proceed output, so its
+// message must carry the surface-at-friction shape: preserve the denial (backend
+// + verb), explain why + name the sanctioned alternative (the per-verb
+// guidance), point at the authority (the declared matrix), and forbid fallback
+// to another backend (never-auto-retry for the capability family).
+func TestUnsupportedVerbError_SurfaceAtFriction(t *testing.T) {
+	hostShell := &HostShell{Cfg: HostShellConfig{}, Runner: newFakeRunner()}
+	for _, c := range []struct {
+		verb Verb
+	}{
+		{VerbLogs}, {VerbPs},
+	} {
+		err := CheckVerb(hostShell, c.verb)
+		if !IsUnsupportedVerbError(err) {
+			t.Fatalf("CheckVerb(host-shell, %s): expected typed unsupported error, got %v", c.verb, err)
+		}
+		msg := err.Error()
+		// Element 1: preserve the denial — backend + verb named.
+		if !strings.Contains(msg, "host-shell") {
+			t.Errorf("verb %s: backend not named in denial: %q", c.verb, msg)
+		}
+		if !strings.Contains(msg, string(c.verb)) {
+			t.Errorf("verb %s: verb not named in denial: %q", c.verb, msg)
+		}
+		// Element 3: the per-verb guidance names a sanctioned alternative.
+		var uve *UnsupportedVerbError
+		if !errors.As(err, &uve) || uve.Guidance == "" {
+			t.Fatalf("verb %s: guidance must be non-empty (names the alternative)", c.verb)
+		}
+		// Element 4 + 5: authority pointer (matrix) + never-fallback directive.
+		if !strings.Contains(msg, "matrix is authoritative") {
+			t.Errorf("verb %s: authority pointer (matrix) missing: %q", c.verb, msg)
+		}
+		if !strings.Contains(msg, "do not retry") {
+			t.Errorf("verb %s: never-fallback directive missing: %q", c.verb, msg)
+		}
+	}
+}

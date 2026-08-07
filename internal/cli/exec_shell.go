@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -125,7 +124,11 @@ func runExec(cmd *cobra.Command, args []string) error {
 	// source-of-truth fix in shell-guard-core.js; it is git-mutation-scoped
 	// only (does NOT default-deny regular exec mutations like mkdir/pytest).
 	if deny, reason := denyExecGitMutationPayload(args); deny {
-		fmt.Fprintf(os.Stderr, "denied: %s\n", reason)
+		// Surface-at-friction: the git-guard reason already names the
+		// sanctioned alternative (commit-gate + committer) and authority; the
+		// footer reinforces never-auto-retry so the agent does not retry the
+		// payload through another route.
+		fmt.Fprintln(cmd.ErrOrStderr(), "denied: "+reason+execDenyFooter())
 		return fmt.Errorf("denied by git mutation guard: %s", reason)
 	}
 
@@ -139,17 +142,23 @@ func runExec(cmd *cobra.Command, args []string) error {
 	gateArgs := append([]string{"vh-agent-harness", "exec"}, args...)
 	action, reason, err := evaluateGate(lm.dir, gateArgs)
 	if err != nil {
-		// Hook itself failed: deny-by-default for safety.
-		fmt.Fprintf(os.Stderr, "permission hook error: %v\n", err)
+		// Hook itself failed: deny-by-default for safety. Surface-at-friction:
+		// the message must say the gate faulted (not that the command was bad),
+		// forbid retry/bypass, and point at diagnosis.
+		fmt.Fprintln(cmd.ErrOrStderr(), "permission hook error: "+err.Error()+hookErrorFooter())
 		return fmt.Errorf("permission hook error: %w", err)
 	}
 	switch action {
 	case permission.Deny:
-		fmt.Fprintf(os.Stderr, "denied: %s\n", reason)
+		// Surface-at-friction (Fix 1): the gate reason explains why; the footer
+		// adds never-auto-retry and the sanctioned-alternative authority pointer.
+		fmt.Fprintln(cmd.ErrOrStderr(), "denied: "+reason+execDenyFooter())
 		return fmt.Errorf("denied by permission hook: %s", reason)
 	case permission.Ask:
-		// No operator loop in slice 4a -> deny-by-default.
-		fmt.Fprintf(os.Stderr, "permission required (ask): %s — no operator loop attached; denying\n", reason)
+		// No operator loop in slice 4a -> deny-by-default. Surface-at-friction:
+		// forbid auto-retry and name the real resolutions.
+		fmt.Fprintln(cmd.ErrOrStderr(), "permission required (ask): "+reason+
+			" — no operator loop attached; denying"+askFooter())
 		return fmt.Errorf("permission ask (no operator loop): %s", reason)
 	case permission.Allow:
 		// proceed
@@ -189,15 +198,18 @@ func runShell(cmd *cobra.Command, _ []string) error {
 	// an operator prompt loop is wired. No test breaks (no shell-allows test).
 	action, reason, err := evaluateGate(lm.dir, nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "permission hook error: %v\n", err)
+		// Hook itself failed: deny-by-default for safety. Surface-at-friction
+		// footer forbids retry/bypass and points at diagnosis.
+		fmt.Fprintln(cmd.ErrOrStderr(), "permission hook error: "+err.Error()+hookErrorFooter())
 		return fmt.Errorf("permission hook error: %w", err)
 	}
 	switch action {
 	case permission.Deny:
-		fmt.Fprintf(os.Stderr, "denied: %s\n", reason)
+		fmt.Fprintln(cmd.ErrOrStderr(), "denied: "+reason+execDenyFooter())
 		return fmt.Errorf("denied by permission hook: %s", reason)
 	case permission.Ask:
-		fmt.Fprintf(os.Stderr, "permission required (ask): %s — no operator loop attached; denying\n", reason)
+		fmt.Fprintln(cmd.ErrOrStderr(), "permission required (ask): "+reason+
+			" — no operator loop attached; denying"+askFooter())
 		return fmt.Errorf("permission ask (no operator loop): %s", reason)
 	case permission.Allow:
 		// proceed
