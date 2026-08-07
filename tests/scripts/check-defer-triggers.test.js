@@ -239,6 +239,24 @@ test("promoter classifyCardState: single malformed-arg predicate → unsupported
     assert.equal(r.details[0].parseState, "malformed");
 });
 
+test("promoter classifyCardState: bare single `|` pseudo-OR arg → unsupported (malformed-predicate)", () => {
+    // A bare-single `|` join (the pseudo-OR `path_touched(a|b|c)`) is a
+    // recognized predicate whose greedy-captured arg still carries the
+    // predicate-structural `|`. Without the isMalformedArg guard extension to
+    // a bare `|`, the greedy `(.+)` in the regex would swallow `fileA.go|fileB.go`
+    // as ONE literal path operand, the card would silently park as
+    // valid-waiting (not-touched-since-ref), and the malformed grammar would
+    // never surface. The guard now rejects the bare `|` so the card is visibly
+    // flagged malformed-predicate, forcing conversion to a legal `any(...)`.
+    const r = evaluateCandidate("tasks/bare-pipe.json", promoterCard("bare-pipe", [
+        "trigger:path_touched(fileA.go|fileB.go|fileC.go)",
+    ]), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(r.state, "unsupported");
+    assert.equal(r.met, false);
+    assert.equal(r.details[0].note, "malformed-predicate");
+    assert.equal(r.details[0].parseState, "malformed");
+});
+
 test("promoter classifyCardState: glob path_touched → cold-glob", () => {
     // A glob operand can never precisely match (exact Set.has lookup), so it
     // is surfaced cold-glob rather than silently parked as valid-waiting.

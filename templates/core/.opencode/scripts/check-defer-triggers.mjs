@@ -288,16 +288,17 @@ function tagExists(tag) {
 // unrecognized shapes (caller reports unknown-predicate). Returns
 // {kind:"malformed"} for a shape that LOOKS like a known predicate but whose
 // greedy-captured arg still carries predicate-structural characters — a
-// literal `||` (a malformed OR attempt; the real OR grammar is `any(...)` via
+// literal `|` (a malformed OR attempt, including the bare-single `a|b|c`
+// pseudo-OR and the doubled `a||b`; the real OR grammar is `any(...)` via
 // extractTriggers) or an unbalanced `(`/`)` (a path/ref operand never contains
 // parens) — so the caller surfaces it as malformed-predicate, NOT a clean
 // not-touched. Without this guard the greedy `(.+)` in the regex would swallow
-// `a)||path_touched(b` for `path_touched(a)||path_touched(b)`, classify it as a
-// valid path_touched with a garbage arg, and the card would silently park as
-// "valid-not-met" (note: not-touched-since-ref) — indistinguishable from a
-// genuine future-watch. The card is malformed and can never fire, so it must be
-// visibly flagged, not parked. PROMOTER-mode parser only; release mode reads
-// committed manifest dispositions and never parses task-card trigger grammar.
+// `a|b|c` for `path_touched(a|b|c)`, classify it as a valid path_touched with
+// a garbage arg, and the card would silently park as "valid-not-met" (note:
+// not-touched-since-ref) — indistinguishable from a genuine future-watch. The
+// card is malformed and can never fire, so it must be visibly flagged, not
+// parked. PROMOTER-mode parser only; release mode reads committed manifest
+// dispositions and never parses task-card trigger grammar.
 function parsePredicate(trigger) {
     const t = (trigger || "").trim();
     let m = t.match(/^path_touched\((.+)\)$/);
@@ -316,12 +317,13 @@ function parsePredicate(trigger) {
 }
 
 // True if a greedy-captured predicate arg still carries predicate-structural
-// characters, i.e. it is not a clean operand: a literal `||` (malformed OR
-// join — the real OR is `any(...)`), or an unbalanced `(`/`)` (a path/ref/tag
-// operand never contains parens). Legitimate operands never contain `|`, `(`,
-// or `)`, so this never rejects a well-formed trigger.
+// characters, i.e. it is not a clean operand: a literal `|` (either the
+// bare-single `a|b|c` pseudo-OR or the doubled `a||b` malformed-OR join — the
+// real OR is `any(...)`), or an unbalanced `(`/`)` (a path/ref/tag operand
+// never contains parens). Legitimate operands never contain `|`, `(`, or `)`,
+// so this never rejects a well-formed trigger.
 function isMalformedArg(arg) {
-    if (arg.includes("||")) return true;
+    if (arg.includes("|")) return true;
     let depth = 0;
     for (const ch of arg) {
         if (ch === "(") depth++;
