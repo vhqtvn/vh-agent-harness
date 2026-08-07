@@ -47,4 +47,4 @@ O6 (a persistent Go step-worker/advisor) stays evidence-gated. **If reconstructi
 See `researches/decisions/2026-08-04-capability-discovery-audit.md` and the prior prime-agent study / solution-brief chain for context.
 
 ## Disposition / fallback
-> **Audited fallback:** any future advisory need starts as an existing-command extension (`exec-ro --explain` / `doctor --why <path>`), never a new protocol-versioned verb.
+> **Audited fallback:** any future advisory need starts as an extension to an existing command (e.g. a proposed `exec-ro --explain` or `doctor --why <path>` flag — neither exists today), never a new protocol-versioned verb.
