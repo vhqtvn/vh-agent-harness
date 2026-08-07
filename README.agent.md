@@ -1095,14 +1095,27 @@ export default function transform({ context }) {
   auto-gate-ignore, skills, subagent-depth, defer-liveness,
   staged-errata-content, behavioral-closure, dev-stale-embed, f1-envelope,
   f1-f2-consistency, f2-pairs, head-progress, complexity-advisory,
-  recurrence-state). The `head-progress` check reads the commit-gate's
+  recurrence-state, exec-sandbox-floor, shipped-pilots, closeout-reach). The `head-progress` check reads the commit-gate's
   durable closeout ledger (`.git/commit-gate/closeouts.log`) and WARNs when the
   last N (default 3, env `COMMIT_GATE_STALE_HEAD_THRESHOLD`) successful closeouts
   all recorded the same `post_commit_head` — a flatline signalling commits may
   be recording as successful without advancing HEAD (Pattern 4 same-file tangle);
   it SKIPs cleanly when there is no ledger or fewer than N closeouts (consumers
   and fresh checkouts see nothing), and never changes doctor's exit code (WARN
-  only — doctor INFORMs; the coordinator reads, never acts). The `auto-classifier` check lints the shape (field
+  only — doctor INFORMs; the coordinator reads, never acts). The
+  `closeout-reach` check reconciles the same closeout ledger against branch
+  REACHABILITY in both directions: (dir-1, WARN) a committed entry whose
+  `post_commit_head` is NOT reachable from any branch (orphaned — the operator
+  `git reset` escape hatch moved the branch away after the gate recorded the
+  commit; the object may still exist but no branch tip reaches it); (dir-2,
+  INFO/advisory) a commit reachable on the current branch with NO ledger entry
+  (work that landed unrecorded — e.g. a cherry-pick through the escape hatch;
+  indistinguishable from a review bypass). Reachability — NOT object existence —
+  is the property that means "landed" (`git show` passes for a reverted/orphaned
+  commit); the check asserts it via `git rev-list --branches` (dir-1) and
+  `git rev-list --max-count=500 HEAD` (dir-2). dir-1 is WARN (never FAIL); dir-2 is
+  INFO (advisory; never FAIL/WARN); greenfield (no ledger / no committed entries)
+  is SKIP — fail-open-safe, exactly like head-progress. The `auto-classifier` check lints the shape (field
   set + types + enums) of the auto-classifier-pilot overlay's config files when
   present — a present-but-invalid `auto-gate-config.json` / `auto-gate-llm.json`
   FAILs; absent configs are never failures (defaults apply). The `auto-gate-ignore`
@@ -1875,11 +1888,11 @@ operator release-prep. The ceremony produces THREE sequential single-path
 (manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`.
 The release-tag wrapper's deterministic gates refuse the tag unless each
 commit binds to its predecessor exactly. The wrapper also runs **G0c**
-  (`vh-agent-harness doctor` — all 23 checks, including #12 defer-liveness,
+  (`vh-agent-harness doctor` — all 24 checks, including #12 defer-liveness,
   #13 staged-errata-content, #14 behavioral-closure, #15 dev-stale-embed,
   #16 f1-envelope, #17 f1-f2-consistency, #18 f2-pairs, #19 head-progress,
   #20 complexity-advisory, #21 recurrence-state, #22 exec-sandbox-floor,
-  and #23 shipped-pilots)
+  #23 shipped-pilots, and #24 closeout-reach)
   as a hard machine gate
   AFTER the clean-worktree
 gate (G0b) and BEFORE the readiness-pass artifact gate (G1-G5). A

@@ -73,6 +73,7 @@ var doctorCmd = &cobra.Command{
   recurrence-state canonical recurrence groups + defects       WARN if malformed/conflicts/uncollapsed; INFO clean; SKIP none
   exec-sandbox-floor exec-sandbox grant carried w/o a floor     WARN if grant carried and no floor resolves (advisory only; NEVER FAIL)
   shipped-pilots  shipped default-on overlay pilot enablement    INFO if advisory orphan (deselected pilot with stale files); PASS otherwise; SKIP not installed
+  closeout-reach  ledger reconciles with branch reachability     WARN if committed entry post_commit_head unreachable from any branch; INFO if unledgered branch commits; SKIP greenfield
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -429,6 +430,31 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	spr := checkShippedPilots(abs)
 	fmt.Fprintln(out, "    "+spr.String())
 	applyTier(spr.tier, &problems, &warns)
+
+	// 24. closeout-reach (the BOTH-WAYS ledger reachability reconciler — the
+	//     SAFETY LAYER INFORMs). Reconciles the durable commit-gate closeout
+	//     ledger (.git/commit-gate/closeouts.log) against branch reachability
+	//     in two directions: (dir-1, WARN) a committed entry whose
+	//     post_commit_head is NOT reachable from any branch (orphaned — the
+	//     operator git-reset escape hatch moved the branch away after the gate
+	//     recorded the commit; the object may still exist but no branch tip
+	//     reaches it); (dir-2, INFO/advisory) a commit reachable on the current
+	//     branch with NO ledger entry (work that landed unrecorded — e.g. a
+	//     cherry-pick through the escape hatch; indistinguishable from a review
+	//     bypass). Reachability — NOT object existence — is the property that
+	//     means "landed" (git show passes for a reverted/orphaned commit). The
+	//     check asserts reachability via git rev-list --branches (dir-1) and
+	//     git rev-list --max-count=<window> HEAD (dir-2 anchor walk), both now
+	//     agent-allowed read-only plumbing (the prior permission gap closed by
+	//     43f511e). dir-1 is WARN (NEVER FAIL); dir-2 is INFO (advisory; NEVER
+	//     FAIL/WARN). Greenfield (not a work tree, no ledger, no committed
+	//     entries) is SKIP — fail-open-safe, exactly like head-progress #19.
+	//     This is the SAFETY LAYER INFORMing (doctor reconciles + reports; the
+	//     escape hatch is legitimate, this is visibility not refusal).
+	fmt.Fprintln(out, "  closeout-reach:")
+	crr := checkCloseoutReach(abs)
+	fmt.Fprintln(out, "    "+crr.String())
+	applyTier(crr.tier, &problems, &warns)
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)

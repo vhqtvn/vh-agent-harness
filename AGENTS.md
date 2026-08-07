@@ -225,6 +225,18 @@ outcome).
   occurred), not an assertion of the MECHANISM (a flag is set, a record exists,
   a code path ran). Asserting the mechanism without observing the outcome is
   `result: skipped`, not `proven`.
+- Reachability over object existence (for "did this land" cruxes): a
+  behavioral-closure verifier that asserts a commit landed MUST assert
+  REACHABILITY — e.g. `git merge-base --is-ancestor <sha> <branch>` or
+  `git log <branch> --oneline | grep <sha>` — NOT object existence
+  (`git show <sha>`, `git cat-file`). An object-existence verifier cannot
+  distinguish "committed and landed" from "committed and reverted/reset": `git
+  show` succeeds for an orphaned or reflog-only commit, so it passes throughout
+  a window in which the "promoted to canon / landed" claim is false. (doctor
+  check #24 `closeout-reach` reconciles the closeout ledger against branch
+  reachability directly, so a defective land-verifier is also caught by the
+  better mechanism — but the declared crux command must still be a
+  reachability form.)
 
 - **Provable-invariant crux:** when the crux is a provable concurrency or
   state-machine invariant, the `formal-verification` skill authors an

@@ -44,6 +44,13 @@ result: proven               # proven | skipped | not-demonstrable (the crux out
   OUTCOME observation (the behavior occurred), not a MECHANISM assertion (a
   flag is set, a record exists, a code path ran). Mechanism-without-outcome is
   `result: skipped`, not `proven`.
+- Reachability over object existence (for "did this land" cruxes): a crux
+  verifier asserting a commit landed MUST assert REACHABILITY — e.g.
+  `git merge-base --is-ancestor <sha> <branch>` or
+  `git log <branch> --oneline | grep <sha>` — NOT object existence
+  (`git show <sha>`, `git cat-file`). `git show` succeeds for an orphaned /
+  reflog-only commit, so an object-existence verifier cannot distinguish
+  "committed and landed" from "committed and reverted/reset".
 
 ## Success-report integrity (verification claims)
 
