@@ -606,10 +606,11 @@ func GitVerbPastGlobals(args []string) string {
 // This is a SEPARATE check from the global-flag deny above (B-F1, which denies
 // -c / --config-env / --exec-path as config/exec-affecting GLOBALS). The verbs
 // in git_readonly (diff/log/show/grep/blame/ls-tree/status/ls-files/
-// check-ignore/cat-file/show-ref/rev-parse) also accept SUBCOMMAND flags that
-// can write a file or execute an external program even though the verb itself
-// is "read-only". A completeness sweep across all 12 readonly verbs established
-// that the known write/exec-capable subcommand flags are EXACTLY:
+// check-ignore/cat-file/show-ref/rev-parse/merge-base/rev-list) also accept
+// SUBCOMMAND flags that can write a file or execute an external program even
+// though the verb itself is "read-only". A completeness sweep across all 14
+// readonly verbs established that the known write/exec-capable subcommand flags
+// are EXACTLY (the added merge-base/rev-list carry none of them):
 //
 //   - --output=<path> / --output <path>  writes the command's output to a file.
 //     This is the b-F1 prompt-free write vector: `git diff --output=README.agent.md`

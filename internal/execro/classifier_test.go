@@ -35,13 +35,51 @@ func TestClassify(t *testing.T) {
 		{"git --help info ALLOW", "git --help", true},
 		{"git --version info ALLOW", "git --version", true},
 
+		// Reachability read-verbs (card perm-allowlist-readonly-git-reachability):
+		// merge-base (incl. --is-ancestor) and rev-list (incl. --count and
+		// <sha>..<sha> ranges) are object-graph queries the doctor
+		// closeout-ledger reconciler needs. Pure reads — no object/index/ref
+		// mutation. Subject to the same write-flag deny as other readonly verbs.
+		{"git merge-base main origin/main ALLOW", "git merge-base main origin/main", true},
+		{"git merge-base --is-ancestor HEAD main ALLOW", "git merge-base --is-ancestor HEAD main", true},
+		{"git --no-pager merge-base main origin/main ALLOW", "git --no-pager merge-base main origin/main", true},
+		{"git rev-list HEAD~10..HEAD ALLOW", "git rev-list HEAD~10..HEAD", true},
+		{"git rev-list --count HEAD~10..HEAD ALLOW", "git rev-list --count HEAD~10..HEAD", true},
+		{"git --no-pager rev-list --count HEAD..main ALLOW", "git --no-pager rev-list --count HEAD..main", true},
+
 		// Git mutations (default-deny).
 		{"git commit DENY", "git commit", false},
 		{"git rm DENY", "git rm", false},
 		{"git push DENY", "git push", false},
 		{"git reset DENY", "git reset", false},
 		{"git checkout DENY", "git checkout", false},
+		// merge/merge-base distinction: `git merge` mutates (DENY), `git merge-base`
+		// reads (ALLOW above). The classifier matches the FULL verb token, so the
+		// two never collide — locking this here guards against a future prefix
+		// matcher that would widen `git merge` through the merge-base allow.
+		{"git merge DENY (mutation, distinct from merge-base)", "git merge", false},
+		{"git tag DENY (mutation)", "git tag", false},
+		{"git branch DENY (mutation)", "git branch", false},
+		{"git rebase DENY (mutation)", "git rebase", false},
 		{"git --no-pager commit DENY (mutation past global flag)", "git --no-pager commit", false},
+
+		// Hyphenated mutating PLUMBING (F1 regression lock, twin of the JS test in
+		// tests/scripts/forbidden-patterns-git-mutation.test.js). The classifier
+		// matches the FULL verb token against GitMutationVerbsSet, so these full
+		// hyphenated tokens must DENY. Without the explicit list entry, the
+		// token would be unknown (not in GitReadonlyVerbs either) and STILL
+		// default-deny — but listing them as mutation verbs is the fail-closed
+		// strengthening AND keeps the Go set in lockstep with the JS regex
+		// (which shares GitMutationVerbs). Each shares a mutation-verb prefix;
+		// read-only merge-base is the only merge-* ALLOWED (above).
+		{"git checkout-index DENY (plumbing)", "git checkout-index --all", false},
+		{"git checkout--worker DENY (plumbing)", "git checkout--worker --prefix=.", false},
+		{"git commit-graph DENY (plumbing)", "git commit-graph write", false},
+		{"git merge-file DENY (plumbing)", "git merge-file a b c", false},
+		{"git merge-tree DENY (plumbing)", "git merge-tree --write-tree A B", false},
+		{"git merge-octopus DENY (plumbing)", "git merge-octopus b1 b2 b3", false},
+		{"git update-index DENY (plumbing)", "git update-index --add x", false},
+		{"git add--interactive DENY (plumbing)", "git add--interactive", false},
 
 		// Config/exec-affecting git globals MUST hard-deny before the readonly
 		// verb is ever allowed (exec-ro is allowlisted in opencode.jsonc, so it

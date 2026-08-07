@@ -79,6 +79,19 @@ var CommandGroups = []CommandGroup{
 		"git cat-file *",
 		"git show-ref *",
 		"git rev-parse *",
+		// Reachability read-verbs (object-graph queries, no mutation). merge-base
+		// computes a best common ancestor of commits and `--is-ancestor` tests
+		// ancestry via exit code; rev-list walks/lists/counts commits reachable
+		// from a tip (incl. `<sha>..<sha>` ranges and `--count`). Both are
+		// read-only plumbing the doctor closeout-ledger reconciler needs to
+		// verify a committed SHA is REACHABLE from a branch — object-existence
+		// checks via rev-parse/show are insufficient (an unreachable object
+		// still exists in the db). Neither writes the object DB, the index,
+		// HEAD, or any ref. NOTE: `git merge` (mutation) is NOT the same verb
+		// as `git merge-base` (read) — the classifier matches the full verb
+		// token, so merge stays denied while merge-base is allowed.
+		"git merge-base *",
+		"git rev-list *",
 		// `git --no-pager <sub>` forms are the PRIMARY config-table prompt-free
 		// path for `--no-pager` readonly invocations. shell-guard's
 		// `walkGitGlobals` classifies these commands for the security DECISION
@@ -102,6 +115,11 @@ var CommandGroups = []CommandGroup{
 		"git --no-pager cat-file *",
 		"git --no-pager show-ref *",
 		"git --no-pager rev-parse *",
+		// Reachability verbs paired with --no-pager (see the bare-form comment
+		// above for the read-only argument). As with the bare forms, these do
+		// NOT admit `git merge` — only `git merge-base`.
+		"git --no-pager merge-base *",
+		"git --no-pager rev-list *",
 	}},
 	{Name: "gate", Commands: []string{
 		".opencode/scripts/commit-gate.sh acquire *",
@@ -135,10 +153,41 @@ var GroupNames = []string{"readonly", "git_readonly", "gate"}
 // previous JS-only definition lived in forbidden-patterns.core.js; it moved here
 // so Go (exec-ro) and JS (shell-guard) cannot drift. Keep this list in sync with
 // the verbs the commit-gate wrapper accepts (the committer's mutation surface).
+// Hyphenated mutating PLUMBING whose first token is one of the verbs above (or
+// a sibling like `update-*`) is also in this list. The trailing boundary of
+// GIT_MUTATION_RE (forbidden-patterns.core.js) is the hyphen-aware negative
+// lookahead `(?![\w-])`, which REFUSES to match a verb immediately followed by
+// `-`. That is what lets read-only `git merge-base`/`git rev-list` through, but
+// it means `git merge` alone does NOT catch `git merge-file` — every hyphenated
+// mutating plumbing command MUST be listed here as a FULL token or it slips past
+// the shell-guard regex backstop. The legacy `\b` boundary denied these
+// incidentally (firing at the `verb`→`-` word boundary); switching to
+// `(?![\w-])` to fix the merge-base false-deny would have RE-OPENED each one
+// had it not been listed explicitly. Enumerated via a `git --exec-path` binary
+// sweep + `git help -a`; if a future git release adds another hyphenated
+// mutating command sharing one of these prefixes, add it here too. `merge-base`
+// is DELIBERATELY ABSENT — it is read-only (git_readonly allowlist) and must
+// stay allowed.
 var GitMutationVerbs = []string{
+	// Main porcelain mutation verbs.
 	"add", "commit", "push", "reset", "commit-tree", "update-ref",
 	"checkout", "merge", "rebase", "stash", "branch", "restore",
 	"cherry-pick", "revert", "clean", "rm", "mv", "tag", "am", "apply", "switch",
+	// Hyphenated mutating plumbing (see the comment block above this slice):
+	"checkout-index",   // checkout prefix: copies index→working-tree; -f overwrites uncommitted files
+	"checkout--worker", // checkout prefix: parallel-checkout worker; writes files to the working tree
+	"commit-graph",     // commit prefix: writes/rewrites .git/objects/info/commit-graph
+	"merge-file",       // merge prefix: three-way file merge; rewrites files in place
+	"merge-index",      // merge prefix: runs merge-one-file over files needing merging
+	"merge-octopus",    // merge prefix: >2-head merge strategy; updates index/working tree
+	"merge-one-file",   // merge prefix: per-file merge helper; writes merged result
+	"merge-ours",       // merge prefix: "ours" strategy; discards the other side
+	"merge-recursive",  // merge prefix: recursive strategy (the default); mutates index/working tree
+	"merge-resolve",    // merge prefix: resolve strategy; three-way merge
+	"merge-subtree",    // merge prefix: subtree strategy; mutates index/working tree
+	"merge-tree",       // merge prefix: --write-tree writes tree objects to the object DB
+	"add--interactive", // add prefix: interactive staging backend (git add -i/-p); stages hunks
+	"update-index",     // update prefix (separate from update-ref): registers/modifies index entries (--add/--remove/--cacheinfo)
 }
 
 // GitMutationVerbsSet is the set form of GitMutationVerbs for O(1) membership

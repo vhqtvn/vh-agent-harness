@@ -633,7 +633,7 @@ func validate(locations map[string]LocationRule, tasks map[string][]TaskEntry, g
 // Go-canonical CommandGroups tables. The output matches the exact export shape
 // that shell-guard-core.js imports at runtime:
 //
-//	export const GIT_MUTATION_VERBS = [ ...21 verbs... ];
+//	export const GIT_MUTATION_VERBS = [ ...35 verbs... ];
 //	export const COMMANDS = {
 //	    readonly: [...],
 //	    git_readonly: [...],

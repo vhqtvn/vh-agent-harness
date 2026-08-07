@@ -413,6 +413,93 @@ func TestCommandGroups_NoPagerReadonlyAndStatusSplit(t *testing.T) {
 	}
 }
 
+// Test 9c: the reachability read-verbs (merge-base, rev-list) are admitted to
+// git_readonly (card perm-allowlist-readonly-git-reachability). These are the
+// object-graph queries the doctor closeout-ledger reconciler needs to verify a
+// committed SHA is REACHABLE from a branch (not merely an existing object, which
+// rev-parse/show already cover). Both are bare + paired --no-pager forms,
+// matching the Q1b shape every other readonly verb follows.
+//
+// The DISJOINTNESS invariant is the load-bearing safety property of this
+// widening: NO verb in git_readonly may also be a GitMutationVerb — otherwise
+// the allowlist would admit a mutation. This is what guarantees "reachability
+// allowed, mutation still denied." It is checked exhaustively, not just for the
+// two new verbs, so a future edit cannot silently widen a mutation into the
+// readonly roster. NOTE: `merge` (mutation) and `merge-base` (read) are
+// distinct full verb tokens — the disjointness check confirms both belong to
+// exactly one set.
+func TestCommandGroups_ReachabilityReadonlyAndMutationDisjoint(t *testing.T) {
+	findGroup := func(name string) CommandGroup {
+		t.Helper()
+		for _, g := range CommandGroups {
+			if g.Name == name {
+				return g
+			}
+		}
+		t.Fatalf("group %q not found", name)
+		return CommandGroup{}
+	}
+	has := func(group CommandGroup, cmd string) bool {
+		for _, c := range group.Commands {
+			if c == cmd {
+				return true
+			}
+		}
+		return false
+	}
+	gitReadonly := findGroup("git_readonly")
+
+	// (a) reachability verbs admitted, in both the bare and --no-pager shapes.
+	for _, cmd := range []string{
+		"git merge-base *",
+		"git rev-list *",
+		"git --no-pager merge-base *",
+		"git --no-pager rev-list *",
+	} {
+		if !has(gitReadonly, cmd) {
+			t.Errorf("git_readonly must contain reachability verb %q", cmd)
+		}
+	}
+
+	// The derived GitReadonlyVerbs set (consumed by exec-ro) must recognize the
+	// new verbs so `git merge-base`/`git rev-list` ALLOW without a second edit.
+	for _, verb := range []string{"merge-base", "rev-list"} {
+		if !GitReadonlyVerbs[verb] {
+			t.Errorf("GitReadonlyVerbs must contain %q (derived from git_readonly)", verb)
+		}
+	}
+
+	// (b) DISJOINTNESS: no git_readonly verb is a mutation verb. This is the
+	// invariant that makes the widening safe regardless of which verbs are
+	// admitted. Exhaustive over GitReadonlyVerbs × GitMutationVerbsSet.
+	for verb := range GitReadonlyVerbs {
+		if GitMutationVerbsSet[verb] {
+			t.Errorf("verb %q is in BOTH git_readonly and GitMutationVerbs — widening a mutation into the readonly set", verb)
+		}
+	}
+
+	// (c) the mutation surface stays intact: the specific mutating verbs the
+	// mission names must STILL be GitMutationVerbs (and therefore denied by
+	// exec-ro, which checks GitMutationVerbsSet BEFORE the readonly set).
+	for _, verb := range []string{"tag", "push", "reset", "checkout", "merge", "rebase", "branch", "commit"} {
+		if !GitMutationVerbsSet[verb] {
+			t.Errorf("GitMutationVerbs must still contain %q (mutation surface narrowed)", verb)
+		}
+		if GitReadonlyVerbs[verb] {
+			t.Errorf("mutation verb %q must NOT be in git_readonly", verb)
+		}
+	}
+
+	// Lock the merge vs merge-base distinction: two distinct tokens, exactly one
+	// read + exactly one mutation.
+	if !GitReadonlyVerbs["merge-base"] || GitReadonlyVerbs["merge"] {
+		t.Errorf("merge/merge-base distinction broken: merge-base must be readonly, merge must NOT")
+	}
+	if !GitMutationVerbsSet["merge"] || GitMutationVerbsSet["merge-base"] {
+		t.Errorf("merge/merge-base distinction broken: merge must be a mutation, merge-base must NOT")
+	}
+}
+
 // Test 10: validate catches gate-exempt agent that wrongly carries a gate key.
 func TestValidate_GateExemptWithGate(t *testing.T) {
 	// "evil" agent is gate-exempt but has HasGate=true.
