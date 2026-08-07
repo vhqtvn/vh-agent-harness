@@ -463,7 +463,8 @@ not in the permission map:
   that justify the code); a backlog commit carries backlog rows. One backlog
   commit per work cycle is the target. This is what keeps a concurrent
   backlog edit from blocking a clean code commit.
-- **On `cas_conflict`, re-read + re-apply + retry — do NOT revert
+- **On `could_not_land` (a backlog content-tangle — another session's backlog
+  edit landed first), re-read + re-apply + retry — do NOT revert
   `backlog.md` to unblock.** Reverting the shared ledger to HEAD discards
   other agents' promoted state. The canonical recovery is to re-read the file
   from the new HEAD, re-apply only your rows, and retry. The

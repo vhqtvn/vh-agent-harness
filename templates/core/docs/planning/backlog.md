@@ -10,7 +10,8 @@ edits):
   the docs that justify it); a backlog commit carries backlog rows. One backlog
   commit per work cycle is the target. Never bundle a backlog-status change into
   a code commit.
-- **On `cas_conflict`, re-read + re-apply + retry — do NOT revert this file.**
+- **On `could_not_land` (a content-tangle — another session's backlog edit
+  landed first), re-read + re-apply + retry — do NOT revert this file.**
   Reverting discards other agents' promoted state. Re-read from the new HEAD,
   re-apply only your rows (by stable ID), and retry.
 

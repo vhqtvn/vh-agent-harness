@@ -106,7 +106,8 @@ Because agents edit the backlog freely, a content conflict on
   restore unrelated paths, HARVEST any dirty `backlog.md` edits first (copy the
   working-tree content aside), then restore, then re-apply the harvested
   backlog content. The shared ledger is never blind-reverted.
-- **On `cas_conflict`, re-read + re-apply + retry.** Re-read the file from the
+- **On `could_not_land` (a backlog content-tangle — another session's backlog
+  edit landed first), re-read + re-apply + retry.** Re-read the file from the
   new HEAD, re-apply only your rows (matched by stable ID), and retry the
   commit. Reconcile manually from the task cards if two sessions both promoted.
 

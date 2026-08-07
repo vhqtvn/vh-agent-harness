@@ -451,9 +451,11 @@ requests**:
 
 Do not stop, hand off, close out, or report the normalization complete
 between the two reviews. Run the normalizer check over the complete working
-tree before the first review and again after the second. If a `cas_conflict`
-occurs, re-read the ledger, rerun the normalizer, and recompute both exact
-path sets before retrying. See the `backlog` skill and the `committer` agent
+tree before the first review and again after the second. If a `could_not_land`
+occurs (a backlog content-tangle — another session's backlog edit landed
+between the two reviews), re-read the ledger, rerun the normalizer, and
+recompute both exact path sets before retrying. See the `backlog` skill and the
+`committer` agent
 for the matching two-commit protocol.
 
 ## CGD Phase-1 notes
