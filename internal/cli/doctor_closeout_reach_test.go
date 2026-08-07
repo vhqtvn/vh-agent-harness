@@ -132,6 +132,28 @@ func TestCheckCloseoutReach_Unit(t *testing.T) {
 		}
 	})
 
+	// Case-domain: a hand-edited ledger line whose post_commit_head is
+	// UPPERCASE (isValidFullSHA is case-insensitive) but the commit IS
+	// reachable. The parser must lowercase-normalize at the parse site so
+	// the uppercase ledger key reconciles against the lowercase reachable
+	// map → no false dir-1 WARN. This is the exact case the fix targets
+	// (mirrors reachable_committed_no_WARN but with a hand-edited uppercase
+	// SHA); without the normalize, head would be keyed uppercase in ledgered
+	// and miss the lowercase reachable[sha] map key → false orphan WARN.
+	t.Run("uppercase_sha_reachable_no_WARN", func(t *testing.T) {
+		dir, commit := reachRepo(t)
+		commit("root")
+		head := commit("second")                                 // reachable branch tip (lowercase from git)
+		seedReachLedger(t, dir, []string{strings.ToUpper(head)}) // hand-edited uppercase post_commit_head
+		r := checkCloseoutReach(dir)
+		if r.tier == tierWarn {
+			t.Fatalf("uppercase reachable committed SHA must NOT WARN (case-normalized at parse time); got WARN: %q", r.detail)
+		}
+		if r.tier != tierPass {
+			t.Fatalf("uppercase reachable committed SHA: tier = %q, want PASS (reachable, anchor at HEAD, no unledgered); detail=%q", r.tier, r.detail)
+		}
+	})
+
 	// dir-2: a reachable branch commit with NO ledger entry. Must surface INFO
 	// naming the unledgered commit; a ledgered commit must NOT be listed.
 	t.Run("unledgered_branch_commit_INFO", func(t *testing.T) {

@@ -123,7 +123,20 @@ func checkCloseoutReach(target string) checkResult {
 			continue
 		}
 		committedEntries++
-		ledgered[rec.PostCommitHead] = true
+		// Lowercase-normalize the post_commit_head at parse time. git
+		// rev-list emits lowercase OIDs, so the reachable set (dir-1) and
+		// the HEAD walk (dir-2) key commits under their lowercase form.
+		// isValidFullSHA is intentionally case-insensitive (lenient on
+		// hand-edited / upserted ledger lines), so an UPPERCASE
+		// post_commit_head passes validation; without this normalization it
+		// would be keyed under its uppercase form in ledgered and miss the
+		// lowercase reachable[sha] map key → false orphaned → false dir-1
+		// WARN. Normalizing here (rather than a case-insensitive compare at
+		// the lookup site) fixes BOTH directions and any downstream consumer
+		// of the ledgered key uniformly, at the one place the SHA enters the
+		// reconciliation. The commit gate always writes lowercase, so this
+		// affects only hand-edited ledger lines.
+		ledgered[strings.ToLower(rec.PostCommitHead)] = true
 	}
 	if len(ledgered) == 0 {
 		// Greenfield: no committed closeouts recorded (only failures / empty).
