@@ -393,6 +393,18 @@ func captureStderr(t *testing.T, fn func()) string {
 // check alone could not detect a successful_render_id bump or a reformat that
 // left the entries identical. It also captures stderr and asserts the
 // "manifest NOT persisted" warning fires AND names the failed destination.
+//
+// Subsumption note (P1-SUBSTRATE-001 generation-wide gate): this test still
+// PASSES unchanged because the generation-wide gate is a STRICT SUPERSET of
+// the v1.1 tracked-overlay-skill gate it originally targeted — a failed tracked
+// skill write still fails the generation (GenerationFullyApplied=false) and so
+// still gates the manifest. The companion test
+// TestSeamOrphan_ManifestGated_OnNonSkillWriteFailure below exercises the NEW
+// ground the generation-wide gate covers (a failed NON-skill managed write),
+// which the v1.1 scope let through. This test is retained to lock the original
+// tracked-skill byte-intact guarantee; it is NOT redundant under the
+// generation-wide gate (it asserts the specific tracked-skill-failure path and
+// its stderr contract, distinct from the non-skill path).
 func TestSeamOrphan_ManifestSkipped_OnTrackedSkillWriteFailure(t *testing.T) {
 	root := renderBaseline(t) // manifest = {ghost-skill/SKILL.md}
 	// A second tracked skill whose write will succeed. If the manifest persists,

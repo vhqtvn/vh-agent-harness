@@ -1440,10 +1440,15 @@ How a **definite orphan** is told apart from benign cases:
 This provenance is tracked in a generated manifest at
 **`.vh-agent-harness/rendered-outputs.json`** — a JSON file with a
 `manifest_version` field, written atomically after a non-dry-run
-`update`/`install` only when no currently-rendered, manifest-tracked overlay-skill
-destination reports a failed live write (a failed non-skill managed write does
-not gate this skill-scoped manifest, and `substrate.Apply` still returns nil on a
-live-write failure). It records each overlay-rendered skill file's destination,
+`update`/`install` only when the generation FULLY applied (P1-SUBSTRATE-001
+generation-wide gate). Any live-write failure gates the persist — a failed
+managed write, whether a tracked overlay-skill destination OR a non-skill
+managed file, leaves the prior manifest byte-for-byte intact and emits a stderr
+warning (`substrate.Apply` reports `GenerationFullyApplied=false` while still
+returning nil on a live-write failure). This keeps the manifest correlated with
+lineage's `last_successful_update_id`, which gates on the same any-failure
+condition; the prior v1.1 scope gated only on tracked overlay-skill
+destinations. It records each overlay-rendered skill file's destination,
 producing pack, source-relative path, and content digest. If the manifest is
 absent (a project first updated by a pre-v0.10.0 binary), the first `update`
 establishes a baseline from the current render — it does NOT retroactively

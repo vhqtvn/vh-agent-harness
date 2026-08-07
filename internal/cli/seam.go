@@ -526,9 +526,10 @@ exec_sandbox:
 // The .vh-agent-harness/ directory usually already exists at this point
 // (managed writes and/or a prior lineage write create it). Under a partially-
 // failed generation (P1-SUBSTRATE-001) Apply may NOT write lineage, but the
-// managed writes that did land + earlier runs keep the dir present; a missing
-// dir is handled by MkdirAll, so this seed is best-effort regardless. A present
-// file is preserved byte-for-byte (S4 is project_owned).
+// managed writes that did land + earlier runs keep the dir present; if the dir
+// is nonetheless absent, os.WriteFile fails (this seed does NOT mkdir-parent
+// the dir) and the function returns an error the caller warns on — the seed is
+// best-effort. A present file is preserved byte-for-byte (S4 is project_owned).
 func seedRunShapeDefault(target string) error {
 	rsPath := filepath.Join(target, runshape.DirName, runshape.FileName)
 	if _, err := os.Stat(rsPath); err == nil {
