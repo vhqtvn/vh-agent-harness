@@ -595,6 +595,15 @@ function workstreamFilePath(workstreamName, target) {
 }
 
 function localCoordinatorRoot() {
+    // Opt-in isolation override (mirrors OPENCODE_STATE_ROOT / OPENCODE_RUN_ROOT):
+    // when set, the ENTIRE .local/coordinator/ subtree (tasks + reports +
+    // dashboards + scratch) resolves against this root instead of the real repo.
+    // Used by verification scripts (verify-task-registry.js et al.) to redirect
+    // their fixture cards to an isolated temp dir so a fixture can NEVER leak
+    // into the real coordinator registry — even on interruption. Empty/absent
+    // preserves the default repo-rooted behavior for every other caller.
+    const override = (process.env.OPENCODE_LOCAL_COORDINATOR_ROOT || "").trim();
+    if (override) return override;
     return path.join(repoRoot(), ".local", "coordinator");
 }
 
