@@ -67,27 +67,39 @@ func TestExec_PropagatesChildExitCode(t *testing.T) {
 	}
 }
 
-// TestExecRo_PropagatesChildExitCode mirrors the defect-2 crux for exec-ro.
-// exec-ro's classifier allows `bash` only in a non-metachar form; the cleanest
-// read-only-ish child that exits a specific code is `false` (always exits 1) —
-// but to test a NON-1 code we use `bash -c 'exit N'`. bash is in exec-ro's
-// read-only set? It is not guaranteed, so this test uses a known-allowed
-// read-only binary. `false` always exits 1, which is the boundary value most
-// likely to MASK the collapse (1 was the old collapse target). We assert
-// exec-ro exits 1 for `false` — and crucially does NOT dump usage (defect 3).
-func TestExecRo_ChildFailureNoUsageDump(t *testing.T) {
-	// `false` is a coreutils binary that always exits 1. It is read-only
-	// (no mutation, no metachars) so exec-ro's classifier allows it. Under the
-	// old collapse, exec-ro would exit 1 here too — but for the WRONG reason
-	// (collapse) vs. the right reason (child exit). The defect-3 assertion
-	// (no usage dump) is the observable signal that distinguishes them.
-	out, exit := runExec(t, "exec-ro", "false")
-	if exit != 1 {
-		t.Logf("exec-ro false: exit=%d (expected 1 from `false`); output:\n%s", exit, out)
+// TestExecRo_PropagatesNon1ChildExitAndNoUsageDump is BOTH the defect-2 and
+// defect-3 crux for exec-ro, observed end-to-end on the real binary.
+//
+// defect 2: exec-ro must propagate the CHILD's real exit code, not collapse it
+// to 1. To prove propagation rather than the former collapse-to-1, the child
+// must exit a NON-1 code — otherwise a test asserting "exit==1" passes both
+// under correct propagation (child exited 1) and under the old collapse
+// (collapse target was 1), and the two are indistinguishable. `rg --bad-flag`
+// is a classifier-ALLOWED readonly binary (`rg *` is in the readonly command
+// group in internal/permconfig/tables.go) that reliably exits 2 on an
+// unrecognized flag. exec-ro ALLOWs it through to the backend, the child
+// exits 2, and exec-ro must surface exit 2 — NOT 1. Under the old
+// exitCodeFromError collapse, this would have exited 1 (the former collapse
+// target), so an exit==2 assertion distinguishes correct propagation from the
+// former collapse.
+//
+// defect 3: on that child failure, exec-ro must NOT dump cobra's Usage/Flags
+// block (SilenceUsage). The error is the child's, not a mis-invocation.
+func TestExecRo_PropagatesNon1ChildExitAndNoUsageDump(t *testing.T) {
+	// `rg --bad-flag` is classifier-allowed (readonly `rg *` group) and exits
+	// 2 (ripgrep's exit code for an unrecognized flag). A NON-1 exit is the
+	// load-bearing choice: exit 1 would be ambiguous (it is BOTH the child
+	// exit of `false` AND the old collapse target), so asserting exit==2 is
+	// the only way to distinguish "child code propagated" from "collapsed to
+	// 1".
+	out, exit := runExec(t, "exec-ro", "rg", "--bad-flag")
+	if exit != 2 {
+		t.Fatalf("exec-ro rg --bad-flag: exit code = %d, want 2 (rg's exit code for an unrecognized flag must propagate through exec-ro, not collapse to 1)\n--- output ---\n%s",
+			exit, out)
 	}
 	// Defect 3 crux: NO usage/flags dump on a child failure. The error is the
 	// child's, not a mis-invocation.
-	assertNoUsageDump(t, "exec-ro false", out)
+	assertNoUsageDump(t, "exec-ro rg --bad-flag", out)
 }
 
 // TestExec_ChildFailureNoUsageDump is the defect-3 crux: on a child failure,
