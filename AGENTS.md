@@ -327,7 +327,6 @@ When making changes:
   - use `planner` to turn an agreed direction into a compact execution brief for `build`
   - for high-uncertainty tasks, prefer `researcher -> debate -> planner -> build`; send routine or obvious work directly to `build`
   - when you want that high-uncertainty chain as one read-only compare-and-plan pass, prefer `/solution-brief <question>`
-    See `docs/coding-agent-in-research/solution-brief/README.md` for the bounded workflow note and linked research trail.
 - For multi-session coordination work, classify the task as `short`, `medium`, or `long` before fanning out. Use `docs/coordination/TASK_MODES.md` and `docs/coordination/RUNTIME_MODEL.md` to decide whether `.opencode/state/` is enough or whether a local runtime layer under `.local/coordinator/` is justified.
 - Use `repo-explorer` as a path finder and call-graph tracer first. Ask for exact full file bodies only through an explicit read command when needed.
 - For read-only shell inspection, prefer narrow commands such as `ls`, `find`, `grep`, `sed -n`, `head`, `tail`, `jq`, and `git grep`. Avoid `cat` dumps for exploration.

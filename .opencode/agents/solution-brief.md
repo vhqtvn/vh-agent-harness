@@ -92,7 +92,3 @@ Default output:
 - next recommended command
 - framing_confidence (if present at kickoff) and whether it shifted during the pass
 - if a manual step-back occurred, record it and its outcome
-
-Reference:
-- See `docs/coding-agent-in-research/solution-brief/README.md` for the live
-  workflow note, reverse-escalation guidance, and linked research trail.

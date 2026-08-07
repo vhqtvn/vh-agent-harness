@@ -36,7 +36,4 @@ Example invocations:
 - `/solution-brief Should this repo express reusable compare-and-plan workflows as command wrappers, repo-local skills, or documented manual choreography?`
 - `/solution-brief For long-running evaluation orchestration, should the repo prefer a repo-local skill, coordinator task cards, or a thin command wrapper over existing specialists?`
 
-Reference:
-- See `docs/coding-agent-in-research/solution-brief/README.md` for the live workflow note, reverse-escalation guidance, and linked research trail.
-
 For git operations, follow `.opencode/docs/git-execution-routing.md`.
