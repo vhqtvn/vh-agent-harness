@@ -26,7 +26,7 @@ alongside them.
 | Skill | Name explicitly when | Do not use it for |
 | --- | --- | --- |
 | `repo-recon` | mapping the repo, locating entrypoints/hotspots/packages/tests, or refreshing `.opencode/repo-configs/repo-recon-data.yml` after a structural change | implementation work |
-| `backlog` | editing `docs/planning/backlog.md`, resolving a backlog `cas_conflict`, or routing where a DEFER/follow-up finding should land | general planning or non-backlog docs |
+| `backlog` | editing `docs/planning/backlog.md`, resolving a backlog `could_not_land` (content-tangle), or routing where a DEFER/follow-up finding should land | general planning or non-backlog docs |
 | `bgshell-job` | long local non-GPU shell tasks (build/release/maintenance), detached lifecycle management, and post-compaction resume of a job that may outlive one shell call | quick foreground commands |
 | `gated-commit` | any git write — `git add`, `git commit`, `git push`, `git reset` — or understanding the commit-gate enforcement model | read-only git inspection |
 | `harness-operator` | installing, self-updating, running the upgrade loop, reading release migration notes, or using `guide` / `update` / `doctor` | ordinary repo edits unrelated to the harness itself |
