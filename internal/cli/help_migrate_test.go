@@ -76,6 +76,42 @@ func TestHelpMigrate_VersionNormalization(t *testing.T) {
 	}
 }
 
+// TestHelpMigrate_VersionNormalization_UppercaseV confirms a capital-V explicit
+// arg ("V0.1.8") is normalized to the lowercase canonical "v0.1.8" key and
+// resolves the SAME note as the lowercase-v form. normalizeVersion and
+// isCleanReleased must agree on case handling; before the fix, only the
+// lowercase "v" was stripped and a capital-V arg missed the note-key lookup.
+func TestHelpMigrate_VersionNormalization_UppercaseV(t *testing.T) {
+	out, err := executeCapture(t, []string{"help", "migrate", "V0.1.8"})
+	if err != nil {
+		t.Fatalf("help migrate V0.1.8: want nil error (uppercase-V normalized), got %v", err)
+	}
+	if !strings.Contains(out, "# Migration: v0.1.8") {
+		t.Errorf("normalized V0.1.8 should resolve to the v0.1.8 note\n--- output ---\n%s", out)
+	}
+	if !strings.Contains(out, "Documentation only: this is the migration note for upgrading TO v0.1.8.") {
+		t.Errorf("uppercase-V explicit-version path must resolve to the same note as the lowercase-v form (banner present)\n--- output ---\n%s", out)
+	}
+}
+
+// TestNormalizeVersion is a direct unit test for the case-insensitive
+// canonicalization: bare, lowercase-v, and uppercase-V prefixes all collapse to
+// the lowercase "vX.Y.Z" key; empty stays empty.
+func TestNormalizeVersion(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"0.1.8", "v0.1.8"},
+		{"v0.1.8", "v0.1.8"},
+		{"V0.1.8", "v0.1.8"},
+		{"  V0.2.0  ", "v0.2.0"},
+	}
+	for _, c := range cases {
+		if got := normalizeVersion(c.in); got != c.want {
+			t.Errorf("normalizeVersion(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 // TestHelpMigrate_ExplicitMissingVersion exits non-zero with the reconciled
 // not-found message (errSilent path — clean message, no cobra "Error:"/usage
 // dump) and steers toward the no-arg bounded-path form.
@@ -253,14 +289,47 @@ func TestHelpMigrate_NoArgRange(t *testing.T) {
 			},
 		},
 		{
-			// Case 2: binary carries a build suffix ("+dev") → not clean released
-			// → cannot infer a released range.
+			// Case 2 (binary unclean): the binary carries a build suffix ("+dev")
+			// → not clean released → cannot infer a released range. The message
+			// names the BINARY as the endpoint that failed the clean-released
+			// check.
 			name: "suffix_binary_cannot_infer", adopted: "0.1.8", binary: "0.6.0+dev", wantErr: true, delimCount: 0,
 			wants: []string{
 				"Detected adopted version: v0.1.8",
 				"Running binary version:   v0.6.0+dev",
-				"Cannot infer a released migration range from this binary version.",
+				"Cannot infer a released migration range because the running binary version is not a clean released version.",
 				"Use vh-agent-harness help migrate <version> to inspect a specific released target note.",
+			},
+		},
+		{
+			// Case 2 (adopted unclean): the adopted profile carries a dev suffix
+			// ("0.x-dev") while the binary is a clean release → cannot infer a
+			// released range. The message names the ADOPTED endpoint as the one
+			// that failed the clean-released check (NOT the binary), which is
+			// the precise remediation pointer the old blame-the-binary copy got
+			// wrong.
+			name: "suffix_adopted_cannot_infer", adopted: "0.x-dev", binary: "0.1.8", wantErr: true, delimCount: 0,
+			wants: []string{
+				"Detected adopted version: v0.x-dev",
+				"Running binary version:   v0.1.8",
+				"Cannot infer a released migration range because the adopted profile version is not a clean released version.",
+				"Use vh-agent-harness help migrate <version> to inspect a specific released target note.",
+			},
+		},
+		{
+			// Case 2 (both unclean): BOTH endpoints fail the clean-released check.
+			// The message names NEITHER endpoint individually, so it must NOT
+			// blame only one side.
+			name: "suffix_both_cannot_infer", adopted: "0.x-dev", binary: "0.6.0+dev", wantErr: true, delimCount: 0,
+			wants: []string{
+				"Detected adopted version: v0.x-dev",
+				"Running binary version:   v0.6.0+dev",
+				"Cannot infer a released migration range because neither the adopted profile version nor the running binary version is a clean released version.",
+				"Use vh-agent-harness help migrate <version> to inspect a specific released target note.",
+			},
+			notWants: []string{
+				"Cannot infer a released migration range because the adopted profile version is not a clean released version.\n",
+				"Cannot infer a released migration range because the running binary version is not a clean released version.\n",
 			},
 		},
 		{

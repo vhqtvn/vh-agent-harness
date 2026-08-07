@@ -172,11 +172,22 @@ func showMigrationRange(out io.Writer, notes map[string][]byte, versions []strin
 	// Case 2: either endpoint is not a clean released version (carries a
 	// pre-release "-" or build "+" suffix, or is otherwise non-semver).
 	// compareVersion/parseSemver strip suffixes and so cannot authorize a
-	// released bound — refuse to infer rather than silently strip.
-	if !isCleanReleased(adopted) || !isCleanReleased(Version) {
+	// released bound — refuse to infer rather than silently strip. Name WHICH
+	// endpoint failed the clean-released check so the message points at the
+	// correct remediation (a stale adopted profile vs a dev binary).
+	adoptedClean := isCleanReleased(adopted)
+	binaryClean := isCleanReleased(Version)
+	if !adoptedClean || !binaryClean {
 		fmt.Fprintf(out, "Detected adopted version: %s\n", adopted)
 		fmt.Fprintf(out, "Running binary version:   %s\n", binVer)
-		fmt.Fprintln(out, "Cannot infer a released migration range from this binary version.")
+		switch {
+		case !adoptedClean && !binaryClean:
+			fmt.Fprintln(out, "Cannot infer a released migration range because neither the adopted profile version nor the running binary version is a clean released version.")
+		case !adoptedClean:
+			fmt.Fprintln(out, "Cannot infer a released migration range because the adopted profile version is not a clean released version.")
+		default:
+			fmt.Fprintln(out, "Cannot infer a released migration range because the running binary version is not a clean released version.")
+		}
 		fmt.Fprintln(out, "Use vh-agent-harness help migrate <version> to inspect a specific released target note.")
 		return errSilent{}
 	}
@@ -275,17 +286,20 @@ func detectAdoptedVersion() string {
 	return strings.TrimPrefix(lin.Template.Ref, "harness/")
 }
 
-// normalizeVersion accepts "X.Y.Z" or "vX.Y.Z" and returns the canonical
-// "vX.Y.Z" form used as the migration-note key. An empty input stays empty.
+// normalizeVersion accepts "X.Y.Z", "vX.Y.Z", or "VX.Y.Z" and returns the
+// canonical lowercase "vX.Y.Z" form used as the migration-note key. Both cases
+// of a leading "v" are stripped and re-added as lowercase, mirroring
+// isCleanReleased's case-insensitive handling so an explicit capital-V arg
+// (e.g. "help migrate V0.1.8") resolves the same note key as the lowercase
+// form. An empty input stays empty.
 func normalizeVersion(arg string) string {
 	v := strings.TrimSpace(arg)
 	if v == "" {
 		return ""
 	}
-	if !strings.HasPrefix(v, "v") {
-		v = "v" + v
-	}
-	return v
+	v = strings.TrimPrefix(v, "v")
+	v = strings.TrimPrefix(v, "V")
+	return "v" + v
 }
 
 // cleanReleasedRe matches a clean release version AFTER stripping an optional
