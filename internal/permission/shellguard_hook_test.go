@@ -1183,6 +1183,153 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 		})
 	}
 
+	// --- RF-B: shell file-authoring deny matrix (Go -> node -> WASM -> evaluate())
+	//
+	// Pins RF-B: a structural classifier in evaluate() that detects shell
+	// file-authoring forms (output redirection `>` / `>>` to a file) and
+	// denies them with a Write-tool routing message BEFORE the forbidden-
+	// pattern scan runs.
+	//
+	// Load-bearing invariants pinned here:
+	//   - clean output redirects (echo/printf/cat > file, >> append) are
+	//     DENIED — previously these were ALLOWED (echo/printf/cat are readonly
+	//     and the redirect was invisible to the allowlist check).
+	//   - the A4 accepted behavior change: `printf 'see git commit' > file`
+	//     is DENIED — previously the git-mutation-bypass inspector carve-out
+	//     (printf in command position) exempted the prose AND the redirect was
+	//     invisible to the allowlist, so the command was ALLOWED.
+	//   - heredoc-to-file with a forbidden token in the body is DENIED for the
+	//     RIGHT reason (file-authoring, not the token): previously system-tmp-
+	//     access fired on `/tmp` in the heredoc body. The deny REASON is
+	//     verified in the standalone check below the table.
+	//   - /dev/null redirects are NOT file-authoring (discard) and stay ALLOW.
+	//   - bare echo/printf prose (no redirect) is still ALLOWED (inspector
+	//     carve-out preserved; RF-B does not touch commands without output
+	//     redirects).
+	//   - fail-closed: chains (&&) with redirects do NOT fire RF-B — they fall
+	//     through to the existing scan unchanged (only-adds-denials: RF-B
+	//     never weakens the scan).
+	rfbCases := []struct {
+		name string
+		cmd  string
+		want Action
+	}{
+		// --- MUST DENY: clean output redirect (previously ALLOWED) ---
+		{
+			name: "echo hello > tmp/x denied (RF-B file-authoring)",
+			cmd:  `echo hello > tmp/x`,
+			want: Deny,
+		},
+		{
+			// A4 accepted behavior change: printf single-line with git-commit
+			// content redirected to a file. Previously ALLOWED (printf carve-out
+			// + redirect invisible to allowlist). Now DENIED by RF-B.
+			name: "printf git-commit > tmp/x denied (A4 accepted behavior change)",
+			cmd:  `printf 'see git commit notes' > tmp/x`,
+			want: Deny,
+		},
+		{
+			name: "cat > tmp/x denied (RF-B cat redirect)",
+			cmd:  `cat > tmp/x`,
+			want: Deny,
+		},
+		{
+			name: "echo value >> tmp/log denied (RF-B append redirect)",
+			cmd:  `echo value >> tmp/log`,
+			want: Deny,
+		},
+		{
+			// The exact FP scenario: heredoc-to-file with /tmp in the body.
+			// Previously DENIED via system-tmp-access (confusing reason). Now
+			// DENIED via RF-B file-authoring (actionable reason — verified
+			// in the standalone reason check below).
+			name: "heredoc-to-file with /tmp in body denied (RF-B drains system-tmp-access FP)",
+			cmd:  "cat > tmp/x <<'EOF'\nsee /tmp reference\nEOF",
+			want: Deny,
+		},
+
+		// --- MUST ALLOW: not file-authoring or excluded ---
+		{
+			name: "echo hello allowed (no redirect, RF-B does not fire)",
+			cmd:  `echo hello`,
+			want: Allow,
+		},
+		{
+			// /dev/null discards output — NOT file-authoring. Excluded from
+			// RF-B so legitimate output-suppression stays allowed.
+			name: "echo hello > /dev/null allowed (devnull excluded from RF-B)",
+			cmd:  `echo hello > /dev/null`,
+			want: Allow,
+		},
+		{
+			// Quoted /dev/null (single quotes): tree-sitter .text retains the
+			// quotes, so the exclusion must use unquoteToken. Pinned so the
+			// normalization cannot regress (commit-review F1).
+			name: "echo hello > '/dev/null' allowed (quoted devnull, unquoteToken normalization)",
+			cmd:  `echo hello > '/dev/null'`,
+			want: Allow,
+		},
+		{
+			// Quoted /dev/null (double quotes): same normalization path.
+			name: `echo hello > "/dev/null" allowed (quoted devnull, unquoteToken normalization)`,
+			cmd:  `echo hello > "/dev/null"`,
+			want: Allow,
+		},
+		{
+			// Bare echo prose (no redirect). The inspector carve-out still
+			// exempts this from git-mutation-bypass. RF-B does NOT fire (no
+			// output redirect present). This is the FP drain for non-file-
+			// authoring prose: agents use bare echo/printf, which is allowed.
+			name: "echo prose with git commit allowed (no redirect, inspector carve-out preserved)",
+			cmd:  `echo "see git commit notes"`,
+			want: Allow,
+		},
+
+		// --- UNCHANGED: RF-B fail-closed (ambiguous/chained) ---
+		{
+			// Chain: RF-B sees a `list` node in the AST → fail-closed →
+			// falls through to scan. No forbidden tokens → allowlist matches
+			// echo/cat → ALLOW (unchanged from pre-RF-B behavior). RF-B does
+			// not over-deny chained forms.
+			name: "echo x && cat > tmp/y allowed (RF-B fail-closed on chain)",
+			cmd:  `echo x && cat > tmp/y`,
+			want: Allow,
+		},
+	}
+	for _, c := range rfbCases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, _, evalErr := h.Evaluate(context.Background(), []string{c.cmd})
+			if evalErr != nil {
+				t.Fatalf("Evaluate(%q) error %v; want verdict %s (no bridge error)", c.cmd, evalErr, c.want)
+			}
+			if got != c.want {
+				t.Errorf("Evaluate(%q) = %s; want %s", c.cmd, got, c.want)
+			}
+		})
+	}
+
+	// RF-B reason check: the heredoc-to-file drain case must be denied with
+	// the file-authoring reason (NOT system-tmp-access). This proves the FP
+	// is drained for the right reason — the deny message routes to the Write
+	// tool, not to the forbidden-token scan that previously fired on the body.
+	{
+		cmd := "cat > tmp/x <<'EOF'\nsee /tmp reference\nEOF"
+		got, reason, evalErr := h.Evaluate(context.Background(), []string{cmd})
+		if evalErr != nil {
+			t.Fatalf("Evaluate(heredoc drain) error %v; want Deny (no bridge error)", evalErr)
+		}
+		if got != Deny {
+			t.Fatalf("Evaluate(heredoc drain) = %s; want Deny", got)
+		}
+		if !strings.Contains(reason, "file-authoring") {
+			t.Errorf("heredoc drain deny reason should mention file-authoring; got %q", reason)
+		}
+		if strings.Contains(reason, "system-tmp-access") {
+			t.Errorf("heredoc drain deny reason should NOT mention system-tmp-access (RF-B fires before scan); got %q", reason)
+		}
+	}
+
 	// --- git global-flag walker matrix ---------------------------------------
 	//
 	// These cases exercise walkGitGlobals end-to-end through eval.js. They use
