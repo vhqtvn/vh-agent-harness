@@ -48,6 +48,19 @@ import (
 //   - heartbeat_rejects_traversal_meta_uuid: SECDATA-1 overwrite class —
 //     heartbeat --uuid traversal rejected at _session_meta_path so the
 //     lock-free read+write ('w') python3 block cannot corrupt a victim file
+//   - acquire_cleanup_protects_live_concurrent_session: the PROTECT-LIVE half
+//     of the acquire-time dual contract — an aged LIVE concurrent session's
+//     meta-/index- survives a later acquire (protected-UUID skip works
+//     independent of heartbeat)
+//   - acquire_cleanup_heartbeat_refreshes_meta_mtime: heartbeat refreshes
+//     meta mtime (pins the open question empirically) and a heartbeated
+//     session's scratch survives a concurrent acquire
+//   - acquire_cleanup_reaps_abandoned_orphan_scratch: the POSITIVE-REAP half
+//     of the acquire-time dual contract — genuinely abandoned meta-/index-
+//     (no lock, no _current_uuid, aged meta) ARE reaped by a later acquire,
+//     while the acquiring session's own fresh scratch survives. Complements
+//     the two protect-live subtests so a future OVER-protection regression
+//     cannot pass silently.
 func TestCommitGate_MessageCleanup(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
@@ -870,6 +883,121 @@ func TestCommitGate_MessageCleanup(t *testing.T) {
 		}
 		if _, err := os.Stat(indexA); err != nil {
 			t.Fatalf("REGRESSION: heartbeated A index-A was deleted by B's acquire-time cleanup; stat err=%v", err)
+		}
+	})
+
+	// ---------------------------------------------------------------------
+	// Subtest 13: acquire-time cleanup REAPS genuinely abandoned scratch
+	// (the POSITIVE-REAP half of the acquire-time dual contract; complements
+	// subtests 11 and 12, which prove only the protect-live half).
+	//
+	// The acquire-time meta cleanup (commit-gate.sh, the pre-lock block in
+	// cmd_acquire) must STILL REAP meta-X/index-X when X is genuinely
+	// abandoned — i.e. when X is NOT in the protected-UUID set: no held lock,
+	// no _current_uuid pointing at X, and meta-X aged past GC_MAX_AGE (so it
+	// is not in the fresh-meta set either). Without this positive case, a
+	// future OVER-protection regression (the protected-UUID skip matching too
+	// broadly, or the cleanup skipping reaping entirely) would pass subtests
+	// 11 + 12 (protect-live) while silently breaking scratch reclamation. This
+	// subtest seeds an orphan meta-X + index-X in a fresh repo (no lock, no
+	// _current_uuid), ages meta-X past the GC retention window, runs an
+	// acquire, and asserts BOTH orphan files are reaped (the load-bearing
+	// reap-abandoned assertion). It also asserts the acquiring session's OWN
+	// fresh meta-/index- exist post-acquire as an integrity check that the
+	// acquire completed normally; NOTE this does NOT by itself rule out an
+	// over-reap (blanket-nuke) regression, because those files are created
+	// AFTER the pre-lock cleanup runs. The over-reap direction is guarded by
+	// subtests 11 and 12 (PRE-EXISTING live scratch survives) — together the
+	// three cases pin the full dual contract.
+	// ---------------------------------------------------------------------
+	t.Run("acquire_cleanup_reaps_abandoned_orphan_scratch", func(t *testing.T) {
+		dir, dstScripts := setupScratchRepo(t)
+		seedAndCommit(t, dir, "v1\n")
+
+		// Seed an ORPHAN session's scratch (meta-X + index-X) left behind by a
+		// prior session that died without committing/releasing and whose lock
+		// was broken/cleared. This repo has NEVER acquired (fresh), so:
+		//   - no $LOCK_DIR  → active-lock UUID is empty
+		//   - no _current_uuid → no most-recent-session marker
+		//   - meta-X aged past GC_MAX_AGE → not in the fresh-meta set
+		// ⇒ X is NOT in the protected-UUID set ⇒ the cleanup MUST reap it.
+		orphanX := genUUID(t, dstScripts)
+		gateDir := filepath.Join(dir, ".git", "commit-gate")
+		if err := os.MkdirAll(gateDir, 0o755); err != nil {
+			t.Fatalf("mkdir gate dir: %v", err)
+		}
+		metaX := filepath.Join(gateDir, "meta-"+orphanX)
+		indexX := filepath.Join(gateDir, "index-"+orphanX)
+		if err := os.WriteFile(metaX, []byte("{\"uuid\":\""+orphanX+"\",\"abandoned\":true}\n"), 0o644); err != nil {
+			t.Fatalf("write orphan meta-X: %v", err)
+		}
+		if err := os.WriteFile(indexX, []byte("placeholder-index\n"), 0o644); err != nil {
+			t.Fatalf("write orphan index-X: %v", err)
+		}
+		// Age meta-X past the GC retention window (DEFAULT_GC_MAX_AGE=3600s).
+		// The cleanup's age gate keys off the META mtime; index-X is removed
+		// unconditionally once meta-X is determined stale+unprotected.
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(metaX, old, old); err != nil {
+			t.Fatalf("chtimes meta-X: %v", err)
+		}
+
+		// Sanity: confirm the orphan is genuinely UNPROTECTED at acquire time
+		// (no lock, no _current_uuid). If either exists, the test premise
+		// would not hold (the orphan could be protected for an unrelated
+		// reason and the reap assertion would not exercise the contract).
+		if _, err := os.Stat(filepath.Join(dir, ".git", "commit-gate.lock")); !os.IsNotExist(err) {
+			t.Fatalf("test premise broken: a lock exists at acquire time (stat err=%v)", err)
+		}
+		if _, err := os.Stat(filepath.Join(gateDir, "_current_uuid")); !os.IsNotExist(err) {
+			t.Fatalf("test premise broken: _current_uuid exists at acquire time (stat err=%v)", err)
+		}
+
+		// Acquire with a real working-tree change (a DIFFERENT session whose
+		// uuid != orphanX). The acquire-time cleanup runs pre-lock, BEFORE the
+		// new session writes its own _current_uuid/meta-/index-.
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("v2\n"), 0o644); err != nil {
+			t.Fatalf("modify: %v", err)
+		}
+		uuidA := genUUID(t, dstScripts)
+		msgRel := writeAgentMsg(t, dir, uuidA)
+		acq := runGate(t, dstScripts, dir, "acquire",
+			"--paths", `["file.txt"]`,
+			"--message-file", msgRel,
+			"--session-alias", "reap-test")
+		uuidG, _ := acq["uuid"].(string)
+		if uuidG == "" {
+			t.Fatalf("acquire did not return a uuid: %v", acq)
+		}
+		if status, _ := acq["status"].(string); status != "acquired" {
+			t.Fatalf("expected status acquired, got %v", acq)
+		}
+		if uuidG == orphanX {
+			t.Fatalf("test premise broken: new session uuid == orphan uuid (%s)", orphanX)
+		}
+
+		// THE positive-reap assertion: the ORPHAN meta-X + index-X are GONE.
+		// A future over-protection regression (protected-UUID skip too broad,
+		// or cleanup skipping reaping entirely) would leave these behind while
+		// still passing the protect-live subtests 11 + 12.
+		if _, err := os.Stat(metaX); !os.IsNotExist(err) {
+			t.Fatalf("REGRESSION: orphan meta-X %s must be reaped by acquire-time cleanup; stat err=%v", metaX, err)
+		}
+		if _, err := os.Stat(indexX); !os.IsNotExist(err) {
+			t.Fatalf("REGRESSION: orphan index-X %s must be reaped by acquire-time cleanup; stat err=%v", indexX, err)
+		}
+
+		// Integrity check (NOT a blanket-nuke guard): the acquiring session's
+		// OWN fresh meta-/index- exist post-acquire, confirming the acquire
+		// completed normally and created its own scratch. This does NOT by
+		// itself rule out an over-reap regression, because these files are
+		// created AFTER the pre-lock cleanup; the over-reap direction is
+		// guarded by subtests 11 and 12 (PRE-EXISTING live scratch survives).
+		if _, err := os.Stat(filepath.Join(gateDir, "meta-"+uuidG)); err != nil {
+			t.Fatalf("acquiring session meta-%s must SURVIVE its own cleanup; stat err=%v", uuidG, err)
+		}
+		if _, err := os.Stat(filepath.Join(gateDir, "index-"+uuidG)); err != nil {
+			t.Fatalf("acquiring session index-%s must SURVIVE its own cleanup; stat err=%v", uuidG, err)
 		}
 	})
 }
