@@ -495,6 +495,19 @@ _stale_break() {
   local lockdir="$1" expected_uuid="$2"
   local stale_backup="${lockdir}.stale.$$"
 
+  # Fail-safe: refuse to break a lock whose expected identity is empty. An
+  # empty expected_uuid means _is_stale could not read the lock's uuid
+  # (absent/unparseable meta — a half-born lock). The verify-after-move below
+  # compares actual_uuid != expected_uuid; with both empty that guard is
+  # vacuously FALSE and we would proceed to destroy a LIVE lock, breaking
+  # mutual exclusion (half-born-lock-stale-break). _is_stale now returns
+  # non-stale for this case, so this path is unreachable in the normal acquire
+  # flow; this guard is defense-in-depth against any future caller reaching
+  # here with an empty uuid. Never move/destroy a lock we cannot identify.
+  if [[ -z "$expected_uuid" ]]; then
+    return 1
+  fi
+
   # Atomic claim: move the lock dir to our unique backup path.
   # If mv fails, another process already moved/removed it. That's fine.
   mv "$lockdir" "$stale_backup" 2>/dev/null || return 0
@@ -546,6 +559,21 @@ _is_stale() {
   lock_hname=$(_field_str "$content" "hostname")
   cur_hname=$(_hostname)
   uuid_from_meta=$(_field_str "$content" "uuid")
+
+  # Fail-safe: absent/unparseable meta means the lock is being born (mkdir done,
+  # meta not yet written) or is corrupt. In EITHER case we cannot identify it
+  # for the verify-after-move in _stale_break — treating it as stale would let a
+  # concurrent acquirer destroy a LIVE lock and break mutual exclusion
+  # (half-born-lock-stale-break). The empty uuid is the absence signal (no
+  # readable heartbeat, pid, or uuid — content collapsed to "{}"). Modeled on
+  # internal/cli/profile.go corpusDefaultFeatures: fail-safe, not fail-open.
+  # NOTE: this does NOT weaken stale recovery — every genuinely-stale path
+  # below requires a readable meta (expired heartbeat, dead pid, cross-host),
+  # all of which carry a non-empty uuid. Only the no-meta half-born state is
+  # affected, and that state is a LIVE lock mid-birth, never legitimately stale.
+  if [[ -z "$uuid_from_meta" ]]; then
+    return 1  # cannot identify → not stale (lock being born or corrupt)
+  fi
 
   # Primary check: heartbeat TTL
   # If heartbeat is fresh (within TTL), the lock is NOT stale regardless of PID.
