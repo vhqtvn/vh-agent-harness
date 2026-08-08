@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
 )
 
 // srcDir returns the .vh-agent-harness/ source dir under a temp project, created.
@@ -165,4 +167,137 @@ func composeAndRead(t *testing.T, dir string) (string, error) {
 		t.Fatalf("read composed AGENTS.md: %v", err)
 	}
 	return string(got), nil
+}
+
+// --- answer-threading (renderAgentsCoreTemplate data-context widening) --------
+//
+// renderAgentsCoreTemplate historically built a features-ONLY data context, so a
+// future {{ .project_name }} / {{ .project_slug }} / {{ .coordinator_dir }}
+// Go-template action in AGENTS.core.md would render as the silent <no value>
+// footgun (documented at the call site). The widening threads installRenderAnswers
+// alongside the features map so those dot-actions resolve to the SAME value the
+// renderer's SubstituteHarnessTokens pass resolved the equivalent UPPER sentinels
+// to. This test is the load-bearing crux: it proves (1) a {{ .project_name }}
+// action resolves non-empty, (2) coordinator_dir defaults to "coordinator", and
+// (3) a {{ if .features.backlog }} action in the SAME core STILL evaluates
+// correctly — i.e. threading answers did NOT switch to missingkey=error (which
+// would break the features zero-value-falsy semantics).
+
+// TestComposeAgentsMd_AnswersThreadedAndFeaturesPreserved proves the data
+// context widening closes the <no value> footgun while preserving the features
+// gating semantics. Greenfield temp dir (no lineage, no profile):
+// installRenderAnswers falls back to defaultAnswers (project_name = dir basename),
+// coordinatorDirOrDefault returns "coordinator", and reconciledFeatures returns
+// the corpus default (backlog=true).
+func TestComposeAgentsMd_AnswersThreadedAndFeaturesPreserved(t *testing.T) {
+	dir := t.TempDir()
+	src := srcDir(t, dir)
+	// A core carrying BOTH a non-features dot-action (the footgun this fix
+	// closes) and a feature conditional (the mechanism this fix must preserve).
+	core := "# Core\n" +
+		"NAME=[{{ .project_name }}]\n" +
+		"SLUG=[{{ .project_slug }}]\n" +
+		"COORD=[{{ .coordinator_dir }}]\n" +
+		"{{ if .features.backlog }}BACKLOG-PRESENT\n{{ end }}\n"
+	mustWrite(t, filepath.Join(src, "AGENTS.core.md"), core)
+	mustWrite(t, filepath.Join(src, "AGENTS.mission.md"), "# Mission\nDOMAIN-MARKER\n")
+
+	got, err := composeAndRead(t, dir)
+	if err != nil {
+		t.Fatalf("composeAgentsMd: %v", err)
+	}
+	// The dot-actions must resolve to concrete values, NOT render as the silent
+	// <no value> footgun.
+	if strings.Contains(got, "<no value>") {
+		t.Errorf("threaded answers must resolve dot-actions; found <no value>:\n%s", got)
+	}
+	// project_name / project_slug resolve to the temp dir basename (defaultAnswers
+	// derives both from filepath.Base(target)).
+	expectedName := filepath.Base(dir)
+	if !strings.Contains(got, "NAME=["+expectedName+"]") {
+		t.Errorf("project_name must resolve to dir basename %q; got:\n%s", expectedName, got)
+	}
+	if !strings.Contains(got, "SLUG=["+expectedName+"]") {
+		t.Errorf("project_slug must resolve to dir basename %q; got:\n%s", expectedName, got)
+	}
+	// coordinator_dir resolves to the substrate-mirrored default "coordinator"
+	// (no lineage answer in a greenfield temp dir).
+	if !strings.Contains(got, "COORD=[coordinator]") {
+		t.Errorf("coordinator_dir must default to \"coordinator\"; got:\n%s", got)
+	}
+	// The feature conditional must STILL evaluate (backlog=true corpus default),
+	// proving the widening preserved the features zero-value-falsy semantics
+	// (no missingkey=error switch).
+	if !strings.Contains(got, "BACKLOG-PRESENT") {
+		t.Errorf("features.backlog (corpus default true) must still include the gated section:\n%s", got)
+	}
+	if !strings.Contains(got, "DOMAIN-MARKER") {
+		t.Errorf("mission half must survive:\n%s", got)
+	}
+	// No template action markers may leak into the composed output.
+	if strings.Contains(got, "{{ ") || strings.Contains(got, "{{if") {
+		t.Errorf("composed AGENTS.md leaked a template action marker:\n%s", got)
+	}
+}
+
+// TestComposeAgentsMd_AnswersFromLineageRecord proves the lineage-present branch
+// of installRenderAnswers (the "lineage-or-default" equivalence half of the
+// widening): when a lineage.yml carries distinct install-identity values, the
+// dot-actions emit THOSE values (not the defaultAnswers dir-basename fallback),
+// and coordinatorDirOrDefault returns the lineage's coordinator_dir (not the
+// "coordinator" default). This closes the test gap where only the greenfield
+// default-answers path was exercised.
+func TestComposeAgentsMd_AnswersFromLineageRecord(t *testing.T) {
+	dir := t.TempDir()
+	src := srcDir(t, dir)
+	// Seed a lineage record with DISTINCT install-identity values so a pass via
+	// defaultAnswers (dir basename / "coordinator") would be detectable: every
+	// asserted value differs from the fallback.
+	lin := &lineage.Lineage{
+		LineageVersion: "1",
+		Answers: lineage.AnswersRef{
+			Values: map[string]string{
+				"project_name":    "lin-proj",
+				"project_slug":    "lin-slug",
+				"coordinator_dir": "lin-coord",
+			},
+		},
+	}
+	if err := lin.Write(dir); err != nil {
+		t.Fatalf("seed lineage: %v", err)
+	}
+	core := "# Core\n" +
+		"NAME=[{{ .project_name }}]\n" +
+		"SLUG=[{{ .project_slug }}]\n" +
+		"COORD=[{{ .coordinator_dir }}]\n" +
+		"{{ if .features.backlog }}BACKLOG-PRESENT\n{{ end }}\n"
+	mustWrite(t, filepath.Join(src, "AGENTS.core.md"), core)
+	mustWrite(t, filepath.Join(src, "AGENTS.mission.md"), "# Mission\nDOMAIN-MARKER\n")
+
+	got, err := composeAndRead(t, dir)
+	if err != nil {
+		t.Fatalf("composeAgentsMd: %v", err)
+	}
+	if strings.Contains(got, "<no value>") {
+		t.Errorf("threaded answers must resolve dot-actions; found <no value>:\n%s", got)
+	}
+	// The lineage values must win over the defaultAnswers fallback.
+	if !strings.Contains(got, "NAME=[lin-proj]") {
+		t.Errorf("project_name must come from the lineage record (lin-proj), not defaultAnswers:\n%s", got)
+	}
+	if !strings.Contains(got, "SLUG=[lin-slug]") {
+		t.Errorf("project_slug must come from the lineage record (lin-slug):\n%s", got)
+	}
+	if !strings.Contains(got, "COORD=[lin-coord]") {
+		t.Errorf("coordinator_dir must come from the lineage record (lin-coord), not the \"coordinator\" default:\n%s", got)
+	}
+	// The feature conditional must still evaluate (corpus default backlog=true),
+	// proving the widening preserved the features zero-value-falsy semantics on
+	// the lineage-present path too.
+	if !strings.Contains(got, "BACKLOG-PRESENT") {
+		t.Errorf("features.backlog (corpus default true) must still include the gated section:\n%s", got)
+	}
+	if strings.Contains(got, "{{ ") || strings.Contains(got, "{{if") {
+		t.Errorf("composed AGENTS.md leaked a template action marker:\n%s", got)
+	}
 }

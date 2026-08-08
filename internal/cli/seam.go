@@ -528,23 +528,50 @@ func composeAgentsMd(target string) error {
 // (features.<x>: false in vh-harness-profile.yml) suppresses its section in the
 // composed AGENTS.md.
 //
-// The data context is INTENTIONALLY features-only: it carries a top-level
-// "features" map (map[string]bool from reconciledFeatures) so
-// {{ if .features.backlog }} resolves the BOOLEAN (not a non-empty "false"
-// string), and an unset flag is falsy via Go's default map-index behavior (a
-// missing key in map[string]bool returns the zero value false). Non-features
-// harness tokens ({{COORDINATOR_DIR}} etc.) are ALREADY resolved by the
-// renderer's SubstituteHarnessTokens pass during the preserve-as-is copy, so
-// the core half arriving here needs no project_name/project_slug/coordinator_dir
-// answers — only the feature flags remain as live template actions. If a
-// future non-features template action is added to AGENTS.core.md, widen this
-// context (mirror substrate.buildTemplateData) or it will render as <no value>.
+// The data context carries:
+//   - a top-level "features" map (map[string]bool from reconciledFeatures) so
+//     {{ if .features.backlog }} resolves the BOOLEAN (not a non-empty "false"
+//     string), and an unset flag is falsy via Go's default map-index behavior (a
+//     missing key in map[string]bool returns the zero value false);
+//   - the install render answers (project_name/project_slug/coordinator_dir from
+//     installRenderAnswers — the lineage-or-defaultAnswers source the renderer's
+//     SubstituteHarnessTokens pass uses for the {{PROJECT_NAME}}/{{PROJECT_SLUG}}/
+//     {{COORDINATOR_DIR}} sentinels) so a future {{ .project_name }} /
+//     {{ .project_slug }} / {{ .coordinator_dir }} Go-template action in
+//     AGENTS.core.md resolves to a concrete value instead of rendering as the
+//     silent <no value> footgun. project_name and coordinator_dir resolve to the
+//     SAME value the equivalent UPPER sentinel resolved to during the preserve-
+//     as-is copy (coordinator_dir defaults to "coordinator" when unset, mirroring
+//     substrate.SubstituteHarnessTokens). project_slug is the raw install answer
+//     verbatim: it matches the lower-case {{PROJECT_SLUG}} emission when the
+//     install recorded a slug, but a dot-action emits ONE value and so does NOT
+//     reproduce the UPPER sentinel's slugify-from-project_name fallback (when the
+//     answer is empty) or its case-aware SCREAMING_SNAKE behavior — those are
+//     sentinel-context-dependent and have no dot-action equivalent. A live
+//     {{ .project_slug }} consumer, if ever added, should re-evaluate whether to
+//     mirror the slugify fallback here (see coordinatorDirOrDefault's twin).
+//
+// Non-features harness tokens ({{COORDINATOR_DIR}} etc.) are ALREADY resolved by
+// the renderer's SubstituteHarnessTokens pass during the preserve-as-is copy, so
+// historically only the feature flags remained as live template actions and the
+// three answer keys are defensive (no current AGENTS.core.md action consumes
+// them — the only live action is {{ if .features.backlog }}). Threading them now
+// closes the <no value> footgun atomically: a non-features action added later
+// resolves correctly without a second seam edit. This does NOT switch to
+// missingkey=error — that would break the features.* zero-value-falsy semantics
+// ({{ if .features.<unset> }} would error instead of suppressing the section).
 // A core file with NO template actions parses and executes as an identity — the
 // common case for a project's hand-authored core that carries no feature gates —
 // so this is backward-safe.
 func renderAgentsCoreTemplate(core []byte, target string) ([]byte, error) {
 	features := reconciledFeatures(target)
-	data := map[string]any{"features": features}
+	answers := installRenderAnswers(target)
+	data := map[string]any{
+		"features":        features,
+		"project_name":    answers["project_name"],
+		"project_slug":    answers["project_slug"],
+		"coordinator_dir": coordinatorDirOrDefault(answers),
+	}
 	t, err := template.New("AGENTS.core.md").Parse(string(core))
 	if err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
@@ -554,6 +581,22 @@ func renderAgentsCoreTemplate(core []byte, target string) ([]byte, error) {
 		return nil, fmt.Errorf("execute: %w", err)
 	}
 	return out.Bytes(), nil
+}
+
+// coordinatorDirOrDefault mirrors substrate.SubstituteHarnessTokens's
+// {{COORDINATOR_DIR}} resolution: the install-chosen coordinator_dir when the
+// lineage answer carries one, else "coordinator" (the README default install
+// dir, .local/coordinator/). It is kept here so renderAgentsCoreTemplate's
+// {{ .coordinator_dir }} Go-template action resolves identically to the
+// equivalent {{COORDINATOR_DIR}} sentinel the renderer already resolved during
+// the preserve-as-is copy — a future author adding either form gets the same
+// value. (The substrate side inlines the same "coordinator" default; this is the
+// compose-side twin, not a divergence.)
+func coordinatorDirOrDefault(answers map[string]string) string {
+	if v := answers["coordinator_dir"]; v != "" {
+		return v
+	}
+	return "coordinator"
 }
 
 // defaultRunShapeSeed is the minimal, schema-valid run-shape the seam seeds on
