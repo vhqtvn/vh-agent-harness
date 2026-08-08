@@ -429,6 +429,23 @@ test("lifecycle: cancelled card with a FIRED trigger is NOT actionable (re-fire)
     assert.equal(r.actionable, false);
 });
 
+test("lifecycle: staged card with a FIRED trigger is NOT actionable (re-fire) — closed for recurrence like completed/cancelled", () => {
+    // Staged is closed for promotion/recurrence: it mirrors PREP_CLOSED_STATUSES
+    // (release-prep) and the Go-side closedStatuses (claim.go CardIsClosed/
+    // StatusIsClosed + the release-gate closed set {completed, cancelled,
+    // staged}). A staged card (correction queued for the next release) whose
+    // trigger fires is a regression signal, NOT fresh actionable READY. Pre-fix
+    // the promoter disposed set held only {completed, cancelled} and missed
+    // staged → a fired staged card rendered [READY].
+    const r = evaluateCandidate("tasks/staged.json", promoterCard("staged", [
+        "trigger:path_touched(fileA.go)",
+    ], "staged"), "v0.1.0", new Set(["fileA.go"]));
+    assert.equal(r.state, "valid-fired", "predicate state must stay valid-fired (evaluation unchanged)");
+    assert.equal(r.met, true, "predicate-READY (met) must stay true so the re-fire is still visible");
+    assert.equal(r.lifecycle, "disposed", "staged must be lifecycle disposed (closed for recurrence)");
+    assert.equal(r.actionable, false, "a staged card must NOT be actionable READY even when its trigger fires");
+});
+
 test("lifecycle: completed card status is case-insensitive and trimmed (Completed / Cancelled )", () => {
     const rUpper = evaluateCandidate("tasks/done-u.json", promoterCard("done-u", [
         "trigger:path_touched(fileA.go)",
@@ -502,8 +519,11 @@ test("lifecycle: no-trigger completed card carries lifecycle + actionable=false 
 
 // Build a hermetic scratch git repo with a prior tag and a post-tag change to
 // fileA.go (so path_touched(fileA.go) fires), then run the TEMPLATE script in
-// promoter mode against a tasks dir holding one completed card.
-function runPromoterWithCompletedCard() {
+// promoter mode against a tasks dir holding one completed card, one staged
+// card, and one open draft card. The completed + staged cards are both
+// disposition-satisfied (closed for recurrence) and must re-fire as [RE-FIRE],
+// while the open draft card fires as [READY].
+function runPromoterWithDisposedRefireCards() {
     const dir = mkdtempSync(join(tmpdir(), "cdt-promoter-"));
     // Copy the template script so __dirname-based repoRoot() resolves to dir.
     const scriptCopy = join(dir, ".opencode", "scripts", "check-defer-triggers.mjs");
@@ -518,6 +538,17 @@ function runPromoterWithCompletedCard() {
         task_id: "done-refire",
         status: "completed",
         owner_notes: ["source:review-defer", "trigger:path_touched(fileA.go)", "studied:2026-04-30"],
+    }));
+    // A STAGED card whose watched path (fileA.go) re-fires. Staged is closed
+    // for recurrence (mirrors PREP_CLOSED_STATUSES + the Go-side closedStatuses),
+    // so it must re-fire as [RE-FIRE] too — NOT [READY]. Pre-fix the promoter
+    // disposed set held only {completed, cancelled} and a fired staged card
+    // rendered [READY], conflating trigger-fired with promotion-work-remains.
+    writeFileSync(join(tasksDir, "staged-refire.json"), JSON.stringify({
+        schema_version: 1,
+        task_id: "staged-refire",
+        status: "staged",
+        owner_notes: ["source:review-defer", "trigger:path_touched(fileA.go)", "studied:2026-08-08"],
     }));
     // An open (draft) card that also fires, to prove READY still works alongside.
     writeFileSync(join(tasksDir, "draft-fire.json"), JSON.stringify({
@@ -548,19 +579,27 @@ function runPromoterWithCompletedCard() {
     return { stdout: res.stdout, status: res.status, stderr: res.stderr };
 }
 
-test("promoter e2e: completed card re-fires as [RE-FIRE] (NOT [READY]) and is excluded from the actionable count", () => {
-    const { stdout, status, stderr } = runPromoterWithCompletedCard();
+test("promoter e2e: completed + staged cards re-fire as [RE-FIRE] (NOT [READY]) and are excluded from the actionable count", () => {
+    const { stdout, status, stderr } = runPromoterWithDisposedRefireCards();
     assert.equal(status, 0, `promoter must exit 0 (never blocking); stderr: ${stderr}`);
     // The completed card is surfaced under the distinct RE-FIRE category.
     assert.ok(stdout.includes("[RE-FIRE] done-refire"), `completed re-fire must render [RE-FIRE]; got:\n${stdout}`);
-    // And it must NOT appear under [READY] (the defect: it used to).
-    assert.ok(!stdout.includes("[READY] done-refire"), `completed card must NOT render [READY] (defect regressed); got:\n${stdout}`);
+    // The staged card is ALSO surfaced as [RE-FIRE] (closed for recurrence,
+    // mirroring PREP_CLOSED_STATUSES + the Go-side closedStatuses). Pre-fix it
+    // rendered [READY] because the promoter disposed set held only
+    // {completed, cancelled} and missed staged.
+    assert.ok(stdout.includes("[RE-FIRE] staged-refire"), `staged re-fire must render [RE-FIRE]; got:\n${stdout}`);
+    // And neither must appear under [READY] (the defect: staged used to).
+    assert.ok(!stdout.includes("[READY] done-refire"), `completed card must NOT render [READY]; got:\n${stdout}`);
+    assert.ok(!stdout.includes("[READY] staged-refire"), `staged card must NOT render [READY] (defect regressed); got:\n${stdout}`);
     // The open draft card still renders [READY] alongside (no over-rejection).
     assert.ok(stdout.includes("[READY] draft-fire"), `open draft card must still render [READY]; got:\n${stdout}`);
-    // The actionable count excludes the disposed re-fire: 1 actionable READY
-    // (draft-fire) out of 2 candidates.
-    assert.ok(stdout.includes("1/2 candidate(s) are actionable READY"), `actionable count must exclude the disposed re-fire; got:\n${stdout}`);
-    // The separate disposed re-fire summary line surfaces the regression signal.
+    // The actionable count excludes BOTH disposed re-fires: 1 actionable READY
+    // (draft-fire) out of 3 candidates. staged does not increase the actionable
+    // count.
+    assert.ok(stdout.includes("1/3 candidate(s) are actionable READY"), `actionable count must exclude both disposed re-fires; got:\n${stdout}`);
+    // The separate disposed re-fire summary line surfaces the regression signal,
+    // and staged DOES increase the re-fire count: 2 (done-refire + staged-refire).
     assert.ok(stdout.includes("Disposed re-fires"), `the re-fire summary line must preserve the regression signal; got:\n${stdout}`);
-    assert.ok(stdout.includes(": 1\n"), `re-fire count must be 1; got:\n${stdout}`);
+    assert.ok(stdout.includes(": 2\n"), `re-fire count must be 2 (completed + staged); got:\n${stdout}`);
 });

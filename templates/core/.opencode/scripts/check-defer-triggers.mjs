@@ -386,6 +386,20 @@ function extractTriggers(body) {
     return { mode: "all", items: triggers };
 }
 
+// CLOSED_FOR_RECURRENCE_STATUSES mirrors PREP_CLOSED_STATUSES (release-prep
+// mode below) and the Go-side closedStatuses (internal/memory/claims/claim.go
+// CardIsClosed/StatusIsClosed + the release-gate closed set
+// {completed, cancelled, staged}). A card in one of these statuses is closed
+// for promotion/recurrence: disposition-satisfied, so a trigger re-fire is a
+// regression signal surfaced as [RE-FIRE], NOT fresh actionable [READY] work.
+// Kept as a purpose-named constant (rather than importing PREP_CLOSED_STATUSES,
+// which is declared later in the release-prep section) so the promoter path is
+// self-documenting; the two sets carry identical content and both mirror the
+// Go-side closed-status convention. Pre-fix this held only {completed,
+// cancelled} and a fired staged card rendered [READY], conflating trigger-fired
+// with promotion-work-remains.
+const CLOSED_FOR_RECURRENCE_STATUSES = new Set(["completed", "cancelled", "staged"]);
+
 // Evaluate one candidate (PROMOTER mode). Returns a report object. `body` is
 // the PARSED JSON task-card object (not the raw file text): task_id and
 // owner_notes are read natively so DEFER/p2-followup cards (.json produced
@@ -409,15 +423,16 @@ export function evaluateCandidate(file, body, since, changedPaths) {
     // Lifecycle disposition (REPORTING layer, not predicate evaluation). The
     // six-state predicate logic in classifyCardState is UNCHANGED and never
     // consults status; this only affects the promotable-READY REPORTING so a
-    // card that is already completed/cancelled does not re-fire as actionable
-    // READY when its own fix re-touched its watched path. The predicate truth
-    // (state/met below) is preserved so the re-fire signal (watched path
-    // re-touched, possible regression) is still surfaced — just under a distinct
-    // already-disposed category instead of conflated with fresh actionable READY.
+    // card already closed for promotion/recurrence (completed/cancelled/staged)
+    // does not re-fire as actionable READY when its own fix re-touched its
+    // watched path. The predicate truth (state/met below) is preserved so the
+    // re-fire signal (watched path re-touched, possible regression) is still
+    // surfaced — just under a distinct already-disposed category instead of
+    // conflated with fresh actionable READY.
     const statusRaw = (body && typeof body.status === "string")
         ? body.status.trim().toLowerCase()
         : "";
-    const disposed = statusRaw === "completed" || statusRaw === "cancelled";
+    const disposed = CLOSED_FOR_RECURRENCE_STATUSES.has(statusRaw);
     const lifecycle = disposed ? "disposed" : "open";
     const trig = extractTriggers(notesText);
     if (!trig.items || trig.items.length === 0) {
@@ -455,11 +470,11 @@ export function evaluateCandidate(file, body, since, changedPaths) {
     // `met` is the PREDICATE-READY signal: the trigger condition is satisfied
     // (valid-fired). classifyCardState already refuses malformed-compound (the
     // false-READY defect), so this is consistent rather than a second opinion.
-    // `met` deliberately does NOT consult lifecycle: a completed/cancelled card
-    // whose watched path was re-touched still has a MET predicate (the re-fire
-    // regression signal is preserved). `actionable` below is the promotable-READY
-    // signal (predicate met AND lifecycle open) and is what the promoter's
-    // actionable count consumes.
+    // `met` deliberately does NOT consult lifecycle: a disposed (closed-for-
+    // recurrence) card whose watched path was re-touched still has a MET
+    // predicate (the re-fire regression signal is preserved). `actionable`
+    // below is the promotable-READY signal (predicate met AND lifecycle open)
+    // and is what the promoter's actionable count consumes.
     const met = state === "valid-fired";
     return {
         id, file, met, mode: trig.mode, note: stateNote(state),
@@ -1267,12 +1282,13 @@ function mainPromoter(options) {
         // promoter can order the holding-area population instead of reading
         // every detail parenthetical to tell waiting from broken.
         //
-        // A valid-fired card that is already completed/cancelled is surfaced as
-        // a distinct [RE-FIRE] flag instead of [READY]: its watched path was
-        // re-touched AFTER disposal (a possible-regression signal worth seeing),
-        // but it is NOT fresh actionable work and must NOT inflate the actionable
-        // READY count. The predicate state (valid-fired) is unchanged; only the
-        // reporting flag + the actionable count consult lifecycle.
+        // A valid-fired card that is already closed for recurrence
+        // (completed/cancelled/staged) is surfaced as a distinct [RE-FIRE] flag
+        // instead of [READY]: its watched path was re-touched AFTER disposal (a
+        // possible-regression signal worth seeing), but it is NOT fresh
+        // actionable work and must NOT inflate the actionable READY count. The
+        // predicate state (valid-fired) is unchanged; only the reporting flag +
+        // the actionable count consult lifecycle.
         let flag;
         if (r.state === "valid-fired" && r.lifecycle === "disposed") {
             flag = "RE-FIRE";
@@ -1289,9 +1305,10 @@ function mainPromoter(options) {
     }
 
     // `ready` is the ACTIONABLE count: valid-fired AND lifecycle open. A
-    // completed/cancelled card whose trigger re-fired is counted separately as
-    // `refires`, NOT as ready, so the actionable set is not polluted by drained
-    // cards re-firing on their own fix.
+    // closed-for-recurrence (completed/cancelled/staged) card whose trigger
+    // re-fired is counted separately as `refires`, NOT as ready, so the
+    // actionable set is not polluted by drained cards re-firing on their own
+    // fix.
     const ready = reports.filter((r) => r.actionable).length;
     const refires = reports.filter(
         (r) => r.state === "valid-fired" && r.lifecycle === "disposed",
@@ -1312,7 +1329,7 @@ function mainPromoter(options) {
         `plan + clear slice + provenance) before promoting any READY candidate.\n` +
         `State breakdown: ${breakdown}\n` +
         (refires > 0
-            ? `Disposed re-fires (completed/cancelled, watched path re-touched — possible regression, NOT actionable): ${refires}\n`
+            ? `Disposed re-fires (completed/cancelled/staged, watched path re-touched — possible regression, NOT actionable): ${refires}\n`
             : ""),
     );
     process.exit(0);
