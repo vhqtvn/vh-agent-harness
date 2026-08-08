@@ -12,6 +12,7 @@ import (
 
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
 	"github.com/vhqtvn/vh-agent-harness/internal/manifest"
+	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 )
 
@@ -234,6 +235,18 @@ func runSeamUninstall(cmd *cobra.Command, target string, force bool) error {
 	// Remove the S1 lineage record LAST (the seam's manifest equivalent), then
 	// drop the .vh-agent-harness/ dir if it is now empty. run-shape.yml and any
 	// operator-authored overrides there are preserved (operator runtime config).
+	//
+	// The origin-hash sidecar (.vh-agent-harness/origin-hashes.json) is removed
+	// too: it records per-file origin hashes for the three-way update sync. If
+	// it survived uninstall, a later install would Read stale entries and treat
+	// every previously-managed file (now absent) as consumer-deleted
+	// (ActionManagedDiverged: respected, not re-seeded) — breaking the
+	// install→uninstall→install lifecycle (managed files would NOT be restored).
+	// Removing it on uninstall restores the clean-bootstrap install semantics.
+	if rerr := os.Remove(originhash.FilePath(target)); rerr != nil && !os.IsNotExist(rerr) {
+		fmt.Fprintln(errOut, "error:", fmt.Errorf("delete origin-hash store: %w", rerr))
+		return fmt.Errorf("delete origin-hash store: %w", rerr)
+	}
 	if rerr := os.Remove(lineage.FilePath(target)); rerr != nil && !os.IsNotExist(rerr) {
 		fmt.Fprintln(errOut, "error:", fmt.Errorf("delete lineage: %w", rerr))
 		return fmt.Errorf("delete lineage: %w", rerr)

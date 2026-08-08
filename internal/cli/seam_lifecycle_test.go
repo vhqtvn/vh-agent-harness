@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
+	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 )
 
 // These tests exercise the SEAM path of diff/uninstall/preflight (the default
@@ -123,6 +124,51 @@ func TestSeamUninstall_RemovesManagedPreservesOwnedAndLineageLast(t *testing.T) 
 	}
 }
 
+// TestSeamUninstall_RemovesOriginHashStoreSoReinstallReseeds is the regression
+// lock for the origin-hash update sync lifecycle: install records the
+// origin-hashes.json sidecar; uninstall MUST remove it (otherwise a later
+// install reads stale entries and treats every previously-managed file as
+// consumer-deleted → not re-seeded, breaking install→uninstall→install).
+// Proves the full lifecycle: managed files are restored after a re-install.
+func TestSeamUninstall_RemovesOriginHashStoreSoReinstallReseeds(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	managed := filepath.Join(root, filepath.FromSlash(seamManagedProbe))
+	// Precondition: install recorded the origin-hash sidecar.
+	if !pathExists(t, originhash.FilePath(root)) {
+		t.Fatalf("precondition: origin-hashes.json should exist after install")
+	}
+
+	// Uninstall.
+	runWithCwd(t, root, func() {
+		uninstallForce = false
+		cmd, buf := newOutCmd()
+		if err := runUninstall(cmd, nil); err != nil {
+			t.Fatalf("seam uninstall: %v (out=%q)", err, buf.String())
+		}
+	})
+
+	// The sidecar MUST be gone (else reinstall would treat managed files as
+	// consumer-deleted and refuse to re-seed them).
+	if pathExists(t, originhash.FilePath(root)) {
+		t.Errorf("origin-hashes.json still present after uninstall (would block re-seed on reinstall)")
+	}
+	if pathExists(t, managed) {
+		t.Errorf("managed %s still present after uninstall", seamManagedProbe)
+	}
+
+	// Re-install: managed files MUST be restored (clean-bootstrap semantics,
+	// because the sidecar is gone so there is no stale origin to honor).
+	seamInstallInto(t, root)
+	if !pathExists(t, managed) {
+		t.Errorf("managed %s NOT restored after reinstall (stale origin-hashes store survived uninstall?)", seamManagedProbe)
+	}
+	if !pathExists(t, originhash.FilePath(root)) {
+		t.Errorf("origin-hashes.json should be re-recorded after reinstall")
+	}
+}
+
 // TestSeamPreflight_PassThenDrift: fresh seam install passes preflight via the
 // seam authorities; corrupting a managed file fails it on managed-drift.
 func TestSeamPreflight_PassThenDrift(t *testing.T) {
@@ -143,6 +189,13 @@ func TestSeamPreflight_PassThenDrift(t *testing.T) {
 		}
 	})
 
+	// Genuine drift: remove the origin-hash store so corrupting a managed file
+	// is NOT mistaken for a consumer edit the new feature preserves (a consumer
+	// edit is now non-failing consumer-preserved, not drift). This keeps the
+	// test's "preflight FAILs on real drift" intent intact.
+	if err := os.Remove(originhash.FilePath(root)); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove origin-hash store: %v", err)
+	}
 	corruptManaged(t, root, seamManagedProbe)
 	runWithCwd(t, root, func() {
 		cmd, buf := newOutCmd()

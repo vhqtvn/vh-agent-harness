@@ -8,6 +8,7 @@ import (
 
 	corpus "github.com/vhqtvn/vh-agent-harness" // root package: embed + CoreOwnershipDefaults
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
+	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 )
 
@@ -574,5 +575,574 @@ func TestManagedUpToDate_AbsentOrUnreadableFallsBackToFalse(t *testing.T) {
 	dirLive := t.TempDir() // a directory is not a readable managed file
 	if managedUpToDate(stagedPath, dirLive) {
 		t.Errorf("unreadable (directory) live path: managedUpToDate must be false (route to overwrite), got true")
+	}
+}
+
+// TestApply_OriginHashThreeWayPreservesConsumerEdits is the BEHAVIORAL-CLOSURE
+// crux for the origin-hash update sync (decision memo
+// origin-hash-update-sync.md, OPT-A, porting hermes skills_sync's three-way
+// mechanism). It exercises the REAL apply path twice against the same live tree
+// with the REAL ownership classifier and the REAL origin-hash sidecar
+// (.vh-agent-harness/origin-hashes.json) — no mocks:
+//
+//  1. Apply #1 (install): seeds platform_managed files and RECORDS their origin
+//     hashes.
+//  2. Between applies, hand-edit ONE platform_managed file (simulating a
+//     consumer edit like vh-video-maker's rule 6 in the composed AGENTS.md) and
+//     leave another unedited; produce a new staging with genuinely different
+//     platform bytes for both (simulating a new harness release).
+//  3. Apply #2 (update): the EDITED file must be PRESERVED
+//     (ActionManagedDiverged, consumer bytes byte-identical, NOT clobbered);
+//     the UNEDITED file must be UPDATED normally to the new platform bytes
+//     (ActionManagedOverwrite). The edited file's origin hash must be carried
+//     forward unchanged (the platform did not write it).
+//
+// This is the hermes _is_tracked_user_modification test ported to the harness
+// apply path, proven end-to-end against real machinery.
+func TestApply_OriginHashThreeWayPreservesConsumerEdits(t *testing.T) {
+	live := t.TempDir()
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+
+	const editedRel = ".vh-agent-harness/AGENTS.core.md" // platform_managed in the corpus
+	const uneditedRel = ".opencode/agents/build.md"      // platform_managed in the corpus
+
+	// --- Apply #1: render + apply (install). Seeds managed files, records
+	// origin hashes. ---
+	staging := t.TempDir()
+	if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render #1: %v", err)
+	}
+	if _, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-originhash",
+		TemplateSource: "templates/core",
+	}); err != nil {
+		t.Fatalf("Apply #1: %v", err)
+	}
+
+	// Origin-hash store MUST have been written, with an entry for every
+	// platform_managed file the platform seeded.
+	store, err := originhash.Read(live)
+	if err != nil {
+		t.Fatalf("read origin-hash store after Apply #1: %v", err)
+	}
+	if store == nil {
+		t.Fatalf("origin-hash store was not written by Apply #1")
+	}
+	for _, rel := range []string{editedRel, uneditedRel} {
+		if _, ok := store.Lookup(rel); !ok {
+			t.Fatalf("origin-hash store missing platform_managed entry for %q", rel)
+		}
+	}
+
+	// --- Between applies: hand-edit one file; simulate a new platform release
+	// (different bytes) for BOTH files. ---
+	const consumerEdit = "CONSUMER HAND-EDIT — must survive update (origin-hash three-way)\n"
+	writeFile(t, live, editedRel, consumerEdit)
+	// uneditedRel is left exactly as Apply #1 wrote it.
+
+	staging2 := t.TempDir()
+	if err := r.Render(staging2, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render #2: %v", err)
+	}
+	// Mutate the staged copies so a real platform change exists for both files
+	// (proves the unedited file is actually updated, not skipped as byte-identical).
+	appendMarkerToStaged := func(rel, marker string) {
+		p := filepath.Join(staging2, rel)
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			t.Fatalf("read staged %s: %v", rel, rerr)
+		}
+		b = append(b, []byte("\n# platform release marker: "+marker+"\n")...)
+		if werr := os.WriteFile(p, b, 0o644); werr != nil {
+			t.Fatalf("mutate staged %s: %v", rel, werr)
+		}
+	}
+	appendMarkerToStaged(editedRel, "edited-release")
+	appendMarkerToStaged(uneditedRel, "unedited-release")
+
+	// --- Apply #2: update. ---
+	report2, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging2,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-originhash",
+		TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("Apply #2: %v", err)
+	}
+	byPath := map[string]FileOutcome{}
+	for _, o := range report2.Outcomes {
+		byPath[o.Path] = o
+	}
+
+	// EDITED file: diverged → preserved (NOT clobbered).
+	ed, ok := byPath[editedRel]
+	if !ok {
+		t.Fatalf("edited file produced no outcome; got %+v", report2.Outcomes)
+	}
+	if ed.Action != ActionManagedDiverged {
+		t.Fatalf("edited platform_managed file: want %s, got %s (note=%q)", ActionManagedDiverged, ed.Action, ed.Note)
+	}
+	if gotEdited := readFile(t, live, editedRel); gotEdited != consumerEdit {
+		t.Fatalf("consumer edit was NOT preserved (clobbered); want=%q got=%q", consumerEdit, gotEdited)
+	}
+
+	// UNEDITED file: updated to new platform bytes (overwrite, content changed).
+	un, ok := byPath[uneditedRel]
+	if !ok {
+		t.Fatalf("unedited file produced no outcome; got %+v", report2.Outcomes)
+	}
+	if un.Action != ActionManagedOverwrite {
+		t.Fatalf("unedited platform_managed file: want %s (content changed), got %s (note=%q)", ActionManagedOverwrite, un.Action, un.Note)
+	}
+	stagedUnedited, _ := os.ReadFile(filepath.Join(staging2, uneditedRel))
+	if gotUnedited := readFile(t, live, uneditedRel); string(stagedUnedited) != gotUnedited {
+		t.Fatalf("unedited file was not updated to new platform bytes")
+	}
+
+	// Origin-hash store after Apply #2: edited file retains the ORIGINAL origin
+	// (the platform version from Apply #1 — it did not write this generation);
+	// unedited file's origin advanced to the new platform bytes.
+	store2, err := originhash.Read(live)
+	if err != nil {
+		t.Fatalf("read origin-hash store after Apply #2: %v", err)
+	}
+	if store2 == nil {
+		t.Fatalf("origin-hash store not written by Apply #2")
+	}
+	if origEdited, ok := store2.Lookup(editedRel); !ok || origEdited != store.OriginHashes[editedRel] {
+		t.Fatalf("edited file origin hash must be carried forward unchanged across a skip; got %q", origEdited)
+	}
+	if origUnedited, ok := store2.Lookup(uneditedRel); !ok {
+		t.Fatalf("unedited file origin hash missing after Apply #2")
+	} else {
+		// Unedited was overwritten with new bytes → origin must be the new staged hash.
+		wantUnedited := originhash.Digest(stagedUnedited)
+		if origUnedited != wantUnedited {
+			t.Fatalf("unedited file origin hash not advanced to new platform bytes; want %q got %q", wantUnedited, origUnedited)
+		}
+	}
+}
+
+// TestApply_OriginHashRespectsConsumerDeletedManagedFile locks the deletion-
+// suppression half of the origin-hash update sync: a platform_managed file the
+// consumer DELETED (but the platform previously rendered, so it has a recorded
+// origin hash) must NOT be re-seeded on the next update. Mirrors hermes
+// skills_sync :914-916.
+func TestApply_OriginHashRespectsConsumerDeletedManagedFile(t *testing.T) {
+	live := t.TempDir()
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+
+	const rel = ".vh-agent-harness/AGENTS.core.md"
+
+	// Apply #1: install (seeds the file, records origin hash).
+	staging := t.TempDir()
+	if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render #1: %v", err)
+	}
+	if _, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-originhash",
+		TemplateSource: "templates/core",
+	}); err != nil {
+		t.Fatalf("Apply #1: %v", err)
+	}
+
+	// Consumer deletes the managed file.
+	if err := os.Remove(filepath.Join(live, rel)); err != nil {
+		t.Fatalf("remove managed file: %v", err)
+	}
+
+	// Apply #2: must NOT re-seed the deleted file (origin hash recorded → respected).
+	staging2 := t.TempDir()
+	if err := r.Render(staging2, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render #2: %v", err)
+	}
+	report, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging2,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-originhash",
+		TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("Apply #2: %v", err)
+	}
+	byPath := map[string]FileOutcome{}
+	for _, o := range report.Outcomes {
+		byPath[o.Path] = o
+	}
+	got, ok := byPath[rel]
+	if !ok {
+		t.Fatalf("deleted managed file produced no outcome; got %+v", report.Outcomes)
+	}
+	if got.Action != ActionManagedDiverged {
+		t.Fatalf("deleted managed file: want %s (not re-seeded), got %s (note=%q)", ActionManagedDiverged, got.Action, got.Note)
+	}
+	// The file must NOT have been re-created on disk.
+	if _, statErr := os.Stat(filepath.Join(live, rel)); !os.IsNotExist(statErr) {
+		t.Fatalf("deleted managed file was re-seeded on update (must be respected); stat err=%v", statErr)
+	}
+}
+
+// TestApply_OriginHashBootstrapNoPriorOriginSeedsNormally locks the bootstrap
+// case: with no prior origin-hash store (first install, or a pre-origin-hash
+// install), platform_managed files are seeded/overwritten normally (NOT skipped
+// as "diverged"), and origin hashes are then recorded for the next apply. This
+// guards against the three-way check accidentally treating "no prior origin" as
+// divergence (which would block first install).
+func TestApply_OriginHashBootstrapNoPriorOriginSeedsNormally(t *testing.T) {
+	live := t.TempDir() // empty: no prior origin-hash store
+	staging := t.TempDir()
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+	if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	report, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-originhash",
+		TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	// A platform_managed file on first install must be seeded (overwrite), never
+	// diverged (no prior origin → bootstrap).
+	const rel = ".vh-agent-harness/AGENTS.core.md"
+	byPath := map[string]FileOutcome{}
+	for _, o := range report.Outcomes {
+		byPath[o.Path] = o
+	}
+	got, ok := byPath[rel]
+	if !ok {
+		t.Fatalf("managed file produced no outcome; got %+v", report.Outcomes)
+	}
+	if got.Action != ActionManagedOverwrite {
+		t.Fatalf("bootstrap first-install managed file: want %s, got %s (must seed, not skip)", ActionManagedOverwrite, got.Action)
+	}
+	// Origin hashes recorded for the next apply.
+	store, err := originhash.Read(live)
+	if err != nil {
+		t.Fatalf("read origin-hash store after bootstrap apply: %v", err)
+	}
+	if store == nil {
+		t.Fatalf("origin-hash store not written after bootstrap apply")
+	}
+	if _, ok := store.Lookup(rel); !ok {
+		t.Fatalf("origin-hash store missing bootstrap entry for %q", rel)
+	}
+}
+
+// TestApply_OriginHashUpstreamRemovedDeManifestsOnly locks the
+// upstream-removed case: a platform_managed path present in the prior origin
+// store but NOT in the current generation's staging is dropped from the store
+// (de-manifested) while its on-disk copy is left untouched. (The path not being
+// staged means planOutcome never processes it, so it never reaches an outcome;
+// the new store is built only from this generation's outcomes, so the prior
+// entry simply disappears.)
+func TestApply_OriginHashUpstreamRemovedDeManifestsOnly(t *testing.T) {
+	live := t.TempDir()
+	// Seed a prior origin store with a path that will NOT be staged this apply.
+	prior := originhash.New()
+	const ghostRel = ".opencode/agents/ghost-removed-by-upstream.md"
+	prior.OriginHashes[ghostRel] = originhash.Digest([]byte("old platform bytes"))
+	// Plant the on-disk copy the consumer still has.
+	writeFile(t, live, ghostRel, "consumer still has this file on disk\n")
+	if err := prior.Write(live); err != nil {
+		t.Fatalf("seed prior store: %v", err)
+	}
+
+	// Render the real corpus (which does NOT contain ghostRel) and apply.
+	staging := t.TempDir()
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+	if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if _, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-originhash",
+		TemplateSource: "templates/core",
+	}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// The ghost path is de-manifested: it is NOT in the new store.
+	store, err := originhash.Read(live)
+	if err != nil {
+		t.Fatalf("read origin-hash store after apply: %v", err)
+	}
+	if store == nil {
+		t.Fatalf("origin-hash store not written")
+	}
+	if _, ok := store.Lookup(ghostRel); ok {
+		t.Fatalf("upstream-removed path %q must be de-manifested (dropped from store); still present", ghostRel)
+	}
+	// But its on-disk copy is left untouched (NEVER deleted).
+	if got := readFile(t, live, ghostRel); got != "consumer still has this file on disk\n" {
+		t.Fatalf("upstream-removed on-disk copy was altered/deleted; got %q", got)
+	}
+}
+
+// TestApply_OriginHashCorruptStoreBlocksUpdate locks the fail-closed contract
+// for the origin-hash store: a PRESENT-BUT-CORRUPT or unsupported-schema
+// sidecar makes originhash.Read return an error, and Apply MUST surface that
+// error (aborting before any live-tree write) rather than treating it as a
+// no-origin bootstrap. A nil store would make Lookup report no prior origin for
+// every platform_managed path, skipping the three-way divergence check for ALL
+// such files and wholesale-overwriting every consumer hand-edit — exactly the
+// silent-clobber data loss this feature exists to prevent (and the store would
+// then be rewritten fresh, erasing the prior origins). Fail-closed here is the
+// package's documented contract ("a corrupted file is never silently trusted").
+func TestApply_OriginHashCorruptStoreBlocksUpdate(t *testing.T) {
+	const editedRel = ".vh-agent-harness/AGENTS.core.md" // platform_managed in the corpus
+	const consumerEdit = "CONSUMER HAND-EDIT — a corrupt store must NOT let this be clobbered\n"
+
+	cases := []struct {
+		name        string
+		storeBytes  []byte // raw bytes planted at the origin-hash sidecar path
+		errFragment string // substring expected in the Apply error
+	}{
+		{
+			name:        "malformed-json",
+			storeBytes:  []byte("{ this is not valid json "),
+			errFragment: "originhash",
+		},
+		{
+			name:        "unsupported-schema-version",
+			storeBytes:  []byte(`{"schema_version":"999","origin_hashes":{}}` + "\n"),
+			errFragment: "unsupported",
+		},
+		{
+			// Schema-version-valid but origin_hashes is explicitly null. This
+			// binary's Write never produces this form (it always marshals a
+			// non-nil map as "{}"), so null means hand-edited/foreign/truncated.
+			// A nil map treated as an empty bootstrap store would make Lookup
+			// report no prior origin for every path → every consumer edit clobbered.
+			name:        "schema-valid-null-hashes",
+			storeBytes:  []byte(`{"schema_version":"1","origin_hashes":null}` + "\n"),
+			errFragment: "missing or null origin_hashes",
+		},
+		{
+			// Same defect via an absent field.
+			name:        "schema-valid-absent-hashes",
+			storeBytes:  []byte(`{"schema_version":"1"}` + "\n"),
+			errFragment: "missing or null origin_hashes",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			live := t.TempDir()
+
+			// Plant a corrupt origin-hash store so Read returns an error.
+			dir := filepath.Join(live, originhash.DirName)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("mkdir store dir: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, originhash.FileName), tc.storeBytes, 0o644); err != nil {
+				t.Fatalf("plant corrupt store: %v", err)
+			}
+
+			// Plant a consumer-edited managed file on the live tree. Under the
+			// OLD swallow-the-error behavior this would be wholesale-overwritten
+			// (the bug); under fail-closed it MUST survive because Apply aborts
+			// before any write.
+			writeFile(t, live, editedRel, consumerEdit)
+
+			staging := t.TempDir()
+			r := FixtureRenderer{TemplateRoot: corpusRoot}
+			if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+				t.Fatalf("render: %v", err)
+			}
+
+			_, err := Apply(r, ApplyOptions{
+				ProjectRoot: live, StagingDir: staging,
+				Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-originhash",
+				TemplateSource: "templates/core",
+			})
+			if err == nil {
+				t.Fatalf("Apply must FAIL on a corrupt origin-hash store (fail-closed); it succeeded — consumer edits would be silently clobbered")
+			}
+			if !strings.Contains(err.Error(), tc.errFragment) {
+				t.Fatalf("Apply error must mention %q; got %q", tc.errFragment, err.Error())
+			}
+
+			// The consumer edit survives: Apply aborted before any live-tree
+			// write (the plan phase loaded the store and failed).
+			if got := readFile(t, live, editedRel); got != consumerEdit {
+				t.Fatalf("consumer edit was clobbered despite a corrupt store; want=%q got=%q", consumerEdit, got)
+			}
+		})
+	}
+}
+
+// TestApply_OriginHashPartialFailureSelfHealsOnRetry locks the recovery path for
+// the partial-failure window (commit-review b-F2): if a prior apply's live-tree
+// writes landed but its origin-store write did NOT (e.g. .vh-agent-harness/
+// transiently non-writable), the store is left at the OLD origin while the live
+// tree holds the platform's NEW bytes. A naive three-way check would see
+// live(new) != origin(old) and misclassify the file as ActionManagedDiverged
+// (consumer-edited) — permanently skipping platform updates to a file the
+// consumer never touched. The staged-comparison self-heal routes this to
+// ActionManagedNoop (live already equals what the platform would write) and
+// advances the origin, so the interrupted generation recovers on retry.
+func TestApply_OriginHashPartialFailureSelfHealsOnRetry(t *testing.T) {
+	live := t.TempDir()
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+	const rel = ".vh-agent-harness/AGENTS.core.md" // platform_managed in the corpus
+
+	// --- Apply #1: install. live gets v1 (corpus), store records v1 origin. ---
+	staging := t.TempDir()
+	if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render #1: %v", err)
+	}
+	if _, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-originhash",
+		TemplateSource: "templates/core",
+	}); err != nil {
+		t.Fatalf("Apply #1: %v", err)
+	}
+	store1, err := originhash.Read(live)
+	if err != nil || store1 == nil {
+		t.Fatalf("store not written by Apply #1: %v", err)
+	}
+	origV1, ok := store1.Lookup(rel)
+	if !ok {
+		t.Fatalf("store missing origin for %q after Apply #1", rel)
+	}
+
+	// --- Simulate the partial-failure state: the platform wrote v2 to the live
+	// tree but the origin-store write failed, so the store is still at v1. ---
+	const v2Marker = "\n# platform release v2 (partial-failure: live advanced, store did not)\n"
+	// v2 = the platform's new bytes (v1 corpus content + a release marker).
+	v1Live := readFile(t, live, rel)
+	v2Bytes := append([]byte(v1Live), []byte(v2Marker)...)
+	// Write v2 to the live tree WITHOUT going through Apply (which would advance
+	// the store). The store stays at v1 origin — the interrupted-generation state.
+	writeFile(t, live, rel, string(v2Bytes))
+	// Confirm the store was NOT advanced (still v1) — i.e. the simulated state
+	// really is "live=v2, store=v1-origin".
+	if s, _ := originhash.Read(live); s == nil || s.OriginHashes[rel] != origV1 {
+		t.Fatalf("test setup invariant: store origin changed to %q, expected still v1 %q", s.OriginHashes[rel], origV1)
+	}
+
+	// --- Apply #2: retry with staging = v2 (the same bytes now on live). ---
+	staging2 := t.TempDir()
+	if err := r.Render(staging2, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render #2: %v", err)
+	}
+	// Make staged match the v2 bytes already on live (the platform's current release).
+	stagedRel2 := filepath.Join(staging2, rel)
+	stagedBase, serr := os.ReadFile(stagedRel2)
+	if serr != nil {
+		t.Fatalf("read staged %s: %v", stagedRel2, serr)
+	}
+	if werr := os.WriteFile(stagedRel2, append(stagedBase, []byte(v2Marker)...), 0o644); werr != nil {
+		t.Fatalf("mutate staged %s: %v", stagedRel2, werr)
+	}
+	stagedV2, _ := os.ReadFile(stagedRel2)
+	wantV2 := originhash.Digest(stagedV2)
+
+	report, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging2,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-originhash",
+		TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("Apply #2: %v", err)
+	}
+	var got FileOutcome
+	for _, o := range report.Outcomes {
+		if o.Path == rel {
+			got = o
+		}
+	}
+	// Self-heal: live already equals the platform's current bytes → noop (NOT
+	// diverged). A naive three-way check would return diverged here and skip the
+	// file permanently despite no consumer edit.
+	if got.Action != ActionManagedNoop {
+		t.Fatalf("partial-failure self-heal: want %s for live==staged, got %s (note=%q); the file would be permanently skipped despite no consumer edit",
+			ActionManagedNoop, got.Action, got.Note)
+	}
+	// Origin advanced to v2 (the bytes now confirmed on both live and staging),
+	// so the interrupted generation is reconciled — it did NOT stay at v1.
+	store2, err := originhash.Read(live)
+	if err != nil || store2 == nil {
+		t.Fatalf("store not written by Apply #2: %v", err)
+	}
+	if got2, ok := store2.Lookup(rel); !ok || got2 != wantV2 {
+		t.Fatalf("origin must advance to v2 after self-heal; want %q got %q (ok=%v)", wantV2, got2, ok)
+	}
+}
+
+// TestApply_OriginHashUnreadableLiveFileIsPreserved locks the fail-closed path
+// for an authored managed file whose bytes cannot be read by the update process
+// (commit-review b-F1, round 2): os.Stat succeeds but hashSHA256(live) fails
+// (e.g. write-permitted-but-not-readable, mode 0200). We CANNOT confirm whether
+// the consumer edited it, so the safe choice — the feature's core guarantee —
+// is to PRESERVE (ActionManagedDiverged), NOT fall through to overwrite, which
+// would silently clobber a possible edit (the write only needs WRITE perm).
+func TestApply_OriginHashUnreadableLiveFileIsPreserved(t *testing.T) {
+	live := t.TempDir()
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+	const rel = ".vh-agent-harness/AGENTS.core.md" // authored platform_managed
+
+	// --- Apply #1: install. Records an origin hash so the three-way check runs. ---
+	staging := t.TempDir()
+	if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render #1: %v", err)
+	}
+	if _, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-originhash",
+		TemplateSource: "templates/core",
+	}); err != nil {
+		t.Fatalf("Apply #1: %v", err)
+	}
+
+	// Snapshot the content, then make the live file write-but-not-read (mode
+	// 0200: owner write, no read). os.Stat still succeeds; os.ReadFile fails.
+	origContent := readFile(t, live, rel)
+	livePath := filepath.Join(live, rel)
+	if err := os.Chmod(livePath, 0o200); err != nil {
+		t.Fatalf("chmod 0200: %v", err)
+	}
+	// Self-check: if reads still succeed (root, or a permissive filesystem), the
+	// write-but-not-read scenario is not enforceable here — skip, do not pass.
+	if _, rerr := os.ReadFile(livePath); rerr == nil {
+		t.Skip("cannot enforce write-but-not-read permissions on this platform/filesystem (reads succeed)")
+	}
+
+	// --- Apply #2: re-render the same content. The live file is unreadable. ---
+	staging2 := t.TempDir()
+	if err := r.Render(staging2, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render #2: %v", err)
+	}
+	report, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging2,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-originhash",
+		TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("Apply #2: %v", err)
+	}
+	var got FileOutcome
+	for _, o := range report.Outcomes {
+		if o.Path == rel {
+			got = o
+		}
+	}
+	// Unreadable live file with a prior origin → PRESERVE (diverged), NOT
+	// overwrite. We cannot confirm the file is unedited, so we never clobber it.
+	if got.Action != ActionManagedDiverged {
+		t.Fatalf("unreadable live managed file: want %s (preserved, never clobber), got %s (note=%q)",
+			ActionManagedDiverged, got.Action, got.Note)
+	}
+
+	// Restore read perm and confirm the platform did NOT overwrite the file: the
+	// original content survived byte-for-byte.
+	if err := os.Chmod(livePath, 0o644); err != nil {
+		t.Fatalf("chmod restore 0644: %v", err)
+	}
+	if got := readFile(t, live, rel); got != origContent {
+		t.Fatalf("unreadable live file was overwritten (clobbered); content changed from %q to %q", origContent, got)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	corpus "github.com/vhqtvn/vh-agent-harness"
+	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 )
 
@@ -120,13 +121,22 @@ func TestManagedDrift_NoOverride_Pass(t *testing.T) {
 	}
 }
 
-// TestManagedDrift_NoOverride_Divergent_StillFails: regression guard. Without an
-// override, divergent bytes on a platform_managed path must still FAIL. This
-// proves the override-awareness change did not silently disable real drift
-// detection for the common (no-override) case.
+// TestManagedDrift_NoOverride_Divergent_StillFails: regression guard. Genuine
+// drift (a managed file with NO recorded origin — bootstrap / pre-origin-hash —
+// whose live bytes differ from a fresh render) must still FAIL. The origin-hash
+// store is removed so the divergence is NOT mistaken for a consumer edit
+// (consumer edits, which update preserves, are carved out as non-failing
+// consumer-preserved — see TestManagedDrift_ConsumerEdit_Preserved_NotDrift).
+// This proves genuine drift detection was not disabled by the origin-hash
+// carve-out: a file with no recorded origin that has drifted is real drift.
 func TestManagedDrift_NoOverride_Divergent_StillFails(t *testing.T) {
 	root := t.TempDir()
 	seamInstallInto(t, root)
+	// Remove the origin-hash store so the divergent file has no recorded origin
+	// (bootstrap/pre-feature semantics): genuine drift, not a consumer edit.
+	if err := os.Remove(originhash.FilePath(root)); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove origin-hash store: %v", err)
+	}
 	p := findLivePlatformManagedPath(t, root)
 	live := filepath.Join(root, filepath.FromSlash(p))
 	if err := os.WriteFile(live, []byte("// intentionally divergent bytes\n"), 0o644); err != nil {
@@ -135,10 +145,97 @@ func TestManagedDrift_NoOverride_Divergent_StillFails(t *testing.T) {
 
 	r := checkManagedDrift(root)
 	if r.tier != tierFail {
-		t.Fatalf("want FAIL for divergent managed file with no override, got %s: %s", r.tier, r.detail)
+		t.Fatalf("want FAIL for divergent managed file with no recorded origin, got %s: %s", r.tier, r.detail)
 	}
 	if !strings.Contains(r.detail, "drifted") {
 		t.Errorf("FAIL detail should report drift; got %q", r.detail)
+	}
+}
+
+// TestManagedDrift_ConsumerEdit_Preserved_NotDrift is the origin-hash B3
+// regression lock: a platform_managed file the consumer EDITED (live diverged
+// from the platform's recorded origin hash) is a SANCTIONED state — update
+// deliberately preserves it (ActionManagedDiverged) — so doctor must report it
+// as a non-failing consumer-preserved signal (tierInfo), NOT as a perpetual
+// drifted FAIL whose prescribed remedy (`update`) is a no-op. This keeps doctor
+// and update in agreement on day one of the origin-hash feature.
+func TestManagedDrift_ConsumerEdit_Preserved_NotDrift(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	// Precondition: the install recorded an origin-hash store.
+	if _, err := originhash.Read(root); err != nil {
+		t.Fatalf("precondition: origin-hash store should be readable after install: %v", err)
+	}
+
+	// Consumer hand-edits a platform_managed file (the surface where
+	// vh-video-maker's rule 6 lives only in the render).
+	p := findLivePlatformManagedPath(t, root)
+	live := filepath.Join(root, filepath.FromSlash(p))
+	const consumerEdit = "// CONSUMER HAND-EDIT (rule 6) — update must preserve, doctor must not FAIL\n"
+	if err := os.WriteFile(live, []byte(consumerEdit), 0o644); err != nil {
+		t.Fatalf("consumer-edit %s: %v", p, err)
+	}
+
+	r := checkManagedDrift(root)
+	// Must NOT be a FAIL: the consumer edit is a sanctioned preserved state.
+	if r.tier == tierFail {
+		t.Fatalf("consumer-edited managed file must NOT drift-FAIL (update preserves it); got FAIL: %s", r.detail)
+	}
+	// Must surface as non-failing consumer-preserved (tierInfo), naming the path.
+	if r.tier != tierInfo {
+		t.Fatalf("want INFO (consumer-preserved) for consumer-edited managed file, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "consumer-preserved") {
+		t.Errorf("INFO detail should mention consumer-preserved; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, p) {
+		t.Errorf("INFO detail should name the consumer-preserved path %q; got %q", p, r.detail)
+	}
+}
+
+// TestManagedDrift_RegeneratedConsumerEdit_IsGenuineDrift is the R4-B1
+// regression lock: a consumer edit to a platform-REGENERATED managed file
+// (allowed-commands.js) is GENUINE drift, NOT a consumer-preserved signal —
+// because seamApply EXEMPTS regenerated paths from origin-hash preservation
+// (RegeneratedPlatformPaths) and OVERWRITES a consumer edit to keep the file
+// byte-sync with the emitted permission blocks. doctor's consumer-preserved
+// carve-out must agree with update's overwrite behavior: reporting it as
+// "update preserves your edit" would be a false promise. This is the mirror of
+// TestManagedDrift_ConsumerEdit_Preserved_NotDrift for the regenerated path.
+func TestManagedDrift_RegeneratedConsumerEdit_IsGenuineDrift(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	// Precondition: the install recorded an origin-hash store (incl. for
+	// allowed-commands.js, which apply records even though it is exempt from the
+	// divergence SKIP — recording is harmless and keeps the store complete).
+	if _, err := originhash.Read(root); err != nil {
+		t.Fatalf("precondition: origin-hash store should be readable after install: %v", err)
+	}
+
+	// Consumer edits the REGENERATED managed file (allowed-commands.js).
+	p := ".opencode/repo-configs/allowed-commands.js"
+	live := filepath.Join(root, filepath.FromSlash(p))
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("precondition: %s should exist after install: %v", p, err)
+	}
+	if err := os.WriteFile(live, []byte("// CONSUMER CUSTOMIZATION (regenerated file — update WILL overwrite)\n"), 0o644); err != nil {
+		t.Fatalf("consumer-edit %s: %v", p, err)
+	}
+
+	r := checkManagedDrift(root)
+	// MUST be a FAIL: update overwrites this file (exempt from preservation), so
+	// the drift is real and the "run update" remedy is correct. A tierInfo
+	// consumer-preserved here would be a false promise (R4-B1 regression).
+	if r.tier != tierFail {
+		t.Fatalf("consumer-edited REGENERATED managed file (%s) must drift-FAIL (update overwrites it), got %s: %s", p, r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, p) {
+		t.Errorf("FAIL detail should name the drifted regenerated path %q; got %q", p, r.detail)
+	}
+	if strings.Contains(r.detail, "consumer-preserved") {
+		t.Errorf("REGENERATED managed file must NOT be reported consumer-preserved (update overwrites it); got %q", r.detail)
 	}
 }
 
@@ -318,6 +415,14 @@ func TestPreflight_PreservedIsNonBlocking(t *testing.T) {
 func TestManagedDrift_Divergent_NamesPathAndBothRemedies(t *testing.T) {
 	root := t.TempDir()
 	seamInstallInto(t, root)
+	// Remove the origin-hash store so the divergence is GENUINE drift (no
+	// recorded origin → not a consumer edit), not the now-sanctioned consumer-
+	// preserved state. This preserves the test's intent (the FAIL detail for
+	// real drift names the path + both remedies); consumer edits are covered by
+	// TestManagedDrift_ConsumerEdit_Preserved_NotDrift.
+	if err := os.Remove(originhash.FilePath(root)); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove origin-hash store: %v", err)
+	}
 	p := findLivePlatformManagedPath(t, root)
 	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(p)),
 		[]byte("// intentionally divergent bytes\n"), 0o644); err != nil {

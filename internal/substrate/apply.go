@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
+	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 	"github.com/vhqtvn/vh-agent-harness/internal/renderstate"
 	"github.com/vhqtvn/vh-agent-harness/internal/schema"
@@ -42,6 +43,16 @@ type ApplyOptions struct {
 	// phase is side-effect-free, so a dry-run is a safe preview an operator (or
 	// agent) inspects before applying.
 	DryRun bool
+	// RegeneratedPlatformPaths is the set of platform_managed paths the platform
+	// REGENERATES canonically on every apply (e.g. .opencode/repo-configs/
+	// allowed-commands.js, emitted from Go tables). The origin-hash three-way
+	// preservation does NOT apply to these: they are generated, not consumer-
+	// authored content, and they MUST stay in sync with the platform's canonical
+	// emission (preserving a stale consumer customization would desync the
+	// shell-guard from the permission blocks). A nil/empty set means no
+	// exemptions — every platform_managed file gets the three-way check (the
+	// default for non-seam callers and unit tests).
+	RegeneratedPlatformPaths map[string]bool
 }
 
 // FileAction labels what the seam did to one staged file. It is the machine
@@ -51,6 +62,7 @@ type FileAction string
 const (
 	ActionManagedOverwrite FileAction = "managed-overwrite"   // platform_managed -> overwrite
 	ActionManagedNoop      FileAction = "managed-unchanged"   // platform_managed/active overlay_extension already up to date
+	ActionManagedDiverged  FileAction = "managed-diverged"    // platform_managed diverged from origin (consumer-edited) or consumer-deleted -> skip, NEVER clobber (origin-hash three-way)
 	ActionProjectPreserved FileAction = "project-preserved"   // project_owned present -> skip
 	ActionProjectSeeded    FileAction = "project-seeded"      // project_owned absent -> seed once
 	ActionArmedMerged      FileAction = "armed-merged"        // platform_armed clean reconcile applied
@@ -160,11 +172,29 @@ func Apply(r Renderer, opts ApplyOptions) (*ApplyReport, error) {
 		return nil, fmt.Errorf("walk staging: %w", err)
 	}
 
+	// Load the prior origin-hash store (the three-way divergence input for the
+	// platform_managed branch of planOutcome). A MISSING store (Read returns
+	// nil, nil) is the bootstrap case: no prior origin recorded, so every
+	// platform_managed file is treated as unedited (overwritten/seeded) and
+	// origin hashes are recorded fresh. A PRESENT-BUT-CORRUPT or unsupported-
+	// schema store is FAIL-CLOSED: returning the error aborts the apply BEFORE
+	// any live-tree write. This is deliberate — a nil store would make Lookup
+	// report no prior origin for every path, skipping the three-way check for
+	// ALL platform_managed files and wholesale-overwriting every consumer hand-
+	// edit, which is exactly the silent-clobber data loss this feature exists
+	// to prevent (and the store would then be rewritten fresh, erasing the
+	// prior origins). The error carries originhash's remediation hint (remove
+	// origin-hashes.json to re-bootstrap), so the operator has a clear unblock.
+	priorOrigin, err := originhash.Read(opts.ProjectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("load origin-hash store: %w", err)
+	}
+
 	// 2. PLAN all outcomes before any write. A fail-closed unclassified path or a
 	//    malformed armed instance aborts here, before the live tree is touched.
 	planned := make([]FileOutcome, 0, len(staged))
 	for _, rel := range staged {
-		outcome, pErr := planOutcome(opts, rel)
+		outcome, pErr := planOutcome(opts, rel, priorOrigin)
 		if pErr != nil {
 			return nil, fmt.Errorf("plan %q: %w", rel, pErr)
 		}
@@ -246,6 +276,52 @@ func Apply(r Renderer, opts ApplyOptions) (*ApplyReport, error) {
 		return report, nil
 	}
 
+	// 3b. Record origin hashes for this generation (the three-way divergence
+	//     input for the NEXT apply). This is the harness's port of hermes's
+	//     skills_sync origin-hash mechanism. For every platform_managed file the
+	//     platform WROTE this generation (an overwrite that succeeded, or a noop
+	//     where on-disk already matched staged), record origin = hash(staged).
+	//     For a diverged/skip outcome the platform did NOT write, so carry
+	//     forward the prior origin hash (the consumer's edit stands; the last
+	//     platform-written version stays the divergence baseline). A
+	//     platform_managed path NOT in this generation (upstream-removed) is
+	//     dropped from the store (de-manifested) but its on-disk copy is left
+	//     untouched — mirrors hermes :869-870 (update + record) and
+	//     :862-867/:918-921 (skip + preserve entry / drop entry without deleting).
+	//     Persisted under the same GenerationFullyApplied gate as lineage.yml so
+	//     the store never claims a generation whose writes did not all land.
+	newOrigin := originhash.New()
+	for i := range planned {
+		o := &planned[i]
+		if o.Class != ownership.ClassPlatformManaged {
+			continue
+		}
+		switch o.Action {
+		case ActionManagedOverwrite:
+			// WriteSucceeded is guaranteed here (the gate above returned early on
+			// any WriteFailed); guard defensively regardless.
+			if o.WriteState == WriteSucceeded {
+				if h, err := hashSHA256(filepath.Join(opts.StagingDir, o.Path)); err == nil {
+					newOrigin.OriginHashes[o.Path] = h
+				}
+			}
+		case ActionManagedNoop:
+			// On-disk already matches staged byte-for-byte; record the staged hash.
+			if h, err := hashSHA256(filepath.Join(opts.StagingDir, o.Path)); err == nil {
+				newOrigin.OriginHashes[o.Path] = h
+			}
+		case ActionManagedDiverged:
+			// Platform did not write; carry forward the prior origin so the next
+			// apply still detects the consumer's edit/deletion as a divergence.
+			if h, ok := priorOrigin.Lookup(o.Path); ok {
+				newOrigin.OriginHashes[o.Path] = h
+			}
+		}
+	}
+	if err := newOrigin.Write(opts.ProjectRoot); err != nil {
+		return report, fmt.Errorf("write origin-hash store: %w", err)
+	}
+
 	// 4. WRITE lineage (D3-B). lineage.yml is the S1 authority. (The renderer
 	//    records its own identity via Render.RenderedBy; the Go-native renderer
 	//    carries the harness/bundled-template version in Template.Ref.)
@@ -308,7 +384,7 @@ func walkStaged(stagingDir string) ([]string, error) {
 // ownership.IsOverwritableBySeamApply documents this same class-set (and is pinned by
 // its own test) but is NOT called here — this switch is the live gate, not the
 // predicate.
-func planOutcome(opts ApplyOptions, rel string) (FileOutcome, error) {
+func planOutcome(opts ApplyOptions, rel string, priorOrigin *originhash.Store) (FileOutcome, error) {
 	cls, err := opts.Classifier.MustClassify(rel)
 	if err != nil {
 		return FileOutcome{}, err
@@ -318,13 +394,94 @@ func planOutcome(opts ApplyOptions, rel string) (FileOutcome, error) {
 
 	switch cls.Class {
 	case ownership.ClassPlatformManaged:
+		// Three-way origin-hash divergence check (port of hermes skills_sync),
+		// SKIPPED for platform-regenerated paths (ApplyOptions.
+		// RegeneratedPlatformPaths): those are generated canonically each apply
+		// and must stay in sync with the platform's emission, so a consumer
+		// customization is always overwritten (never preserved as "diverged").
+		//
+		// For all other platform_managed files, the origin-hash store records
+		// the hash of the bytes the platform last wrote. When the on-disk content
+		// no longer matches that origin hash, the consumer has edited it
+		// (ownership-transferred) or deleted it: route to ActionManagedDiverged
+		// — skip the write, NEVER clobber — UNLESS the on-disk bytes already match
+		// the platform's current staged corpus (a partial-failure self-heal: see
+		// the branch body). A file with no prior origin (first install / bootstrap)
+		// and an unedited file (on-disk still matches origin) proceed to the
+		// normal overwrite/noop path below.
+		if _, regenerated := opts.RegeneratedPlatformPaths[rel]; !regenerated {
+			if origin, hadOrigin := priorOrigin.Lookup(rel); hadOrigin {
+				liveInfo, liveStatErr := os.Stat(livePath)
+				if os.IsNotExist(liveStatErr) {
+					// Truly absent → consumer-deleted → respect, do NOT re-seed
+					// (mirrors hermes :914-916). A NON-file at the path (e.g. a
+					// directory) is NOT treated as deletion: it falls through to
+					// the write path below, where the write fails (WriteFailed)
+					// rather than being hidden as a "respected deletion" —
+					// preserving the partial-failure semantics that a blocked
+					// write is reported.
+					return FileOutcome{Path: rel, Class: cls.Class, Action: ActionManagedDiverged,
+						Note: "platform_managed previously rendered; absent on disk (consumer-deleted); not re-seeded"}, nil
+				}
+				if liveStatErr == nil && !liveInfo.IsDir() {
+					liveHash, hErr := hashSHA256(livePath)
+					if hErr != nil {
+						// The live file is stat-able but its bytes cannot be read
+						// (e.g. write-permitted-but-not-readable to this process).
+						// We CANNOT confirm whether the consumer edited it, so the
+						// safe choice — consistent with this feature's core "never
+						// clobber a consumer edit" guarantee — is to PRESERVE (route
+						// to diverged) rather than fall through to managedUpToDate/
+						// overwrite. Falling through would be unsafe here:
+						// executeOutcome's write only needs WRITE permission (not
+						// read), so it would SUCCEED at overwriting a possible edit
+						// with the staged bytes — silently clobbering a file we
+						// never inspected. (The regenerated-path exemption above
+						// already skipped this whole block, so this preserve only
+						// applies to authored managed files.)
+						return FileOutcome{Path: rel, Class: cls.Class, Action: ActionManagedDiverged,
+							Note: "platform_managed live file unreadable (cannot confirm consumer edit); preserved (not clobbered)"}, nil
+					}
+					if liveHash != origin {
+						// On-disk differs from the recorded origin. Distinguish a
+						// genuine consumer edit from a PARTIAL-FAILURE SELF-HEAL: if
+						// the on-disk bytes already match the platform's CURRENT
+						// staged corpus, the platform already wrote these bytes (the
+						// origin store simply did not advance — e.g. a prior apply
+						// whose live writes landed but whose origin-store write
+						// failed, leaving the store at the prior version). That is
+						// NOT a consumer edit: fall through so managedUpToDate routes
+						// it to ActionManagedNoop and the recording loop advances the
+						// origin, self-healing the interrupted generation rather than
+						// permanently skipping a file the consumer never touched.
+						// Only when on-disk differs from BOTH origin and staged is
+						// this a genuine consumer edit → diverged (mirrors hermes
+						// :862-867 "user-modified, skipping"). A staged-hash read
+						// failure (the staged file should exist post-render) is
+						// treated as diverged — the safe, never-clobber choice.
+						if stagedHash, sErr := hashSHA256(stagedPath); sErr != nil || liveHash != stagedHash {
+							return FileOutcome{Path: rel, Class: cls.Class, Action: ActionManagedDiverged,
+								Note: "platform_managed diverged from origin hash (consumer-modified); preserved (not clobbered)"}, nil
+						}
+						// live == staged: fall through (managedNoop + origin advance
+						// self-heals the interrupted generation).
+					}
+					// liveHash == origin (unedited): fall through to managedUpToDate's
+					// safe overwrite/noop default (both staged and live are readable
+					// here, so managedUpToDate can compare them honestly).
+				}
+				// A directory (or stat error other than NotExist) at the path is
+				// not a confirmed divergence: fall through so the write is
+				// attempted and any failure is reported as WriteFailed.
+			}
+		}
 		// IsMutableByGenericRender(ClassPlatformManaged) == true: the generic
 		// force-overwrite class. A plain re-render overwrites it wholesale —
 		// UNLESS the live instance is already byte-identical to the freshly
 		// re-rendered corpus, in which case we route to ActionManagedNoop
 		// (no write, reported as managed-unchanged) so the summary can
 		// distinguish real churn from a no-op refresh. An absent live file
-		// is NOT up to date (first install still seeds/overwrites).
+		// with no prior origin (first install) still seeds/overwrites.
 		if managedUpToDate(stagedPath, livePath) {
 			return FileOutcome{Path: rel, Class: cls.Class, Action: ActionManagedNoop,
 				Note: "platform_managed already up to date"}, nil
@@ -447,7 +604,9 @@ func executeOutcome(opts ApplyOptions, o *FileOutcome) {
 		o.Action == ActionArmedMerged {
 		writeArmedManaged(opts, o)
 	}
-	// Preserved / proposal / noop (armed or managed) / unsupported / ignored -> no write.
+	// Preserved / diverged / proposal / noop (armed or managed) / unsupported /
+	// ignored -> no write. (ActionManagedDiverged is the origin-hash three-way
+	// skip: the consumer edit/deletion is preserved, never clobbered.)
 }
 
 // writeArmedManaged computes the bytes to write (copy for managed/seed; reconcile
@@ -556,6 +715,22 @@ func managedUpToDate(stagedPath, livePath string) bool {
 		return false
 	}
 	return bytes.Equal(staged, live)
+}
+
+// hashSHA256 reads p and returns its "sha256:<hex>" digest. It is the single
+// hash representation the origin-hash three-way check (planOutcome live file)
+// and the post-generation origin-hash recording (staged file) use, routed
+// through originhash.Digest so the format is identical to the persisted store
+// and never drifts from it. A read error is surfaced to the caller: in the
+// three-way check, a live-hash read error (e.g. write-permitted-but-not-read)
+// with a prior origin routes to ActionManagedDiverged (preserved, never
+// clobbered) rather than falling through to an overwrite — see planOutcome.
+func hashSHA256(p string) (string, error) {
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return "", err
+	}
+	return originhash.Digest(data), nil
 }
 
 func fieldErrorsString(errs []schema.FieldError) string {

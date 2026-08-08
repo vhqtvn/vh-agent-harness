@@ -146,6 +146,7 @@ func summarizeOutcomes(outcomes []substrate.FileOutcome) string {
 	order := []substrate.FileAction{
 		substrate.ActionManagedOverwrite,
 		substrate.ActionManagedNoop,
+		substrate.ActionManagedDiverged,
 		substrate.ActionProjectSeeded,
 		substrate.ActionProjectPreserved,
 		substrate.ActionArmedMerged,

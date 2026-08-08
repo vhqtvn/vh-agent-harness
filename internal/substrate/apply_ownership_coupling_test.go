@@ -71,7 +71,7 @@ func TestPlanOutcome_ManagedOverwriteRoutingMatchesPredicate(t *testing.T) {
 		if ownership.IsOverwritableBySeamApply(c) {
 			writeFile(t, live, rel, "LIVE DIFFERENT "+string(c))
 		}
-		outcome, pErr := planOutcome(opts, rel)
+		outcome, pErr := planOutcome(opts, rel, nil)
 		reachedManagedOverwrite := pErr == nil &&
 			(outcome.Action == ActionManagedOverwrite || outcome.Action == ActionManagedNoop)
 		if reachedManagedOverwrite != ownership.IsOverwritableBySeamApply(c) {

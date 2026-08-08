@@ -201,9 +201,14 @@ func TestPrintDryRunPlan_ListsOverwritePaths(t *testing.T) {
 	if !strings.Contains(out, "Would OVERWRITE") || !strings.Contains(out, "DESTRUCTIVE") {
 		t.Errorf("OVERWRITE header must flag DESTRUCTIVE; got:\n%s", out)
 	}
-	// (3) The non-destructive overlay-promotion remedy must appear inline.
-	if !strings.Contains(out, "overlay pack source") || !strings.Contains(out, ".vh-agent-harness/overlays/<pack>/") {
-		t.Errorf("OVERWRITE section must offer the non-destructive overlay-promotion remedy; got:\n%s", out)
+	// (3) The non-destructive remedy for the overwrite set must appear inline.
+	// With origin-hash, authored consumer edits are PRESERVED (not in this set);
+	// the overwrite set is unedited/bit-rot files plus regenerated files
+	// (allowed-commands.js), so the remedy is forbidden-patterns.project.js +
+	// diff. (The overlay-promotion remedy for preserved authored edits lives in
+	// the DIVERGED section — see TestPrintDryRunPlan_ListsDivergedPaths.)
+	if !strings.Contains(out, "forbidden-patterns.project.js") || !strings.Contains(out, "vh-agent-harness diff") {
+		t.Errorf("OVERWRITE section must offer the non-destructive remedy; got:\n%s", out)
 	}
 	// (4) Regression: the OLD count-only form must be gone.
 	if strings.Contains(out, "generic managed file(s), force-refreshed") {
@@ -215,6 +220,54 @@ func TestPrintDryRunPlan_ListsOverwritePaths(t *testing.T) {
 	}
 	if !strings.Contains(out, "Would SEED") {
 		t.Errorf("SEED section must still render; got:\n%s", out)
+	}
+}
+
+// TestPrintDryRunPlan_ListsDivergedPaths is the dry-run regression lock for the
+// origin-hash update sync: consumer-edited AUTHORED managed files route to
+// ActionManagedDiverged and MUST appear path-by-path under their own PRESERVE
+// section (not vanish, and not be folded into the destructive OVERWRITE set),
+// with the re-baseline + overlay-promotion remedy inline.
+func TestPrintDryRunPlan_ListsDivergedPaths(t *testing.T) {
+	divergedPaths := []string{
+		".vh-agent-harness/AGENTS.core.md",
+		".opencode/agents/build.md",
+	}
+	report := &substrate.ApplyReport{
+		Outcomes: []substrate.FileOutcome{
+			{Path: divergedPaths[0], Class: ownership.ClassPlatformManaged, Action: substrate.ActionManagedDiverged},
+			{Path: divergedPaths[1], Class: ownership.ClassPlatformManaged, Action: substrate.ActionManagedDiverged},
+		},
+	}
+	var buf bytes.Buffer
+	printDryRunPlan(&buf, "update", "<target>", report)
+	out := buf.String()
+
+	// (1) Every diverged (consumer-edited managed) path must be visible.
+	for _, p := range divergedPaths {
+		if !strings.Contains(out, "  "+p+"\n") {
+			t.Errorf("DIVERGED preview must list path %q path-by-path; got:\n%s", p, out)
+		}
+	}
+	// (2) The PRESERVE (consumer-edited managed) header must flag that these are
+	// preserved, not overwritten.
+	if !strings.Contains(out, "PRESERVE (consumer-edited managed)") || !strings.Contains(out, "origin-hash") {
+		t.Errorf("DIVERGED header must flag origin-hash preservation; got:\n%s", out)
+	}
+	// (3) The non-destructive remedy (re-baseline via origin-hashes store +
+	// overlay promotion) appears. The re-baseline MUST point at the
+	// origin-hashes.json store, NOT at deleting the file (deleting the file is
+	// self-defeating: a deleted managed file is also preserved as
+	// consumer-deleted, not re-seeded).
+	if !strings.Contains(out, "overlay pack source") || !strings.Contains(out, ".vh-agent-harness/overlays/<pack>/") {
+		t.Errorf("DIVERGED section must offer the overlay-promotion remedy; got:\n%s", out)
+	}
+	if !strings.Contains(out, "origin-hashes.json") {
+		t.Errorf("DIVERGED re-baseline remedy must point at the origin-hashes store (not at deleting the file); got:\n%s", out)
+	}
+	// (4) A diverged file must NOT appear under the destructive OVERWRITE header.
+	if strings.Contains(out, "Would OVERWRITE") {
+		t.Errorf("DIVERGED paths must not appear under the destructive OVERWRITE set; got:\n%s", out)
 	}
 }
 

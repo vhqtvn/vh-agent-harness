@@ -17,6 +17,7 @@ import (
 	corpus "github.com/vhqtvn/vh-agent-harness"
 	"github.com/vhqtvn/vh-agent-harness/internal/jsonc"
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
+	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 	"github.com/vhqtvn/vh-agent-harness/internal/schema"
 	"github.com/vhqtvn/vh-agent-harness/internal/substrate"
@@ -952,13 +953,22 @@ func checkManagedDrift(target string) checkResult {
 		return checkResult{name: "managed-drift", tier: tierFail,
 			detail: fmt.Sprintf("ownership resolve (raise-only): %v", rverr)}
 	}
+	// Origin-hash update sync: load the persisted origin-hash store so a
+	// platform_managed file the consumer EDITED (live diverged from the
+	// platform's last-recorded origin) is recognized as a SANCTIONED preserved
+	// state (update deliberately preserves it via ActionManagedDiverged) rather
+	// than reported as unresolvable drift. A read error / missing store is
+	// tolerated here: doctor is diagnostic, and falling back to the raw
+	// live-vs-staged compare (no carve-out) is fail-LOUD (reports drift), never
+	// fail-silent — the hard fail-closed contract lives in Apply, not here.
+	originStore, _ := originhash.Read(target)
 	// Surface-at-friction (researches/decisions/2026-08-04-capability-discovery-
 	// audit.md §6 entry 1): carry the drifted/missing PATHS (not just counts)
 	// into the FAIL detail so the message is self-routing. A drift an operator
 	// cannot programmatically distinguish from bit-rot gets BOTH remedies inline.
-	drifted, missing, preserved := 0, 0, 0
+	drifted, missing, preserved, consumerPreserved := 0, 0, 0, 0
 	checked := 0
-	var driftedPaths, missingPaths []string
+	var driftedPaths, missingPaths, consumerPreservedPaths []string
 	for path := range defaults {
 		// Resolve seeds every default path, so eff[path] is always present; its
 		// Origin records whether an override genuinely raised the class.
@@ -1009,6 +1019,39 @@ func checkManagedDrift(target string) checkResult {
 			continue
 		}
 		if string(live) != string(staged) {
+			// Origin-hash carve-out: if this platform_managed file has a recorded
+			// origin AND the live bytes diverge from that origin, the consumer
+			// edited it (update deliberately PRESERVES it via
+			// ActionManagedDiverged). That is a sanctioned state, NOT drift
+			// `update` would repair — surface it as a non-failing consumer-
+			// preserved signal (mirrors the override-raise preserved carve-out
+			// above) so the operator is told the edit is known/preserved and
+			// `update` will NOT overwrite it. A file whose live hash MATCHES its
+			// origin (stale-but-unedited: platform moved on, consumer did not)
+			// stays genuine drift — `update` overwrites it, so the FAIL remedy
+			// is correct there. A file with no recorded origin (bootstrap / pre-
+			// origin-hash) is also genuine drift (update will seed/overwrite it).
+			//
+			// REGENERATED-PATH EXCLUSION (R4-B1): seamApply exempts the paths in
+			// regeneratedPlatformPaths (today: allowed-commands.js) from origin-
+			// hash preservation — it OVERWRITES a consumer edit to keep the file
+			// byte-sync with the emitted permission blocks. The carve-out MUST
+			// agree: a consumer edit to a regenerated file is genuine drift
+			// (update will clobber it, and warnIfAllowedCommandsCustomized warns
+			// at update time), NOT "consumer-preserved". Reading the SAME shared
+			// set (regeneratedPlatformPaths) the seam uses keeps the two from
+			// drifting apart. Without this, doctor's "update preserves your edit"
+			// message would be a false promise for exactly this path.
+			isRegenerated := regeneratedPlatformPaths[path]
+			if !isRegenerated && originStore != nil {
+				if origin, hadOrigin := originStore.Lookup(path); hadOrigin {
+					if originhash.Digest(live) != origin {
+						consumerPreserved++
+						consumerPreservedPaths = append(consumerPreservedPaths, path)
+						continue
+					}
+				}
+			}
 			drifted++
 			driftedPaths = append(driftedPaths, path)
 		}
@@ -1024,9 +1067,22 @@ func checkManagedDrift(target string) checkResult {
 			detail: formatManagedDriftFail(
 				fmt.Sprintf("%d missing of %d managed", missing, checked),
 				driftedPaths, missingPaths)}
-	case preserved > 0:
+	case consumerPreserved > 0 || preserved > 0:
+		// Non-failing: all checked managed files are either in sync OR in a
+		// sanctioned preserved state. consumerPreserved = consumer hand-edits
+		// update preserves by origin-hash (NOT drift update would repair);
+		// preserved = override-raised out of platform_managed. Name the
+		// consumer-preserved paths so the operator can find/re-baseline them.
+		parts := []string{fmt.Sprintf("%d managed file(s) in sync", checked)}
+		if consumerPreserved > 0 {
+			parts = append(parts, fmt.Sprintf("%d consumer-preserved (origin-hash: update preserves your edit)", consumerPreserved))
+			parts = append(parts, capPathList("consumer-preserved", consumerPreservedPaths))
+		}
+		if preserved > 0 {
+			parts = append(parts, fmt.Sprintf("%d project-preserved (ownership override)", preserved))
+		}
 		return checkResult{name: "managed-drift", tier: tierInfo,
-			detail: fmt.Sprintf("%d managed file(s) in sync; %d project-preserved (ownership override)", checked, preserved)}
+			detail: strings.Join(parts, "; ")}
 	default:
 		return checkResult{name: "managed-drift", tier: tierPass,
 			detail: fmt.Sprintf("%d managed file(s) in sync", checked)}
@@ -1042,13 +1098,22 @@ func checkManagedDrift(target string) checkResult {
 // the SIGNED OFF entry): a fail-closed result must name the sanctioned
 // alternative inline so the operator routes without losing a deliberate edit.
 //
+// Origin-hash note: a platform_managed file the consumer has EDITED (live
+// diverged from the recorded origin hash) is NOT in the drifted FAIL set —
+// update PRESERVES it (ActionManagedDiverged) and doctor surfaces it as a
+// non-failing consumer-preserved signal. So the drifted set here is genuine
+// bit-rot / stale-but-unedited / bootstrap drift that `update` WILL overwrite:
+// the DESTRUCTIVE claim is accurate for this set. A deliberate edit that ended
+// up in this set (e.g. pre-origin-hash bootstrap, no recorded origin) should be
+// routed to remedy (2) so promotion makes it canonical rather than reverted.
+//
 // (1) DESTRUCTIVE: `update` re-renders drifted/missing files from the corpus,
 // discarding local edits (this is the bit-rot fix and the incident-2026-08-06
 // hazard when applied to a deliberate edit). (2) NON-DESTRUCTIVE: promote the
 // edit into the overlay pack source so `update` renders it as canonical content
 // — the file stops being "drift" and stops being reverted. The overlay source
 // path convention mirrors .opencode/ under .vh-agent-harness/overlays/<pack>/.
-const driftRecoverySuffix = " — remedies: (1) run `vh-agent-harness update` to re-render drifted/missing files from the corpus (DESTRUCTIVE: overwrites local edits); (2) if a drift is a deliberate edit, promote it into the overlay pack source at .vh-agent-harness/overlays/<pack>/ (unit files mirror .opencode/: agents/<name>.md, skills/<name>/SKILL.md, commands/<name>.md) then `vh-agent-harness update` renders it as canonical content instead of reverting it. Inspect exact bytes with `vh-agent-harness diff`."
+const driftRecoverySuffix = " — remedies: (1) run `vh-agent-harness update` to re-render drifted/missing files from the corpus (DESTRUCTIVE: overwrites those files; consumer-edited managed files are preserved separately by origin-hash and are NOT in this set); (2) if a drift is a deliberate edit, promote it into the overlay pack source at .vh-agent-harness/overlays/<pack>/ (unit files mirror .opencode/: agents/<name>.md, skills/<name>/SKILL.md, commands/<name>.md) then `vh-agent-harness update` renders it as canonical content instead of reverting it. Inspect exact bytes with `vh-agent-harness diff`."
 
 // driftDetailPathCap is the maximum number of paths per category (drifted /
 // missing) embedded inline in a FAIL detail. The detail renders as a single

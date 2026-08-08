@@ -329,11 +329,13 @@ func countDirEntries(dir string) int {
 // audit.md §6 entry 1): the overwrite set is the ONLY destructive category, and
 // substrate.ActionManagedOverwrite fires ONLY when live bytes differ from the
 // corpus (drift) or the file is absent — byte-identical files route to
-// ActionManagedNoop. So the overwrite set is exactly the destructive set and is
-// bounded (NOT bulk/noisy); collapsing it to a count hid the very paths an
-// operator needs to approve safely (incident 2026-08-06: an approved
-// "11 generic managed file(s)" preview reverted a 199-line skill + a version
-// bump because no path was visible). Listing the paths is correct and safe.
+// ActionManagedNoop, and consumer-edited authored files route to
+// ActionManagedDiverged (origin-hash: preserved, not overwritten). So the
+// overwrite set is exactly the destructive set and is bounded (NOT bulk/noisy);
+// collapsing it to a count hid the very paths an operator needs to approve
+// safely (incident 2026-08-06: an approved "11 generic managed file(s)" preview
+// reverted a 199-line skill + a version bump because no path was visible).
+// Listing the paths is correct and safe.
 func printDryRunPlan(out io.Writer, verb, target string, report *substrate.ApplyReport) {
 	fmt.Fprintf(out, "DRY RUN — %s plan for %s\n", verb, target)
 	fmt.Fprintln(out, "Nothing was written (lineage, run-shape seed, and AGENTS.md compose were skipped).")
@@ -361,21 +363,40 @@ func printDryRunPlan(out io.Writer, verb, target string, report *substrate.Apply
 	}
 	section("Would SEED — new project file, written once then yours", substrate.ActionProjectSeeded)
 	section("Would PRESERVE — your file, left untouched", substrate.ActionProjectPreserved)
+	// Origin-hash update sync: a consumer hand-edit to an AUTHORED managed file
+	// (on-disk diverged from the platform's recorded origin hash) is preserved,
+	// not overwritten. This is a non-destructive outcome (like project-preserved)
+	// and is surfaced path-by-path so the operator sees exactly which managed
+	// edits survived the update.
+	section("Would PRESERVE (consumer-edited managed) — your hand-edits to a managed file, left untouched (origin-hash: ownership transferred)", substrate.ActionManagedDiverged)
+	if divergedPaths := byAction[substrate.ActionManagedDiverged]; len(divergedPaths) > 0 {
+		fmt.Fprintf(out, "  %d managed file(s) above diverge from the platform's last-recorded origin hash,\n", len(divergedPaths))
+		fmt.Fprintln(out, "  so `update` PRESERVED your edits instead of overwriting them. To re-baseline")
+		fmt.Fprintln(out, "  (accept the platform's new version): remove the file's entry from")
+		fmt.Fprintln(out, "  .vh-agent-harness/origin-hashes.json (or delete that store to re-bootstrap all),")
+		fmt.Fprintln(out, "  THEN run `vh-agent-harness update` — deleting the FILE alone will NOT work")
+		fmt.Fprintln(out, "  (a deleted managed file is also preserved as consumer-deleted, not re-seeded).")
+		fmt.Fprintln(out, "  To make an edit canonical, promote it into the overlay pack source at")
+		fmt.Fprintln(out, "  .vh-agent-harness/overlays/<pack>/. Inspect exact bytes with `vh-agent-harness diff`.")
+	}
 	section("Would RECONCILE — armed config, schema-merged", substrate.ActionArmedMerged)
 	section("CONFLICT — armed config needs a decision, NOT written", substrate.ActionArmedProposal)
 	// The destructive category, now listed path-by-path (was count-only). Every
 	// path here is one `update` would force-revert to the canonical corpus.
 	section("Would OVERWRITE — managed file(s) force-refreshed from the canonical corpus (DESTRUCTIVE: local edits discarded)", substrate.ActionManagedOverwrite)
 	if overwritePaths := byAction[substrate.ActionManagedOverwrite]; len(overwritePaths) > 0 {
-		// Surface the non-destructive alternative inline so the operator can
-		// route WITHOUT losing a deliberate edit. A drift the operator cannot
-		// programmatically distinguish from bit-rot gets BOTH remedies.
-		fmt.Fprintln(out, "  A file above that is a DELIBERATE local edit (not bit-rot) will be reverted by")
-		fmt.Fprintln(out, "  `update`. To keep it, promote the edit into the overlay pack source at")
-		fmt.Fprintln(out, "  .vh-agent-harness/overlays/<pack>/ (unit files mirror .opencode/:")
-		fmt.Fprintln(out, "  agents/<name>.md, skills/<name>/SKILL.md, commands/<name>.md) so `update`")
-		fmt.Fprintln(out, "  renders it as canonical content. Inspect the exact bytes first with")
-		fmt.Fprintln(out, "  `vh-agent-harness diff`.")
+		// With origin-hash, an authored managed file the consumer edited is
+		// PRESERVED (see the PRESERVE section above), NOT reverted — so this
+		// overwrite set is unedited/bit-rot authored files (on-disk still
+		// matches the recorded origin) plus regenerated files the platform
+		// rewrites canonically each apply (allowed-commands.js). The advisory
+		// routes the regenerated-file case to its non-destructive alternative.
+		fmt.Fprintln(out, "  A consumer hand-edit to an AUTHORED managed file is preserved (see PRESERVE")
+		fmt.Fprintln(out, "  above), not reverted here. This overwrite set is unedited/bit-rot files plus")
+		fmt.Fprintln(out, "  regenerated files (allowed-commands.js). To preserve custom deny-rules that")
+		fmt.Fprintln(out, "  allowed-commands.js would discard, use")
+		fmt.Fprintln(out, "  .opencode/repo-configs/forbidden-patterns.project.js. Inspect the exact bytes")
+		fmt.Fprintln(out, "  first with `vh-agent-harness diff`.")
 	}
 	if managedNoop > 0 {
 		fmt.Fprintf(out, "Already current — %d managed file(s) byte-identical to the corpus (no write).\n", managedNoop)

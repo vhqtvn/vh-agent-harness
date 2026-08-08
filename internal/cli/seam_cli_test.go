@@ -9,6 +9,7 @@ import (
 
 	corpus "github.com/vhqtvn/vh-agent-harness"
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
+	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 	"github.com/vhqtvn/vh-agent-harness/internal/substrate"
 )
@@ -279,6 +280,14 @@ func TestSeamDoctor_HealthyAfterInstallWithCustomAnswers(t *testing.T) {
 func TestSeamDoctor_UnhealthyOnManagedDrift(t *testing.T) {
 	root := t.TempDir()
 	seamInstallInto(t, root)
+	// Remove the origin-hash store so the corruption is GENUINE drift (no
+	// recorded origin → not a consumer edit the new feature preserves), keeping
+	// the test's UNHEALTHY-on-real-drift intent intact. A consumer EDIT to an
+	// authored managed file is now non-failing consumer-preserved (see
+	// TestSeamUpdate_OriginHashPreservesAuthoredEdit), not drift.
+	if err := os.Remove(originhash.FilePath(root)); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove origin-hash store: %v", err)
+	}
 	// Corrupt a managed file the classifier tags platform_managed.
 	const rel = ".vh-agent-harness/AGENTS.core.md"
 	if err := os.WriteFile(filepath.Join(root, rel), []byte("CORRUPTED\n"), 0o644); err != nil {
@@ -370,8 +379,14 @@ func TestSeamUpdate_PreservesOwnedReconcilesArmed(t *testing.T) {
 		t.Fatalf("edit armed: %v", err)
 	}
 
-	// Corrupt a managed file (must be refreshed on update).
-	const managedRel = ".vh-agent-harness/AGENTS.core.md"
+	// Corrupt a platform-REGENERATED managed file (must be refreshed on update).
+	// Use allowed-commands.js rather than an authored managed file like
+	// AGENTS.core.md: authored managed files are now PRESERVED when consumer-
+	// edited (origin-hash three-way, see TestSeamUpdate_OriginHashPreservesAuthoredEdit),
+	// so they would NOT refresh. allowed-commands.js is canonically regenerated
+	// each apply (exempt from origin-hash preservation) and so still refreshes,
+	// which is what this branch is verifying.
+	const managedRel = ".opencode/repo-configs/allowed-commands.js"
 	if err := os.WriteFile(filepath.Join(root, managedRel), []byte("OLD V1 CORRUPT\n"), 0o644); err != nil {
 		t.Fatalf("corrupt managed: %v", err)
 	}
@@ -449,6 +464,44 @@ func TestSeamUpdate_ArmedConflictEmitsProposal(t *testing.T) {
 	}
 }
 
+// TestSeamUpdate_OriginHashPreservesAuthoredEdit is the seam-level proof of the
+// origin-hash update sync (decision memo origin-hash-update-sync.md, OPT-A):
+// a consumer hand-edit to an AUTHORED platform_managed file (the composed
+// AGENTS.core.md, the same surface as vh-video-maker's rule 6) is PRESERVED
+// across `vh-agent-harness update` — reported as managed-diverged, bytes
+// byte-identical — rather than silently clobbered. This complements the
+// substrate-level crux (internal/substrate TestApply_OriginHashThreeWay...) by
+// exercising the real CLI update command end-to-end through the seam.
+func TestSeamUpdate_OriginHashPreservesAuthoredEdit(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	// The consumer hand-edits an authored platform_managed file. This is the
+	// composed AGENTS.core.md — exactly the surface where vh-video-maker's
+	// rule 6 lives only in the render and is silently dropped on update today.
+	const authoredRel = ".vh-agent-harness/AGENTS.core.md"
+	const consumerEdit = "# CONSUMER HAND-EDIT (e.g. rule 6) — must survive update\n"
+	if err := os.WriteFile(filepath.Join(root, authoredRel), []byte(consumerEdit), 0o644); err != nil {
+		t.Fatalf("hand-edit authored managed: %v", err)
+	}
+
+	out, err := seamUpdateOut(t, root)
+	if err != nil {
+		t.Fatalf("seam update: %v (out=%q)", err, out)
+	}
+	// The edited authored managed file is PRESERVED, not overwritten.
+	if !strings.Contains(out, "managed-diverged") {
+		t.Errorf("update want managed-diverged for the consumer-edited authored file, got %q", out)
+	}
+	got, rerr := os.ReadFile(filepath.Join(root, authoredRel))
+	if rerr != nil {
+		t.Fatalf("read authored after update: %v", rerr)
+	}
+	if string(got) != consumerEdit {
+		t.Fatalf("consumer hand-edit to authored managed file was NOT preserved (clobbered); want=%q got=%q", consumerEdit, string(got))
+	}
+}
+
 // --- seam install: idempotent re-install -------------------------------
 
 func TestSeamInstall_IdempotentReinstall(t *testing.T) {
@@ -485,8 +538,12 @@ func TestSeamReinstall_ReportsManagedUnchangedOnCurrentTree(t *testing.T) {
 	root := t.TempDir()
 	seamInstallInto(t, root)
 
-	// Corrupt exactly one managed file; the rest stay byte-identical to the corpus.
-	const driftedRel = ".vh-agent-harness/AGENTS.core.md"
+	// Corrupt exactly one platform-REGENERATED managed file (allowed-commands.js,
+	// exempt from origin-hash preservation so it still refreshes); the rest stay
+	// byte-identical to the corpus. An AUTHORED managed file like AGENTS.core.md
+	// would instead be PRESERVED (managed-diverged) once consumer-edited — see
+	// TestSeamUpdate_OriginHashPreservesAuthoredEdit for that behavior.
+	const driftedRel = ".opencode/repo-configs/allowed-commands.js"
 	if err := os.WriteFile(filepath.Join(root, driftedRel), []byte("CORRUPTED\n"), 0o644); err != nil {
 		t.Fatalf("corrupt managed: %v", err)
 	}

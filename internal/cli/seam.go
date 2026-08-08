@@ -200,6 +200,16 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 		Ref:            "harness/" + Version,
 		Answers:        answers,
 		DryRun:         dryRun,
+		// allowed-commands.js is canonically REGENERATED from Go tables on every
+		// apply (permconfig.GenerateAllowedCommandsJS) and must stay byte-in-sync
+		// with the emitted opencode.jsonc permission blocks. The origin-hash
+		// three-way preservation must NOT apply to it: a consumer who ignored
+		// the warnIfAllowedCommandsCustomized warning and edited it would
+		// otherwise keep a stale copy that desyncs the shell-guard from the
+		// permission surface. It is overwritten wholesale whenever it differs
+		// from the canonical form, the same as before origin-hash existed.
+		// regeneratedPlatformPaths is the shared set doctor also reads (R4-B1).
+		RegeneratedPlatformPaths: regeneratedPlatformPaths,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("seam: apply: %w", err)
@@ -938,7 +948,25 @@ func validateCoreOutputsSourceExistence(catalog *resolver.Catalog) error {
 const (
 	skillsPathPrefix  = ".opencode/skills/"
 	opencodePrefixCLI = ".opencode/"
+	// allowedCommandsRel is the repo-relative live path of allowed-commands.js,
+	// the canonical Go-tables-generated permission compat artifact the seam
+	// regenerates on every apply. It is referenced by warnIfAllowedCommandsCustomized,
+	// isAllowedCommandsCustomized, and regeneratedPlatformPaths (the exemption set
+	// shared with doctor's managed-drift check so the two cannot drift apart).
+	allowedCommandsRel = ".opencode/repo-configs/allowed-commands.js"
 )
+
+// regeneratedPlatformPaths is the set of platform_managed paths the platform
+// REGENERATES canonically on every apply (not template-rendered content). These
+// are exempt from origin-hash preservation — a consumer edit is always
+// overwritten so the file stays byte-in-sync with the platform's canonical
+// emission (e.g. allowed-commands.js must track the emitted permission blocks).
+// Apply consumes this via ApplyOptions.RegeneratedPlatformPaths; doctor's
+// managed-drift check consumes the SAME set so its consumer-preserved carve-out
+// (R3-B3) does not falsely promise to "preserve" a file update will overwrite
+// (R4-B1). Keep this the single source of truth — do not re-list these paths
+// inline in seam or doctor.
+var regeneratedPlatformPaths = map[string]bool{allowedCommandsRel: true}
 
 // walkStagedLivePaths returns the set of LIVE .opencode-relative paths already
 // present in staging (the builtin corpus the renderer just wrote, plus anything
@@ -973,7 +1001,7 @@ func warnIfAllowedCommandsCustomized(target, staging string) {
 	if !isAllowedCommandsCustomized(target, staging) {
 		return
 	}
-	const rel = ".opencode/repo-configs/allowed-commands.js"
+	rel := allowedCommandsRel
 	fmt.Fprintf(os.Stderr, `
 vh-agent-harness WARNING: %s has been modified and will be overwritten.
   The file is now GENERATED from Go canonical tables (internal/permconfig/tables.go).
@@ -990,7 +1018,7 @@ vh-agent-harness WARNING: %s has been modified and will be overwritten.
 // false when either file is missing (first install or render bug surfaced
 // elsewhere).
 func isAllowedCommandsCustomized(target, staging string) bool {
-	const rel = ".opencode/repo-configs/allowed-commands.js"
+	rel := allowedCommandsRel
 	staged, serr := os.ReadFile(filepath.Join(staging, rel))
 	if serr != nil {
 		return false
