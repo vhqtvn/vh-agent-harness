@@ -178,12 +178,30 @@ func TestShellGuardHook_NodeMinVersion(t *testing.T) {
 
 // --- Live bridge: end-to-end node eval.js + WASM + rules ---------------------
 
+// requireLiveBridge reports whether the live bridge MUST run. When
+// VH_REQUIRE_LIVE_BRIDGE=1 is set, every early-skip site in
+// TestShellGuardHook_LiveBridge must t.Fatal instead of t.Skip, so a CI job that
+// requests the full matrix cannot silently exercise nothing (a future regression
+// that re-opens a carve-out could otherwise land green). Default (unset) keeps
+// the historical t.Skip so local/unit dev is unaffected. Do NOT use a generic
+// CI=true var: some CI jobs are intentionally short/smoke, so the explicit var
+// names exactly what is required.
+func requireLiveBridge() bool {
+	return os.Getenv("VH_REQUIRE_LIVE_BRIDGE") == "1"
+}
+
 func TestShellGuardHook_LiveBridge(t *testing.T) {
 	if testing.Short() {
+		if requireLiveBridge() {
+			t.Fatal("VH_REQUIRE_LIVE_BRIDGE=1 set but running in -short mode: live bridge required yet skipped")
+		}
 		t.Skip("skipping live node bridge in -short mode")
 	}
 	nodeBin, err := exec.LookPath("node")
 	if err != nil {
+		if requireLiveBridge() {
+			t.Fatalf("VH_REQUIRE_LIVE_BRIDGE=1 set but node not on PATH: %v", err)
+		}
 		t.Skip("node not on PATH; skipping live bridge (JSON-mapping unit tests still cover the hook)")
 	}
 
@@ -240,11 +258,17 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 	// JSON-mapping unit tests still cover the Go hook).
 	npmBin, npmErr := exec.LookPath("npm")
 	if npmErr != nil {
+		if requireLiveBridge() {
+			t.Fatalf("VH_REQUIRE_LIVE_BRIDGE=1 set but npm not on PATH: %v", npmErr)
+		}
 		t.Skip("npm not on PATH; skipping live bridge")
 	}
 	install := exec.Command(npmBin, "install", "--no-audit", "--no-fund")
 	install.Dir = scratchOpencode
 	if out, err := install.CombinedOutput(); err != nil {
+		if requireLiveBridge() {
+			t.Fatalf("VH_REQUIRE_LIVE_BRIDGE=1 set but npm install failed: %v\n%s", err, out)
+		}
 		t.Skipf("npm install failed (offline?): %v\n%s", err, out)
 	}
 
