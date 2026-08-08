@@ -913,6 +913,16 @@ if [ "$TAGGED_SHA" != "$HEAD_SHA" ]; then
   emit false "$VERSION" "$TAGGED_SHA" false \
     "post-tag pin verification failed: tag ${VERSION} target (${TAGGED_SHA}) does not match the validated commit (${HEAD_SHA}); refusing before push" \
     "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON" "$HEAD_DRIFTED"
+  # Clean up the just-created local tag so a retry is not blocked by a stale
+  # dangling tag ("tag already exists" at the tag-existence check). The
+  # pin-verify failure was already recorded by emit above; this only removes
+  # the orphaned local ref. Fail-safe: if the delete itself fails, still exit 1
+  # so the original pin-verify failure is never masked.
+  if ! git tag -d "$VERSION" >/dev/null 2>&1; then
+    echo "release-tag: WARNING — failed to clean up local tag ${VERSION} after pin-verify failure; remove it manually with 'git tag -d ${VERSION}'" >&2
+  else
+    echo "release-tag: removed local tag ${VERSION} (cleaning up local tag after pin-verify failure)" >&2
+  fi
   exit 1
 fi
 
