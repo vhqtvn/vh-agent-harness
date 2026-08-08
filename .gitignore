@@ -1,0 +1,76 @@
+# .gitignore
+# Platform-managed starter .gitignore. project_owned in practice — edit freely.
+
+# --- Agent / harness local state (never commit) ---
+.opencode/state/
+.opencode/sessions/
+.opencode/plans/
+.opencode/runs/
+.opencode/scripts/__pycache__/
+.local/coordinator/
+.local/config/
+.local/ssh/
+.local/demo-server/
+
+# --- Local operator coordination / task registry (private) ---
+.local/coordinator/
+
+# --- Repo-scoped scratch (agent runs, logs, temp) ---
+tmp/
+*.log
+*.tmp
+*.bak
+
+# --- Python caches / test artifacts ---
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+coverage.*
+*.egg-info/
+
+# --- Node (web/admin) ---
+node_modules/
+.next/
+.turbo/
+dist/
+
+# --- Env files (never commit secrets) ---
+.env
+.env.local
+.env.*.local
+*.env
+# (env EXAMPLES are tracked)
+!*.env.example
+!*.env.*.example
+
+# --- Harness config docs ---
+# The harness does NOT scatter *.example scaffolds here. Run
+# `vh-agent-harness example <path>` to print a file's doc/template on demand
+# (e.g. `vh-agent-harness example .vh-agent-harness/AGENTS.mission.md`).
+
+# --- auto-classifier-pilot config (per-developer + secrets-adjacent) ---
+# Config files live under .opencode/repo-configs/. Three kinds, two rules:
+#   1. CONVENTION local-companions (gitignored): the optional `.local.json`
+#      shallow field-override beside each committed base file. auto-gate is the
+#      first consumer. The scoped wildcard keeps these per-developer and out of
+#      history without over-matching files outside repo-configs/.
+#   2. The SECRETS LLM file (gitignored): auto-gate-llm.json is NEVER committed
+#      (secrets-adjacent — model endpoint/key). Only the LLM file is ignored by
+#      its bare name; the behavior-config base (auto-gate-config.json) is NOT
+#      ignored — it is the optionally-committable shared base.
+#   3. COMMITTED base files (NOT gitignored): X.json files under repo-configs/
+#      are intended to be committed when they encode shared project policy.
+.opencode/repo-configs/*.local.json
+.opencode/repo-configs/auto-gate-llm.json
+
+# --- Editor / OS ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
