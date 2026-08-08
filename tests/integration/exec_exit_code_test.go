@@ -92,6 +92,16 @@ func TestExecRo_PropagatesNon1ChildExitAndNoUsageDump(t *testing.T) {
 	// exit of `false` AND the old collapse target), so asserting exit==2 is
 	// the only way to distinguish "child code propagated" from "collapsed to
 	// 1".
+	//
+	// rg (ripgrep) is a third-party binary this crux relies on as the failing
+	// child. Every env running this harness carries rg (it is a first-class
+	// readonly tool in internal/permconfig/tables.go), but skip cleanly on an
+	// rg-less host so a missing binary surfaces as a SKIP (environmental)
+	// rather than an opaque failure that could be mistaken for a behavioral
+	// regression.
+	if _, err := exec.LookPath("rg"); err != nil {
+		t.Skip("rg (ripgrep) not found on PATH: exec-ro crux requires rg as the failing child; defect-2/defect-3 behavior cannot be exercised without it")
+	}
 	out, exit := runExec(t, "exec-ro", "rg", "--bad-flag")
 	if exit != 2 {
 		t.Fatalf("exec-ro rg --bad-flag: exit code = %d, want 2 (rg's exit code for an unrecognized flag must propagate through exec-ro, not collapse to 1)\n--- output ---\n%s",
@@ -187,12 +197,18 @@ func TestExecSandbox_ExitHandlingUnchanged(t *testing.T) {
 
 // assertNoUsageDump fails the test if the output contains cobra's Usage block
 // markers. The exec family sets SilenceUsage:true so a CHILD failure must not
-// dump Usage/Flags. We check for the load-bearing markers: "Usage:" (the usage
-// header) and "Flags:" (the flags block header) and the Global Flags block. The
-// error line "Error:" is expected and allowed.
+// dump Usage/Flags. We match cobra's MULTI-LINE block form — the usage header
+// on its own line followed by the command/flags indented on the next line —
+// rather than the bare "Usage:" / "Flags:" literals. The bare literals would
+// false-trip on a clap-v4 build (e.g. a future ripgrep) that emits a
+// single-line "Usage: rg [OPTIONS]..." on a flag error; the multi-line cobra
+// block form ("Usage:\n  ", "Flags:\n  ") is cobra-specific and resists that
+// false-trip while still detecting a genuine cobra Usage/Flags dump (cobra
+// always puts the command/flags on the line AFTER the header). The error line
+// "Error:" is expected and allowed.
 func assertNoUsageDump(t *testing.T, label, out string) {
 	t.Helper()
-	for _, marker := range []string{"Usage:", "Flags:"} {
+	for _, marker := range []string{"Usage:\n  ", "Flags:\n  "} {
 		if strings.Contains(out, marker) {
 			t.Errorf("%s: child failure must NOT dump cobra Usage/Flags (found %q) — SilenceUsage should suppress it; a child exit is not a usage error\n--- output ---\n%s",
 				label, marker, out)
