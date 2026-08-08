@@ -208,6 +208,15 @@ outcome).
   internally consistent**; it does NOT prove the cited path executed. Proving
   the crux needs the repo-specific live verification this section already
   requires (the verified seam). The token is a declaration, not a proof.
+- Retained receipt for `result: proven`: before any closeout or promotion
+  claims `behavioral-closure` `result: proven`, an exec-capable surface must
+  have actually run the crux/verifier command(s) AND retained an inspectable
+  command receipt — the command(s) plus their outcome, bound to the assessed
+  revision/tree — in the closeout or durable report. A missing or unverifiable
+  receipt does not support `result: proven`. The receipt is compact (command +
+  outcome summary + tree binding), not a raw stdout/stderr dump and not a
+  `tmp/`-only artifact. The `behavioral-closure` token remains a consistency
+  declaration, not proof the path executed.
 - The `vh-agent-harness doctor` health check rejects an internally-inconsistent
   declaration (e.g. `verdict: proven` without a proven crux). This is the
   safety layer acting; it does not gate a verdict it cannot verify.
