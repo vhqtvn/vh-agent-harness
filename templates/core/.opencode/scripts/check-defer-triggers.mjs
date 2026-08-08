@@ -142,6 +142,15 @@
 //   `Disposed re-fires (completed/cancelled/staged, watched path re-touched —
 //    possible regression, NOT actionable): N`
 //
+// An always-printed `State breakdown: <state>=<count>  ...` line follows the
+// summary, tallying every card under its predicate state so the promoter can
+// triage at a glance (which cards are genuinely waiting, which are noise, which
+// need a grammar repair). The states are sorted alphabetically and joined by
+// two spaces; the line is printed unconditionally with the summary (unlike the
+// conditional `Disposed re-fires` line above). The `valid-fired` tally counts
+// BOTH [READY] and [RE-FIRE] cards — they share one predicate state, and only
+// the flag + actionable count differ by lifecycle.
+//
 // Promoter-mode failures (missing git, unreadable dir) print a warning line
 // and degrade to "no candidates". Release-mode failures fail closed.
 

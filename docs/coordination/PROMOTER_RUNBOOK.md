@@ -74,6 +74,13 @@ Promote on any of these triggers:
    set is `{completed, cancelled, staged}` — a card in any of these is
    disposition-satisfied, so a trigger re-fire is a recurrence/regression
    signal, not promotion work.
+   An always-printed `State breakdown: <state>=<count>  ...` line tallies every
+   card under its predicate state (sorted alphabetically, joined by two spaces)
+   so the promoter can triage at a glance. It is printed unconditionally with
+   the summary (unlike the conditional `Disposed re-fires` line). The
+   `valid-fired` tally includes BOTH `[READY]` and `[RE-FIRE]` cards — they
+   share one predicate state; only the flag and the actionable count differ by
+   lifecycle.
 3. **Apply the Definition of Ready (DoR).** Promote a candidate into
    `docs/planning/backlog.md` only if ALL of:
    - **Trigger fired** (checker confirms) OR **operator override** (recorded in
