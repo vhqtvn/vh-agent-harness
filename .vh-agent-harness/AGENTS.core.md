@@ -79,10 +79,8 @@ add-an-agent / add-command / add-skill recipe and the overlay anatomy.
 - `vh-agent-harness docs opencode-memory-model` when shaping or changing agent-memory conventions, workstream memory, or local/private OpenCode state
 - `docs/coordination/README.md` when shaping cross-boundary ownership, handoffs, blocker rules, or prompt/closeout coordination
 - `docs/coordination/TASK_MODES.md` and `docs/coordination/RUNTIME_MODEL.md` when a task may span multiple sessions, several subagent reports, or a local coordination runtime
-- the relevant `researches/decisions/` memo when rethinking the coordinator-session workflow, local task registry, or future external coordinator/runtime options
-- the relevant `researches/decisions/` memo when designing or implementing `/write-task`, `/task-ready`, `/task-update`, `/task-repair`, `/task-list`, `/task-open`, `/resume-task`, `/task-closeout`, or `/task-review`
-- the relevant `researches/decisions/` memo when designing or changing the repo's durable research workflow, source-packet conventions, long-running research setup, or `/research` entrypoint
-- the relevant `researches/decisions/` memo when designing browser-driven external research providers, provider polling/check status flows, or `.local/coordinator/research-runs/`
+- a repository-local memo, **when one exists** under `researches/decisions/`, before changing a settled boundary. Boundaries that commonly carry such a memo include the coordinator-session workflow, the local task registry, the `/write-task` … `/task-review` lifecycle, the durable research workflow and source-packet conventions, future external coordinator/runtime options, and browser-driven research providers / `.local/coordinator/research-runs/`. Do NOT treat the absence of a `researches/` tree or a matching memo as an error, and do NOT invent a missing memo or cite one as required — these are conditionally relevant only when such a memo actually exists in the target repo.
+- the durable research-artifact placement convention: `researches/sources/` for durable source packets and `researches/decisions/` for durable option comparisons / recommendations. These trees are used ONLY when the work explicitly calls for a committed research artifact; they are NOT required in every repository, and research workflows MUST NOT auto-create them merely by running. Absence of the tree is normal, not an error.
 - `.local/AGENTS.md` when working in local-only operator state such as `.local/coordinator/`, `.local/config/`, or `.local/ssh/`
 - `vh-agent-harness docs opencode-skills` when the task depends on a repo-local OpenCode skill or when you need to know which local skill should be invoked explicitly
 - `docs/ai/shell-execution.md` before planning or running shell commands
@@ -434,7 +432,7 @@ it would be empty, a placeholder, `none`, or a repetition of a sibling or an
 existing retained summary. This is a density rule, not a license to omit work:
 scan all nine, emit the ones with material content, omit the rest rather than
 emit a shell.
-
+{{ if .features.backlog }}
 ## Backlog tracking rules
 
 The canonical planning documents live under `docs/planning/` and `docs/checkpoints/`.
@@ -617,3 +615,4 @@ row's summary.
 - Keep each task scoped to one clear vertical slice or one focused boundary change.
 - Prefer areas that match repo boundaries (e.g. `api`, `web`, `storage`, `docs`, or the project's own package names).
 - Completed tasks must include enough notes for a reviewer to understand what changed without diff-mining the branch.
+{{ end }}
