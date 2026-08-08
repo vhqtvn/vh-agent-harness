@@ -11,13 +11,16 @@ package cli
 //     passes (the exact behavior of the former erratum_gate_test.go, now proven
 //     as a fixture of this generic gate rather than a parallel mechanism).
 //   - LIVE-repo cleanliness is NOT asserted by these tests. It is the authority
-//     of doctor check #12 (`checkDeferLiveness`) at the G0c release gate
+//     of doctor checks #12 (`checkDeferLiveness`) AND #13
+//     (`checkStagedErrataContent`) at the G0c release gate
 //     (scripts/release-tag.sh), NOT a `go test` canary. A go-test canary over
 //     the real repo would duplicate the authoritative G0c check at the wrong
 //     layer, turning the universal dev test red during release-prep windows
-//     whenever an open defer card's path_touched target is touched by a
-//     legitimate commit. `go test ./...` stays HERMETIC (scratch-repo fixtures
-//     only); the live F4-C / defer-liveness refusal surfaces at doctor/G0c.
+//     (#12: whenever an open defer card's path_touched target is touched by a
+//     legitimate commit; #13: whenever a staged errata card is mid-flight
+//     before `release inject-errata` runs). `go test ./...` stays HERMETIC
+//     (scratch-repo fixtures only); the live F4-C / defer-liveness refusal
+//     AND the staged-errata-content refusal both surface at doctor/G0c.
 //
 // symptom_signature stability is parked; these tests key cards by task_id only.
 
@@ -803,24 +806,13 @@ func TestStagedErrataContent_FailWhenHighestNoteLacksContent(t *testing.T) {
 	}
 }
 
-// TestStagedErrataContent_LiveRepoIsClean runs the check against the real repo.
-// It SKIPs today (no about-to-release note exists), proving the new check does
-// not break the existing green doctor state.
-func TestStagedErrataContent_LiveRepoIsClean(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git binary not available; cannot locate repo root for live gate")
-	}
-	repoRoot, err := repoRootFromCwd(t)
-	if err != nil {
-		t.Skipf("could not locate git working-tree root: %v", err)
-	}
-	r := checkStagedErrataContent(repoRoot)
-	// The check must not FAIL on the real repo (no about-to-release note → SKIP,
-	// or PASS if a note exists and errata is clean). FAIL is a regression.
-	if r.tier == tierFail {
-		t.Fatalf("live repo must not FAIL the staged-errata-content check, got FAIL: %s", r.detail)
-	}
-}
+// TestStagedErrataContent_LiveRepoIsClean was REMOVED. It ran
+// checkStagedErrataContent against the live repo, duplicating doctor #13 at the
+// go-test layer — the same hermetic/live split that removed the #12 canaries
+// (commit c588c7e) applies here. The 6 hermetic fixtures above (Fail/PASS/SKIP
+// variants) cover every logic branch; the live-state signal belongs to doctor
+// #13 at G0c, which can legitimately be red during the staged→inject window of
+// release-prep. `go test ./...` stays hermetic.
 
 // --- F4-C release-diff-recurrence predicate (doctor #12, second class) ---
 //
