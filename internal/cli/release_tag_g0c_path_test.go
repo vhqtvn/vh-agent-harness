@@ -17,8 +17,16 @@ package cli
 // invoked — the refuse (doctor unhealthy in the scratch fixture, a legitimate
 // red) carries real doctor output from the FRESH binary, never the decoy's
 // marker and never the old "stale binary on PATH" message.
+//
+// The first three tests below end in REFUSAL (they hand-write a partial
+// lineage.yml so doctor is structurally unhealthy). The fourth —
+// TestReleaseTag_G0c_StalePathBinaryIgnored_GreenPastG0cAllowsTag — is the
+// complement: it makes doctor HEALTHY via a full seam render, so the ceremony
+// proceeds PAST G0c and LANDS the tag at the validated commit while the decoy
+// still wins PATH resolution.
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -286,5 +294,123 @@ func TestReleaseTag_G0c_MissingCeremonyBinary_RecipeRecovers(t *testing.T) {
 	}
 	if strings.Contains(stdout2, decoyBinaryMarker) || strings.Contains(stderr2, decoyBinaryMarker) {
 		t.Errorf("decoy invoked on retry (PATH resolved despite fresh ceremony binary)\nstdout: %s\nstderr: %s", stdout2, stderr2)
+	}
+}
+
+// TestReleaseTag_G0c_StalePathBinaryIgnored_GreenPastG0cAllowsTag is the
+// GREEN-PAST-G0c behavioral-closure crux: a ceremony whose PATH resolves a
+// stale decoy binary RUNS G0c against a full seam render (doctor HEALTHY),
+// ignores the decoy, proceeds through every remaining gate, and LANDS the tag
+// at the validated commit. This is the complement of the three refusal tests
+// above — they prove the wrapper refuses for the RIGHT reason against an
+// unhealthy tree; this one proves that against a HEALTHY seam-installed tree
+// the stale PATH decoy is harmless and the ceremony completes.
+//
+// SCOPE (solution-brief SPLIT): this test observes WRAPPER behavior only. It
+// does NOT observe the agent runtime (make-build recognition, single retry,
+// AUTO-RECOVER log emission, or STOP-AND-ASK avoidance). Those claims are
+// not-demonstrable with the current seam (the interaction-contract verifier
+// checks prompt anchors, it never executes the releaser) and are recorded as
+// the accepted residual in the closeout. The binary is placed at
+// ./bin/vh-agent-harness by copyHarnessBinaryToCeremony, not by an observed
+// `make build`.
+//
+// Stale PATH is STATIC pre-invocation state (it does not mutate Git history),
+// so the full seam render that makes doctor HEALTHY is not subject to the
+// head-drift G1-G5 sequencing block.
+func TestReleaseTag_G0c_StalePathBinaryIgnored_GreenPastG0cAllowsTag(t *testing.T) {
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, manifestSpecForReadiness())
+
+	// A full seam render writes a real .vh-agent-harness/lineage.yml — the only
+	// condition under which G0c runs doctor AND doctor can be HEALTHY. The
+	// hand-crafted lineage.yml used by the refusal tests above makes doctor
+	// structurally unhealthy, which is the right red there but wrong here.
+	seamInstallInto(t, scratch)
+
+	// Re-sequence the history so the seam render lives in the release-prep
+	// commit (HEAD^^ at tag time), keeping the note->artifact->manifest
+	// ceremony intact on top. The manifest commit from setup is undone, the
+	// full seam render is folded into a new release-prep, then the manifest
+	// and readiness ceremony are re-stamped against it.
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", scratch}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	// Undo the manifest commit; unstage it so the seam-render commit is clean.
+	git("reset", "--soft", "HEAD~1")
+	git("reset", "HEAD", "--", ".vh-agent-harness/release-defer-dispositions.json")
+	// Commit the full seam render (plus the manifest blob on disk) as the new
+	// release-prep. `git add -A` captures every rendered file; the bin/-only
+	// scratch .gitignore keeps ./bin/vh-agent-harness (placed later) invisible.
+	git("add", "-A")
+	git("commit", "-q", "-m", "seam render fixture for green-past-G0c")
+
+	// Re-commit the manifest (handshake from current HEAD = release-prep) and
+	// then run the readiness ceremony on top, producing the note->artifact->
+	// manifest sequence the wrapper's G1-G5 handshake validates.
+	manifestBytes := buildManifestBytes(t, scratch, manifestSpecForReadiness())
+	commitReleaseManifest(t, scratch, manifestBytes, "")
+	insertReadinessArtifactCommit(t, scratch, manifestSpecForReadiness(), readinessArtifactSpec{})
+
+	// Place the FRESH ceremony binary at ./bin/vh-agent-harness (the path G0c
+	// resolves after the Layer 1 pin). Gitignored via bin/, so G0b stays clean.
+	copyHarnessBinaryToCeremony(t, scratch)
+
+	// Stale decoy FIRST on PATH (would WIN PATH resolution under the old code).
+	decoyDir := t.TempDir()
+	writeDecoyStaleBinary(t, decoyDir)
+
+	msgFile := filepath.Join(t.TempDir(), "msg.txt")
+	if err := os.WriteFile(msgFile, []byte("release v0.2.0\n\n-test\n"), 0o644); err != nil {
+		t.Fatalf("write msg: %v", err)
+	}
+
+	// Capture the validated commit (HEAD at ceremony start). The wrapper pins
+	// the tag to the HEAD_SHA it captures early, so this is the tag's target.
+	validatedCommit := gitRevParseVerify(t, scratch, "HEAD")
+
+	exitCode, stdout, stderr := runG0cCeremony(t, wrapper, msgFile, "v0.2.0", decoyDir)
+
+	// CRUX ASSERTION — wrapper exits success (green past every gate incl. G0c).
+	if exitCode != 0 {
+		t.Fatalf("green-past-G0c must ALLOW (exit 0); got %d\nstdout: %s\nstderr: %s", exitCode, stdout, stderr)
+	}
+
+	// The decoy was NEVER invoked: its marker must not appear anywhere.
+	if strings.Contains(stdout, decoyBinaryMarker) || strings.Contains(stderr, decoyBinaryMarker) {
+		t.Errorf("REGRESSION: decoy stale binary was invoked (PATH resolved); marker found\nstdout: %s\nstderr: %s", stdout, stderr)
+	}
+
+	// No stale-PATH / path-drift / doctor refusal substrings (a regression to
+	// PATH resolution would surface one of these).
+	for _, bad := range []string{"staleness guard", "binary on PATH", "ceremony binary missing", "G0c doctor not HEALTHY"} {
+		if strings.Contains(stdout, bad) || strings.Contains(stderr, bad) {
+			t.Errorf("REGRESSION: green-past-G0c hit a refuse path (%q) instead of completing\nstdout: %s\nstderr: %s", bad, stdout, stderr)
+		}
+	}
+
+	// The wrapper must emit a well-formed success JSON (ok=true).
+	var result releaseTagManifestResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("wrapper stdout must be valid success JSON: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+	}
+	if !result.OK {
+		t.Errorf("expected ok=true; got false (error=%v)", result.Error)
+	}
+
+	// The tag must exist.
+	if !tagExists(t, scratch, "v0.2.0") {
+		t.Errorf("tag v0.2.0 must exist after green-past-G0c")
+	}
+
+	// CRUX ASSERTION — the tag TARGETS the validated commit (reachability, NOT
+	// object existence: this distinguishes "tagged and landed" from "committed
+	// then reverted/reset").
+	tagTarget := gitRevParseVerify(t, scratch, "refs/tags/v0.2.0^{commit}")
+	if tagTarget != validatedCommit {
+		t.Errorf("tag v0.2.0 must target the validated commit %s; got %s", validatedCommit, tagTarget)
 	}
 }
