@@ -1,0 +1,11 @@
+{
+  "//": "vh-agent-harness :: product-prefixes.json — the product-code surface for coordination hints.",
+  "//_purpose": "Coordination hints flag when one change touches BOTH the coordination surface AND the product-code surface (the cross-boundary-slice warning). The product-code surface is the set of repo-relative directory prefixes that count as 'product code' for that warning. On a monorepo that is apps/ + packages/ (the shipped default); a non-monorepo layout (e.g. a single src/ tree) declares its own here so the warning fires for the right paths. Save this to .vh-agent-harness/product-prefixes.json. Get this template with: vh-agent-harness example .vh-agent-harness/product-prefixes.json",
+  "//_shape": "product_prefixes: array of repo-relative directory prefixes, each a non-empty string. A trailing slash is OPTIONAL ('src' and 'src/' are equivalent); backslashes are normalized to forward slashes. Entries are directory-bounded — 'apps' matches 'apps/x' but NOT 'appsfoo/' (no over-match of a same-stem directory). Duplicates are dropped; order is preserved.",
+  "//_fallback": "If this file is ABSENT, or product_prefixes is missing / empty / malformed (any non-string member, or not an array), coordination hints fall back to the monorepo default ['apps/', 'packages/']. So most monorepo projects NEVER create this file — create it only to declare a non-monorepo layout.",
+  "//_consumer": "Read at runtime by .opencode/scripts/coordination-hints-lib.js :: loadProductPrefixes (null on absent/malformed -> default). NOT read by the Go render seam; NOT a project.config.json field (that file has a contract-closed 4-field set). The example value below is an illustrative non-monorepo layout — replace it with YOUR directories.",
+
+  "product_prefixes": [
+    "src/"
+  ]
+}
