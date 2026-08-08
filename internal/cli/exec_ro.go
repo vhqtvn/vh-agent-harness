@@ -106,6 +106,11 @@ func runExecRo(cmd *cobra.Command, args []string) error {
 
 	opts := runtime.ExecOpts{Interactive: false}
 	if err := be.Exec(ctx, args, opts); err != nil {
+		// INVARIANT (defer-027): return this error UNWRAPPED. exitCodeFromError
+		// (defect-2 exit-code propagation) uses errors.As(*exec.ExitError) to
+		// surface the child's real exit code; a non-%w wrap here would hide the
+		// *exec.ExitError and silently revert to exit 1. Pinned by
+		// TestRunExecRo_ReturnsBackendErrorUnwrapped.
 		return err
 	}
 	if _, err := fireHook(ctx, hooks.Point(runshape.HookPostExec), be.Name(), lm.dir); err != nil {
