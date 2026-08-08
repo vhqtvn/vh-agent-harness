@@ -5,27 +5,48 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"regexp"
 	"sort"
+	"strings"
 	"testing"
 )
 
 // TestCommitReviewerSeatsByteIdentical guards the load-bearing property that
-// the four commit-reviewer seat prompts (a/b/c/d) never silently drift apart.
-// Apart from each leaf's distinct `description:` frontmatter line, the four
-// embedded sources must be byte-identical.
+// the commit-reviewer seat prompts never silently drift apart. Apart from each
+// leaf's distinct `description:` frontmatter line, the embedded sources must be
+// byte-identical.
 //
-// This is a deliberate drift-prevention test, chosen over a generator (which
-// would add maintenance machinery for four rarely-changing files) and over a
-// renderer change (no per-invocation payoff). If a future edit changes one seat
-// without the others, this test fails and surfaces the divergence.
+// The seat set is DISCOVERED BY GLOB (commit-reviewer-*.md) rather than
+// hardcoded, so a future fifth seat is auto-enrolled in the drift guard instead
+// of silently bypassing it. This is a deliberate drift-prevention test, chosen
+// over a generator (which would add maintenance machinery for rarely-changing
+// files) and over a renderer change (no per-invocation payoff). If a future
+// edit changes one seat without the others, this test fails and surfaces the
+// divergence.
 func TestCommitReviewerSeatsByteIdentical(t *testing.T) {
-	seats := []string{"a", "b", "c", "d"}
-	base := "templates/core/.opencode/agents/commit-reviewer-"
-	stripped := make([][]byte, len(seats))
-	for i, s := range seats {
-		b, err := CoreFS.ReadFile(base + s + ".md")
-		if err != nil {
-			t.Fatalf("read commit-reviewer-%s: %v", s, err)
+	// The pattern commit-reviewer-*.md matches every seat leaf
+	// (commit-reviewer-{a,b,c,d}.md today, and any later seat) but NOT the
+	// seat-less commit-reviewer.md dispatcher, which carries no -<seat> suffix.
+	pattern := "templates/core/.opencode/agents/commit-reviewer-*.md"
+	matches, err := fs.Glob(CoreFS, pattern)
+	if err != nil {
+		t.Fatalf("glob %s: %v", pattern, err)
+	}
+	if len(matches) == 0 {
+		t.Fatalf("glob %s matched no seat files (embed walk regression)", pattern)
+	}
+	sort.Strings(matches)
+
+	seats := make([]string, len(matches))
+	stripped := make([][]byte, len(matches))
+	for i, p := range matches {
+		// Seat suffix = the file stem after "commit-reviewer-", e.g. "a".
+		stem := strings.TrimSuffix(path.Base(p), ".md")
+		seat := strings.TrimPrefix(stem, "commit-reviewer-")
+		seats[i] = seat
+		b, rerr := CoreFS.ReadFile(p)
+		if rerr != nil {
+			t.Fatalf("read %s: %v", p, rerr)
 		}
 		stripped[i] = stripDescriptionLine(b)
 	}
@@ -109,7 +130,9 @@ var grandfatheredSkillDescriptionCap = map[string]int{
 //
 // On failure it reports each offending skill with its actual length and the
 // applicable ceiling, so a maintainer can either trim the description or update
-// the grandfather map deliberately.
+// the grandfather map deliberately. The per-skill evaluation is delegated to
+// evaluateSoftCap, which is also exercised directly by
+// TestEvaluateSoftCapBranches.
 func TestSkillDescriptionSoftCap(t *testing.T) {
 	skills, err := readEmbeddedSkillFiles()
 	if err != nil {
@@ -133,48 +156,65 @@ func TestSkillDescriptionSoftCap(t *testing.T) {
 			failures = append(failures, fmt.Sprintf("%s: no frontmatter `description:` line found", name))
 			continue
 		}
-		if isYAMLBlockScalarIndicator(desc) {
-			// A block/fold scalar (`>-`, `|`, ...) is measured here as a 2-byte
-			// indicator and would pass the cap vacuously regardless of the real
-			// (indented, multi-line) description — an evasion the guard cannot
-			// see. Require an inline scalar so length is always meaningful.
-			failures = append(failures, fmt.Sprintf(
-				"%s: description uses a YAML block/fold scalar indicator (%q); the soft-cap guard measures inline scalars only — convert to an inline (bare or double-quoted) scalar",
-				name, desc))
-			continue
-		}
-		got := len(desc)
 		ceiling, grandfathered := grandfatheredSkillDescriptionCap[name]
-		switch {
-		case grandfathered && ceiling <= skillDescriptionSoftCap:
-			// Stale entry: the RECORDED ceiling never exceeded the cap, so the
-			// grandfather record must be removed (it should never have shipped).
-			failures = append(failures, fmt.Sprintf(
-				"%s: grandfathered ceiling %d <= soft cap %d; remove the stale grandfather entry (the recorded value never exceeded the cap)",
-				name, ceiling, skillDescriptionSoftCap))
-		case grandfathered && got <= skillDescriptionSoftCap:
-			// Whittle-down positive signal: the description has since been
-			// trimmed below the cap, so the exemption is no longer needed and
-			// the entry is stale — remove it so the skill is held to the cap.
-			failures = append(failures, fmt.Sprintf(
-				"%s: description is now %d bytes (<= soft cap %d); remove the stale grandfather entry so the skill is held to the cap",
-				name, got, skillDescriptionSoftCap))
-		case grandfathered:
-			if got > ceiling {
-				failures = append(failures, fmt.Sprintf(
-					"%s: description grew to %d bytes, exceeding its grandfathered ceiling of %d (trim it or raise the ceiling deliberately)",
-					name, got, ceiling))
-			}
-		default:
-			if got > skillDescriptionSoftCap {
-				failures = append(failures, fmt.Sprintf(
-					"%s: description is %d bytes, over the soft cap of %d (trim it, or add a deliberate grandfather entry if untrimmable)",
-					name, got, skillDescriptionSoftCap))
-			}
+		if f := evaluateSoftCap(name, desc, ceiling, grandfathered); f != "" {
+			failures = append(failures, f)
 		}
 	}
 	for _, f := range failures {
 		t.Error(f)
+	}
+}
+
+// evaluateSoftCap returns the soft-cap failure string for a single skill
+// description, or "" when the description is clean. It is the factored core of
+// TestSkillDescriptionSoftCap's per-skill evaluation, extracted so every switch
+// branch can be exercised by TestEvaluateSoftCapBranches with synthetic
+// descriptions — without mutating embedded skills.
+//
+// `ceiling` and `grandfathered` are the per-skill entries from
+// grandfatheredSkillDescriptionCap (pass 0,false for a non-grandfathered skill).
+// The failure strings are the EXACT forms TestSkillDescriptionSoftCap emits, so
+// extracting this helper changes no observable test behavior.
+func evaluateSoftCap(name, desc string, ceiling int, grandfathered bool) string {
+	if isYAMLBlockScalarIndicator(desc) {
+		// A block/fold scalar (`>-`, `|`, ...) is measured here as a short
+		// indicator and would pass the cap vacuously regardless of the real
+		// (indented, multi-line) description — an evasion the guard cannot
+		// see. Require an inline scalar so length is always meaningful.
+		return fmt.Sprintf(
+			"%s: description uses a YAML block/fold scalar indicator (%q); the soft-cap guard measures inline scalars only — convert to an inline (bare or double-quoted) scalar",
+			name, desc)
+	}
+	got := len(desc)
+	switch {
+	case grandfathered && ceiling <= skillDescriptionSoftCap:
+		// Stale entry: the RECORDED ceiling never exceeded the cap, so the
+		// grandfather record must be removed (it should never have shipped).
+		return fmt.Sprintf(
+			"%s: grandfathered ceiling %d <= soft cap %d; remove the stale grandfather entry (the recorded value never exceeded the cap)",
+			name, ceiling, skillDescriptionSoftCap)
+	case grandfathered && got <= skillDescriptionSoftCap:
+		// Whittle-down positive signal: the description has since been trimmed
+		// below the cap, so the exemption is no longer needed and the entry is
+		// stale — remove it so the skill is held to the cap.
+		return fmt.Sprintf(
+			"%s: description is now %d bytes (<= soft cap %d); remove the stale grandfather entry so the skill is held to the cap",
+			name, got, skillDescriptionSoftCap)
+	case grandfathered:
+		if got > ceiling {
+			return fmt.Sprintf(
+				"%s: description grew to %d bytes, exceeding its grandfathered ceiling of %d (trim it or raise the ceiling deliberately)",
+				name, got, ceiling)
+		}
+		return ""
+	default:
+		if got > skillDescriptionSoftCap {
+			return fmt.Sprintf(
+				"%s: description is %d bytes, over the soft cap of %d (trim it, or add a deliberate grandfather entry if untrimmable)",
+				name, got, skillDescriptionSoftCap)
+		}
+		return ""
 	}
 }
 
@@ -249,24 +289,24 @@ func skillDescriptionValue(b []byte) (string, bool) {
 	return "", false
 }
 
-// yamlBlockScalarIndicators are the YAML block/fold scalar introducers. When a
-// description value is exactly one of these (the unquoted indicator that begins
-// an indented continuation block), skillDescriptionValue returns it as the
-// 2-char value; measuring that would pass the cap vacuously. The full set with
-// optional chomping/keep indicators (`>`, `>-`, `>+`, `|`, `|-`, `|+`) is closed.
-var yamlBlockScalarIndicators = map[string]bool{
-	">":  true,
-	">-": true,
-	">+": true,
-	"|":  true,
-	"|-": true,
-	"|+": true,
-}
+// yamlBlockScalarIndicatorRe matches a YAML block/fold scalar introducer: a
+// leading `|` (literal) or `>` (folded) followed by an optional indentation
+// indicator (one or more digits — e.g. `|2`, `>10`) and an optional
+// chomping/keep indicator (`-` strip or `+` keep — e.g. `>-`, `|2-`, `>1+`).
+// Per the YAML 1.2 block-header grammar the two indicators may appear in EITHER
+// order, so `|2-` (indent then chomp) AND `|-2` (chomp then indent) are both
+// valid headers and both matched here. The whole string must be the bare
+// indicator: a value with trailing body text (`"> not bare"`, `|2 body`) is NOT
+// matched and is measured as an inline scalar.
+//
+// This subsumes the prior closed map {>, >-, >+, |, |-, |+} and ALSO recognizes
+// the indentation-indicator forms (>2, |2-, |-2) the map missed.
+var yamlBlockScalarIndicatorRe = regexp.MustCompile(`^[\|>](\d*[+-]?|[+-]?\d*)$`)
 
 // isYAMLBlockScalarIndicator reports whether s is a YAML block/fold scalar
 // introducer — the evasion form the inline-scalar guard cannot length-measure.
 func isYAMLBlockScalarIndicator(s string) bool {
-	return yamlBlockScalarIndicators[s]
+	return yamlBlockScalarIndicatorRe.MatchString(s)
 }
 
 // TestSkillDescriptionValueParser is a focused unit test for the line-level
@@ -298,16 +338,59 @@ func TestSkillDescriptionValueParser(t *testing.T) {
 }
 
 // TestYAMLBlockScalarIndicatorDetection covers the closed set of block/fold
-// scalar introducers and confirms ordinary description text is not mis-flagged.
+// scalar introducers — including the indentation-indicator forms (>2, |2-) the
+// prior exact-map missed — and confirms ordinary description text is not
+// mis-flagged.
 func TestYAMLBlockScalarIndicatorDetection(t *testing.T) {
-	for _, indicator := range []string{">", ">-", ">+", "|", "|-", "|+"} {
+	for _, indicator := range []string{">", ">-", ">+", "|", "|-", "|+", "|2", ">2-", "|-1", "|10+", ">1+", "|-2", ">-10"} {
 		if !isYAMLBlockScalarIndicator(indicator) {
 			t.Errorf("expected %q to be detected as a block scalar indicator", indicator)
 		}
 	}
-	for _, text := range []string{"hello world", "", "- leading dash body", "pipe|in middle", "\"quoted\"", "> not bare (has trailing text)"} {
+	for _, text := range []string{"hello world", "", "- leading dash body", "pipe|in middle", "\"quoted\"", "> not bare (has trailing text)", "|2 body", ">+ trailing"} {
 		if isYAMLBlockScalarIndicator(text) {
 			t.Errorf("did not expect %q to be flagged as a block scalar indicator", text)
 		}
+	}
+}
+
+// TestEvaluateSoftCapBranches is the committed synthetic-failure table test for
+// the soft-cap guard. It feeds synthetic descriptions (one per switch branch)
+// through evaluateSoftCap and asserts each failure branch fires (and the clean
+// branches stay quiet), without mutating embedded skills. This durably captures
+// the crux the operator originally demonstrated manually (inject 248->285 bytes
+// -> FAILURE -> revert): every branch now has a committed positive control.
+func TestEvaluateSoftCapBranches(t *testing.T) {
+	overCap := strings.Repeat("x", skillDescriptionSoftCap+1) // 251 bytes
+	underCap := strings.Repeat("x", 100)                      // 100 bytes
+	for _, tc := range []struct {
+		name          string
+		desc          string
+		ceiling       int
+		grandfathered bool
+		wantFail      bool
+		wantContains  string
+	}{
+		{"clean_not_grandfathered", underCap, 0, false, false, ""},
+		{"clean_grandfathered_within_ceiling", strings.Repeat("x", skillDescriptionSoftCap+10), skillDescriptionSoftCap + 50, true, false, ""},
+		{"over_cap_default_branch", overCap, 0, false, true, "over the soft cap"},
+		{"over_grandfathered_ceiling", strings.Repeat("x", skillDescriptionSoftCap+30), skillDescriptionSoftCap + 20, true, true, "exceeding its grandfathered ceiling"},
+		{"grandfathered_stale_whittled_down", underCap, skillDescriptionSoftCap + 50, true, true, "held to the cap"},
+		{"grandfathered_stale_recorded_below_cap", underCap, skillDescriptionSoftCap - 50, true, true, "never exceeded the cap"},
+		{"block_scalar_indicator_basic", "|", 0, false, true, "block/fold scalar indicator"},
+		{"block_scalar_indent_indicator", "|2-", 0, false, true, "block/fold scalar indicator"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := evaluateSoftCap("synthetic-skill", tc.desc, tc.ceiling, tc.grandfathered)
+			if tc.wantFail && got == "" {
+				t.Fatalf("expected a failure for %s, got clean", tc.name)
+			}
+			if !tc.wantFail && got != "" {
+				t.Fatalf("expected clean for %s, got failure: %s", tc.name, got)
+			}
+			if tc.wantFail && tc.wantContains != "" && !strings.Contains(got, tc.wantContains) {
+				t.Errorf("failure %q does not contain expected substring %q", got, tc.wantContains)
+			}
+		})
 	}
 }
