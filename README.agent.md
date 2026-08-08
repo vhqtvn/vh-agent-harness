@@ -1943,6 +1943,96 @@ after the seed manifest lands is the canonical case — the seed manifest's SHAs
 are placeholders that the releaser recomputes against the actual post-artifact
 commit R on its first run.
 
+### Recovery: ceremony refusals (operator-only git recovery)
+
+The release-tag wrapper refuses the tag BEFORE any `git tag` mutation, emitting
+a structured JSON refusal and a non-zero exit. Two refusal classes need
+operator git recovery that the agent CANNOT perform itself — shell-guard's
+`git-mutation-bypass` rule denies `git reset`, `git branch`, and
+`git cherry-pick` to every agent (the gated-commit `committer` only stages and
+commits an authorized slice; it does not reset or cherry-pick). On either class
+the agent's correct role is **STOP-AND-ASK** the operator with the verified
+chain below — never author a recovery that leaves untracked files in the
+worktree or relies on the reflog in place of a branch ref.
+
+- **Failure mode A — mis-authored M.** M's handshake SHAs are wrong, or the
+  `records[]` block is malformed/unsorted, so the evaluator returns
+  `evaluator-error` (exit 2). The override ceremony CANNOT cure this class;
+  M must be re-authored.
+- **Failure mode B — a concurrent commit landed above M.** A commit outside
+  the N→R→M chain now sits at HEAD above M, breaking the wrapper's readiness
+  binding (at tag time M must be HEAD, R = HEAD^, N = HEAD^^). The handshake
+  no longer holds and the wrapper refuses.
+
+**The G0b untracked-file trap (applies to both).** G0b runs
+`git status --short` (release-tag.sh:558) and refuses on ANY non-empty output.
+`git status --short` COUNTS UNTRACKED files — they appear with a `??` prefix —
+not just modified/staged ones, so the worktree can be clean of *modifications*
+yet still fail G0b on untracked files. **Distinguish untracked from modified
+before acting:**
+
+- `git status --short` lists untracked files with a leading `??`; modified
+  files show ` M` / `M ` / `MM`. Only the latter are real edits.
+- `git status --short --untracked-files=no` isolates the *modified* check
+  (it shows both staged and unstaged tracked changes; do NOT substitute
+  `git diff --quiet`, which exits 0 on a purely staged change while G0b still
+  refuses). If `--untracked-files=no` output is empty but plain
+  `git status --short` is not, the entire G0b refusal is untracked-file noise,
+  not an uncommitted edit.
+
+**Operator-verified recovery sequence (v0.21.0 reference; operator-only):**
+
+1. **Pin any concurrent commit with a real branch ref BEFORE reset** —
+   `git branch keep-<id> <sha>`. A branch ref is GC-proof; the reflog is NOT
+   (it expires and is not a durable anchor), so never substitute reflog
+   inspection for a real branch ref. This preserves the concurrent commit for
+   re-application after the tag. NOTE: a branch ref preserves ONLY the named
+   commit — it does not capture uncommitted index/worktree state, which step 2
+   handles separately.
+2. **Preserve any uncommitted tracked WIP before the hard reset.** Because
+   `keep-<id>` holds only the concurrent commit, run
+   `git status --short --untracked-files=no` and stash or branch any tracked
+   modifications that are NOT part of that commit (e.g.
+   `git stash push -m "ceremony-recovery-wip"`, which captures both staged and
+   unstaged tracked changes). The `git reset --hard` in the next step would
+   otherwise discard them irreversibly. (Untracked scratch is backed up in
+   step 4.)
+3. **Reset to R (hard)** — `git reset --hard <R-sha>`. HEAD, index, AND worktree
+   all move to R; the concurrent commit's tracked changes are discarded from the
+   worktree, preserved in the pinned `keep-<id>` ref (which is why steps 1 and 2
+   are mandatory). Use `--hard`, NOT `--mixed` — `--mixed` resets only
+   HEAD+index and leaves the concurrent commit's tracked changes in the worktree,
+   so `git status --short` stays non-empty and G0b still refuses at tag time.
+4. **Remove untracked files from the worktree** so G0b sees a clean tree
+   (`git reset --hard` resets tracked files but does NOT delete untracked
+   files). Back up genuinely-untracked scratch first; tracked-concurrent content
+   is already safe in the pinned branch. This step resolves the G0b
+   untracked-file trap from above.
+5. **Commit M(good) as an immediate child of R** — manifest path only — via
+   the gated-commit `committer`, so `M^ == R` and `git diff --name-only R..M`
+   is exactly the manifest path. (For failure mode A, this is also where the
+   mis-authored M is corrected before re-commit.)
+6. **Re-verify the handshake** — re-run the evaluator against M; confirm
+   `evaluated_commit` / `manifest_parent_commit` == SHA(R) and
+   `evaluated_tree` == tree(R).
+7. **Tag** — invoke the wrapper; with a clean worktree G0b passes and the
+   ceremony completes.
+8. **AFTER the tag, cherry-pick the pinned branch back onto the integration
+   branch and delete the temp branch** — `git cherry-pick keep-<id>` then
+   `git branch -D keep-<id>` (single-commit concurrent work; a multi-commit
+   branch would need a range). If step 2 stashed WIP, restore it
+   (`git stash pop`). The release tag sits immutable on M, with the concurrent
+   work reapplied above it.
+
+**Agent role.** Every git step above (reset, branch, cherry-pick) is
+operator-only. On a ceremony refusal in either failure mode the agent
+STOP-AND-ASKs the operator with this verified chain — it does not run the
+recovery, does not author a variant that leaves untracked files in the
+worktree, and does not rely on the reflog in place of a branch ref. The G0b
+global-clean requirement at release transitions is correct and load-bearing
+(see the AGENTS.md B2 release-cleanliness rule); the gap this runbook closes is
+the UNDOCUMENTED recovery path, not the gate.
+
 ### Wrapper flags
 
 ```sh

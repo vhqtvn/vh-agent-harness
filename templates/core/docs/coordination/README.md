@@ -69,6 +69,14 @@ See [PROMOTER_RUNBOOK.md](PROMOTER_RUNBOOK.md) for the promoter procedure,
 the eventual-consistency pass, conflict resolution, and the Definition of
 Ready.
 
+**Session-list idle is not a safe-to-commit signal.** An OpenCode session
+showing `idle` in the session list is advisory, not a quiesce guarantee:
+concurrent agents, a backlog sweep, or new working-tree edits can land
+mid-commit window even while the list reads idle. The commit-gate's exact-slice
+integrity (not session-list idle) is what makes a commit safe — re-read the
+working tree and the gate's verdict before treating the environment as
+quiesced.
+
 ## Record Lifecycle
 
 The harness keeps records in a few distinct tiers, each with a different
