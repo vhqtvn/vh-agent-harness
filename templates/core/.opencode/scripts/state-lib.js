@@ -6161,6 +6161,34 @@ function readyCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) {
             `Task ${loaded.payload.task_id} is ${loaded.payload.status} and cannot be prepared for execution.`,
         );
     }
+    // --- TEST-ONLY pre-lock interleaving seam (lifecycle-TOCTOU exercise) ---
+    // The locked current.status re-check inside updateCoordinationTask below
+    // defends a TOCTOU window: between this pre-lock status guard (which read
+    // loaded.payload.status) and lock acquisition inside updateCoordinationTask,
+    // a concurrent caller may have transitioned the task (e.g., activated it
+    // to "working"). This optional, per-call, synchronous callback fires
+    // exactly once at the after-status-check / before-lock boundary so a
+    // verifier can transition the task via the real lifecycle (ready +
+    // activate, both through their own locked writes) and exercise the
+    // locked re-check -> throw wiring deterministically.
+    //
+    // Containment contract (enforced by construction, mirroring the merge-path
+    // _testPreLockInterleave seam):
+    //  - per-call: passed via the options arg only; NOT an env var.
+    //  - inert by default: every production + existing-test caller omits it.
+    //  - synchronous, invoked at most once.
+    //  - NOT propagated: readyCoordinationTask calls updateCoordinationTask
+    //    (lock+persist), whose signature is (taskIDRaw, updateFn) with no
+    //    options arg — the seam callback cannot reach it.
+    //  - CANNOT override the status guard, suppress locking, authorize
+    //    persistence, or override a thrown guard: the callback only provides
+    //    the interleaving opportunity; the locked re-check inside
+    //    updateCoordinationTask remains the sole authority and may still throw.
+    if (typeof options._testPreLockInterleave === "function") {
+        options._testPreLockInterleave({
+            task_id: loaded.payload.task_id,
+        });
+    }
     const payload = input && typeof input === "object" ? input : {};
     const explicitNextAction =
         payload.next_action !== undefined
