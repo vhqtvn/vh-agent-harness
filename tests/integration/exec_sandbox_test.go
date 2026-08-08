@@ -260,6 +260,30 @@ func TestSandboxAbsentFloor_ContainedDefaultPreserved(t *testing.T) {
 	if strings.Contains(out, "refusing --sandbox=off") {
 		t.Fatalf("absent floor + best-effort: Fix-1 refuse fired (must not — only explicit off is refused):\n%s", out)
 	}
+
+	// CAUSE-PINNING (defer-023): the assertions above observe the OUTCOME (file
+	// not created + non-zero exit). This block narrows the CAUSE so a future
+	// regression that blocks the write for the WRONG reason cannot false-pass.
+	//
+	// Landlock filesystem denials manifest as EACCES at the syscall layer —
+	// there is no Landlock-specific errno, and the harness does not attribute
+	// denials to Landlock at runtime, so "permission denied" (EACCES) is the
+	// most direct cause signal this seam exposes. Here it is also
+	// DISCRIMINATING: the probe's parent is t.TempDir() (owner-owned, 0700),
+	// so the owner has full filesystem write permission and the ONLY remaining
+	// source of an EACCES on the write is the Landlock ruleset. A wrong-reason
+	// failure would surface a different error class instead — ENOENT ("no such
+	// file or directory" if the path/sandbox cwd drifted), ENOSPC ("no space
+	// left on device"), or seccomp's ENOSYS ("function not implemented") — none
+	// of which carry "permission denied". Requiring the EACCES signal therefore
+	// catches exactly the regression the outcome-only assertion would miss.
+	//
+	// Honesty caveat: this pins a PERMISSION-CLASS denial attributable to
+	// Landlock in this owner-owned-dir setup; it does not fingerprint Landlock
+	// at the kernel (EACCES is shared with fs-perm denials in general).
+	if !strings.Contains(strings.ToLower(out), "permission denied") {
+		t.Fatalf("absent floor + best-effort: write outside tmp failed (exit=%d) but WITHOUT the EACCES cause signal ('permission denied') — the denial came from the wrong reason, not Landlock containment:\n%s", exit, out)
+	}
 }
 
 // TestSandboxStrictFloor_DeniesP5Bypass is the CRUX integration test: in the
