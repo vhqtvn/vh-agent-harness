@@ -429,3 +429,198 @@ func TestHasGaps(t *testing.T) {
 		t.Fatal("fail-fast flag alone is not a gap")
 	}
 }
+
+// TestValidate_Integration_RealisticReviewSlice exercises Validate end-to-end
+// over a realistic commit-review declared scope — the shape a tiered
+// commit-reviewer would actually produce — rather than the minimal 2-3-item
+// abstract fixtures above. It proves the F4-A declared-scope-coverage property
+// holds over a realistic input even though the validator is not yet wired to
+// any blocking approval gate (it remains INFORMS-only / non-blocking per the
+// decision memo's gate-attachment preconditions).
+//
+// The realistic slice mixes the two terminal dispositions a real review uses:
+//
+//   - StatusExamined  for files the reviewer actually read
+//   - StatusExcluded  (WITH a non-blank Reason) for files excluded by contract
+//     (generated/vendored artifact, out-of-slice docs)
+//
+// plus a concern-qualified item (a sub-region of a file the review promised to
+// cover specifically). The sub-tests then assert:
+//
+//  1. COMPLETE realistic coverage — every declared item accounted for ->
+//     Complete=true and every gap slice empty (the happy path a future approval
+//     gate would consult via HasGaps).
+//  2. REALISTIC GAP, a missed item — dropping one examined disposition (a
+//     reviewer who forgot to account for one declared file) is caught: Missing
+//     grows to name it and Complete=false. This is the load-bearing coverage
+//     property: a missed item cannot hide behind the other covered items.
+//  3. REALISTIC excluded-by-contract — a generated file excluded WITH a reason
+//     is terminal and not a gap; the SAME exclusion WITHOUT a reason becomes an
+//     unexplained exclusion that blocks Complete (the F1 fix, exercised over a
+//     realistic reason shape: "generated file" must carry its contract).
+//
+// This complements the minimal unit fixtures above: those prove each gap class
+// in isolation with abstract inputs; this proves the classes compose correctly
+// and that happy-path coverage + gap detection hold over a realistic review
+// slice. It does NOT fabricate coverage semantics — every assertion exercises
+// real declared-scope-coverage behavior of Validate.
+func TestValidate_Integration_RealisticReviewSlice(t *testing.T) {
+	// A realistic commit-review declared scope: hand-written source, a test
+	// file, the validator package (whole + a concern-qualified sub-region), a
+	// sibling package, an out-of-slice doc, and a generated artifact.
+	declared := []DeclaredScopeItem{
+		item("internal/cli/release.go", ""),
+		item("internal/cli/release_test.go", ""),
+		item("internal/scopecoverage/scopecoverage.go", ""),
+		item("internal/scopecoverage/scopecoverage.go", "exports"), // concern-qualified
+		item("internal/ownership/classify.go", ""),
+		item("docs/ai/release-flow.md", ""),
+		item("internal/cli/release_string.go", ""), // generated
+	}
+
+	// Canonical IDs the dispositions target (path.Cleaned; concern joined by #).
+	const (
+		releaseGo           = "internal/cli/release.go"
+		releaseTestGo       = "internal/cli/release_test.go"
+		scopecoverageGo     = "internal/scopecoverage/scopecoverage.go"
+		scopecoverageExport = "internal/scopecoverage/scopecoverage.go#exports"
+		classifyGo          = "internal/ownership/classify.go"
+		releaseFlowMd       = "docs/ai/release-flow.md"
+		releaseStringGo     = "internal/cli/release_string.go"
+	)
+
+	// Dispositions a real review would produce: examined for hand-written code,
+	// excluded-by-contract (WITH reason) for the generated artifact and the
+	// out-of-slice doc, examined for the concern-qualified sub-region.
+	completeDispositions := []CoverageDisposition{
+		dstat(releaseGo, StatusExamined),
+		dstat(releaseTestGo, StatusExamined),
+		dstat(scopecoverageGo, StatusExamined),
+		dstat(scopecoverageExport, StatusExamined),
+		dstat(classifyGo, StatusExamined),
+		dexcl(releaseFlowMd, "out of slice: docs-only change, no code surface reviewed"),
+		dexcl(releaseStringGo, "generated file: regenerated from source, not hand-reviewed"),
+	}
+
+	// (1) COMPLETE realistic coverage: every declared item accounted for.
+	t.Run("complete_realistic_coverage", func(t *testing.T) {
+		r := Validate(declared, completeDispositions, false)
+		if !r.Complete {
+			t.Fatalf("realistic full coverage must be Complete; got %+v", r)
+		}
+		if r.HasGaps() {
+			t.Fatalf("HasGaps must be false for complete realistic coverage; got %+v", r)
+		}
+		for _, gap := range []struct {
+			name string
+			got  []string
+		}{
+			{"Missing", r.Missing},
+			{"NonTerminal", r.NonTerminal},
+			{"Extra", r.Extra},
+			{"AmbiguousDeclared", r.AmbiguousDeclared},
+			{"DuplicateDispositions", r.DuplicateDispositions},
+			{"UnexplainedExclusions", r.UnexplainedExclusions},
+		} {
+			if len(gap.got) != 0 {
+				t.Errorf("%s = %v, want empty for complete realistic coverage", gap.name, gap.got)
+			}
+		}
+	})
+
+	// (2) REALISTIC GAP — a missed item: the reviewer forgot to account for
+	// internal/ownership/classify.go (no disposition). The validator must catch
+	// it: Complete=false, Missing names the missed file, and no other item's
+	// coverage hides the gap.
+	t.Run("realistic_gap_missed_item_caught", func(t *testing.T) {
+		missed := classifyGo
+		disp := dropDisposition(completeDispositions, missed)
+		r := Validate(declared, disp, false)
+		if r.Complete {
+			t.Fatalf("a missed declared item must block Complete; got %+v", r)
+		}
+		if !reflect.DeepEqual(r.Missing, []string{missed}) {
+			t.Fatalf("Missing = %v, want [%s]", r.Missing, missed)
+		}
+		// The other covered items must not contaminate the gap slices.
+		if len(r.Extra) != 0 || len(r.NonTerminal) != 0 || len(r.UnexplainedExclusions) != 0 {
+			t.Fatalf("only Missing should flag a missed item; got Extra=%v NonTerminal=%v UnexplainedExclusions=%v",
+				r.Extra, r.NonTerminal, r.UnexplainedExclusions)
+		}
+	})
+
+	// (3) REALISTIC excluded-by-contract: the generated file excluded WITH a
+	// reason is terminal (no gap). The SAME exclusion WITHOUT a reason becomes
+	// an unexplained exclusion that blocks Complete — over the realistic reason
+	// shape, "generated file" must carry its contract.
+	t.Run("realistic_excluded_by_contract_reason_is_load_bearing", func(t *testing.T) {
+		// With reason -> terminal, full coverage still complete.
+		rWithReason := Validate(declared, completeDispositions, false)
+		if !rWithReason.Complete {
+			t.Fatalf("generated file excluded WITH reason must be terminal (complete); got %+v", rWithReason)
+		}
+		if len(rWithReason.UnexplainedExclusions) != 0 {
+			t.Fatalf("no unexplained exclusions expected when reason present; got %v", rWithReason.UnexplainedExclusions)
+		}
+
+		// Without reason -> unexplained exclusion blocks Complete.
+		dispNoReason := replaceDisposition(completeDispositions, releaseStringGo,
+			CoverageDisposition{ItemID: releaseStringGo, Status: StatusExcluded, Reason: ""})
+		rNoReason := Validate(declared, dispNoReason, false)
+		if rNoReason.Complete {
+			t.Fatalf("generated file excluded WITHOUT reason must block Complete; got %+v", rNoReason)
+		}
+		if !reflect.DeepEqual(rNoReason.UnexplainedExclusions, []string{releaseStringGo}) {
+			t.Fatalf("UnexplainedExclusions = %v, want [%s]", rNoReason.UnexplainedExclusions, releaseStringGo)
+		}
+		if !reflect.DeepEqual(rNoReason.NonTerminal, []string{releaseStringGo}) {
+			t.Fatalf("NonTerminal = %v, want [%s]", rNoReason.NonTerminal, releaseStringGo)
+		}
+		// Everything else is still covered: only the unexplained exclusion flags.
+		if len(rNoReason.Missing) != 0 || len(rNoReason.Extra) != 0 {
+			t.Fatalf("only the unexplained exclusion should flag; got Missing=%v Extra=%v",
+				rNoReason.Missing, rNoReason.Extra)
+		}
+	})
+}
+
+// dropDisposition returns a copy of disp with the single entry whose ItemID
+// equals id removed. It models a realistic missed item (a reviewer who forgot
+// one declared file). It panics if id is absent so a fixture typo fails loudly
+// rather than passing vacuously.
+func dropDisposition(disp []CoverageDisposition, id string) []CoverageDisposition {
+	out := make([]CoverageDisposition, 0, len(disp))
+	removed := false
+	for _, d := range disp {
+		if d.ItemID == id {
+			removed = true
+			continue
+		}
+		out = append(out, d)
+	}
+	if !removed {
+		panic("dropDisposition: id " + id + " not present (fixture typo)")
+	}
+	return out
+}
+
+// replaceDisposition returns a copy of disp with the single entry whose ItemID
+// equals id replaced by repl. It models mutating one realistic disposition
+// (e.g. stripping an exclusion reason) while keeping the rest. It panics if id
+// is absent so a fixture typo fails loudly rather than passing vacuously.
+func replaceDisposition(disp []CoverageDisposition, id string, repl CoverageDisposition) []CoverageDisposition {
+	out := make([]CoverageDisposition, 0, len(disp))
+	replaced := false
+	for _, d := range disp {
+		if d.ItemID == id {
+			out = append(out, repl)
+			replaced = true
+			continue
+		}
+		out = append(out, d)
+	}
+	if !replaced {
+		panic("replaceDisposition: id " + id + " not present (fixture typo)")
+	}
+	return out
+}
