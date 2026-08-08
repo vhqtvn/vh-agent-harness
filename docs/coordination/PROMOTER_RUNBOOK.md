@@ -57,6 +57,23 @@ Promote on any of these triggers:
    `git diff --name-only`, `after_tag(<tag>)` via `git describe`). The checker
    is a **promotion-review aid only** — it never runs in a commit hook, never
    blocks. A false-negative from the checker is not a hard veto.
+
+   The report prints one line per candidate as `[FLAG] <id> (<file>) — <note>`:
+
+   | Flag | Meaning | Action |
+   |------|---------|--------|
+   | `[READY]` | Trigger fired AND the card's lifecycle is open (not disposed). | **Actionable** — apply the Definition of Ready, then promote. |
+   | `[RE-FIRE]` | Trigger fired BUT the card is already closed for recurrence (`completed` / `cancelled` / `staged`); its watched path was re-touched after disposal. | **Not actionable** — a possible-regression signal worth seeing, but not fresh work. Excluded from the actionable `READY` count. |
+   | `<state>` | `valid-waiting`, `no-machine-trigger`, `unsupported`, `malformed-compound`, or `cold-glob`. | **Not ready** — refine, repair the trigger grammar, or leave on hold. |
+
+   The summary line `R/N candidate(s) are actionable READY (trigger met,
+   lifecycle open)` counts ONLY open-lifecycle fired cards (re-fires excluded).
+   When a disposed card re-fires, the report adds:
+   `Disposed re-fires (completed/cancelled/staged, watched path re-touched —
+   possible regression, NOT actionable): N`. The closed-for-recurrence status
+   set is `{completed, cancelled, staged}` — a card in any of these is
+   disposition-satisfied, so a trigger re-fire is a recurrence/regression
+   signal, not promotion work.
 3. **Apply the Definition of Ready (DoR).** Promote a candidate into
    `docs/planning/backlog.md` only if ALL of:
    - **Trigger fired** (checker confirms) OR **operator override** (recorded in

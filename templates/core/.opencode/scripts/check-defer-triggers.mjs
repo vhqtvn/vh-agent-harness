@@ -114,6 +114,34 @@
 //   Model/reviewer surfaces (the advisory readiness surface) cannot supply
 //   this flag.
 //
+// PROMOTER-MODE REPORT OUTPUT (default mode). The report prints one line per
+// candidate as `[FLAG] <id> (<file>) — <note>`, followed by a summary. The
+// flags:
+//   [READY]        trigger fired AND the card's lifecycle is open (not yet
+//                  disposed) — this is ACTIONABLE work: apply the Definition
+//                  of Ready before promoting.
+//   [RE-FIRE]      trigger fired BUT the card is already closed for recurrence
+//                  (status in {completed, cancelled, staged}). Its watched path
+//                  was re-touched AFTER disposal — a possible-regression signal
+//                  worth SEEING, but NOT fresh actionable work. A re-fire never
+//                  inflates the actionable READY count; it is tallied
+//                  separately as `Disposed re-fires` in the summary.
+//   <state>        every other card is printed under its predicate state name
+//                  (valid-waiting, no-machine-trigger, unsupported,
+//                  malformed-compound, cold-glob) — all deliberately NOT READY.
+// The closed-for-recurrence status set is {completed, cancelled, staged}
+// (CLOSED_FOR_RECURRENCE_STATUSES), mirroring the release-prep closed set and
+// the Go-side closed-status convention: a card in any of these statuses is
+// disposition-satisfied, so a trigger re-fire is a recurrence/regression signal
+// rather than new promotion work.
+//
+// The summary's actionable line is `R/N candidate(s) are actionable READY
+// (trigger met, lifecycle open)` where R counts ONLY open-lifecycle valid-fired
+// cards (re-fires excluded). When at least one disposed card re-fired, an
+// additional line is printed:
+//   `Disposed re-fires (completed/cancelled/staged, watched path re-touched —
+//    possible regression, NOT actionable): N`
+//
 // Promoter-mode failures (missing git, unreadable dir) print a warning line
 // and degrade to "no candidates". Release-mode failures fail closed.
 
