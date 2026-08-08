@@ -225,9 +225,10 @@ func Compare(prior *Manifest, current []Record, checker SourceChecker, projectRo
 }
 
 // NextManifest builds the manifest to persist after a non-dry-run apply (the
-// caller gates: it reaches NextManifest only when no currently-rendered,
-// manifest-tracked overlay-skill destination reports WriteFailed; non-skill write
-// failures do not gate, and substrate.Apply return semantics are unchanged). It is the
+// caller gates: it reaches NextManifest only when the generation FULLY applied —
+// any live-write failure, skill OR non-skill, gates persistence via the seam's
+// generation-wide gate, P1-SUBSTRATE-001, which is STRICTER than the v1.1 gate
+// that gated only on tracked overlay-skill destinations). It is the
 // union of the freshly rendered records and the stale prior records that must be
 // RETAINED so their orphans keep reporting across runs (decision: retain a record
 // whose source is missing while its destination remains present; retire only when
