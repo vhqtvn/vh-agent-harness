@@ -49,10 +49,11 @@ const VERIFIER = path.join(
     "verify-task-registry.js",
 );
 
-// Snapshot the real registry's task file set, tolerating a missing
-// .local/coordinator/tasks/ (gitignored, absent on a fresh clone — isolation
-// never creates it). Used to prove the verifier subprocess leaves the real
-// registry byte-for-byte untouched.
+// Snapshot the real registry's task file set (file names only), tolerating a
+// missing .local/coordinator/tasks/ (gitignored, absent on a fresh clone —
+// isolation never creates it). Used to prove the verifier subprocess leaves the
+// real registry's file set unchanged — the snapshot compares file-name sets, not
+// file content.
 function snapshotRegistry() {
     return new Set(
         fs.existsSync(REAL_TASKS_DIR) ? fs.readdirSync(REAL_TASKS_DIR) : [],
@@ -199,10 +200,10 @@ test("verify-task-registry subprocess leaves the real registry untouched (integr
     assert.match(stdout, /verification:\s*ok/, "verifier must report verification: ok");
 
     // CRUX (load-bearing): after a full verifier run that creates ~10 fixture
-    // cards (4 deliberately degraded), the real registry must be byte-for-byte
-    // unchanged. Before the fix, fixtures landed here and only the recorded IDs
-    // were cleaned in finally — so this assertion failed (and an interruption
-    // orphaned them forever).
+    // cards (4 deliberately degraded), the real registry's file set must be
+    // unchanged (file-name set equality, not byte content). Before the fix,
+    // fixtures landed here and only the recorded IDs were cleaned in finally — so
+    // this assertion failed (and an interruption orphaned them forever).
     const after = snapshotRegistry();
     assert.deepEqual(
         [...after].filter((f) => !before.has(f)),
