@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/vhqtvn/vh-agent-harness/internal/managedfile"
 	"github.com/vhqtvn/vh-agent-harness/internal/schema"
 	"github.com/vhqtvn/vh-agent-harness/internal/substrate"
 )
@@ -119,6 +120,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 
 	fmt.Fprintf(out, "install: seam applied %d file(s) into %s\n", len(report.Outcomes), target)
 	fmt.Fprintln(out, summarizeOutcomes(report.Outcomes))
+	if sp := summarizePreservedPaths(report.Outcomes); sp != "" {
+		fmt.Fprintln(out, sp)
+	}
 	if sp := summarizeProposals(report.Proposals); sp != "" {
 		fmt.Fprintln(out, sp)
 	}
@@ -162,6 +166,53 @@ func summarizeOutcomes(outcomes []substrate.FileOutcome) string {
 		}
 	}
 	return "outcomes: " + strings.Join(parts, ", ")
+}
+
+// summarizePreservedPaths lists each preserved/stalled managed path WITH its
+// typed reason from the shared managedfile.PreservedReason taxonomy, in LIVE
+// install/update output (not just dry-run/doctor). It makes the stall state
+// VISIBLE and ACTIONABLE: the operator sees exactly which path(s) update did NOT
+// overwrite and why, and the accept-platform operation that resolves each.
+//
+// Only ActionManagedDiverged outcomes with a non-empty PreservedReason are
+// listed — the non-preserved outcomes (normal overwrite, self-healed origin,
+// regenerated, managed-noop) are NOT stalls and are intentionally absent. The
+// reasons are grouped and ordered by the taxonomy's stable enum order so the
+// surface is deterministic across runs.
+//
+// This is the F2 live-UX counterpart to doctor's non-failing stall report: both
+// consume the SAME shared typed-reason model (managedfile.PreservedReason) so
+// they never disagree on why a path stalled.
+func summarizePreservedPaths(outcomes []substrate.FileOutcome) string {
+	var stalled []substrate.FileOutcome
+	for _, o := range outcomes {
+		if o.Action == substrate.ActionManagedDiverged && o.PreservedReason != "" {
+			stalled = append(stalled, o)
+		}
+	}
+	if len(stalled) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("preserved/stalled managed file(s) — %d path(s) NOT overwritten; run `vh-agent-harness accept-platform <path>` to adopt the platform version (writes platform bytes + advances the origin, live-first then sidecar rename):",
+		len(stalled)))
+	// Group by reason in the taxonomy's stable order for a deterministic surface.
+	for _, reason := range []managedfile.PreservedReason{
+		managedfile.ConsumerEdit, managedfile.ConsumerDelete,
+		managedfile.Unreadable, managedfile.UnknownBaseline,
+	} {
+		var paths []string
+		for _, o := range stalled {
+			if o.PreservedReason == reason {
+				paths = append(paths, o.Path)
+			}
+		}
+		if len(paths) == 0 {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("\n  [%s] %s", reason, strings.Join(paths, ", ")))
+	}
+	return sb.String()
 }
 
 // summarizeProposals returns a short human list of armed-proposal conflicts so

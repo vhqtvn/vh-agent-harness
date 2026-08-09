@@ -130,10 +130,46 @@ func seamClassifierImpl() (*substrate.Classifier, error) {
 // with the caller-supplied answers, profile-wins for feature/overlay keys. On
 // first install the live profile is absent (it is seeded FROM the platform
 // default during apply), so render decisions fall back to defaults.
-func seamApply(target string, answers map[string]string, dryRun bool) (*substrate.ApplyReport, error) {
+// seamStaging is the prepared front-half of a seam apply: a rendered
+// out-of-tree staging directory plus the per-apply classifier and the effective
+// regenerated set, all built from the embedded core corpus + active overlays.
+// It is shared by seamApply (full reconcile) and acceptPlatform (single-path
+// recovery) so accept-platform applies byte-identical platform bytes to what a
+// subsequent `update` would write UNDER IDENTICAL INPUTS (same binary, profile,
+// overlays, target state) — the two render paths share one front-half, so they
+// cannot produce different bytes from the same inputs.
+type seamStaging struct {
+	staging        string
+	renderer       substrate.EmbedFSRenderer
+	cls            *substrate.Classifier
+	effectiveRegen map[string]bool
+	overlayFiles   []string
+	skillRecords   []renderstate.Record
+}
+
+// prepareSeamStaging renders the embedded core corpus + active overlay packs
+// (selected via the live S3 profile) into an OUT-OF-TREE staging dir, then
+// builds the per-apply classifier (core defaults + overlay_extension rules,
+// resolved against the project's raise-only overrides) and the effective
+// regenerated set (F3↔F6 coordination hook). It is the shared front-half of
+// seamApply and acceptPlatform.
+//
+// The returned cleanup removes the staging dir and MUST be called by the caller
+// (typically via defer). On error the cleanup is already invoked and noop is
+// returned, so a caller may unconditionally defer a returned cleanup only on the
+// success path.
+//
+// Staging lives outside the target tree (os.MkdirTemp("", ...)) so walkStaged
+// does not classify the staging paths themselves (they are off the ownership map
+// and would fail-closed the apply). The render is identical to what install and
+// update produce: core corpus + active overlays, overlay merges, permission
+// emission, allowed-commands.js generation. accept-platform reuses it so the
+// bytes it writes are EXACTLY what the next `update` would write.
+func prepareSeamStaging(target string, answers map[string]string) (*seamStaging, func(), error) {
+	noop := func() {}
 	sub, err := coreSubFSImpl()
 	if err != nil {
-		return nil, err
+		return nil, noop, err
 	}
 
 	// Merge the live profile's feature/overlay answers over the caller answers.
@@ -143,9 +179,9 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 
 	staging, err := os.MkdirTemp("", "harness-seam-staging-*")
 	if err != nil {
-		return nil, fmt.Errorf("seam: create staging: %w", err)
+		return nil, noop, fmt.Errorf("seam: create staging: %w", err)
 	}
-	defer os.RemoveAll(staging)
+	cleanup := func() { os.RemoveAll(staging) }
 
 	renderer := substrate.EmbedFSRenderer{Source: sub}
 	// Render the core corpus + active overlay packs (selected via the live S3
@@ -154,8 +190,53 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	// overlays contributed so the classifier can mark them overlay_extension.
 	overlayFiles, skillRecords, inactiveLive, err := renderSeamStaging(staging, renderer, renderAnswers, target)
 	if err != nil {
+		cleanup()
+		return nil, noop, err
+	}
+
+	// The classifier is per-apply: core defaults PLUS overlay_extension rules for
+	// every path the active overlays rendered, resolved against the project's S2
+	// raise-only overrides (harness-ownership.yml). A downgrade override (or any
+	// other D2-A violation) aborts here, before any write touches the live tree.
+	overrides, oerr := readOwnershipOverrides(target)
+	if oerr != nil {
+		cleanup()
+		return nil, noop, fmt.Errorf("seam: ownership overrides: %w", oerr)
+	}
+	cls, cerr := seamClassifierWithOverlays(overlayFiles, overrides, inactiveLive)
+	if cerr != nil {
+		cleanup()
+		return nil, noop, cerr
+	}
+
+	// F3 (regenerated opencode.jsonc) coordination hook: the DECLARED regenerated
+	// set includes opencode.jsonc, but it is EFFECTIVELY regenerated only once a
+	// valid origin entry exists FOR opencode.jsonc (effectiveRegeneratedPaths
+	// keys on the per-path entry, not whole-store existence). We read the origin
+	// store tolerantly here to compute the effective set. Apply performs its own
+	// STRICT read of the same store internally; a corrupt store aborts Apply
+	// before any write. The effective set (not the bare declared set) is what
+	// Apply consumes so pre-migration a colliding opencode.jsonc is NOT bypassed
+	// by the regenerated admission. doctor reads the SAME effective-set
+	// computation (R4-B1); accept-platform inherits it via this struct.
+	originStoreForRegen, _ := originhash.Read(target)
+	ps := &seamStaging{
+		staging:        staging,
+		renderer:       renderer,
+		cls:            cls,
+		effectiveRegen: effectiveRegeneratedPaths(regeneratedPlatformPaths, originStoreForRegen),
+		overlayFiles:   overlayFiles,
+		skillRecords:   skillRecords,
+	}
+	return ps, cleanup, nil
+}
+
+func seamApply(target string, answers map[string]string, dryRun bool) (*substrate.ApplyReport, error) {
+	ps, cleanup, err := prepareSeamStaging(target, answers)
+	if err != nil {
 		return nil, err
 	}
+	defer cleanup()
 
 	// Migration courtesy check (O5 slice 2c, Q5c): allowed-commands.js is now
 	// generated from Go canonical tables (internal/permconfig/tables.go). If the
@@ -168,67 +249,28 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	// contract), and refusing would block legitimate version upgrades whenever
 	// the Go tables change.
 	if !dryRun {
-		warnIfAllowedCommandsCustomized(target, staging)
-	}
-
-	// The classifier is per-apply: core defaults PLUS overlay_extension rules for
-	// every path the active overlays rendered, resolved against the project's S2
-	// raise-only overrides (harness-ownership.yml). A downgrade override (or any
-	// other D2-A violation) aborts the apply here, before any write touches the
-	// live tree (Slice 5.1 live wiring). (The memoized seamClassifierImpl is
-	// core-only and cannot see overlay paths or project overrides — fail-closed
-	// would abort.)
-	overrides, oerr := readOwnershipOverrides(target)
-	if oerr != nil {
-		return nil, fmt.Errorf("seam: ownership overrides: %w", oerr)
-	}
-	cls, err := seamClassifierWithOverlays(overlayFiles, overrides, inactiveLive)
-	if err != nil {
-		return nil, err
+		warnIfAllowedCommandsCustomized(target, ps.staging)
 	}
 
 	// Lineage (S1) records the INSTALL answers (project_name/slug) for the
 	// answer-digest drift check; the S3 profile (features/overlays) is a separate
 	// authority and must NOT enter the install-answer digest (else install→update
-	// would false-flag answer drift the moment the profile exists). Render used the
-	// merged answers above; Apply records the original install answers below.
-	//
-	// F3 (regenerated opencode.jsonc): the DECLARED regenerated set includes
-	// opencode.jsonc, but it is EFFECTIVELY regenerated only once a valid origin
-	// entry exists FOR opencode.jsonc (effectiveRegeneratedPaths keys on the
-	// per-path entry, not whole-store existence). We read the origin store
-	// tolerantly here to compute the effective set — this is the F6 coordination
-	// hook. Apply performs its own STRICT read of the same store internally; the
-	// two reads agree on the valid/absent cases, and a corrupt store aborts Apply
-	// before any write. A tolerant read here (ignoring the error) is safe: nil
-	// store OR a store without an opencode.jsonc entry → opencode.jsonc excluded
-	// from the effective set (pre-migration/partial-migration fall-through to the
-	// F6 stall); store WITH an opencode.jsonc entry → opencode.jsonc included.
-	originStoreForRegen, _ := originhash.Read(target)
-	report, err := substrate.Apply(renderer, substrate.ApplyOptions{
-		ProjectRoot:    target,
-		StagingDir:     staging,
-		Classifier:     cls,
-		HarnessVersion: Version,
-		TemplateSource: corpus.CoreDir,
-		Ref:            "harness/" + Version,
-		Answers:        answers,
-		DryRun:         dryRun,
-		// allowed-commands.js is canonically REGENERATED from Go tables on every
-		// apply (permconfig.GenerateAllowedCommandsJS) and must stay byte-in-sync
-		// with the emitted opencode.jsonc permission blocks. The origin-hash
-		// three-way preservation must NOT apply to it: a consumer who ignored
-		// the warnIfAllowedCommandsCustomized warning and edited it would
-		// otherwise keep a stale copy that desyncs the shell-guard from the
-		// permission surface. It is overwritten wholesale whenever it differs
-		// from the canonical form, the same as before origin-hash existed.
-		// opencode.jsonc is likewise REGENERATED (post-migration) — see
-		// effectiveRegeneratedPaths for the F6 coordination hook. The effective
-		// set (not the bare declared set) is what Apply consumes so pre-migration
-		// a colliding opencode.jsonc is NOT bypassed by the regenerated
-		// admission. regeneratedPlatformPaths is the shared set doctor also
-		// reads (R4-B1), via the same effective-set computation.
-		RegeneratedPlatformPaths: effectiveRegeneratedPaths(regeneratedPlatformPaths, originStoreForRegen),
+	// would false-flag answer drift the moment the profile exists). Render used
+	// the merged answers inside prepareSeamStaging; Apply records the original
+	// install answers below. allowed-commands.js and (post-migration) opencode.jsonc
+	// are REGENERATED canonically on every apply — see ps.effectiveRegen and
+	// effectiveRegeneratedPaths for the F6 coordination hook that gates
+	// opencode.jsonc's regenerated admission on a recorded origin entry.
+	report, err := substrate.Apply(ps.renderer, substrate.ApplyOptions{
+		ProjectRoot:              target,
+		StagingDir:               ps.staging,
+		Classifier:               ps.cls,
+		HarnessVersion:           Version,
+		TemplateSource:           corpus.CoreDir,
+		Ref:                      "harness/" + Version,
+		Answers:                  answers,
+		DryRun:                   dryRun,
+		RegeneratedPlatformPaths: ps.effectiveRegen,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("seam: apply: %w", err)
@@ -261,7 +303,7 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	// classified as a definite orphan. Only a CONFIRMED-missing source (pack
 	// gone or source file gone) whose destination is still on disk is a definite
 	// preserved orphan.
-	report.Orphans = renderstate.Compare(prior, skillRecords, overlaySkillChecker, target, os.Stderr)
+	report.Orphans = renderstate.Compare(prior, ps.skillRecords, overlaySkillChecker, target, os.Stderr)
 
 	// Dry-run: substrate.Apply wrote nothing (it returned the plan only). Skip
 	// every side-effecting post-apply step too — the proposal ledger append, the
@@ -373,7 +415,7 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	if lin, lerr := lineage.Read(target); lerr == nil && lin != nil {
 		renderID = lin.Render.LastSuccessfulUpdateID
 	}
-	next := renderstate.NextManifest(prior, skillRecords, overlaySkillChecker, target, renderID)
+	next := renderstate.NextManifest(prior, ps.skillRecords, overlaySkillChecker, target, renderID)
 	if werr := next.Write(target); werr != nil {
 		fmt.Fprintf(os.Stderr, "seam: warning: rendered-outputs manifest write failed (%v); orphan reporting will be stale until the next successful update\n", werr)
 	}

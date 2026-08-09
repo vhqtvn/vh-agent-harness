@@ -372,10 +372,12 @@ func printDryRunPlan(out io.Writer, verb, target string, report *substrate.Apply
 	if divergedPaths := byAction[substrate.ActionManagedDiverged]; len(divergedPaths) > 0 {
 		fmt.Fprintf(out, "  %d managed file(s) above diverge from the platform's last-recorded origin hash,\n", len(divergedPaths))
 		fmt.Fprintln(out, "  so `update` PRESERVED your edits instead of overwriting them. To re-baseline")
-		fmt.Fprintln(out, "  (accept the platform's new version): remove the file's entry from")
-		fmt.Fprintln(out, "  .vh-agent-harness/origin-hashes.json (or delete that store to re-bootstrap all),")
-		fmt.Fprintln(out, "  THEN run `vh-agent-harness update` — deleting the FILE alone will NOT work")
-		fmt.Fprintln(out, "  (a deleted managed file is also preserved as consumer-deleted, not re-seeded).")
+		fmt.Fprintln(out, "  (accept the platform's new version for one path), run")
+		fmt.Fprintln(out, "  `vh-agent-harness accept-platform <path>` — it writes the platform bytes and")
+		fmt.Fprintln(out, "  advances the origin (live-first, then sidecar atomic rename); you do NOT edit")
+		fmt.Fprintln(out, "  origin-hashes.json (it is")
+		fmt.Fprintln(out, "  binary-owned). Deleting the FILE alone will NOT work (a deleted managed file")
+		fmt.Fprintln(out, "  is also preserved as consumer-deleted, not re-seeded).")
 		fmt.Fprintln(out, "  To make an edit canonical, promote it into the overlay pack source at")
 		fmt.Fprintln(out, "  .vh-agent-harness/overlays/<pack>/. Inspect exact bytes with `vh-agent-harness diff`.")
 	}

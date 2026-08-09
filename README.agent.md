@@ -56,17 +56,20 @@ To see what changed in a release and how to migrate, inspect its migration note
    managed-diverged / reconcile / conflict) and write nothing. Read it before
    the real run.
 2. **Do not hand-edit a `platform_managed` file unless you mean to keep the
-   edit.** `update` overwrites a `platform_managed` file **only when it is still
-   the bytes the platform last wrote** (the recorded origin hash). If you have
-   edited it, `update` **preserves your edit** (`managed-diverged` — ownership
-   has effectively transferred to you) and will not clobber it. To re-baseline
-   (accept the platform's version again): remove the file's entry from
-   `.vh-agent-harness/origin-hashes.json` (or delete that store to re-bootstrap
-   all) THEN run `update` — deleting the file alone will NOT work (a deleted
-   managed file is also preserved as consumer-deleted). To make an edit
-   canonical across updates, promote it into an overlay pack source. To change
-   managed behavior without editing the file, use a seam: overlay, profile,
-   run-shape, mission, project deny-rules, or a raise-only ownership override.
+    edit.** `update` overwrites a `platform_managed` file **only when it is still
+    the bytes the platform last wrote** (the recorded origin hash). If you have
+    edited it, `update` **preserves your edit** (`managed-diverged` — ownership
+    has effectively transferred to you) and will not clobber it. To re-baseline
+    (accept the platform's version again for one path): run
+    `vh-agent-harness accept-platform <path>` — it writes the platform bytes and
+    advances the origin (live-first, then sidecar atomic rename; not a
+    cross-object transaction, but a rejected path touches nothing). You do NOT
+    edit `origin-hashes.json` (it is
+    binary-owned). Deleting the file alone will NOT work (a deleted managed file
+    is also preserved as consumer-deleted). To make an edit canonical across
+    updates, promote it into an overlay pack source. To change managed behavior
+    without editing the file, use a seam: overlay, profile, run-shape, mission,
+    project deny-rules, or a raise-only ownership override.
 3. **Edit config under `.vh-agent-harness/`, not the rendered `.opencode/` tree.**
    The `.opencode/` tree is generated; your inputs live in `.vh-agent-harness/`.
 4. **Prefer `--json`** where offered (`guide --json`) for reliable parsing.
@@ -102,11 +105,13 @@ real target locations.
 | `.local/cleared-assumptions.yaml` | Operator-state ledger of cleared assumptions (usually operator-maintained). |
 
 Do **not** edit: `lineage.yml` (binary-owned), `origin-hashes.json` (binary-
-owned: records per-file origin hashes for the three-way update sync), `AGENTS.core.md`
-(managed compose source), or anything under `.opencode/` that is `platform_managed`
-— unless you intend to keep the edit (see golden rule #2: a hand-edited managed
-file is preserved, not overwritten, and `origin-hashes.json` is how the platform
-remembers your edit is yours).
+owned: records per-file origin hashes for the three-way update sync — use
+`vh-agent-harness accept-platform <path>` to re-baseline a preserved managed file,
+never hand-edit the sidecar), `AGENTS.core.md` (managed compose source), or
+anything under `.opencode/` that is `platform_managed` — unless you intend to
+keep the edit (see golden rule #2: a hand-edited managed file is preserved, not
+overwritten, and `origin-hashes.json` is how the platform remembers your edit is
+yours).
 
 ### `vh-harness-profile.yml` field contract
 

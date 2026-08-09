@@ -260,6 +260,9 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 
 	fmt.Fprintf(out, "update: seam reconciled %d file(s) in %s\n", len(report.Outcomes), abs)
 	fmt.Fprintln(out, summarizeOutcomes(report.Outcomes))
+	if sp := summarizePreservedPaths(report.Outcomes); sp != "" {
+		fmt.Fprintln(out, sp)
+	}
 	if sp := summarizeProposals(report.Proposals); sp != "" {
 		fmt.Fprintln(out, sp)
 	}

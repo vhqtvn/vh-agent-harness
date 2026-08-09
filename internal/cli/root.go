@@ -52,6 +52,7 @@ and repo-relative.
 Lifecycle
   install              install/adopt the harness (preview with --dry-run)
   update               re-render the corpus after a config or binary change (--dry-run)
+  accept-platform      adopt the platform's version of a preserved/stalled managed file (re-baseline)
   uninstall            remove the harness from the current project
   overlay              discover/list/docs/new overlay packs (overlay list, overlay docs, overlay new)
   self-update          download + install the latest binary (verified by checksums.txt)
@@ -139,6 +140,7 @@ func init() {
 		installCmd,
 		updateCmd,
 		uninstallCmd,
+		acceptPlatformCmd,
 		// orientation (agent-facing entry point)
 		guideCmd,
 		exampleCmd,
@@ -189,7 +191,7 @@ func init() {
 	// titled group so the help surface reads as Lifecycle / Orientation /
 	// Health & Diagnostics / Runtime instead of one alphabetical flat list.
 	assignGroup(groupLifecycle,
-		installCmd, updateCmd, uninstallCmd, selfUpdateCmd, overlayCmd, releaseCmd)
+		installCmd, updateCmd, uninstallCmd, acceptPlatformCmd, selfUpdateCmd, overlayCmd, releaseCmd)
 	assignGroup(groupOrientation,
 		guideCmd, exampleCmd, docsCmd, sysPromptCmd, helpCmd)
 	assignGroup(groupHealth,

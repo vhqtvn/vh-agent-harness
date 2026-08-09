@@ -254,16 +254,16 @@ func TestPrintDryRunPlan_ListsDivergedPaths(t *testing.T) {
 	if !strings.Contains(out, "PRESERVE (consumer-edited managed)") || !strings.Contains(out, "origin-hash") {
 		t.Errorf("DIVERGED header must flag origin-hash preservation; got:\n%s", out)
 	}
-	// (3) The non-destructive remedy (re-baseline via origin-hashes store +
+	// (3) The non-destructive remedy (re-baseline via accept-platform +
 	// overlay promotion) appears. The re-baseline MUST point at the
-	// origin-hashes.json store, NOT at deleting the file (deleting the file is
-	// self-defeating: a deleted managed file is also preserved as
-	// consumer-deleted, not re-seeded).
+	// `accept-platform` operation, NOT at hand-editing the sidecar and NOT at
+	// deleting the file (deleting the file is self-defeating: a deleted managed
+	// file is also preserved as consumer-deleted, not re-seeded).
 	if !strings.Contains(out, "overlay pack source") || !strings.Contains(out, ".vh-agent-harness/overlays/<pack>/") {
 		t.Errorf("DIVERGED section must offer the overlay-promotion remedy; got:\n%s", out)
 	}
-	if !strings.Contains(out, "origin-hashes.json") {
-		t.Errorf("DIVERGED re-baseline remedy must point at the origin-hashes store (not at deleting the file); got:\n%s", out)
+	if !strings.Contains(out, "accept-platform") {
+		t.Errorf("DIVERGED re-baseline remedy must point at `accept-platform` (the sanctioned recovery op); got:\n%s", out)
 	}
 	// (4) A diverged file must NOT appear under the destructive OVERWRITE header.
 	if strings.Contains(out, "Would OVERWRITE") {

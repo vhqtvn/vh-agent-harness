@@ -126,6 +126,18 @@ func renderWriteMode(name string) os.FileMode {
 	return 0o644
 }
 
+// RenderWriteMode is the exported form of renderWriteMode for cross-package
+// callers that must reproduce the EXACT canonical on-disk permission bits
+// substrate.Apply would write for a rendered file. The prime caller is
+// internal/cli accept-platform: it writes live platform bytes for a recovered
+// path and must write them mode-identical to what the next `update` would
+// produce (a consumer-deleted managed .sh script must be recreated executable,
+// not 0o644). Sharing the single source of truth keeps the two write paths from
+// drifting on the exec bit.
+func RenderWriteMode(name string) os.FileMode {
+	return renderWriteMode(name)
+}
+
 // GoTemplateRenderer is the production Go-native renderer. It renders the
 // bundled template corpus into a staging directory using the standard library's
 // text/template engine — no Python, no Copier, no third-party templating
