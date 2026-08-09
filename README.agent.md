@@ -2079,6 +2079,51 @@ global-clean requirement at release transitions is correct and load-bearing
 (see the AGENTS.md B2 release-cleanliness rule); the gap this runbook closes is
 the UNDOCUMENTED recovery path, not the gate.
 
+### Published-tag immutability (never move a published version)
+
+A successfully-published `vX.Y.Z` tag is **immutable**: the annotated tag object
+AND the commit it dereferences retain the same SHAs for the life of the version.
+The release-tag wrapper enforces this by REFUSING the create flow when
+`refs/tags/<version>` already exists (release-tag.sh:232-238) — it never moves,
+replaces, or force-updates a published tag. There is **no**
+`--force` / `--move` / `--move-published-tag` mode; every such verb is rejected
+as an unknown argument (release-tag.sh:287-290). This is the "never move a
+published version" policy.
+
+**Correction is forward-only.** A defect in a published release is fixed by
+shipping a **successor version** (`vX.Y.(Z+1)`, or `vX.(Y+1).0`) through the
+full N→R→M + G0-G7 ceremony — never by rewriting the existing tag. The
+published tag stays as the historical record; the successor is the correction.
+
+Policy contract (7 points):
+
+1. **Published-tag immutability.** The annotated tag object and its
+   dereferenced commit are immutable once published.
+2. **Forward-only correction.** A defect ships as a successor version through
+   the full release ceremony (note → readiness artifact → manifest + G0-G7).
+3. **No wrapper move mode.** The wrapper ships no `--force` / `--move` /
+   `--move-published-tag` branch and never will.
+4. **`--push-only` is publication-only.** It pushes an already-cut annotated
+   tag to origin; it is NOT a replacement, deletion, or force authority.
+5. **Unpublished-local cleanup is the operator's.** If a tag was cut locally
+   but never published, the operator may remove it (`git tag -d <version>`) and
+   re-run the wrapper. This does NOT authorize agents to use raw `git` —
+   shell-guard's `git-mutation-bypass` rule still denies tag mutation to every
+   agent.
+6. **Published-reference surgery is a separately-authorized incident.** Moving
+   or deleting an ALREADY-PUBLISHED tag (e.g. a hostile or compromised tag) is
+   an operator/platform incident with its own authorization, NOT routine
+   wrapper functionality. The wrapper provides no path for it.
+7. **No misleading manual escape hatch.** The `git tag -d <version>` + re-run
+   recipe is valid ONLY for an unpublished LOCAL tag. It must never be
+   documented or implied as a way to "correct" a published version — that is
+   published-reference surgery (point 6), not a cleanup.
+
+The regression tests in `internal/cli/release_tag_move_policy_test.go` pin both
+refusal paths (existing-tag create-flow refusal + no-move-mode), so a future
+edit that adds a move branch or weakens the existing-tag check fails before it
+lands.
+
 ### Wrapper flags
 
 ```sh
