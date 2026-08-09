@@ -363,3 +363,333 @@ func TestPersistF2CanonicalSidecar_NoContentGenerationOperation(t *testing.T) {
 	// producing parameter, the test body below would need to change.
 	var _ func(*F2IngestResult, string, time.Time) (F2PersistOutcome, error) = PersistF2CanonicalSidecar
 }
+
+// --- Transient-locator admission gate (narrow durable-path check) -----------
+//
+// Design authority: researches/decisions/2026-07-25-f2-rendering-family-
+// mechanism.md (transient-locator contract sentence). Before writing an F2
+// artifact pair, persistence must refuse any repo-relative canonical provenance
+// locator lexically rooted under tmp/agent-runs/. The recovery is a new F1 emit
+// under a new synthesis cycle with a durable locator — never an in-place
+// rewrite (F2 must NOT rewrite locators).
+//
+// Test matrix (from the build brief):
+//   - lexical normalization: backslash→/; strip one leading "./".
+//   - REJECT: tmp/agent-runs (exact), tmp/agent-runs/child, ./tmp/agent-runs/x,
+//     tmp\agent-runs\x.
+//   - ACCEPT: docs/researches/x.md, researches/x.md, .local/coordinator/x.json,
+//     tmp/scratch/x (other tmp root — narrow), https://example.com/x (URL),
+//     /tmp/agent-runs/x (absolute — non-goal).
+//   - each of the 4 canonical provenance locator fields is walked and the error
+//     names the offending field path + locator.
+//   - CheckedScope is NOT enumerated (narrow scope — scope-description field).
+//   - the canonical fixture (no transient locators) is admitted.
+//   - integration: PersistF2CanonicalSidecar + PersistF2Pair refuse pre-write
+//     and create NEITHER the JSON nor the MD member.
+
+func TestF2NormalizeLocator_MinimalLexicalNormalization(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain repo-relative unchanged", "docs/researches/x.md", "docs/researches/x.md"},
+		{"backslash to slash", "tmp\\agent-runs\\x.md", "tmp/agent-runs/x.md"},
+		{"strip single leading dot-slash", "./tmp/agent-runs/x.md", "tmp/agent-runs/x.md"},
+		{"absolute preserved (leading slash stays)", "/tmp/agent-runs/x.md", "/tmp/agent-runs/x.md"},
+		{"url preserved", "https://example.com/x", "https://example.com/x"},
+		{"repeated dot-slash stripped once (minimal)", "././tmp/agent-runs/x.md", "./tmp/agent-runs/x.md"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := f2NormalizeLocator(tc.in); got != tc.want {
+				t.Fatalf("f2NormalizeLocator(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestF2IsTransientAgentRunsLocator_ExactPrefixAndExclusions(t *testing.T) {
+	reject := []string{
+		"tmp/agent-runs",
+		"tmp/agent-runs/",
+		"tmp/agent-runs/x.md",
+		"tmp/agent-runs/sub/deep.md",
+		"./tmp/agent-runs/x.md",
+		"tmp\\agent-runs\\x.md",
+	}
+	for _, in := range reject {
+		if !f2IsTransientAgentRunsLocator(in) {
+			t.Fatalf("expected REJECT for %q (repo-relative, rooted under tmp/agent-runs/)", in)
+		}
+	}
+	accept := []string{
+		"", // empty locator — not rooted under the disposable root
+		"docs/researches/x.md",
+		"researches/decisions/x.md",
+		".local/coordinator/tasks/x.json",
+		"tmp/scratch/x.md",     // other tmp root — narrow check, NOT classified
+		"tmp/agent-runs-other", // sibling prefix, not a child of tmp/agent-runs/
+		"https://example.com/x",
+		"http://example.com/tmp/agent-runs/x",
+		"/tmp/agent-runs/x", // absolute — non-goal, NOT classified
+		"/home/u/repo/tmp/agent-runs/x",
+		"src-a",
+	}
+	for _, in := range accept {
+		if f2IsTransientAgentRunsLocator(in) {
+			t.Fatalf("expected ACCEPT for %q (not repo-relative, or not rooted under tmp/agent-runs/)", in)
+		}
+	}
+}
+
+// TestValidateNoTransientProvenanceLocators_RejectsEachLocatorField proves the
+// walk reaches every one of the four canonical provenance locator fields and
+// the error names the offending field path + locator. Uses hand-constructed
+// envelopes (the pure helper takes *F1SynthesisEnvelope directly — no F1
+// validation, so each field is isolated without the hazard-source resolution
+// constraint).
+func TestValidateNoTransientProvenanceLocators_RejectsEachLocatorField(t *testing.T) {
+	transient := "tmp/agent-runs/x.md"
+	cases := []struct {
+		name      string
+		env       *F1SynthesisEnvelope
+		wantField string // substring of the error's field path
+	}{
+		{
+			name: "entry source_refs",
+			env: &F1SynthesisEnvelope{Entries: []F1FamilyEntry{
+				{SourceRefs: []string{transient}},
+			}},
+			wantField: "entries[0].source_refs[0]",
+		},
+		{
+			name: "r1 conclusion source locator",
+			env: &F1SynthesisEnvelope{Entries: []F1FamilyEntry{
+				{R1: &F1R1JoinSummary{Conclusions: []F1R1Conclusion{
+					{Sources: []F1R1Source{{Locator: transient}}},
+				}}},
+			}},
+			wantField: "entries[0].r1.conclusions[0].sources[0].locator",
+		},
+		{
+			name: "r1 hazard source_locators",
+			env: &F1SynthesisEnvelope{Entries: []F1FamilyEntry{
+				{R1: &F1R1JoinSummary{Conclusions: []F1R1Conclusion{
+					{Hazards: []F1R1HazardLink{{SourceLocators: []string{transient}}}},
+				}}},
+			}},
+			wantField: "entries[0].r1.conclusions[0].hazards[0].source_locators[0]",
+		},
+		{
+			name: "pa probe evidence_refs",
+			env: &F1SynthesisEnvelope{Entries: []F1FamilyEntry{
+				{PA: &F1PAProbeSummary{Probes: []F1PAProbe{
+					{EvidenceRefs: []string{transient}},
+				}}},
+			}},
+			wantField: "entries[0].pa.probes[0].evidence_refs[0]",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateNoTransientProvenanceLocators(tc.env)
+			if err == nil {
+				t.Fatalf("expected a transient-locator rejection, got nil")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tc.wantField) {
+				t.Fatalf("error does not name the offending field path %q:\n%s", tc.wantField, msg)
+			}
+			if !strings.Contains(msg, transient) {
+				t.Fatalf("error does not name the offending locator %q:\n%s", transient, msg)
+			}
+		})
+	}
+}
+
+// TestValidateNoTransientProvenanceLocators_AcceptsNonTransientLocators proves
+// the gate does NOT classify other locator roots (the narrow admission check —
+// NOT a general durability classifier). docs/, researches/, .local/, another
+// tmp root, a URL, and an absolute path are all admitted.
+func TestValidateNoTransientProvenanceLocators_AcceptsNonTransientLocators(t *testing.T) {
+	env := &F1SynthesisEnvelope{Entries: []F1FamilyEntry{
+		{
+			SourceRefs: []string{
+				"docs/researches/x.md",
+				"researches/decisions/y.md",
+				".local/coordinator/tasks/z.json",
+				"tmp/scratch/other-root.md", // other tmp root — NOT classified
+				"https://example.com/evidence",
+				"/tmp/agent-runs/absolute.md", // absolute — non-goal, NOT classified
+			},
+			R1: &F1R1JoinSummary{Conclusions: []F1R1Conclusion{
+				{Sources: []F1R1Source{{Locator: "src-a"}}},
+			}},
+		},
+	}}
+	if err := validateNoTransientProvenanceLocators(env); err != nil {
+		t.Fatalf("non-transient locators were rejected (narrow-scope violation): %v", err)
+	}
+}
+
+// TestValidateNoTransientProvenanceLocators_DoesNotClassifyCheckedScope proves
+// the walk does NOT enumerate F1PAProbe.CheckedScope. CheckedScope is a scope-
+// DESCRIPTION field ("the scope that was checked"), not a provenance locator.
+// A transient path in CheckedScope is out of scope for this narrow gate.
+func TestValidateNoTransientProvenanceLocators_DoesNotClassifyCheckedScope(t *testing.T) {
+	env := &F1SynthesisEnvelope{Entries: []F1FamilyEntry{
+		{PA: &F1PAProbeSummary{Probes: []F1PAProbe{
+			{CheckedScope: []string{"tmp/agent-runs/checked-here.md"}},
+		}}},
+	}}
+	if err := validateNoTransientProvenanceLocators(env); err != nil {
+		t.Fatalf("CheckedScope was classified (over-broad — narrow-scope violation): %v", err)
+	}
+}
+
+// TestValidateNoTransientProvenanceLocators_CanonicalFixtureAdmitted proves the
+// golden fixture (no transient locators) passes the gate, so the existing dated
+// F2 pair behavior is unchanged.
+func TestValidateNoTransientProvenanceLocators_CanonicalFixtureAdmitted(t *testing.T) {
+	if err := validateNoTransientProvenanceLocators(canonicalF1Fixture()); err != nil {
+		t.Fatalf("canonical fixture was rejected by the transient-locator gate (existing dated pair would break): %v", err)
+	}
+}
+
+// f2IngestWithMutation deep-copies the canonical fixture, applies mutate, then
+// re-derives the digest and runs EmitF1 + IngestF1EmitForF2 so the result is a
+// valid ingest result carrying a binding digest with the mutation baked into
+// canonical content. Used by the integration tests.
+func f2IngestWithMutation(t *testing.T, mutate func(env *F1SynthesisEnvelope)) *F2IngestResult {
+	t.Helper()
+	fixture := canonicalF1Fixture()
+	raw, err := json.Marshal(fixture)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	var env F1SynthesisEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	mutate(&env)
+	// Recompute the digest after mutation so the envelope is self-consistent.
+	d, err := env.ComputeDigest()
+	if err != nil {
+		t.Fatalf("compute digest after mutation: %v", err)
+	}
+	env.SemanticDigest = d
+	env.Validation = F1ValidationInfo{Disposition: F1ValidationComplete}
+	emit, errs := EmitF1(&env)
+	if emit == nil {
+		t.Fatalf("EmitF1 on mutated fixture failed (setup): %v", errs)
+	}
+	result, errs := IngestF1EmitForF2(emit)
+	if result == nil {
+		t.Fatalf("IngestF1EmitForF2 on mutated fixture failed (setup): %v", errs)
+	}
+	return result
+}
+
+// f2R1Entry mutates the canonical fixture's R1 entry (entry-r1). Returns nothing;
+// callers use it inside f2IngestWithMutation. The fixture's R1 entry is
+// entries[0] with conclusion R1C1 at conclusions[0].
+func f2MutateR1SourceLocator(transient string) func(*F1SynthesisEnvelope) {
+	return func(env *F1SynthesisEnvelope) {
+		for i := range env.Entries {
+			if env.Entries[i].Family == F1FamilyR1CrossLaneJoin && env.Entries[i].R1 != nil {
+				if len(env.Entries[i].R1.Conclusions) > 0 && len(env.Entries[i].R1.Conclusions[0].Sources) > 0 {
+					env.Entries[i].R1.Conclusions[0].Sources[0].Locator = transient
+				}
+			}
+		}
+	}
+}
+
+// TestPersistF2CanonicalSidecar_TransientLocatorRejectedPreWrite is the
+// integration crux for the JSON-only persist entrypoint: an ingest whose
+// canonical envelope carries a transient provenance locator is refused BEFORE
+// the sidecar file is created. The outcome is NotAttempted (pre-write content
+// rejection, not a collision refusal) and the error names the offending field
+// + locator.
+func TestPersistF2CanonicalSidecar_TransientLocatorRejectedPreWrite(t *testing.T) {
+	dir := t.TempDir()
+	transient := "tmp/agent-runs/f1-build/SLICE-0-STOP.md"
+	ingest := f2IngestWithMutation(t, f2MutateR1SourceLocator(transient))
+
+	outcome, err := PersistF2CanonicalSidecar(ingest, dir, fixedTime)
+	if outcome != F2PersistNotAttempted {
+		t.Fatalf("transient-locator persist outcome = %s, want not_attempted (pre-write rejection)", outcome)
+	}
+	if err == nil {
+		t.Fatal("transient-locator persist returned nil error (expected a refusal)")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "tmp/agent-runs") {
+		t.Fatalf("refusal does not name the disposable root:\n%s", msg)
+	}
+	if !strings.Contains(msg, transient) {
+		t.Fatalf("refusal does not name the offending locator %q:\n%s", transient, msg)
+	}
+	if !strings.Contains(msg, "sources[0].locator") {
+		t.Fatalf("refusal does not name the offending field path:\n%s", msg)
+	}
+
+	// CRUX: NEITHER the sidecar NOR any file was created.
+	path := F2CanonicalSidecarPath(dir, ingest.SynthesisCycleID)
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("transient-locator persist created a file at %q (must refuse pre-write)", path)
+	}
+}
+
+// TestPersistF2Pair_TransientLocatorRejectedCreatesNeitherMember is the
+// integration crux for the pair persist entrypoint: an ingest whose canonical
+// envelope carries a transient provenance locator is refused BEFORE EITHER the
+// JSON sidecar OR the MD projection is created. This proves both entrypoints
+// converge on the same admission decision via the shared helper.
+func TestPersistF2Pair_TransientLocatorRejectedCreatesNeitherMember(t *testing.T) {
+	dir := t.TempDir()
+	transient := "tmp/agent-runs/f1-build/SLICE-0-STOP.md"
+	ingest := f2IngestWithMutation(t, f2MutateR1SourceLocator(transient))
+
+	outcome, err := PersistF2Pair(ingest, dir, fixedTime)
+	if outcome != F2PairNotAttempted {
+		t.Fatalf("transient-locator pair outcome = %s, want not_attempted (pre-write rejection)", outcome)
+	}
+	if err == nil {
+		t.Fatal("transient-locator pair returned nil error (expected a refusal)")
+	}
+	if !strings.Contains(err.Error(), transient) {
+		t.Fatalf("pair refusal does not name the offending locator %q:\n%s", transient, err.Error())
+	}
+
+	// CRUX: NEITHER the canonical sidecar NOR the MD projection was created.
+	canonPath := F2CanonicalSidecarPath(dir, ingest.SynthesisCycleID)
+	mdPath := F2MarkdownProjectionPath(dir, ingest.SynthesisCycleID)
+	if _, statErr := os.Stat(canonPath); !os.IsNotExist(statErr) {
+		t.Fatalf("transient-locator pair created the canonical sidecar at %q (must refuse pre-write)", canonPath)
+	}
+	if _, statErr := os.Stat(mdPath); !os.IsNotExist(statErr) {
+		t.Fatalf("transient-locator pair created the MD projection at %q (must refuse pre-write)", mdPath)
+	}
+}
+
+// TestPersistF2CanonicalSidecar_NonTransientLocatorAccepted proves a durable
+// locator is admitted end-to-end (the gate does not over-reject). A locator
+// under docs/researches/ passes the gate and the sidecar is written normally.
+func TestPersistF2CanonicalSidecar_NonTransientLocatorAccepted(t *testing.T) {
+	dir := t.TempDir()
+	ingest := f2IngestWithMutation(t, f2MutateR1SourceLocator("docs/researches/decisions/durable.md"))
+
+	outcome, err := PersistF2CanonicalSidecar(ingest, dir, fixedTime)
+	if err != nil {
+		t.Fatalf("durable-locator persist failed (gate over-rejected): %v", err)
+	}
+	if outcome != F2PersistWritten {
+		t.Fatalf("durable-locator persist outcome = %s, want written", outcome)
+	}
+	path := F2CanonicalSidecarPath(dir, ingest.SynthesisCycleID)
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("durable-locator sidecar was not written: %v", statErr)
+	}
+}

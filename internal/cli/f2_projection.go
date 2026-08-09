@@ -857,6 +857,17 @@ func PersistF2Pair(ingest *F2IngestResult, dir string, now time.Time) (F2PairOut
 		return F2PairNotAttempted, fmt.Errorf("f2 pair: ingest result carries no synthesis_cycle_id")
 	}
 
+	// Transient-locator admission gate (narrow durable-path check): refuse
+	// BEFORE constructing the sidecar, serializing the JSON, or rendering the
+	// MD projection if any canonical provenance locator is repo-relative and
+	// rooted under tmp/agent-runs/. Neither pair member is created. Pure lexical
+	// check — no resolve/rewrite/inline/hash/stat. The shared logic lives in
+	// f2_persist.go (validateNoTransientProvenanceLocators) so both persist
+	// entrypoints converge on one admission decision for the disposable root.
+	if tErr := validateNoTransientProvenanceLocators(ingest.CanonicalEnvelope); tErr != nil {
+		return F2PairNotAttempted, tErr
+	}
+
 	// R5 binding validation gate (defense-in-depth): if the ingest carries an
 	// R5 binding, its SourceLocators must EXACTLY match the canonical entry's
 	// SourceRefs. A hand-constructed binding with arbitrary strings is rejected

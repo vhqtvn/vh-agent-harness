@@ -381,6 +381,22 @@ mechanism carries transition authority.
 
 > **Safety valve:** No proposed F2 mechanism requires transition authority. **If implementation attempts to make F2 doctor output a prerequisite for build-ready, release, or coordinator state movement, that portion must be removed or moved to F3.**
 
+### Transient-locator admission (narrow durable-path contract)
+
+Before writing an F2 artifact pair, persistence must refuse any repo-relative
+canonical provenance locator lexically rooted under `tmp/agent-runs/`.
+Persistence must not resolve, rewrite, inline, or otherwise replace that
+locator, and this rule does not classify other locator roots. This is a narrow
+admission check for the one already-defined disposable root (`tmp/agent-runs/`
+— the harness's canonical per-session disposable output root); it is not a
+general durability classifier (it does not consult `.gitignore`, stat the
+filesystem, or classify `.local/`, other tmp roots, absolute paths, or URLs).
+The recovery from a refusal is a new F1 emit under a new synthesis cycle with a
+durable locator — never an in-place rewrite (that would cross the F1→F2 fence).
+Origin: the commit-reviewer AG-F3 DEFER on the first real F2 dogfood pair
+(commit `6fec8222`), which cited `tmp/agent-runs/f1-build/SLICE-0-STOP.md` as
+an evidence locator in three canonical fields.
+
 ## Open questions for build (decision-level, NOT invitations to reopen the mechanism)
 
 1. The exact existing DTO/package owning `ValidatedF1Emit` + the semantic-digest

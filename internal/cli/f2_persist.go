@@ -64,6 +64,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -274,6 +275,165 @@ func F2CanonicalSidecarPath(dir, cycleID string) string {
 	return filepath.Join(dir, cycleID+".canonical.json")
 }
 
+// --- Transient-locator admission check (narrow durable-path gate) -----------
+//
+// Design authority: researches/decisions/2026-07-25-f2-rendering-family-
+// mechanism.md (transient-locator contract sentence). Before writing an F2
+// artifact pair, persistence must refuse any repo-relative canonical
+// provenance locator lexically rooted under tmp/agent-runs/. Persistence must
+// not resolve, rewrite, inline, or otherwise replace that locator, and this
+// rule does not classify other locator roots.
+//
+// This is a NARROW ADMISSION CHECK for ONE already-defined disposable root
+// (tmp/agent-runs/ — the harness's canonical per-session disposable output
+// root per docs/ai/shell-execution.md and AGENTS.md). It is NOT a general
+// durability classifier: it does not consult .gitignore, does not stat the
+// filesystem, does not classify .local/ or other tmp roots, does not classify
+// absolute paths, and does not classify URLs. It refuses exactly the one root
+// a transient provenance locator is most likely to point at when it leaks into
+// canonical content (the dogfood origin: commit 6fec8222's first real F2 pair
+// cited tmp/agent-runs/f1-build/SLICE-0-STOP.md in three canonical fields).
+//
+// The check is PURE and LEXICAL: no I/O, no resolution, no rewrite, no hashing,
+// no inlining. The recovery from a refusal is a new F1 emit under a new
+// synthesis cycle with a durable locator — never an in-place rewrite (F2 must
+// NOT rewrite locators; that would cross the F1→F2 fence).
+
+// f2TransientAgentRunsRoot is the single disposable root this gate admits. It
+// is repo-relative (no leading slash): a repo-relative locator rooted here is
+// transient by construction (the harness never commits tmp/agent-runs/). The
+// gate rejects exactly this root.
+const f2TransientAgentRunsRoot = "tmp/agent-runs"
+
+// f2NormalizeLocator applies the minimal lexical normalization the gate uses
+// to compare a locator against the disposable root:
+//  1. backslash → forward slash (cross-platform: a Windows-style locator must
+//     not evade the check by spelling the separator differently);
+//  2. strip a single leading "./" (a relative-path prefix must not evade the
+//     check).
+//
+// This is deliberately MINIMAL. It does NOT collapse "..", strip repeated
+// "./", lower-case, trim whitespace, resolve symlinks, or canonicalize case.
+// A locator that evades the check by any of those means is out of scope: this
+// gate catches the common, honest mistake (a transient path cited verbatim),
+// not an adversarial obfuscation.
+func f2NormalizeLocator(locator string) string {
+	n := strings.ReplaceAll(locator, "\\", "/")
+	n = strings.TrimPrefix(n, "./")
+	return n
+}
+
+// f2IsTransientAgentRunsLocator reports whether a locator, after minimal
+// lexical normalization, is repo-relative and rooted under tmp/agent-runs/.
+// "Rooted under" means the normalized locator is exactly tmp/agent-runs OR is
+// prefixed tmp/agent-runs/ (a child path).
+//
+// Absolute paths and URLs do NOT match: an absolute path normalizes to a
+// leading "/", and a URL keeps its scheme prefix, so neither equals nor is
+// prefixed by the bare repo-relative root. The check therefore never classifies
+// them (per the non-goal: no absolute-path / URL classification). It admits
+// ONLY repo-relative locators rooted under the one disposable root.
+func f2IsTransientAgentRunsLocator(locator string) bool {
+	n := f2NormalizeLocator(locator)
+	return n == f2TransientAgentRunsRoot || strings.HasPrefix(n, f2TransientAgentRunsRoot+"/")
+}
+
+// validateNoTransientProvenanceLocators walks the canonical envelope and
+// refuses any provenance locator that, after minimal lexical normalization, is
+// repo-relative and rooted under tmp/agent-runs/. Returns an artifact-integrity
+// error naming the offending canonical field path + the locator value, or nil
+// when every locator is admissible (or absent).
+//
+// The provenance locator fields enumerated (the locator-bearing canonical F1
+// envelope fields — references pointing at where source/evidence material
+// lives):
+//
+//   - F1FamilyEntry.SourceRefs                        (entry-level source refs)
+//   - F1R1Conclusion.Sources[].Locator               (R1 source locator)
+//   - F1R1Conclusion.Hazards[].SourceLocators        (R1 hazard source locators)
+//   - F1PAProbe.EvidenceRefs                         (P-a evidence refs)
+//
+// Deliberately NOT enumerated:
+//   - F1PAProbe.CheckedScope — a scope-DESCRIPTION field ("the scope that was
+//     checked"), not a provenance locator. Narrow by design.
+//   - F2ViewMetadata.StorageLocator / AttachmentMetaRef — F2-derived metadata,
+//     excluded from canonical content; not canonical provenance.
+//   - R5Binding.SourceLocators / MediaAttachments[].Locator — F2-derived
+//     metadata carried on the sidecar (not the canonical envelope); R5 source
+//     locators are separately constrained to match a canonical entry's
+//     SourceRefs, so a transient SourceRef is caught here transitively.
+//   - cross-reference ID fields (SupportRefs, CounterEvidenceProbeRefs,
+//     TargetRef, AffectedProperties, ancestry roots, conclusion/option/probe
+//     IDs) — these resolve WITHIN the envelope, not at the filesystem; they are
+//     not file/path locators.
+//
+// The locator field set is FIXED to these four canonical provenance slots.
+// Adding a new provenance locator field to the F1 envelope requires extending
+// this walk (the same discipline as the F1 deep-copy helpers).
+func validateNoTransientProvenanceLocators(env *F1SynthesisEnvelope) error {
+	for i := range env.Entries {
+		e := &env.Entries[i]
+
+		// entry-level source_refs
+		for j, ref := range e.SourceRefs {
+			if f2IsTransientAgentRunsLocator(ref) {
+				return f2TransientLocatorError(
+					fmt.Sprintf("entries[%d].source_refs[%d]", i, j), ref)
+			}
+		}
+
+		// r1 conclusions: sources[].locator + hazards[].source_locators
+		if e.R1 != nil {
+			for c := range e.R1.Conclusions {
+				concl := &e.R1.Conclusions[c]
+				for s := range concl.Sources {
+					loc := concl.Sources[s].Locator
+					if f2IsTransientAgentRunsLocator(loc) {
+						return f2TransientLocatorError(
+							fmt.Sprintf("entries[%d].r1.conclusions[%d].sources[%d].locator", i, c, s), loc)
+					}
+				}
+				for h := range concl.Hazards {
+					hz := &concl.Hazards[h]
+					for sl := range hz.SourceLocators {
+						loc := hz.SourceLocators[sl]
+						if f2IsTransientAgentRunsLocator(loc) {
+							return f2TransientLocatorError(
+								fmt.Sprintf("entries[%d].r1.conclusions[%d].hazards[%d].source_locators[%d]", i, c, h, sl), loc)
+						}
+					}
+				}
+			}
+		}
+
+		// pa probes: evidence_refs
+		if e.PA != nil {
+			for p := range e.PA.Probes {
+				probe := &e.PA.Probes[p]
+				for er := range probe.EvidenceRefs {
+					ref := probe.EvidenceRefs[er]
+					if f2IsTransientAgentRunsLocator(ref) {
+						return f2TransientLocatorError(
+							fmt.Sprintf("entries[%d].pa.probes[%d].evidence_refs[%d]", i, p, er), ref)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// f2TransientLocatorError builds the artifact-integrity error for a refused
+// transient provenance locator. The error names the offending canonical field
+// path and the locator value so an operator can locate and correct the entry.
+// It is returned pre-write: neither the JSON sidecar nor the MD projection is
+// created when this fires.
+func f2TransientLocatorError(fieldPath, locator string) error {
+	return fmt.Errorf(
+		"f2 persist: artifact-integrity refusal — canonical provenance locator %q at %s is rooted under the disposable tmp/agent-runs/ root (transient locators must not enter the durable F2 artifact; persistence does not resolve, rewrite, inline, or replace the locator — re-emit with a durable locator under a new synthesis cycle)",
+		locator, fieldPath)
+}
+
 // --- Persistence (collision-handled) ----------------------------------------
 
 // PersistF2CanonicalSidecar writes the canonical sidecar for the ingest
@@ -309,6 +469,16 @@ func PersistF2CanonicalSidecar(ingest *F2IngestResult, dir string, now time.Time
 	}
 	if ingest.SynthesisCycleID == "" {
 		return F2PersistNotAttempted, fmt.Errorf("f2 persist: ingest result carries no synthesis_cycle_id (cannot derive sidecar path)")
+	}
+
+	// Transient-locator admission gate (narrow durable-path check): refuse
+	// BEFORE constructing the sidecar or touching the filesystem if any
+	// canonical provenance locator is repo-relative and rooted under
+	// tmp/agent-runs/. Pure lexical check — no resolve/rewrite/inline/hash/stat.
+	// The recovery is a new F1 emit with a durable locator, never an in-place
+	// rewrite. See validateNoTransientProvenanceLocators for the field set.
+	if tErr := validateNoTransientProvenanceLocators(ingest.CanonicalEnvelope); tErr != nil {
+		return F2PersistNotAttempted, tErr
 	}
 
 	// R5 binding validation gate (defense-in-depth): if the ingest carries an
