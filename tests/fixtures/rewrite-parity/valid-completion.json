@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "applies": "Component X deletion-replacement (valid completion stage)",
+  "mode": "deletion_replacement",
+  "prior_surface": {
+    "id": "component-x",
+    "revision": "0000000000000000000000000000000000000001",
+    "paths": ["src/x/a.go", "src/x/b.go"],
+    "inventory_complete": true
+  },
+  "behaviors": [
+    {
+      "id": "x-exports",
+      "description": "Component X public API surface is replaced 1:1",
+      "prior_evidence": ["src/x/a.go:Exported (call sites)"],
+      "verifier": { "kind": "go-test", "locator": "go test ./src/x/... -run API" },
+      "result": { "status": "proven", "receipt": "HEAD 000000000000000000000000000000000000000a: go test ./src/x/... -run API -> PASS (2/2)" }
+    },
+    {
+      "id": "x-config",
+      "description": "Component X config loading behavior preserved",
+      "prior_evidence": ["src/x/b.go:Load (tests)"],
+      "verifier": { "kind": "go-test", "locator": "go test ./src/x/... -run Config" },
+      "result": { "status": "proven", "receipt": "HEAD 000000000000000000000000000000000000000a: go test ./src/x/... -run Config -> PASS (3/3)" }
+    }
+  ]
+}

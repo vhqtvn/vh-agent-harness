@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "applies": "Component Y modification-only rewrite (valid planned stage)",
+  "mode": "modification_only_rewrite",
+  "prior_surface": {
+    "id": "component-y",
+    "revision": "0000000000000000000000000000000000000002",
+    "paths": ["src/y/impl.go"],
+    "inventory_complete": false
+  },
+  "behaviors": [
+    {
+      "id": "y-output",
+      "description": "Component Y output shape preserved across the rewrite",
+      "prior_evidence": ["src/y/impl.go:Render (golden test)"],
+      "verifier": { "kind": "go-test", "locator": "go test ./src/y/... -run Golden" },
+      "result": { "status": "planned" }
+    }
+  ]
+}

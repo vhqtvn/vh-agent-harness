@@ -6,6 +6,10 @@ import {
     validateF3DesignReadiness,
     computeDesignDigest,
 } from "./f3-design-readiness.js";
+import {
+    extractAllRewriteParityBlocks,
+    validateRewriteParityCompletion,
+} from "./rewrite-parity-validate.js";
 
 const SCHEMA_VERSION = 1;
 const LOCK_TIMEOUT_MS = 5000;
@@ -6909,6 +6913,37 @@ function saveCoordinationTaskCloseout(sessionID, taskIDRaw, options = {}) {
             "report_envelope",
             errors,
         ) || loaded.payload.report_envelope;
+    // Rewrite-parity Stage 2 (closeout transition). The gate is OPT-IN: it
+    // fires ONLY when the closeout body carries an explicitly-declared
+    // ```rewrite-parity contract (mode: deletion_replacement |
+    // modification_only_rewrite). Ordinary closeouts carry no such block and
+    // bear zero rewrite-parity burden. When status=completed AND a contract
+    // is declared, every behavior must be proven with a non-empty receipt
+    // (structural completeness); the tree-binding honesty is author + reviewer
+    // planned/failed/skipped/not-demonstrable/missing-receipt refuse
+    // completion (not-demonstrable routes to defer). Mirrors behavioral-
+    // closure's authority split (a structurally-complete contract can still
+    // carry weak evidence; the verifier/receipt honesty is author + reviewer).
+    if (taskStatus === "completed") {
+        const rpBlocks = extractAllRewriteParityBlocks(options.body || "");
+        rpBlocks.forEach((blk, idx) => {
+            if (blk.error) {
+                errors.push(
+                    "rewrite-parity contract #" + (idx + 1) + " in closeout body " +
+                    "could not be parsed: " + blk.error,
+                );
+                return;
+            }
+            const rpErrors = validateRewriteParityCompletion(blk.contract);
+            for (const e of rpErrors) {
+                errors.push(
+                    "rewrite-parity contract #" + (idx + 1) +
+                    " failed completion validation (status=completed requires " +
+                    "every behavior proven with a receipt): " + e,
+                );
+            }
+        });
+    }
     throwCollectedErrors(errors);
     const createdAt = isoZ();
     const reportTitle =

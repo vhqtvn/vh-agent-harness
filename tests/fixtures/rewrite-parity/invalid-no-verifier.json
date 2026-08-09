@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "applies": "behavior missing verifier",
+  "mode": "deletion_replacement",
+  "prior_surface": {
+    "id": "x", "revision": "deadbeef", "paths": ["a"], "inventory_complete": true
+  },
+  "behaviors": [
+    { "id": "b", "description": "d", "prior_evidence": ["e"],
+      "verifier": { "kind": "", "locator": "" },
+      "result": { "status": "planned" } }
+  ]
+}

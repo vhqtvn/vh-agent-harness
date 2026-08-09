@@ -3,6 +3,11 @@
 #
 # Subcommands (recommended — file-based form):
 #   acquire   --paths-file FILE --message-file FILE [--session-alias ALIAS]
+#              [--rewrite-parity-contract FILE]
+#              ^ rewrite-parity is OPT-IN: pass a contract file ONLY for an
+#                explicitly-declared deletion/rewrite slice (mode:
+#                deletion_replacement | modification_only_rewrite). Omit for
+#                ordinary deletes/refactors/renames (zero burden).
 #   commit    --uuid UUID --tree-hash HASH --message-file FILE
 #   release   [--uuid UUID] [--message-file FILE]
 #   heartbeat --uuid UUID
@@ -650,6 +655,7 @@ cmd_acquire() {
   local message="" paths="" session_alias=""
   local paths_provided=false
   local message_file="" paths_file=""
+  local rewrite_parity_contract=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -658,6 +664,7 @@ cmd_acquire() {
       --paths)         paths="$2"; paths_provided=true; shift 2 ;;
       --paths-file)    paths_file="$2";    shift 2 ;;
       --session-alias) session_alias="$2"; shift 2 ;;
+      --rewrite-parity-contract) rewrite_parity_contract="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
@@ -1013,7 +1020,55 @@ for l in lines:
     if len(parts) == 2:
         files.append({'status': parts[0], 'path': parts[1]})
 print(json.dumps(files))
-" 2>/dev/null || echo "[]")
+  " 2>/dev/null || echo "[]")
+
+  # -------------------------------------------------------------------
+  # Stage 1: rewrite-parity contract mechanical precheck (OPT-D).
+  #
+  # OPT-IN: only fires when --rewrite-parity-contract <file> is passed.
+  # Ordinary deletes/refactors/renames carry NO rewrite-parity burden
+  # (the flag is absent => this block is skipped entirely). When supplied,
+  # the contract must be structurally valid AND its prior_surface.paths
+  # must cross-check against the tree-bound acquire diff, with
+  # prior_surface.revision bound to head_at_acquire. The check is a
+  # MECHANICAL precheck; commit-reviewer still assesses semantic quality
+  # (defense-in-depth) and does NOT replace it.
+  #
+  # The validator script is a sibling in this scripts dir. It returns
+  # JSON {valid,errors,...} and exits 0/1. On failure the acquire is
+  # refused with status rewrite_parity_error (no metadata is written).
+  # -------------------------------------------------------------------
+  if [[ -n "$rewrite_parity_contract" ]]; then
+    if [[ ! -r "$rewrite_parity_contract" ]]; then
+      rm -f "$private_index" 2>/dev/null || true
+      rm -f "$(_session_meta_path "$uuid")" 2>/dev/null || true
+      json_out "{\"status\":\"rewrite_parity_error\",\"reason\":\"contract_file_unreadable\",\"file\":$(json_encode "$rewrite_parity_contract")}"
+      return 1
+    fi
+    local _rp_script rp_out rp_rc
+    _rp_script="$(dirname "$0")/rewrite-parity-validate.py"
+    rp_rc=0
+    rp_out=$(python3 "$_rp_script" \
+        --contract-file "$rewrite_parity_contract" \
+        --stage precommit \
+        --head-at-acquire "$head_at_acquire" \
+        --diff-files "$files_json" 2>/dev/null) || rp_rc=$?
+    if [[ $rp_rc -ne 0 ]]; then
+      rm -f "$private_index" 2>/dev/null || true
+      rm -f "$(_session_meta_path "$uuid")" 2>/dev/null || true
+      local _rp_errors
+      _rp_errors=$(printf '%s' "$rp_out" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    print(json.dumps(d.get('errors', [])))
+except Exception:
+    print(json.dumps(['validator produced no parseable result']))
+" 2>/dev/null || echo '["validator produced no parseable result"]')
+      json_out "{\"status\":\"rewrite_parity_error\",\"reason\":\"contract_precheck_failed\",\"errors\":${_rp_errors}}"
+      return 1
+    fi
+  fi
 
   # Write final metadata directly to per-session file — no global lock needed
   # (UUID-specific file has zero contention)

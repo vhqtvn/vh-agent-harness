@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "applies": "completion with not-demonstrable (must block)",
+  "mode": "deletion_replacement",
+  "prior_surface": {
+    "id": "x", "revision": "deadbeef", "paths": ["a"], "inventory_complete": true
+  },
+  "behaviors": [
+    { "id": "b", "description": "d", "prior_evidence": ["e"],
+      "verifier": { "kind": "go-test", "locator": "go test" },
+      "result": { "status": "not-demonstrable" } }
+  ]
+}

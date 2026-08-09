@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "applies": "bad mode value",
+  "mode": "deletion",
+  "prior_surface": {
+    "id": "x", "revision": "deadbeef", "paths": ["a"], "inventory_complete": true
+  },
+  "behaviors": [
+    { "id": "b", "description": "d", "prior_evidence": ["e"],
+      "verifier": { "kind": "go-test", "locator": "go test" },
+      "result": { "status": "planned" } }
+  ]
+}

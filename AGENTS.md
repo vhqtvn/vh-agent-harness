@@ -249,6 +249,53 @@ outcome).
   state-machine invariant, the `formal-verification` skill authors an
   engine-checked proof whose result feeds this crux model.
 
+### Rewrite-parity contract gate (explicitly-declared deletion/rewrite slices)
+
+A **rewrite-parity contract** governs an **explicitly-declared** deletion or
+rewrite slice. It is **opt-in** — ordinary deletes, refactors, renames, and
+reorganization carry **zero** rewrite-parity burden. A contract applies only
+when the task declared `mode: deletion_replacement` (a component is deleted and
+replaced) or `mode: modification_only_rewrite` (a component is rewritten in
+place). The canonical representation is versioned JSON inside a fenced
+`rewrite-parity` block, living in durable markdown (closeout reports,
+checkpoints) — the same transport shape as the `behavioral-closure` token.
+
+The gate is **two-stage hybrid** (mirrors the behavioral-closure authority
+split — a mechanical gate enforces structure; the commit-reviewer assesses
+semantic quality as defense-in-depth and does NOT replace the mechanical check):
+
+- **Stage 1 (commit-gate mechanical precheck, pre-commit):** the contract is
+  supplied explicitly via `acquire --rewrite-parity-contract <file>`. The gate
+  loads and validates it: schema/version/mode validity, a planned verifier
+  (kind + locator) per behavior, `prior_surface.revision` bound to the
+  acquire-time HEAD, and `prior_surface.paths` cross-checked against the
+  tree-bound deletion set (`deletion_replacement`: status-D / R-source;
+  `modification_only_rewrite`: status-M). When `inventory_complete: true` the
+  declared paths must equal the change set; otherwise they must be a subset.
+  Rejects missing/malformed/mismatched. Flag absent ⇒ no rewrite-parity gating.
+- **Stage 2 (closeout transition, `status: completed`):**
+  `saveCoordinationTaskCloseout` requires every behavior `result.status: proven`
+  with a non-empty `receipt` (structural completeness). Refuses completion on
+  `planned`/`failed`/`skipped`/`not-demonstrable`/missing-receipt. The
+  tree-binding honesty — that the receipt references the assessed tree, not a
+  stale or fabricated one — is author + reviewer (same honesty ceiling as
+  behavioral-closure); the gate verifies presence, not receipt truth.
+  `not-demonstrable` → `inconclusive` → blocks `completed` (aligns the
+  behavioral-closure mapping above): a behavior whose verified seam cannot
+  observe the outcome is `not-demonstrable`, which fails the completion gate
+  and routes to defer.
+- **doctor** runs an independent structural-consistency audit of committed
+  ```rewrite-parity blocks (same schema; not the sole authority — defense-in-
+  depth catching contracts that landed via paths that bypassed the two gates).
+
+The contract is a **declaration, not a proof** (same honesty ceiling as
+behavioral-closure and F3): a structurally-complete contract can still carry
+weak evidence, a stale receipt, or a coordinated-but-wrong verifier. The gate
+verifies STRUCTURAL completeness, never design truth. State "structurally
+resolved for this design," never "parity proven." See
+`docs/coordination/CLOSEOUT_TEMPLATE.md` → "Rewrite-parity contract" for the
+canonical block shape.
+
 ### Verification claims: full, targeted, and transition-clean
 
 "Green" is ambiguous. When a success report or closeout claims verification,

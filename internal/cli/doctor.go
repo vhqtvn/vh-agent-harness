@@ -457,6 +457,19 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	fmt.Fprintln(out, "    "+crr.String())
 	applyTier(crr.tier, &problems, &warns)
 
+	// Check #25 — rewrite-parity structural-consistency audit. Independent
+	// defense-in-depth scan for ```rewrite-parity contract blocks in durable
+	// closeout/checkpoint artifacts (same surfaces as behavioral-closure).
+	// Validates structural schema/enums only — the commit-gate (Stage 1) and
+	// closeout transition (Stage 2) are the primary enforcement surfaces;
+	// doctor catches contracts that landed via paths that bypassed those gates.
+	// OPT-IN: artifacts without a ```rewrite-parity block contribute no finding
+	// (the contract governs only explicitly-declared deletion/rewrite slices).
+	fmt.Fprintln(out, "  rewrite-parity:")
+	rpr := checkRewriteParity(abs)
+	fmt.Fprintln(out, "    "+rpr.String())
+	applyTier(rpr.tier, &problems, &warns)
+
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)
 	if problems > 0 {

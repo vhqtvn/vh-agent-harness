@@ -12,6 +12,12 @@ A byte-identical copy of the harness SOURCE scripts:
 - `f3-design-readiness.js` — copy of `templates/core/.opencode/scripts/f3-design-readiness.js`
   (state-lib.js imports it; the sibling must be present so the module loads far
   enough for the render-location guard IIFE to read its own bytes and fire)
+- `rewrite-parity-validate.js` — copy of
+  `templates/core/.opencode/scripts/rewrite-parity-validate.js`
+  (state-lib.js imports it for the closeout Stage 2 rewrite-parity check; same
+  reason as `f3-design-readiness.js` — the sibling must be present so the module
+  loads. Only required when the snapshot is refreshed from a state-lib.js that
+  carries the rewrite-parity import; the frozen snapshot predates that import.)
 
 ## Why a frozen copy (not a runtime copy of the live source)
 
@@ -42,6 +48,7 @@ matches the current guard:
 ```
 cp templates/core/.opencode/scripts/state-lib.js            tests/integration/fixtures/state-lib-source-copy/state-lib.js
 cp templates/core/.opencode/scripts/f3-design-readiness.js  tests/integration/fixtures/state-lib-source-copy/f3-design-readiness.js
+cp templates/core/.opencode/scripts/rewrite-parity-validate.js  tests/integration/fixtures/state-lib-source-copy/rewrite-parity-validate.js
 ```
 
 The fixture copy MUST retain the literal `{{COORDINATOR_DIR}}` token (it appears
