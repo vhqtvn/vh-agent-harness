@@ -20,7 +20,14 @@ import (
 // structural rule (e.g. the python version check, the Go mode enum, the JS
 // prior_surface.paths shape) without any test catching the divergence. With it,
 // the three mirrors are bound to identical inputs so a one-sided rule change
-// fails this test.
+// to a COVERED decision point (the cases enumerated below) fails this test.
+// It is NOT an exhaustive equivalence proof: a one-sided change to a decision
+// branch NOT represented in the case matrix (e.g. blank description, empty
+// verifier.kind/locator, receipt/note typing, path trimming) can still escape.
+// The binding is also environment-conditional: it t.Skip()s when python3, node,
+// or the rendered validators under .opencode/scripts/ are unavailable, so a
+// toolchain-poor CI environment can report the suite passing with these cases
+// skipped (see defer-rp-fixture-parity).
 //
 // The cases cover the structural core (the only stage all three implement):
 // version edge cases (1, true, 1.0, 2, "1"), mode validity, prior_surface
@@ -177,7 +184,11 @@ func goStructuralAccept(t *testing.T, contractFile string) bool {
 // rename (R) contributes its old path to removed_set; a typechange (T)
 // contributes to NEITHER removed nor modified (so a deletion_replacement
 // contract declaring a T-only path is rejected). A one-sided change to either
-// implementation's _diff_sets or cross-check now fails this test.
+// implementation's _diff_sets or cross-check ON A COVERED STATUS CLASS now
+// fails this test. As with the structural driver, this is not exhaustive
+// (unrepresented branches and environment-skip limitations apply — see
+// defer-rp-fixture-parity); it binds the named F3 counter-case, not every
+// conceivable precommit divergence.
 func TestRewriteParityPrecommitPyJsConformance(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not on PATH")

@@ -1127,7 +1127,8 @@ export default function transform({ context }) {
   auto-gate-ignore, skills, subagent-depth, defer-liveness,
   staged-errata-content, behavioral-closure, dev-stale-embed, f1-envelope,
   f1-f2-consistency, f2-pairs, head-progress, complexity-advisory,
-  recurrence-state, exec-sandbox-floor, shipped-pilots, closeout-reach). The `head-progress` check reads the commit-gate's
+  recurrence-state, exec-sandbox-floor, shipped-pilots, closeout-reach,
+  rewrite-parity). The `head-progress` check reads the commit-gate's
   durable closeout ledger (`.git/commit-gate/closeouts.log`) and WARNs when the
   last N (default 3, env `COMMIT_GATE_STALE_HEAD_THRESHOLD`) successful closeouts
   all recorded the same `post_commit_head` — a flatline signalling commits may
@@ -1179,7 +1180,20 @@ export default function transform({ context }) {
   and is fail-closed on unknown/malformed declarations; an absent token PASSES
   (the pilot does not force adoption, so pre-pilot closeouts stay HEALTHY). The
   token declares consistency; it does NOT prove the cited crux path executed
-  (proving that needs the repo-specific live verification). The `f1-envelope`
+  (proving that needs the repo-specific live verification). The `rewrite-parity`
+  check scans the same closeout surfaces for fenced `rewrite-parity` contract
+  blocks (versioned JSON governing explicitly-declared deletion/rewrite slices —
+  `mode: deletion_replacement` or `mode: modification_only_rewrite`) and FAILs
+  when one is structurally malformed or internally inconsistent (unknown
+  version/mode/result enum, missing verifier per behavior, duplicate behavior
+  IDs, prior-surface shape errors). It SKIPs cleanly when no artifact carries a
+  block — the contract is OPT-IN, so a plain delete/refactor/rename with no
+  block contributes no finding (zero burden on ordinary work). Like
+  behavioral-closure, it is a STRUCTURAL consistency audit, NOT a truth prover;
+  the commit-gate (`acquire --rewrite-parity-contract <file>` Stage-1 precheck)
+  and the closeout transition (Stage-2 completion refusal unless every behavior
+  is `proven` with a non-empty receipt) are the primary enforcement surfaces,
+  and doctor is independent defense-in-depth. The `f1-envelope`
   check scans the same closeout surfaces for fenced `f1-synthesis-envelope`
   JSON projections and FAILs when a COMMITTED projection is structurally
   inconsistent — unknown closed-vocabulary enum, missing/duplicate family when
@@ -1925,11 +1939,11 @@ operator release-prep. The ceremony produces THREE sequential single-path
 (manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`.
 The release-tag wrapper's deterministic gates refuse the tag unless each
 commit binds to its predecessor exactly. The wrapper also runs **G0c**
-  (`vh-agent-harness doctor` — all 24 checks, including #12 defer-liveness,
+  (`vh-agent-harness doctor` — all 25 checks, including #12 defer-liveness,
   #13 staged-errata-content, #14 behavioral-closure, #15 dev-stale-embed,
   #16 f1-envelope, #17 f1-f2-consistency, #18 f2-pairs, #19 head-progress,
   #20 complexity-advisory, #21 recurrence-state, #22 exec-sandbox-floor,
-  #23 shipped-pilots, and #24 closeout-reach)
+  #23 shipped-pilots, #24 closeout-reach, and #25 rewrite-parity)
   as a hard machine gate
   AFTER the clean-worktree
 gate (G0b) and BEFORE the readiness-pass artifact gate (G1-G5). A
