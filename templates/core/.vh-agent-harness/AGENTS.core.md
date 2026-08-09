@@ -529,14 +529,27 @@ Load the `backlog` skill (`.opencode/skills/backlog/SKILL.md`) for the full
 quick-reference before substantial backlog work. A non-blocking reminder fires
 on the first edit of `backlog.md` per session.
 
-### DEFER / follow-up curation (intake, not direct rows)
+### DEFER / follow-up curation (drain-first, boundary-promotion, landing-gated retirement)
 
-DEFER findings and p2 follow-up/cleanup items NEVER become backlog rows
-directly. They land in `.local/{{COORDINATOR_DIR}}/tasks/` as **conditional
-candidates** (transport, not truth) and reach `backlog.md` only after a
-trigger fires AND the promoter applies the promotion Definition of Ready:
+Transport cards (DEFER findings, p2 follow-ups, implementation/study/research
+work) live in `.local/{{COORDINATOR_DIR}}/tasks/` as **transport, not truth**.
+The canonical lifecycle is documented in
+`docs/coordination/RECORD_LIFECYCLE.md`; the rules in brief:
 
-- **Capture** a DEFER/follow-up via `/write-task` into
+- **Drain-first default.** Work cards directly from transport. No backlog row
+  is created before or after by default. A card gets a `docs/planning/backlog.md`
+  row ONLY when it crosses a boundary (blocked / owner-change /
+  must-survive-session). Backlog is a status ledger, not a record store.
+- **Intake bar (before filing).** A card is filed only after admission
+  (resolve-first / admitted-value): a precise question, concrete area + file
+  scope, validation approach, an ADMITTED BLOCKER or reason the work cannot be
+  resolved now, a ground-truth-derivable trigger when deferral is
+  trigger-dependent, provenance, and dedup. Dispositions at intake:
+  resolvable-now → resolve (don't file); decision-derivable-now → drive to
+  verdict (don't defer); real deferred work meeting the bar → file as `draft`;
+  duplicate/fog → collapse or discard. The `resolve-first` skill is the
+  front-gate classifier for this triage.
+- **Capture** a filed candidate via `/write-task` into
   `.local/{{COORDINATOR_DIR}}/tasks/` **as `status: draft`** — do NOT let an
   advisory candidate inherit the `ready` default. `draft` is a first-class create
   status (`/write-task` accepts `status: draft|ready`) and is correct for
@@ -552,27 +565,40 @@ trigger fires AND the promoter applies the promotion Definition of Ready:
   validated single-card wrapper over that removal mechanic: it removes the
   gitignored card and its local report directory. It does NOT mark the task
   cancelled and must NOT be used to bypass a promotion, review, or closeout
-  gate. Direct `rm` of the gitignored file
-  (`.local/{{COORDINATOR_DIR}}/tasks/<card>.json`) remains a sanctioned retire
-  path equivalent to the wrapper for operators who know exactly what they are
-  doing; the wrapper exists to make the single-card removal safe, validated, and
-  observable. The file is gitignored transport (not committed truth), so
-  deleting it loses nothing durable.
+  gate. For `draft`, `ready`, or `cancelled` cards, direct `rm` of the
+  gitignored file (`.local/{{COORDINATOR_DIR}}/tasks/<card>.json`) remains a
+  sanctioned retire path equivalent to the wrapper for operators who know
+  exactly what they are doing. For a **`completed` card this is NOT true**:
+  retirement is landing-gated (below), so direct `rm` bypasses the landing
+  check and is forbidden — use the sanctioned op, which enforces (will enforce,
+  Slice 2) the reachability check.
+- **Retire on landing, not on review approval.** A `completed` card may be
+  retired as done ONLY when a commit carrying the exact `Task-Card: <card-id>`
+  trailer is reachable from the integration branch
+  (`git log <branch> --fixed-strings --grep="Task-Card: <card-id>"` ≥ 1). Never
+  retire on review approval alone — the 2026-08-07 lesson: a card was deleted on
+  review approval and the commit later failed to land. The `Task-Card:` trailer
+  originates in the `commit-message` draft (the committer is pass-through and
+  does not rewrite it). A gate-appended trailer / gate-ledger card-id→commit
+  join is documented future-hardening, not v1. Legacy: the landing-proof
+  requirement applies to new cards post-codification; pre-existing cards are
+  grandfathered until the Slice-2 retirement code lands.
 - **Fog vs ticket (triage test).** A finding is **ticket-ready** when you can
   state the question precisely now — even if blocked. A finding is **fog** when
   you cannot yet phrase it that sharply: in-scope, but not yet specifiable. Fog
   belongs in `.local/{{COORDINATOR_DIR}}/tasks/` (transport, not truth); it
-  becomes a backlog row only once it sharpens to a precise question AND its
-  trigger has fired AND the promotion DoR below is met.
-- **Promotion Definition of Ready (DoR):** a candidate reaches `backlog.md`
-  only if ALL of: trigger has fired (or operator override) + concrete area +
-  file scope + validation plan + clear slice + provenance Notes. Run the
-  predicate checker (`node .opencode/scripts/check-defer-triggers.mjs`) as a
-  promotion-review aid — it is **promoter-use-only**, never wired into a commit
-  hook, never blocking.
+  becomes a backlog row only once it sharpens to a precise question AND crosses
+  a boundary AND the promotion DoR below is met.
+- **Promotion Definition of Ready (DoR):** a boundary-crossing candidate
+  reaches `backlog.md` only if ALL of: boundary crossed (blocked /
+  owner-change / must-survive-session) + trigger fired (or operator override,
+  for trigger-gated candidates) + concrete area + file scope + validation plan +
+  clear slice + provenance Notes. Run the predicate checker
+  (`node .opencode/scripts/check-defer-triggers.mjs`) as a promotion-review aid
+  — it is **promoter-use-only**, never wired into a commit hook, never blocking.
 - **Reviewer DEFER never becomes a direct backlog row.** A `/commit-review`
-  DEFER finding is captured to `.local/` and curated later; it is not
-  transcribed into `backlog.md` in the same slice.
+  DEFER finding is captured to `.local/` only after passing the intake bar, and
+  is curated later; it is not transcribed into `backlog.md` in the same slice.
 - **DEFER/follow-up triage:** when deciding a candidate's disposition at
   card-creation (resolve-now vs. drive-to-verdict vs. defer-with-trigger), the
   `resolve-first` skill is the front-gate classifier for that triage.

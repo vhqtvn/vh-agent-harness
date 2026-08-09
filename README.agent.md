@@ -959,12 +959,25 @@ export default function transform({ context }) {
   NOT revert `backlog.md`** (that discards a collaborator's update); in
   particular, `commit-gate.sh revert docs/planning/backlog.md` is the
   blind-revert anti-pattern on the ledger. Load the `backlog` skill before
-  editing. DEFER / p2 / follow-up findings route to the holding area
-  (`.local/coordinator/tasks/` via `/write-task` with Notes provenance),
-  never directly to a backlog row; the promoter promotes them only after the
-  predicate checker (`.opencode/scripts/check-defer-triggers.mjs`,
-  promoter-use-only, never blocking) confirms the trigger and the Definition of
-  Ready is met. Run `/backlog-cleanup` (or `vh-agent-harness exec node
+  editing. DEFER / p2 / follow-up findings follow a **drain-first** lifecycle
+  (see `docs/coordination/RECORD_LIFECYCLE.md`): they pass an **admission bar**
+  (resolve-first / admitted-value — precise question, concrete area + file
+  scope, validation approach, an ADMITTED BLOCKER, a ground-truth-derivable
+  trigger when deferral is trigger-dependent, provenance, dedup) before they are
+  filed as a `draft` card in `.local/coordinator/tasks/` (via `/write-task`),
+  and are **drained directly** by default — no backlog row is created before or
+  after. A card is promoted to a backlog row ONLY when it crosses a boundary
+  (blocked / owner-change / must-survive-session); only then does the promoter
+  apply the Definition of Ready (and the predicate checker,
+  `.opencode/scripts/check-defer-triggers.mjs`, promoter-use-only, never
+  blocking, confirms a trigger for trigger-gated candidates). A `completed`
+  card is **retired only on landing** — never on review approval alone — when a
+  commit carrying `Task-Card: <card-id>` is reachable from the integration
+  branch (`git log <branch> --fixed-strings --grep="Task-Card: <card-id>"` ≥ 1;
+  the `commit-message` agent authors the trailer, the committer is pass-through).
+  The landing commit (carrying the card id) is the durable record: no
+  tombstones, no done-rows, checkpoints only for campaign closeouts / reopenable
+  decisions. Run `/backlog-cleanup` (or `vh-agent-harness exec node
   .opencode/scripts/normalize-backlog.js`) to tidy/archive after a batch edit.
   Roadmap intent lives in `docs/planning/roadmap.md`. The backlog is an
   **eventually-consistent ledger**: the safety model is (a) the **commit-gate
@@ -984,16 +997,22 @@ export default function transform({ context }) {
   irreversible hard removal, NOT a lifecycle status — it does not mark the task
   cancelled, create a tombstone/archive, edit `backlog.md`, or bypass
   `/task-review` / `/task-closeout`. A `draft`, `ready`, or `cancelled` card is
-  freely disposable; a `working`, `reported`, `blocked`, or `completed` card is
-  refused without an explicit `force` because its report directory may carry
-  evidence a coordinator gate still needs. It rejects wildcard/path-like/
-  multiple-id/whitespace-separated input before any filesystem mutation, and
-  confines removal to the transport roots. The command surfaces the card
-  (id, title, status, owner, report dir) to the operator *before* the
-  destructive call and prints the post-removal `removed` summary after. Direct
-  `rm` of the gitignored file remains an equivalent operator path; the wrapper
-  makes single-card removal safe, validated, and observable. No `commit`
-  follows — the transport is gitignored.
+  freely disposable (direct `rm` of the gitignored file remains an equivalent
+  operator path for those statuses); a `completed` card is **landing-gated** —
+  retirement is allowed only when a commit carrying `Task-Card: <card-id>` is
+  reachable from the integration branch, so direct `rm` of a `completed` card is
+  NOT equivalent (it bypasses the landing check — see
+  `docs/coordination/RECORD_LIFECYCLE.md`). The Slice-2 retirement CODE will
+  enforce the reachability check in the sanctioned op; until then a `working`,
+  `reported`, `blocked`, or `completed` card is refused without an explicit
+  `force` (a `completed` card is additionally landing-gated per the contract
+  above) because its report directory may carry evidence a coordinator gate
+  still needs. It
+  rejects wildcard/path-like/multiple-id/whitespace-separated input before any
+  filesystem mutation, confines removal to the transport roots, surfaces the
+  card (id, title, status, owner, report dir) to the operator *before* the
+  destructive call, and prints the post-removal `removed` summary after. No
+  `commit` follows — the transport is gitignored.
 - **Model-originated skill proposals use a parallel transport,
   `/skill-propose`.** A model that identifies a reusable workflow worth becoming
   a repo-local skill captures it as a structured `draft` card under
