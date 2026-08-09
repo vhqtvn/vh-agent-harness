@@ -326,3 +326,155 @@ process.exit(errs.length ? 1 : 0);
 	cmd := exec.Command("node", "--input-type=module", "-e", snippet, "--", script, contractFile, diffArg, headAt, skip)
 	return cmd.Run() == nil
 }
+
+// TestRewriteParityFixtureDriverParity drives the 9 golden fixtures under
+// tests/fixtures/rewrite-parity/ through all three structural mirrors — the
+// python reference (rewrite-parity-validate.py), the JS mirror
+// (rewrite-parity-validate.js), and the Go in-process mirror
+// (validateRewriteParityStructureGo) — and asserts they classify each fixture
+// identically AND match the explicit expected verdict map below.
+//
+// This closes the fixture-driver parity gap that
+// TestRewriteParityCrossLanguageConformance leaves open: the inline-case driver
+// covers 19 hand-written contracts but never drives the 9 committed golden
+// fixtures (rewrite-parity-validate.py:15-19 self-documents this gap and tracks
+// it under defer-rp-fixture-parity). Without this driver, a contributor could
+// change one mirror's structural rule in a way the inline cases happen to agree
+// on while the golden fixtures would diverge. Driving the real fixtures binds
+// all three mirrors to the same committed contract set.
+//
+// Like the inline-case driver, this is environment-conditional: it t.Skip()s
+// when python3, node, or the rendered validators under .opencode/scripts/ are
+// unavailable. The environment-INDEPENDENT Go-only guard is
+// TestRewriteParityFixtureGoBindingGuard below — that test NEVER skips, so even
+// a toolchain-poor CI binds the Go structural core to the fixtures (the
+// C-F2/D-F1 vacuous-pass guard).
+//
+// The expected verdict map is STRUCTURAL (the only stage all three mirrors
+// implement). Two fixtures carry an `invalid-completion-*` filename prefix but
+// are structurally VALID — their invalidity is completion-stage only (a missing
+// receipt; a not-demonstrable result). The structural core accepts them; the
+// completion stage (JS-only, exercised in tests/scripts/) refuses them. Do NOT
+// infer the structural verdict from the filename prefix — consult
+// rewriteParityFixtureStructuralVerdicts.
+func TestRewriteParityFixtureDriverParity(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not on PATH")
+	}
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not on PATH")
+	}
+	repoRoot := filepath.Join("..", "..")
+	pyScript := filepath.Join(repoRoot, ".opencode", "scripts", "rewrite-parity-validate.py")
+	jsScript := filepath.Join(repoRoot, ".opencode", "scripts", "rewrite-parity-validate.js")
+	for _, f := range []string{pyScript, jsScript} {
+		if _, err := os.Stat(f); err != nil {
+			t.Skipf("rendered validator unavailable: %s (run `vh-agent-harness update` first)", f)
+		}
+	}
+	fixtureDir := filepath.Join(repoRoot, "tests", "fixtures", "rewrite-parity")
+	expected := rewriteParityFixtureStructuralVerdicts()
+	entries, err := os.ReadDir(fixtureDir)
+	if err != nil {
+		t.Fatalf("read fixture dir: %v", err)
+	}
+	ran := 0
+	for _, e := range entries {
+		name := e.Name()
+		if !e.Type().IsRegular() || filepath.Ext(name) != ".json" {
+			continue
+		}
+		exp, ok := expected[name]
+		if !ok {
+			t.Fatalf("fixture %q has no expected-verdict entry — add it to rewriteParityFixtureStructuralVerdicts", name)
+		}
+		t.Run(name, func(t *testing.T) {
+			contractFile := filepath.Join(fixtureDir, name)
+			pyAccept := pythonStructuralAccept(t, pyScript, contractFile)
+			jsAccept := jsStructuralAccept(t, jsScript, contractFile)
+			goAccept := goStructuralAccept(t, contractFile)
+			if pyAccept != jsAccept || jsAccept != goAccept {
+				t.Errorf("cross-language DISAGREEMENT on fixture %q: py=%v js=%v go=%v", name, pyAccept, jsAccept, goAccept)
+			}
+			if pyAccept != exp {
+				t.Errorf("expected structural verdict %v but got py=%v js=%v go=%v on fixture %q", exp, pyAccept, jsAccept, goAccept, name)
+			}
+		})
+		ran++
+	}
+	if ran == 0 {
+		t.Fatal("no golden fixtures found — fixture-driver parity drove nothing")
+	}
+}
+
+// TestRewriteParityFixtureGoBindingGuard is the environment-INDEPENDENT half of
+// the fixture-driver parity binding: it drives the 9 golden fixtures through
+// the Go in-process structural mirror ONLY, and NEVER t.Skip()s. The Go mirror
+// has no external toolchain dependency (no python3, no node, no rendered
+// validator file), so this test runs in every CI environment regardless of
+// toolchain availability.
+//
+// This is the C-F2/D-F1 vacuous-pass guard. Without it, a toolchain-poor CI
+// that skips TestRewriteParityCrossLanguageConformance and
+// TestRewriteParityFixtureDriverParity (both environment-conditional) would
+// report the rewrite-parity conformance suite green while exercising NONE of the
+// golden fixtures — the binding could be vacuously passing. With this guard, the
+// Go structural core — the same mirror the doctor health check ships in the
+// binary — is bound to the committed fixtures in every environment, so a rule
+// change that diverges from the fixtures fails this test even when the
+// cross-language drivers skip.
+//
+// It does NOT bind py↔JS (those need the toolchain); it binds the Go core to the
+// fixtures unconditionally. See TestRewriteParityFixtureDriverParity for the
+// same expected-verdict map and the filename-prefix caveat.
+func TestRewriteParityFixtureGoBindingGuard(t *testing.T) {
+	repoRoot := filepath.Join("..", "..")
+	fixtureDir := filepath.Join(repoRoot, "tests", "fixtures", "rewrite-parity")
+	expected := rewriteParityFixtureStructuralVerdicts()
+	entries, err := os.ReadDir(fixtureDir)
+	if err != nil {
+		t.Fatalf("read fixture dir: %v", err)
+	}
+	ran := 0
+	for _, e := range entries {
+		name := e.Name()
+		if !e.Type().IsRegular() || filepath.Ext(name) != ".json" {
+			continue
+		}
+		exp, ok := expected[name]
+		if !ok {
+			t.Fatalf("fixture %q has no expected-verdict entry — add it to rewriteParityFixtureStructuralVerdicts", name)
+		}
+		t.Run(name, func(t *testing.T) {
+			goAccept := goStructuralAccept(t, filepath.Join(fixtureDir, name))
+			if goAccept != exp {
+				t.Errorf("Go structural verdict %v does not match expected %v on fixture %q", goAccept, exp, name)
+			}
+		})
+		ran++
+	}
+	if ran == 0 {
+		t.Fatal("no golden fixtures found — the Go binding guard drove nothing (vacuous-pass risk)")
+	}
+}
+
+// rewriteParityFixtureStructuralVerdicts returns the explicit STRUCTURAL verdict
+// (true = accepted by the structural stage, false = rejected) for each golden
+// fixture under tests/fixtures/rewrite-parity/. The structural stage is the only
+// stage all three validator mirrors implement. The verdict is INDEPENDENT of the
+// filename prefix: two fixtures are prefixed `invalid-completion-*` but are
+// structurally valid because their invalidity is completion-stage only (a missing
+// receipt; a not-demonstrable result). Do not infer the verdict from the prefix.
+func rewriteParityFixtureStructuralVerdicts() map[string]bool {
+	return map[string]bool{
+		"valid-completion.json":                    true,
+		"valid-modify-planned.json":                true,
+		"valid-planned.json":                       true,
+		"invalid-completion-no-receipt.json":       true, // completion-stage invalid; structurally valid
+		"invalid-completion-not-demonstrable.json": true, // not-demonstrable is a valid structural enum value
+		"invalid-bad-mode.json":                    false,
+		"invalid-bad-result-enum.json":             false,
+		"invalid-duplicate-ids.json":               false,
+		"invalid-no-verifier.json":                 false,
+	}
+}

@@ -110,6 +110,35 @@ function skippedContract() {
     };
 }
 
+// A minimal structurally-valid contract whose single behavior is `failed`.
+// `failed` is the last non-proven result-status enum value not yet pinned
+// through the closeout wiring (planned/skipped/not-demonstrable/no-receipt
+// already are). It shares the same non-proven refusal branch: completion
+// requires every behavior proven, so `failed` blocks completion just like the
+// others. Inlined (not a golden fixture) to mirror skippedContract() exactly.
+function failedContract() {
+    return {
+        version: 1,
+        applies: "completion with failed (must block)",
+        mode: "deletion_replacement",
+        prior_surface: {
+            id: "x",
+            revision: "deadbeef",
+            paths: ["a"],
+            inventory_complete: true,
+        },
+        behaviors: [
+            {
+                id: "b",
+                description: "d",
+                prior_evidence: ["e"],
+                verifier: { kind: "go-test", locator: "go test" },
+                result: { status: "failed" },
+            },
+        ],
+    };
+}
+
 // The wiring-only prefix saveCoordinationTaskCloseout emits around each
 // validator error. Matching this substring proves the error transited the
 // closeout wiring (the validator-in-isolation suite cannot produce it).
@@ -314,6 +343,35 @@ test("rewrite-parity Stage-2 gate fires through the real saveCoordinationTaskClo
             cardStatus(isoRoot, "rp-b-noreceipt"),
             "working",
             "(b4) card must remain working after a refused closeout",
+        );
+
+        // (b5) completed + failed behavior -> REFUSED (inline contract; no
+        //      golden failed fixture exists). `failed` is the last non-proven
+        //      result-status enum value; it shares the same refusal branch as
+        //      planned/skipped/not-demonstrable (completion requires every
+        //      behavior proven). The needle is deliberately the validator-
+        //      specific `result.status is "failed"` (double-quoted, the form
+        //      JSON.stringify produces in the JS validator's message) rather
+        //      than the bare word "failed": "failed" appears in BOTH the
+        //      WIRING_PREFIX ("rewrite-parity contract #1 failed completion
+        //      validation") AND the enum list
+        //      ("planned/failed/skipped/not-demonstrable"), so the bare word
+        //      would match even if the status string itself never reached the
+        //      message. The `result.status is "failed"` substring is present
+        //      ONLY in the per-behavior validator line and so pins that the
+        //      failed-status enum value — not just the generic refusal path —
+        //      transited the closeout wiring.
+        writeWorkingCard(isoRoot, "rp-b-failed", ALIAS);
+        expectCloseoutRefusal(
+            "rp-b-failed",
+            "completed",
+            rewriteParityBody(failedContract()),
+            'result.status is "failed"',
+        );
+        assert.equal(
+            cardStatus(isoRoot, "rp-b-failed"),
+            "working",
+            "(b5) card must remain working after a refused closeout",
         );
 
         // (c) completed + NO rewrite-parity block -> SUCCEEDS (no Stage-2
