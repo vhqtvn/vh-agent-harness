@@ -32,10 +32,15 @@ func TestClassifyPreserved_Matrix(t *testing.T) {
 		stagedHash  string
 		want        PreservedReason
 	}{
-		// --- bootstrap / pre-feature: no recorded origin -> never preserved ---
+		// --- bootstrap / pre-feature: no recorded origin ---
+		// ABSENT live file with no origin = safe bootstrap (no bytes to lose).
 		{"bootstrap absent (no origin)", false, false, "", LiveState{Absent: true}, "", ""},
-		{"bootstrap present diverged (no origin)", false, false, "", LiveState{IsRegular: true, Readable: true, Hash: liveNew}, staged, ""},
-		{"bootstrap unreadable (no origin)", false, false, "", LiveState{IsRegular: true, Readable: false}, "", ""},
+		// EXISTING regular file with no origin = UnknownBaseline (F6 migration
+		// stall — preserve existing bytes, never clobber without origin proof).
+		{"bootstrap present diverged (no origin)", false, false, "", LiveState{IsRegular: true, Readable: true, Hash: liveNew}, staged, UnknownBaseline},
+		{"bootstrap unreadable (no origin)", false, false, "", LiveState{IsRegular: true, Readable: false}, "", UnknownBaseline},
+		// Directory/stat weirdness with no origin = NOT preserved (caller reports).
+		{"bootstrap directory (no origin)", false, false, "", LiveState{}, "", ""},
 
 		// --- regenerated paths: NEVER preserved (always overwritten) ---
 		{"regenerated absent", true, true, origin, LiveState{Absent: true}, "", ""},
@@ -79,9 +84,10 @@ func TestClassifyPreserved_Matrix(t *testing.T) {
 // behavior change that must be deliberate, not an accidental rename.
 func TestPreservedReasonValues(t *testing.T) {
 	want := map[PreservedReason]string{
-		ConsumerEdit:   "consumer-edit",
-		ConsumerDelete: "consumer-delete",
-		Unreadable:     "unreadable",
+		ConsumerEdit:    "consumer-edit",
+		ConsumerDelete:  "consumer-delete",
+		Unreadable:      "unreadable",
+		UnknownBaseline: "unknown-baseline",
 	}
 	for r, s := range want {
 		if string(r) != s {

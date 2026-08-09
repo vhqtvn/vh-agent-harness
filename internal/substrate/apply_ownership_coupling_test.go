@@ -3,6 +3,7 @@ package substrate
 import (
 	"testing"
 
+	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 )
 
@@ -57,21 +58,38 @@ func TestPlanOutcome_ManagedOverwriteRoutingMatchesPredicate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ownership.Resolve: %v", err)
 	}
+
+	// Seed an origin store where each overwritable path's origin equals its
+	// LIVE content hash. Without this, the F6 UnknownBaseline stall would
+	// preserve the existing live bytes instead of routing to managed-overwrite.
+	// With origin == live, ClassifyPreserved sees live.Hash == origin (unedited)
+	// and returns "", so the file falls through to the overwrite/noop route —
+	// the static coupling this test verifies.
+	liveOrigin := originhash.New()
+	for _, c := range ownership.AllClasses() {
+		if ownership.IsOverwritableBySeamApply(c) {
+			rel := couplingRel(c)
+			writeFile(t, live, rel, "LIVE DIFFERENT "+string(c))
+			liveOrigin.OriginHashes[rel] = originhash.Digest([]byte("LIVE DIFFERENT " + string(c)))
+		}
+	}
+	if err := liveOrigin.Write(live); err != nil {
+		t.Fatalf("seed origin store: %v", err)
+	}
+
 	opts := ApplyOptions{
 		ProjectRoot: live,
 		StagingDir:  staging,
 		Classifier:  NewClassifier(eff, nil),
 	}
 
+	priorOrigin, err := originhash.Read(live)
+	if err != nil {
+		t.Fatalf("read origin store: %v", err)
+	}
 	for _, c := range ownership.AllClasses() {
 		rel := couplingRel(c)
-		// Make the overwritable classes' live content DIFFER from staged so
-		// managedUpToDate is false and the routing is ActionManagedOverwrite
-		// (the overwrite route), not the up-to-date noop.
-		if ownership.IsOverwritableBySeamApply(c) {
-			writeFile(t, live, rel, "LIVE DIFFERENT "+string(c))
-		}
-		outcome, pErr := planOutcome(opts, rel, nil)
+		outcome, pErr := planOutcome(opts, rel, priorOrigin)
 		reachedManagedOverwrite := pErr == nil &&
 			(outcome.Action == ActionManagedOverwrite || outcome.Action == ActionManagedNoop)
 		if reachedManagedOverwrite != ownership.IsOverwritableBySeamApply(c) {

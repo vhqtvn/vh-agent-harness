@@ -415,28 +415,29 @@ func planOutcome(opts ApplyOptions, rel string, priorOrigin *originhash.Store) (
 		// platform's emission, so a consumer edit is always overwritten (never
 		// preserved as "diverged").
 		//
-		// For all other platform_managed files, build the live-file observation
-		// (stat + read via the readLiveFile seam + hash) and let
-		// managedfile.ClassifyPreserved decide. When it returns a preserved
-		// reason, route to ActionManagedDiverged — skip the write, NEVER clobber
-		// — carrying the typed PreservedReason (the correctness signal) and a
-		// human Note. When it returns "" (unedited / bootstrap / self-heal /
-		// regenerated-divergence / directory), fall through to the normal
-		// overwrite/noop path below. The fast-path skips live-file IO entirely
-		// for regenerated paths and paths with no recorded origin.
+		// F6 (adoption migration): when a platform_managed path has NO recorded
+		// origin (hadOrigin == false) and an EXISTING live file, the disposition
+		// is UnknownBaseline — preserve/stall, never clobber. Only an ABSENT live
+		// file with no origin is a safe bootstrap (seed). See managedfile.UnknownBaseline.
 		regenerated := opts.RegeneratedPlatformPaths[rel]
 		origin, hadOrigin := priorOrigin.Lookup(rel)
-		if !regenerated && hadOrigin {
+		// Build the live-file observation for every path that could enter the
+		// classification: non-regenerated paths always do; regenerated paths
+		// with no origin also do (so the migration gate can fire if a
+		// regenerated-flagged path somehow has no origin, though
+		// effectiveRegeneratedPaths already excludes those). A regenerated path
+		// WITH an origin skips the live read entirely (it is always overwritten,
+		// so the live observation would be wasted IO).
+		if !regenerated || !hadOrigin {
 			live := buildLiveState(livePath)
 			// stagedHash is consulted ONLY to distinguish a genuine consumer
 			// edit from a partial-failure self-heal (live already == what the
 			// platform would write). Compute it lazily: only when the live file
-			// is a readable regular file that diverged from its origin. A
-			// staged-hash read failure leaves stagedHash "" and
-			// ClassifyPreserved classifies a diverged live file as ConsumerEdit
-			// (the safe, never-clobber choice) — matches the original behavior.
+			// is a readable regular file that diverged from its origin. The
+			// !hadOrigin (UnknownBaseline) branch never reaches the self-heal
+			// check, so stagedHash stays "" there (no wasted IO).
 			var stagedHash string
-			if live.IsRegular && live.Readable && live.Hash != origin {
+			if hadOrigin && live.IsRegular && live.Readable && live.Hash != origin {
 				if h, sErr := hashSHA256(stagedPath); sErr == nil {
 					stagedHash = h
 				}
@@ -452,7 +453,7 @@ func planOutcome(opts ApplyOptions, rel string, priorOrigin *originhash.Store) (
 		// re-rendered corpus, in which case we route to ActionManagedNoop
 		// (no write, reported as managed-unchanged) so the summary can
 		// distinguish real churn from a no-op refresh. An absent live file
-		// with no prior origin (first install) still seeds/overwrites.
+		// with no prior origin (first install / bootstrap) still seeds/overwrites.
 		if managedUpToDate(stagedPath, livePath) {
 			return FileOutcome{Path: rel, Class: cls.Class, Action: ActionManagedNoop,
 				Note: "platform_managed already up to date"}, nil
@@ -758,6 +759,8 @@ func noteForPreservedReason(r managedfile.PreservedReason) string {
 		return "platform_managed diverged from origin hash (consumer-modified); preserved (not clobbered)"
 	case managedfile.Unreadable:
 		return "platform_managed live file unreadable (cannot confirm consumer edit); preserved (not clobbered)"
+	case managedfile.UnknownBaseline:
+		return "platform_managed existing file with no recorded origin (migration baseline unknown); preserved (not clobbered) — awaiting baseline resolution"
 	default:
 		return ""
 	}

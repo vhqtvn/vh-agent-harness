@@ -150,19 +150,17 @@ func TestManagedDrift_NoOverride_Pass(t *testing.T) {
 	}
 }
 
-// TestManagedDrift_NoOverride_Divergent_StillFails: regression guard. Genuine
-// drift (a managed file with NO recorded origin — bootstrap / pre-origin-hash —
-// whose live bytes differ from a fresh render) must still FAIL. The origin-hash
-// store is removed so the divergence is NOT mistaken for a consumer edit
-// (consumer edits, which update preserves, are carved out as non-failing
-// consumer-preserved — see TestManagedDrift_ConsumerEdit_Preserved_NotDrift).
-// This proves genuine drift detection was not disabled by the origin-hash
-// carve-out: a file with no recorded origin that has drifted is real drift.
-func TestManagedDrift_NoOverride_Divergent_StillFails(t *testing.T) {
+// TestManagedDrift_NoOverride_NoOrigin_IsMigrationStalled: F6 behavior lock.
+// A managed file with NO recorded origin (bootstrap/pre-feature) whose live
+// bytes differ from a fresh render is NOT genuine drift — it is an
+// unknown-baseline collision (the F6 adoption-migration gate). Doctor must
+// surface it as non-failing migration-stalled INFO (update preserves the live
+// bytes, never clobbers without origin proof), NOT as drift FAIL. The
+// origin-hash store is removed to simulate the pre-feature state.
+func TestManagedDrift_NoOverride_NoOrigin_IsMigrationStalled(t *testing.T) {
 	root := t.TempDir()
 	seamInstallInto(t, root)
-	// Remove the origin-hash store so the divergent file has no recorded origin
-	// (bootstrap/pre-feature semantics): genuine drift, not a consumer edit.
+	// Remove the origin-hash store (bootstrap/pre-feature semantics).
 	if err := os.Remove(originhash.FilePath(root)); err != nil && !os.IsNotExist(err) {
 		t.Fatalf("remove origin-hash store: %v", err)
 	}
@@ -173,11 +171,19 @@ func TestManagedDrift_NoOverride_Divergent_StillFails(t *testing.T) {
 	}
 
 	r := checkManagedDrift(root)
-	if r.tier != tierFail {
-		t.Fatalf("want FAIL for divergent managed file with no recorded origin, got %s: %s", r.tier, r.detail)
+	// F6: no-origin existing file → migration-stalled INFO, not drift FAIL.
+	if r.tier != tierInfo {
+		t.Fatalf("want INFO for no-origin divergent file (F6 migration-stalled), got %s: %s", r.tier, r.detail)
 	}
-	if !strings.Contains(r.detail, "drifted") {
-		t.Errorf("FAIL detail should report drift; got %q", r.detail)
+	if !strings.Contains(r.detail, "migration-stalled") {
+		t.Errorf("INFO detail should report migration-stalled; got %q", r.detail)
+	}
+	// With the origin store removed, ALL managed files become migration-stalled
+	// (every file has !hadOrigin). The specific corrupted path may be capped out
+	// of the path list (>10 entries), so verify the count and the cap note
+	// instead of the specific path name.
+	if !strings.Contains(r.detail, "more") {
+		t.Errorf("INFO detail should show capped path list (170+ stalled); got %q", r.detail)
 	}
 }
 
@@ -294,13 +300,28 @@ func TestEffectiveRegeneratedPaths_OpencodeJSONCGatedByOriginStore(t *testing.T)
 		t.Errorf("opencode.jsonc must NOT be effectively regenerated pre-migration (nil store); got included")
 	}
 
-	// Post-migration: valid origin store → opencode.jsonc included.
-	post := effectiveRegeneratedPaths(declared, originhash.New())
-	if !post[allowedCommandsRel] {
+	// Partial-migration: store EXISTS but opencode.jsonc has NO entry (it was
+	// stalled on the first run). opencode.jsonc is still excluded — the F6
+	// stall retains authority until opencode.jsonc's disposition is resolved.
+	partial := originhash.New()
+	postPartial := effectiveRegeneratedPaths(declared, partial)
+	if !postPartial[allowedCommandsRel] {
+		t.Errorf("allowed-commands.js must be effectively regenerated (partial-migration)")
+	}
+	if postPartial[opencodeJSONCRel] {
+		t.Errorf("opencode.jsonc must NOT be effectively regenerated when it has no origin entry (partial-migration); got included")
+	}
+
+	// Post-migration: store exists AND opencode.jsonc HAS an origin entry →
+	// opencode.jsonc included (the migration resolved its disposition).
+	resolved := originhash.New()
+	resolved.OriginHashes[opencodeJSONCRel] = originhash.Digest([]byte("resolved"))
+	postResolved := effectiveRegeneratedPaths(declared, resolved)
+	if !postResolved[allowedCommandsRel] {
 		t.Errorf("allowed-commands.js must be effectively regenerated post-migration")
 	}
-	if !post[opencodeJSONCRel] {
-		t.Errorf("opencode.jsonc must be effectively regenerated post-migration (valid store); got excluded")
+	if !postResolved[opencodeJSONCRel] {
+		t.Errorf("opencode.jsonc must be effectively regenerated post-migration (origin entry exists); got excluded")
 	}
 }
 
@@ -523,22 +544,23 @@ func TestPreflight_PreservedIsNonBlocking(t *testing.T) {
 // non-destructive overlay-pack promotion — so an operator can route without
 // losing a deliberate edit. Pins researches/decisions/2026-08-04-capability-
 // discovery-audit.md §6 entry 1 (the SIGNED OFF entry).
+//
+// Post-F6: genuine drift requires origin == live (stale-but-unedited) but
+// live != staged. We achieve this by corrupting the live file and then fixing
+// the origin entry to match the corrupted content (simulating "the platform
+// previously wrote these bytes"). Removing the origin store now produces
+// migration-stalled INFO (F6), not drift FAIL.
 func TestManagedDrift_Divergent_NamesPathAndBothRemedies(t *testing.T) {
 	root := t.TempDir()
 	seamInstallInto(t, root)
-	// Remove the origin-hash store so the divergence is GENUINE drift (no
-	// recorded origin → not a consumer edit), not the now-sanctioned consumer-
-	// preserved state. This preserves the test's intent (the FAIL detail for
-	// real drift names the path + both remedies); consumer edits are covered by
-	// TestManagedDrift_ConsumerEdit_Preserved_NotDrift.
-	if err := os.Remove(originhash.FilePath(root)); err != nil && !os.IsNotExist(err) {
-		t.Fatalf("remove origin-hash store: %v", err)
-	}
 	p := findLivePlatformManagedPath(t, root)
 	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(p)),
 		[]byte("// intentionally divergent bytes\n"), 0o644); err != nil {
 		t.Fatalf("corrupt %s: %v", p, err)
 	}
+	// Fix origin to match the corrupted live so the divergence is genuine drift
+	// (stale-but-unedited: origin==live, live!=staged), NOT F6 migration-stalled.
+	fixOriginToLive(t, root, p)
 	r := checkManagedDrift(root)
 	if r.tier != tierFail {
 		t.Fatalf("want FAIL, got %s: %s", r.tier, r.detail)

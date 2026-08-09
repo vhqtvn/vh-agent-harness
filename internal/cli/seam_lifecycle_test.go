@@ -190,14 +190,13 @@ func TestSeamPreflight_PassThenDrift(t *testing.T) {
 		}
 	})
 
-	// Genuine drift: remove the origin-hash store so corrupting a managed file
-	// is NOT mistaken for a consumer edit the new feature preserves (a consumer
-	// edit is now non-failing consumer-preserved, not drift). This keeps the
-	// test's "preflight FAILs on real drift" intent intact.
-	if err := os.Remove(originhash.FilePath(root)); err != nil && !os.IsNotExist(err) {
-		t.Fatalf("remove origin-hash store: %v", err)
-	}
+	// Genuine drift: corrupt a managed file and fix the origin to match the
+	// corrupted content so the divergence is genuine drift (stale-but-unedited:
+	// origin==live, live!=staged) — NOT a consumer edit (non-failing) and NOT
+	// F6 migration-stalled (which fires when hadOrigin is false). This keeps
+	// the test's "preflight FAILs on real drift" intent intact.
 	corruptManaged(t, root, seamManagedProbe)
+	fixOriginToLive(t, root, seamManagedProbe)
 	runWithCwd(t, root, func() {
 		cmd, buf := newOutCmd()
 		if err := runPreflight(cmd, nil); err == nil {

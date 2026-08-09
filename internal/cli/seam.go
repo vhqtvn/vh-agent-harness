@@ -195,13 +195,15 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	//
 	// F3 (regenerated opencode.jsonc): the DECLARED regenerated set includes
 	// opencode.jsonc, but it is EFFECTIVELY regenerated only once a valid origin
-	// record exists (effectiveRegeneratedPaths). We read the origin store
+	// entry exists FOR opencode.jsonc (effectiveRegeneratedPaths keys on the
+	// per-path entry, not whole-store existence). We read the origin store
 	// tolerantly here to compute the effective set — this is the F6 coordination
 	// hook. Apply performs its own STRICT read of the same store internally; the
 	// two reads agree on the valid/absent cases, and a corrupt store aborts Apply
 	// before any write. A tolerant read here (ignoring the error) is safe: nil
-	// store → opencode.jsonc excluded from the effective set (pre-migration fall-
-	// through to the three-way check); non-nil store → opencode.jsonc included.
+	// store OR a store without an opencode.jsonc entry → opencode.jsonc excluded
+	// from the effective set (pre-migration/partial-migration fall-through to the
+	// F6 stall); store WITH an opencode.jsonc entry → opencode.jsonc included.
 	originStoreForRegen, _ := originhash.Read(target)
 	report, err := substrate.Apply(renderer, substrate.ApplyOptions{
 		ProjectRoot:    target,
@@ -1038,12 +1040,12 @@ const (
 // (R4-B1). Keep this the single source of truth — do not re-list these paths
 // inline in seam or doctor.
 //
-// opencode.jsonc is DECLARED here but EFFECTIVELY regenerated only once a valid
-// origin-record exists (see effectiveRegeneratedPaths). Pre-migration (no origin
-// store), opencode.jsonc falls through to the normal three-way preservation
-// check so the F6 first-run stall can intervene on a colliding pre-feature
-// baseline. This preserves the migration-precedence rule: the regenerated
-// admission must not short-circuit F6's protection.
+// opencode.jsonc is DECLARED here but EFFECTIVELY regenerated only once it has
+// a recorded origin entry (see effectiveRegeneratedPaths). Pre-migration (no
+// origin entry for opencode.jsonc), opencode.jsonc falls through to the normal
+// three-way preservation check so the F6 UnknownBaseline stall can intervene on
+// a colliding pre-feature baseline. This preserves the migration-precedence
+// rule: the regenerated admission must not short-circuit F6's protection.
 var regeneratedPlatformPaths = map[string]bool{
 	allowedCommandsRel: true,
 	opencodeJSONCRel:   true,
@@ -1051,23 +1053,29 @@ var regeneratedPlatformPaths = map[string]bool{
 
 // effectiveRegeneratedPaths returns the regenerated set actually in force for a
 // given apply/drift pass. It is identical to `declared` (the canonical
-// regeneratedPlatformPaths) UNLESS the origin store is nil — in which case
-// opencode.jsonc is dropped from the effective set.
+// regeneratedPlatformPaths) UNLESS opencode.jsonc lacks a recorded origin entry
+// — in which case opencode.jsonc is dropped from the effective set.
 //
 // Rationale: the regenerated flag's only observable effect is when the path has
 // a prior origin (hadOrigin==true) AND a consumer edit — the flag converts that
-// case from "preserve the edit" to "overwrite". Without a valid origin store
-// (the pre-migration, first-origin-aware-run state), no path carries origin
-// metadata, so the regenerated flag is a no-op there. We still drop
-// opencode.jsonc explicitly from the effective set in that window so the
-// three-way preservation check (and the future F6 stall) retains full authority
-// over a colliding pre-feature opencode.jsonc rather than being bypassed by the
-// regenerated admission.
+// case from "preserve the edit" to "overwrite". Without a per-path origin entry,
+// the regenerated flag is moot there. We still drop opencode.jsonc explicitly
+// from the effective set in that window so the three-way preservation check (and
+// the F6 UnknownBaseline stall) retains full authority over a colliding
+// pre-feature opencode.jsonc rather than being bypassed by the regenerated
+// admission.
+//
+// This keys on PER-PATH origin entry existence (not whole-store existence) so a
+// partial-migration state (store exists but opencode.jsonc has no entry because
+// it was stalled on the first run) stays migration-protected. Only once
+// opencode.jsonc has a recorded origin entry does it become effectively
+// regenerated.
 //
 // This is the F3↔F6 coordination hook: F3 marks opencode.jsonc as regenerated;
-// F6 (Slice 3) will gate the migration that establishes the valid origin record
-// this hook keys on. Declaring the policy now and keying it on the origin store
-// means F6 can land later without re-opening F3's classification.
+// F6 (Slice 3) gates the migration that establishes the valid origin record this
+// hook keys on. Declaring the policy now and keying it on the per-path origin
+// entry means F6's migration stall retains authority over opencode.jsonc until
+// the path's disposition is actually resolved.
 //
 // `declared` is the caller's source-of-truth map (regeneratedPlatformPaths); it
 // is read-only here. `originStore` may be nil — nil means "no valid origin
@@ -1075,8 +1083,14 @@ var regeneratedPlatformPaths = map[string]bool{
 func effectiveRegeneratedPaths(declared map[string]bool, originStore *originhash.Store) map[string]bool {
 	out := make(map[string]bool, len(declared))
 	for p := range declared {
-		if p == opencodeJSONCRel && originStore == nil {
-			continue // pre-migration: opencode.jsonc not effectively regenerated (F6 hook)
+		if p == opencodeJSONCRel {
+			// opencode.jsonc is effectively regenerated ONLY when it has a
+			// recorded origin entry. Without one (nil store OR store exists
+			// but no entry for opencode.jsonc), it stays migration-protected
+			// so the F6 UnknownBaseline stall retains authority (F6 hook).
+			if _, ok := originStore.Lookup(p); !ok {
+				continue
+			}
 		}
 		out[p] = true
 	}

@@ -305,16 +305,36 @@ Both Apply (`seamApply`) and doctor (`checkManagedDrift`) consult the SAME
 effective set, so they cannot disagree on preserved-vs-genuine for
 opencode.jsonc.
 
-### Migration-classification-only model (F6, to land in Slice 3)
+### Migration-classification-only model (F6, landed Slice 3)
 
 F6 is the first-run migration gate. On the first origin-aware run with an
 unknown pre-feature baseline, a colliding existing managed file must be
 preserved/stalled + require explicit `accept-platform` rather than silently
 overwritten. The origin-hash feature's three-way check provides the
-classification (consumer-edit vs. genuine-drift) F6 will key on, but the full
-migration algorithm (stall UX, `accept-platform` verb) is Slice 3 work.
+classification (consumer-edit vs. genuine-drift) F6 keys on, but the full
+migration algorithm (stall UX, `accept-platform` verb) is Slice 4 (F2) work.
 
 F3's regenerated policy was designed to NOT short-circuit this: the
-`effectiveRegeneratedPaths` hook keys on the origin store's existence, which
-F6's migration establishes. F3 can land first; F6 can land later without
+`effectiveRegeneratedPaths` hook keys on the per-path origin entry's existence,
+which F6's migration establishes. F3 can land first; F6 can land later without
 re-opening F3's classification.
+
+**Implemented F6 model (Slice 3):** the shared `managedfile.ClassifyPreserved`
+decision tree now returns a new `UnknownBaseline` preserved reason when a
+platform_managed path has NO recorded origin (`hadOrigin == false`) AND an
+EXISTING live regular file. This is the adoption-migration gate: record
+absence MUST NEVER authorize overwriting existing bytes. The classification is:
+
+- `!hadOrigin` + live ABSENT → `""` (safe bootstrap — no existing bytes to lose)
+- `!hadOrigin` + live REGULAR FILE → `UnknownBaseline` (preserve/stall)
+- `!hadOrigin` + live directory/stat-weirdness → `""` (caller reports)
+- `hadOrigin` + live diverged → existing `ConsumerEdit` / `ConsumerDelete` / `Unreadable`
+
+A stalled path (UnknownBaseline) is NEVER recorded in the origin store — live
+bytes are NEVER snapshotted as prior platform bytes. The path stays stalled
+until a future `accept-platform` recovery operation (Slice 4 / F2) explicitly
+adopts the platform bytes. `effectiveRegeneratedPaths` keys on PER-PATH origin
+entry existence (not whole-store existence) so a partial-migration state (store
+exists but opencode.jsonc was stalled on the first run) stays migration-
+protected. Doctor surfaces UnknownBaseline as a non-failing migration-stalled
+INFO signal (agreeing with Apply's preserve/stall), not drift FAIL.

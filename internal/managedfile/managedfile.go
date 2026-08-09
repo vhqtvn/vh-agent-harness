@@ -58,6 +58,20 @@ const (
 	// would otherwise silently clobber a possible edit); doctor treats it as
 	// preserved where it observes the same condition.
 	Unreadable PreservedReason = "unreadable"
+
+	// UnknownBaseline (F6): the live file EXISTS at a platform_managed path but
+	// there is NO recorded origin for it (hadOrigin == false). This is the
+	// adoption-migration case: a pre-feature install (or a pre-seam tree) carries
+	// on-disk managed files whose bytes we cannot attribute to either the
+	// platform (a genuine unedited render) or the consumer (a hand-edit). Because
+	// we cannot PROVE the live bytes are platform-origin, overwriting them risks
+	// silently destroying consumer edits — exactly the F6 data-loss gate. Update
+	// PRESERVES the live bytes (never clobbers) and reports them in a single
+	// deterministic batched stall; the path stays preserved until a future
+	// `accept-platform` recovery operation (Slice 4 / F2) explicitly adopts the
+	// platform bytes. An ABSENT live file with no origin is NOT UnknownBaseline
+	// — it is a safe bootstrap (there are no existing bytes to lose).
+	UnknownBaseline PreservedReason = "unknown-baseline"
 )
 
 // LiveState captures what the caller observed about a live managed file's
@@ -112,21 +126,43 @@ type LiveState struct {
 // Decision tree (mirrors substrate.Apply's planOutcome origin-hash branch
 // exactly — see the apply.go comment block; the two MUST stay in lockstep):
 //
-//	regenerated || !hadOrigin           -> ""            (never preserved)
-//	live.Absent                          -> ConsumerDelete
-//	!live.IsRegular                      -> ""            (dir/stat weirdness)
-//	!live.Readable                       -> Unreadable
-//	live.Hash == origin                  -> ""            (unedited)
-//	live.Hash == stagedHash (staged set) -> ""            (self-heal: live==staged)
-//	otherwise                            -> ConsumerEdit
+//	regenerated                          -> ""            (never preserved)
+//	!hadOrigin + live.Absent             -> ""            (bootstrap: no existing bytes to lose)
+//	!hadOrigin + !live.IsRegular         -> ""            (dir/stat weirdness: caller reports)
+//	!hadOrigin + live.IsRegular          -> UnknownBaseline (F6 migration: existing bytes, no origin proof)
+//	hadOrigin + live.Absent              -> ConsumerDelete
+//	hadOrigin + !live.IsRegular          -> ""            (dir/stat weirdness)
+//	hadOrigin + !live.Readable           -> Unreadable
+//	hadOrigin + live.Hash == origin      -> ""            (unedited)
+//	hadOrigin + live.Hash == stagedHash  -> ""            (self-heal: live==staged)
+//	hadOrigin + otherwise                -> ConsumerEdit
 //
 // The empty-stagedHash self-heal guard: when stagedHash is "" (staged read
 // failed) AND live diverges from origin, the safe choice is ConsumerEdit
 // (preserve, never clobber) — consistent with Apply's treatment of a staged-hash
 // read failure as diverged.
+//
+// F6 (UnknownBaseline): the !hadOrigin branch is the adoption-migration gate.
+// Record absence MUST NEVER authorize overwriting existing bytes: a pre-feature
+// install carries on-disk managed files whose provenance is unknowable (could be
+// genuine platform bytes, could be consumer edits). The only safe disposition is
+// preserve/stall — never overwrite. An ABSENT live file (no existing bytes) is a
+// safe bootstrap. A regenerated path bypasses this entirely (the regenerated
+// exemption applies regardless of origin state — the canonical emission must
+// stay in sync).
 func ClassifyPreserved(regenerated, hadOrigin bool, origin string, live LiveState, stagedHash string) PreservedReason {
-	if regenerated || !hadOrigin {
+	if regenerated {
 		return ""
+	}
+	if !hadOrigin {
+		// F6 adoption-migration gate: no recorded origin for this path.
+		// An ABSENT live file is a safe bootstrap (no bytes to lose). A
+		// directory/stat-weirdness falls through too (caller reports). An
+		// existing REGULAR FILE is unknown-baseline → preserve/stall.
+		if live.Absent || !live.IsRegular {
+			return ""
+		}
+		return UnknownBaseline
 	}
 	if live.Absent {
 		return ConsumerDelete

@@ -999,9 +999,11 @@ func checkManagedDrift(target string) checkResult {
 	// respects; F1).
 	drifted, missing, preserved := 0, 0, 0
 	consumerPreservedEdit, consumerPreservedDelete := 0, 0
+	migrationStalled := 0
 	checked := 0
 	var driftedPaths, missingPaths []string
 	var consumerPreservedEditPaths, consumerPreservedDeletePaths []string
+	var migrationStalledPaths []string
 	for path := range defaults {
 		// Resolve seeds every default path, so eff[path] is always present; its
 		// Origin records whether an override genuinely raised the class.
@@ -1056,11 +1058,7 @@ func checkManagedDrift(target string) checkResult {
 				// consumer-preserved-deletion signal. A path with NO recorded
 				// origin (bootstrap / pre-feature) or a REGENERATED path stays
 				// genuine missing (update will seed / overwrite it), so the FAIL
-				// remedy stays accurate there. (The lerr != nil && !NotExist
-				// case — a live file that exists but cannot be read — is NOT
-				// reconciled here: it stays drifted to keep this slice bounded to
-				// the deletion gap. Apply preserves it; a future slice can align
-				// doctor by adding one more ClassifyPreserved call here.)
+				// remedy stays accurate there.
 				regenerated := effectiveRegen[path]
 				origin, hadOrigin := "", false
 				if originStore != nil {
@@ -1075,6 +1073,30 @@ func checkManagedDrift(target string) checkResult {
 				missing++
 				missingPaths = append(missingPaths, path)
 			} else {
+				// lerr != nil && !os.IsNotExist: the live file EXISTS but
+				// cannot be read (permission, transient I/O). Route through
+				// the SHARED ClassifyPreserved so doctor AGREES with Apply:
+				// a no-origin unreadable file is UnknownBaseline (migration-
+				// stalled, non-failing); a tracked unreadable file is Unreadable
+				// (preserved, non-failing). Only a non-preserved case stays
+				// drifted FAIL.
+				regenerated := effectiveRegen[path]
+				origin, hadOrigin := "", false
+				if originStore != nil {
+					origin, hadOrigin = originStore.Lookup(path)
+				}
+				reason := managedfile.ClassifyPreserved(regenerated, hadOrigin, origin,
+					managedfile.LiveState{IsRegular: true, Readable: false}, "")
+				if reason == managedfile.Unreadable {
+					consumerPreservedEdit++
+					consumerPreservedEditPaths = append(consumerPreservedEditPaths, path)
+					continue
+				}
+				if reason == managedfile.UnknownBaseline {
+					migrationStalled++
+					migrationStalledPaths = append(migrationStalledPaths, path)
+					continue
+				}
 				drifted++
 				driftedPaths = append(driftedPaths, path)
 			}
@@ -1094,10 +1116,39 @@ func checkManagedDrift(target string) checkResult {
 			// consumer did not) is genuine drift — update overwrites it, the FAIL
 			// remedy is correct. A REGENERATED path is genuine drift (update
 			// overwrites it; warnIfAllowedCommandsCustomized warns at update time)
-			// — never preserved (R4-B1). A file with no recorded origin (bootstrap
-			// / pre-feature) is also genuine drift. We are inside the
-			// live!=staged branch, so live.Hash != stagedHash always holds here
-			// and the classifier's self-heal branch (live==staged) never fires.
+			// — never preserved (R4-B1). F6: a file with no recorded origin but
+			// EXISTING live bytes is UnknownBaseline (migration-stalled) — update
+			// preserves it; doctor must surface it as non-failing too so the two
+			// agree. We are inside the live!=staged branch, so live.Hash !=
+			// stagedHash always holds here and the classifier's self-heal branch
+			// (live==staged) never fires.
+			regenerated := effectiveRegen[path]
+			origin, hadOrigin := "", false
+			if originStore != nil {
+				origin, hadOrigin = originStore.Lookup(path)
+			}
+			liveState := managedfile.LiveState{IsRegular: true, Readable: true, Hash: originhash.Digest(live)}
+			reason := managedfile.ClassifyPreserved(regenerated, hadOrigin, origin,
+				liveState, originhash.Digest(staged))
+			if reason == managedfile.ConsumerEdit {
+				consumerPreservedEdit++
+				consumerPreservedEditPaths = append(consumerPreservedEditPaths, path)
+				continue
+			}
+			if reason == managedfile.UnknownBaseline {
+				migrationStalled++
+				migrationStalledPaths = append(migrationStalledPaths, path)
+				continue
+			}
+			drifted++
+			driftedPaths = append(driftedPaths, path)
+		} else {
+			// live == staged (byte-identical to current corpus). Normally "in
+			// sync" — but a no-origin file (F6) is still UnknownBaseline: Apply
+			// stalls it, so doctor must surface it as migration-stalled to
+			// agree. Consult ClassifyPreserved for the no-origin case only (the
+			// hadOrigin + live==origin case is genuinely in sync and stays
+			// silent; ClassifyPreserved returns "" for it).
 			regenerated := effectiveRegen[path]
 			origin, hadOrigin := "", false
 			if originStore != nil {
@@ -1105,13 +1156,11 @@ func checkManagedDrift(target string) checkResult {
 			}
 			liveState := managedfile.LiveState{IsRegular: true, Readable: true, Hash: originhash.Digest(live)}
 			if reason := managedfile.ClassifyPreserved(regenerated, hadOrigin, origin,
-				liveState, originhash.Digest(staged)); reason == managedfile.ConsumerEdit {
-				consumerPreservedEdit++
-				consumerPreservedEditPaths = append(consumerPreservedEditPaths, path)
-				continue
+				liveState, originhash.Digest(staged)); reason == managedfile.UnknownBaseline {
+				migrationStalled++
+				migrationStalledPaths = append(migrationStalledPaths, path)
 			}
-			drifted++
-			driftedPaths = append(driftedPaths, path)
+			// else: genuinely in sync (hadOrigin and live matches origin/staged)
 		}
 	}
 	switch {
@@ -1125,15 +1174,17 @@ func checkManagedDrift(target string) checkResult {
 			detail: formatManagedDriftFail(
 				fmt.Sprintf("%d missing of %d managed", missing, checked),
 				driftedPaths, missingPaths)}
-	case consumerPreservedEdit > 0 || consumerPreservedDelete > 0 || preserved > 0:
+	case consumerPreservedEdit > 0 || consumerPreservedDelete > 0 || preserved > 0 || migrationStalled > 0:
 		// Non-failing: all checked managed files are either in sync OR in a
 		// sanctioned preserved state. consumer-preserved-edit = consumer hand-
 		// edits update preserves by origin-hash (NOT drift update would repair);
 		// consumer-preserved-deletion = consumer deletions update respects
 		// (NOT re-seeded — and NOT accompanied by the false "run update to
 		// re-render missing files" claim, F1); preserved = override-raised out
-		// of platform_managed. Name the consumer-preserved paths so the operator
-		// can find/re-baseline them.
+		// of platform_managed; migration-stalled = existing files with no
+		// recorded origin (F6 adoption-migration — update preserves, awaiting
+		// baseline resolution). Name the consumer-preserved paths so the
+		// operator can find/re-baseline them.
 		parts := []string{fmt.Sprintf("%d managed file(s) in sync", checked)}
 		if consumerPreservedEdit > 0 {
 			parts = append(parts, fmt.Sprintf("%d consumer-preserved edit(s) (origin-hash: update preserves your edit)", consumerPreservedEdit))
@@ -1142,6 +1193,10 @@ func checkManagedDrift(target string) checkResult {
 		if consumerPreservedDelete > 0 {
 			parts = append(parts, fmt.Sprintf("%d consumer-preserved deletion(s) (origin-hash: update respects your deletion; not re-seeded)", consumerPreservedDelete))
 			parts = append(parts, capPathList("consumer-preserved-deletion", consumerPreservedDeletePaths))
+		}
+		if migrationStalled > 0 {
+			parts = append(parts, fmt.Sprintf("%d migration-stalled (F6: existing file, no origin record; update preserves, awaiting baseline resolution)", migrationStalled))
+			parts = append(parts, capPathList("migration-stalled", migrationStalledPaths))
 		}
 		if preserved > 0 {
 			parts = append(parts, fmt.Sprintf("%d project-preserved (ownership override)", preserved))

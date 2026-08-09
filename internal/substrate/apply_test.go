@@ -2,6 +2,7 @@ package substrate
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +64,26 @@ func readFile(t *testing.T, dir, rel string) string {
 	return string(b)
 }
 
+// seedOriginFromLive writes an origin-hash store where each path's origin equals
+// the hash of its CURRENT live content. Use this when a test needs the live file
+// to appear UNEDITED (live.Hash == origin) so ClassifyPreserved returns "" and
+// the file routes to overwrite/noop rather than diverged.
+func seedOriginFromLive(t *testing.T, target string, rels ...string) {
+	t.Helper()
+	store := originhash.New()
+	for _, rel := range rels {
+		livePath := filepath.Join(target, rel)
+		h, err := hashSHA256(livePath)
+		if err != nil {
+			t.Fatalf("seedOriginFromLive hash %s: %v", rel, err)
+		}
+		store.OriginHashes[rel] = h
+	}
+	if err := store.Write(target); err != nil {
+		t.Fatalf("seedOriginFromLive write: %v", err)
+	}
+}
+
 func TestApply_ManagedUpdatedOwnedPreservedArmedReconciled(t *testing.T) {
 	live := t.TempDir()
 	staging := t.TempDir()
@@ -96,6 +117,12 @@ func TestApply_ManagedUpdatedOwnedPreservedArmedReconciled(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("render: %v", err)
 	}
+
+	// Seed origin = LIVE hash so ClassifyPreserved sees live == origin (unedited)
+	// and routes to overwrite. The live managed file has OLD content; setting
+	// origin = hash(OLD content) means "platform previously wrote OLD content,
+	// consumer did not edit it, now platform has new content → overwrite".
+	seedOriginFromLive(t, live, ".vh-agent-harness/AGENTS.core.md")
 
 	// --- Run the seam ---
 	report, err := Apply(r, ApplyOptions{
@@ -208,6 +235,13 @@ func TestApply_ManagedNoopWhenByteIdentical(t *testing.T) {
 	writeFile(t, live, upToDateRel, string(stagedUpToDate))
 	writeFile(t, live, driftedRel, "DRIFTED CONTENT not the corpus\n")
 
+	// Seed origin = live hash for both files so ClassifyPreserved sees them as
+	// unedited (live == origin). Without this, the F6 UnknownBaseline stall
+	// would preserve them instead of routing to noop/overwrite. With origin ==
+	// live: upToDateRel (live==staged) → noop; driftedRel (live!=staged) →
+	// overwrite.
+	seedOriginFromLive(t, live, upToDateRel, driftedRel)
+
 	report, err := Apply(r, ApplyOptions{
 		ProjectRoot: live, StagingDir: staging,
 		Classifier:     corpusClassifier(t),
@@ -249,6 +283,10 @@ func TestApply_ManagedNoopIsPureSkip(t *testing.T) {
 	const rel = ".vh-agent-harness/AGENTS.core.md"
 	stagedBytes, _ := os.ReadFile(filepath.Join(staging, rel))
 	writeFile(t, live, rel, string(stagedBytes))
+
+	// Seed origin = live hash so the byte-identical file is recognized as
+	// unedited (not F6 unknown-baseline) and routes to noop.
+	seedOriginFromLive(t, live, rel)
 
 	livePath := filepath.Join(live, rel)
 	beforeInfo, err := os.Stat(livePath)
@@ -1283,5 +1321,249 @@ func TestApply_OriginHashUnreadableLiveFile_Deterministic(t *testing.T) {
 	if got2, ok2 := store2.Lookup(rel); !ok2 || got2 != origOrigin {
 		t.Fatalf("origin must carry forward unchanged across an unreadable skip; want %q (ok=%v), got %q (ok=%v)",
 			origOrigin, ok, got2, ok2)
+	}
+}
+
+// TestApply_F6_PreFeatureInstall_PreservesConsumerEdits is the LOAD-BEARING
+// crux for the F6 adoption-migration gate (Slice 3). It simulates the exact
+// scenario F6 exists to prevent: a pre-feature install (existing managed files,
+// NO origin-hash sidecar) carrying CONSUMER HAND-EDITS. The first origin-aware
+// update MUST preserve those edits (ActionManagedDiverged / UnknownBaseline),
+// NOT clobber them. This is the data-loss-prevention property.
+//
+// Setup: seed the live tree from a PRIOR corpus render (simulating a pre-feature
+// install), then hand-edit one managed file, then apply the current corpus with
+// NO origin store. The edited file must survive untouched; the unedited files
+// that still match the prior render are ALSO stalled (no origin proof).
+func TestApply_F6_PreFeatureInstall_PreservesConsumerEdits(t *testing.T) {
+	live := t.TempDir()
+
+	// --- Phase 1: simulate a pre-feature install ---
+	// Render the corpus into staging and seed the live tree (as a pre-feature
+	// binary would have done). No origin-hash store exists (pre-feature).
+	stagingPre := t.TempDir()
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+	if err := r.Render(stagingPre, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("pre-feature render: %v", err)
+	}
+	// Copy the full staged tree into live (simulating a prior install).
+	err := filepath.WalkDir(stagingPre, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return walkErr
+		}
+		rel, relErr := filepath.Rel(stagingPre, p)
+		if relErr != nil {
+			return relErr
+		}
+		data, readErr := os.ReadFile(p)
+		if readErr != nil {
+			return readErr
+		}
+		dst := filepath.Join(live, rel)
+		if mkErr := os.MkdirAll(filepath.Dir(dst), 0o755); mkErr != nil {
+			return mkErr
+		}
+		return os.WriteFile(dst, data, 0o644)
+	})
+	if err != nil {
+		t.Fatalf("seed pre-feature live tree: %v", err)
+	}
+
+	// --- Phase 2: consumer hand-edits one managed file ---
+	const editedRel = ".vh-agent-harness/AGENTS.core.md"
+	const consumerEdit = "# CONSUMER HAND-EDIT — must survive the first origin-aware update\n"
+	writeFile(t, live, editedRel, consumerEdit)
+
+	// Verify NO origin store exists (pre-feature state).
+	if store, _ := originhash.Read(live); store != nil {
+		t.Fatalf("precondition: origin store should be absent (pre-feature); got non-nil store")
+	}
+
+	// --- Phase 3: the first origin-aware update ---
+	stagingNew := t.TempDir()
+	if err := r.Render(stagingNew, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("new render: %v", err)
+	}
+	report, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: stagingNew,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-f6",
+		TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("Apply (first origin-aware update): %v", err)
+	}
+
+	byPath := map[string]FileOutcome{}
+	for _, o := range report.Outcomes {
+		byPath[o.Path] = o
+	}
+
+	// CRUX 1: the consumer-edited file is PRESERVED (not clobbered).
+	got, ok := byPath[editedRel]
+	if !ok {
+		t.Fatalf("edited managed file produced no outcome; got %+v", report.Outcomes)
+	}
+	if got.Action != ActionManagedDiverged {
+		t.Fatalf("CRUX FAIL: consumer-edited file must be %s (preserved), got %s (CLOBBERED!) — this is the F6 data-loss gate",
+			ActionManagedDiverged, got.Action)
+	}
+	if got.PreservedReason != managedfile.UnknownBaseline {
+		t.Fatalf("edited file PreservedReason: want %q, got %q", managedfile.UnknownBaseline, got.PreservedReason)
+	}
+	// The consumer's bytes survived byte-for-byte.
+	if content := readFile(t, live, editedRel); content != consumerEdit {
+		t.Fatalf("CRUX FAIL: consumer edit was clobbered; want %q, got %q", consumerEdit, content)
+	}
+
+	// CRUX 2: NO origin entry is recorded for the stalled file (disposition
+	// unresolved — never snapshot live bytes as origin).
+	store, err := originhash.Read(live)
+	if err != nil {
+		t.Fatalf("read origin store after apply: %v", err)
+	}
+	if store == nil {
+		t.Fatalf("origin store not written after apply")
+	}
+	if _, ok := store.Lookup(editedRel); ok {
+		t.Fatalf("CRUX FAIL: origin entry recorded for stalled file %q — live bytes must NEVER be snapshotted as origin", editedRel)
+	}
+
+	// CRUX 3: an unedited pre-feature file that still matches the prior render
+	// is ALSO stalled (no origin proof — record absence must never authorize
+	// overwriting existing bytes, even if they happen to be unedited).
+	const uneditedRel = ".opencode/agents/build.md" // platform_managed
+	got2, ok2 := byPath[uneditedRel]
+	if !ok2 {
+		t.Fatalf("unedited pre-feature file %q produced no outcome; got %+v", uneditedRel, report.Outcomes)
+	}
+	if got2.Action != ActionManagedDiverged {
+		t.Fatalf("unedited pre-feature file must also stall (no origin proof): %s want %s, got %s",
+			uneditedRel, ActionManagedDiverged, got2.Action)
+	}
+	if got2.PreservedReason != managedfile.UnknownBaseline {
+		t.Fatalf("unedited pre-feature file PreservedReason: want %q, got %q",
+			managedfile.UnknownBaseline, got2.PreservedReason)
+	}
+}
+
+// TestApply_F6_EmptyInstall_BootstrapsCleanly locks the safe-bootstrap side of
+// F6: a genuinely EMPTY target (no colliding managed paths, no origin store) is
+// a true greenfield. Every managed path is absent → safe to seed → origin
+// recorded. This must NOT be stalled by the F6 gate (absent files have no
+// existing bytes to lose).
+func TestApply_F6_EmptyInstall_BootstrapsCleanly(t *testing.T) {
+	live := t.TempDir() // empty: no files, no origin store
+	staging := t.TempDir()
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+	if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	report, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-f6",
+		TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	// Every platform_managed file must be seeded (overwrite), none stalled.
+	for _, o := range report.Outcomes {
+		if o.Class == ownership.ClassPlatformManaged && o.Action == ActionManagedDiverged {
+			t.Fatalf("empty-install file was stalled (F6 should not fire on absent paths): %s action=%s", o.Path, o.Action)
+		}
+	}
+	// Origin store written with entries for the bootstrapped paths.
+	store, err := originhash.Read(live)
+	if err != nil {
+		t.Fatalf("read origin store: %v", err)
+	}
+	if store == nil {
+		t.Fatalf("origin store not written after bootstrap")
+	}
+	if len(store.OriginHashes) == 0 {
+		t.Fatalf("origin store is empty after bootstrap — entries should be recorded")
+	}
+}
+
+// TestApply_F6_StallIsDeterministic_Rerun locks the determinism property: re-
+// running a stalled migration produces the SAME outcomes. A stalled path stays
+// stalled (no origin entry was written for it), and an already-bootstrapped
+// absent path proceeds normally (origin entry exists from the first run).
+func TestApply_F6_StallIsDeterministic_Rerun(t *testing.T) {
+	live := t.TempDir()
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+
+	// Phase 1: seed a pre-feature live tree with one existing managed file.
+	stagingPre := t.TempDir()
+	if err := r.Render(stagingPre, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("pre-feature render: %v", err)
+	}
+	const existingRel = ".vh-agent-harness/AGENTS.core.md"
+	stagedBytes, _ := os.ReadFile(filepath.Join(stagingPre, existingRel))
+	writeFile(t, live, existingRel, string(stagedBytes)+"# consumer addition\n")
+
+	// Phase 2: first origin-aware apply (stalls the existing file, bootstraps
+	// absent files).
+	staging1 := t.TempDir()
+	if err := r.Render(staging1, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render 1: %v", err)
+	}
+	report1, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging1,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-f6",
+		TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("Apply 1: %v", err)
+	}
+
+	// The existing file was stalled.
+	outcome1 := map[string]FileOutcome{}
+	for _, o := range report1.Outcomes {
+		outcome1[o.Path] = o
+	}
+	if got, ok := outcome1[existingRel]; !ok || got.Action != ActionManagedDiverged {
+		t.Fatalf("first apply: existing file must stall; got %+v", got)
+	}
+
+	// Phase 3: second origin-aware apply (re-run the stalled migration).
+	staging2 := t.TempDir()
+	if err := r.Render(staging2, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render 2: %v", err)
+	}
+	report2, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging2,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-f6",
+		TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("Apply 2: %v", err)
+	}
+
+	// The stalled file is STILL stalled (deterministic — no origin was recorded
+	// for it on the first run, so it remains unknown-baseline).
+	outcome2 := map[string]FileOutcome{}
+	for _, o := range report2.Outcomes {
+		outcome2[o.Path] = o
+	}
+	if got, ok := outcome2[existingRel]; !ok || got.Action != ActionManagedDiverged {
+		t.Fatalf("second apply: stalled file must STILL stall (deterministic); got action=%s", got.Action)
+	}
+	if got, ok := outcome2[existingRel]; ok && got.PreservedReason != managedfile.UnknownBaseline {
+		t.Fatalf("second apply: stalled file PreservedReason drift: want %q, got %q",
+			managedfile.UnknownBaseline, got.PreservedReason)
+	}
+	// Origin-store hygiene: the stalled file must STILL have NO origin entry
+	// after the second apply (deterministic — live bytes are never snapshotted
+	// as prior platform bytes for an unresolved disposition).
+	store2, err := originhash.Read(live)
+	if err != nil {
+		t.Fatalf("read origin store after Apply 2: %v", err)
+	}
+	if store2 == nil {
+		t.Fatalf("origin store not written after Apply 2")
+	}
+	if _, ok := store2.Lookup(existingRel); ok {
+		t.Fatalf("stalled file %q must NOT have an origin entry after Apply 2 (live bytes never snapshotted as origin)", existingRel)
 	}
 }

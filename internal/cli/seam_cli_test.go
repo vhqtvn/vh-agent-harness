@@ -59,6 +59,36 @@ func seamUpdateOut(t *testing.T, root string) (string, error) {
 	return out, err
 }
 
+// fixOriginToLive reads the current live file at rel, computes its origin hash,
+// and updates the origin-hash store entry for rel to match. Use this in tests
+// to simulate the "stale-but-unedited" genuine-drift case: origin == live (the
+// platform thinks it wrote these bytes) but live != staged (the canonical
+// content has since changed). With origin matching live, ClassifyPreserved
+// returns "" (unedited), so the divergence from staged is genuine drift FAIL —
+// NOT the F6 UnknownBaseline stall (which fires when hadOrigin is false) or the
+// ConsumerEdit carve-out (which fires when live diverges from origin).
+//
+// This is the post-F6 way to trigger genuine drift FAIL: removing the origin
+// store now produces migration-stalled INFO (F6), not drift FAIL.
+func fixOriginToLive(t *testing.T, root, rel string) {
+	t.Helper()
+	liveBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatalf("fixOriginToLive read %s: %v", rel, err)
+	}
+	store, err := originhash.Read(root)
+	if err != nil {
+		t.Fatalf("fixOriginToLive read store: %v", err)
+	}
+	if store == nil {
+		store = originhash.New()
+	}
+	store.OriginHashes[rel] = originhash.Digest(liveBytes)
+	if err := store.Write(root); err != nil {
+		t.Fatalf("fixOriginToLive write store: %v", err)
+	}
+}
+
 // TestSeamUpdate_FailClosedOnBadOverlay (W9/Q5) confirms the seam refuses to
 // render when a profile-listed overlay pack fails to open. Previously this was
 // warn-and-skip, which silently produced an INCOMPLETE render (missing the
@@ -280,19 +310,17 @@ func TestSeamDoctor_HealthyAfterInstallWithCustomAnswers(t *testing.T) {
 func TestSeamDoctor_UnhealthyOnManagedDrift(t *testing.T) {
 	root := t.TempDir()
 	seamInstallInto(t, root)
-	// Remove the origin-hash store so the corruption is GENUINE drift (no
-	// recorded origin → not a consumer edit the new feature preserves), keeping
-	// the test's UNHEALTHY-on-real-drift intent intact. A consumer EDIT to an
-	// authored managed file is now non-failing consumer-preserved (see
-	// TestSeamUpdate_OriginHashPreservesAuthoredEdit), not drift.
-	if err := os.Remove(originhash.FilePath(root)); err != nil && !os.IsNotExist(err) {
-		t.Fatalf("remove origin-hash store: %v", err)
-	}
-	// Corrupt a managed file the classifier tags platform_managed.
+	// Corrupt a managed file the classifier tags platform_managed, then fix the
+	// origin entry to match the corrupted content so the divergence is GENUINE
+	// drift (stale-but-unedited: origin==live, live!=staged) — NOT a consumer
+	// edit (which is now non-failing consumer-preserved) and NOT F6 migration-
+	// stalled (which fires when hadOrigin is false). This preserves the test's
+	// UNHEALTHY-on-real-drift intent.
 	const rel = ".vh-agent-harness/AGENTS.core.md"
 	if err := os.WriteFile(filepath.Join(root, rel), []byte("CORRUPTED\n"), 0o644); err != nil {
 		t.Fatalf("corrupt %s: %v", rel, err)
 	}
+	fixOriginToLive(t, root, rel)
 	out := seamDoctorOut(t, root)
 	if !strings.Contains(out, "UNHEALTHY") {
 		t.Errorf("want UNHEALTHY on managed drift, got %q", out)
