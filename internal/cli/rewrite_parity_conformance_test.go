@@ -167,3 +167,151 @@ func goStructuralAccept(t *testing.T, contractFile string) bool {
 	errs := validateRewriteParityStructureGo(contract, "conformance")
 	return len(errs) == 0
 }
+
+// TestRewriteParityPrecommitPyJsConformance binds the precommit cross-check
+// (Stage 1) across the two implementations that implement it: the python
+// reference (commit-gate) and the JS mirror. The Go doctor mirror is
+// structural-only by design, so it is not part of this binding.
+//
+// This covers the git status classes the F3 review named (D, M, R*, T): a
+// rename (R) contributes its old path to removed_set; a typechange (T)
+// contributes to NEITHER removed nor modified (so a deletion_replacement
+// contract declaring a T-only path is rejected). A one-sided change to either
+// implementation's _diff_sets or cross-check now fails this test.
+func TestRewriteParityPrecommitPyJsConformance(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not on PATH")
+	}
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not on PATH")
+	}
+	repoRoot := filepath.Join("..", "..")
+	pyScript := filepath.Join(repoRoot, ".opencode", "scripts", "rewrite-parity-validate.py")
+	jsScript := filepath.Join(repoRoot, ".opencode", "scripts", "rewrite-parity-validate.js")
+	for _, f := range []string{pyScript, jsScript} {
+		if _, err := os.Stat(f); err != nil {
+			t.Skipf("rendered validator unavailable: %s (run `vh-agent-harness update` first)", f)
+		}
+	}
+
+	// A minimal structurally-valid contract template; prior_surface.paths and
+	// mode are overridden per case. revision matches headAt ("abc123") unless
+	// the case tests a revision mismatch.
+	tmpl := func(mode string, paths []string, inv bool, revision string) string {
+		if revision == "" {
+			revision = "abc123"
+		}
+		pathArr := "["
+		for i, p := range paths {
+			if i > 0 {
+				pathArr += ","
+			}
+			pathArr += "\"" + p + "\""
+		}
+		pathArr += "]"
+		return `{"version":1,"applies":"x","mode":"` + mode + `","prior_surface":{"id":"a","revision":"` + revision + `","paths":` + pathArr + `,"inventory_complete":` + rpBoolStr(inv) + `},"behaviors":[{"id":"b","description":"d","prior_evidence":["p"],"verifier":{"kind":"t","locator":"l"},"result":{"status":"planned"}}]}`
+	}
+
+	cases := []struct {
+		name      string
+		contract  string
+		diffFiles string // JSON array of {status,path}; "null" = no cross-check
+		headAt    string
+		accept    bool
+	}{
+		// deletion_replacement, inventory_complete=true, declared == removed_set
+		{name: "del-repl complete: declared==removed (D)", contract: tmpl("deletion_replacement", []string{"a.go"}, true, ""), diffFiles: `[{"status":"D","path":"a.go"}]`, headAt: "abc123", accept: true},
+		// undeclared deletion (removed has a path not in declared)
+		{name: "del-repl complete: undeclared delete (D)", contract: tmpl("deletion_replacement", []string{"a.go"}, true, ""), diffFiles: `[{"status":"D","path":"a.go"},{"status":"D","path":"b.go"}]`, headAt: "abc123", accept: false},
+		// declared path not actually deleted
+		{name: "del-repl complete: declared not deleted", contract: tmpl("deletion_replacement", []string{"a.go"}, true, ""), diffFiles: `[{"status":"D","path":"b.go"}]`, headAt: "abc123", accept: false},
+		// inventory_complete=false: declared ⊆ removed (subset OK)
+		{name: "del-repl partial: declared⊆removed", contract: tmpl("deletion_replacement", []string{"a.go"}, false, ""), diffFiles: `[{"status":"D","path":"a.go"},{"status":"D","path":"b.go"}]`, headAt: "abc123", accept: true},
+		// inventory_complete=false: declared ⊄ removed (declared not deleted)
+		{name: "del-repl partial: declared not deleted", contract: tmpl("deletion_replacement", []string{"a.go"}, false, ""), diffFiles: `[{"status":"D","path":"b.go"}]`, headAt: "abc123", accept: false},
+		// rename: R-source goes into removed_set
+		{name: "del-repl complete: rename source (R)", contract: tmpl("deletion_replacement", []string{"old.go"}, true, ""), diffFiles: `[{"status":"R100","path":"old.go\tnew.go"}]`, headAt: "abc123", accept: true},
+		// typechange: T is in NEITHER removed nor modified — del-repl declaring a T path rejects
+		{name: "del-repl: typechange (T) not a deletion", contract: tmpl("deletion_replacement", []string{"a.go"}, false, ""), diffFiles: `[{"status":"T","path":"a.go"}]`, headAt: "abc123", accept: false},
+		// modification_only_rewrite: M paths
+		{name: "modify complete: declared==modified (M)", contract: tmpl("modification_only_rewrite", []string{"a.go"}, true, ""), diffFiles: `[{"status":"M","path":"a.go"}]`, headAt: "abc123", accept: true},
+		{name: "modify complete: undeclared modify (M)", contract: tmpl("modification_only_rewrite", []string{"a.go"}, true, ""), diffFiles: `[{"status":"M","path":"a.go"},{"status":"M","path":"b.go"}]`, headAt: "abc123", accept: false},
+		// modification: a D path is not in modified_set → declared-as-modify + actual-delete mismatch
+		{name: "modify: D path not a modification", contract: tmpl("modification_only_rewrite", []string{"a.go"}, false, ""), diffFiles: `[{"status":"D","path":"a.go"}]`, headAt: "abc123", accept: false},
+		// revision mismatch
+		{name: "revision mismatch", contract: tmpl("deletion_replacement", []string{"a.go"}, false, "wrongsha"), diffFiles: `[{"status":"D","path":"a.go"}]`, headAt: "abc123", accept: false},
+		// no diff-files supplied (cross-check skipped) → accept (structural + revision only)
+		{name: "no diff-files (cross-check skipped)", contract: tmpl("deletion_replacement", []string{"a.go"}, false, ""), diffFiles: "null", headAt: "abc123", accept: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp, err := os.CreateTemp(t.TempDir(), "precommit-*.json")
+			if err != nil {
+				t.Fatalf("create temp: %v", err)
+			}
+			if _, err := tmp.WriteString(tc.contract); err != nil {
+				t.Fatalf("write temp: %v", err)
+			}
+			tmp.Close()
+
+			pyAccept := pythonPrecommitAccept(t, pyScript, tmp.Name(), tc.diffFiles, tc.headAt)
+			jsAccept := jsPrecommitAccept(t, jsScript, tmp.Name(), tc.diffFiles, tc.headAt)
+
+			if pyAccept != jsAccept {
+				t.Errorf("py↔JS DISAGREEMENT on %q: py=%v js=%v", tc.name, pyAccept, jsAccept)
+			}
+			if pyAccept != tc.accept {
+				t.Errorf("expected accept=%v but got py=%v js=%v on %q", tc.accept, pyAccept, jsAccept, tc.name)
+			}
+		})
+	}
+}
+
+func rpBoolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// pythonPrecommitAccept runs the python reference at the precommit stage.
+func pythonPrecommitAccept(t *testing.T, script, contractFile, diffFiles, headAt string) bool {
+	t.Helper()
+	args := []string{script, "--contract-file", contractFile, "--stage", "precommit", "--head-at-acquire", headAt}
+	if diffFiles != "null" {
+		args = append(args, "--diff-files", diffFiles)
+	}
+	cmd := exec.Command("python3", args...)
+	return cmd.Run() == nil
+}
+
+// jsPrecommitAccept runs the JS mirror's validateRewriteParityPrecommit.
+func jsPrecommitAccept(t *testing.T, script, contractFile, diffFiles, headAt string) bool {
+	t.Helper()
+	diffArg := diffFiles
+	skipDiff := diffFiles == "null"
+	if skipDiff {
+		diffArg = "[]"
+	}
+	snippet := `
+import { readFileSync } from "fs";
+import { pathToFileURL } from "url";
+const mod = await import(pathToFileURL(process.argv[1]).href);
+let raw;
+try { raw = readFileSync(process.argv[2], "utf8"); } catch { process.exit(1); }
+let contract;
+try { contract = JSON.parse(raw); } catch { process.exit(1); }
+const diffFiles = JSON.parse(process.argv[3]);
+const headAt = process.argv[4];
+const skipDiff = process.argv[5] === "1";
+const errs = mod.validateRewriteParityPrecommit(contract, skipDiff ? null : diffFiles, headAt);
+process.exit(errs.length ? 1 : 0);
+`
+	skip := "0"
+	if skipDiff {
+		skip = "1"
+	}
+	cmd := exec.Command("node", "--input-type=module", "-e", snippet, "--", script, contractFile, diffArg, headAt, skip)
+	return cmd.Run() == nil
+}
