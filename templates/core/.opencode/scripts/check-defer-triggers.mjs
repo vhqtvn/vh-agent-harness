@@ -154,10 +154,23 @@
 // Promoter-mode failures (missing git, unreadable dir) print a warning line
 // and degrade to "no candidates". Release-mode failures fail closed.
 
-import { execFileSync } from "node:child_process";
+// Git is invoked via spawnSync with a FILE-BACKED stdout descriptor (NOT a
+// pipe) and an all-ignore status variant. This is load-bearing: under the
+// strict exec sandbox (ModeStrict + NetDeny), libuv's pipe-based stdio
+// allocation uses socketpair(AF_UNIX), which the seccomp NetDeny filter
+// blocks — so execFileSync(...,{stdio:["ignore","pipe","ignore"]}) EPERMs at
+// node's spawn layer before git ever runs, and the checker silently degrades
+// to "git unavailable". A numeric regular-file FD in stdio is inherited by the
+// git child via dup2 with no pipe/socketpair allocation, so git runs and its
+// stdout is captured from the file. gitCapture/gitSuccess are the only
+// sanctioned git-invocation primitives in this file.
+import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+const GIT = "git";
 
 // ESM has no global __dirname; derive it from import.meta.url (mirrors the
 // proven shim in state-lib.js) so repoRoot() is cwd-robust when node is
@@ -180,6 +193,128 @@ const COORDINATOR_DIR = "{{COORDINATOR_DIR}}";
 
 function defaultTasksDir() {
     return path.join(repoRoot(), ".local", COORDINATOR_DIR, "tasks");
+}
+
+// Git subprocess env. Under the strict sandbox, $HOME is outside the read
+// profile, so git reaches for several config files OUTSIDE the profile and
+// fatals on each:
+//   - ~/.gitconfig                → GIT_CONFIG_GLOBAL=/dev/null (empty RWFile)
+//   - ~/.config/git/ignore        → core.excludesFile override (git diff
+//     <ref> applies excludes when comparing to the WORKING TREE; an unreadable
+//     excludes file is FATAL — "cannot use ... as an exclude file"). Tree-to-
+//     tree diffs (HEAD^..HEAD) do NOT apply excludes, so only the working-tree
+//     diff trips this.
+//   - ~/.config/git/attributes    → core.attributesFile override (same class).
+// GIT_CONFIG_COUNT/KEY/VALUE is git's in-process config override (no quoting,
+// no -c flag per call site) — it overrides these three paths to /dev/null
+// (readable, empty) WITHOUT changing the read operations' results
+// (describe/diff/rev-parse/tag/show are config-independent). Scoped to the git
+// subprocess only — does not mutate the checker's own process.env.
+// Exported for unit testing.
+export function gitEnv() {
+    return {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        // Override the three $HOME-rooted config paths git probes, in order:
+        GIT_CONFIG_COUNT: "2",
+        GIT_CONFIG_KEY_0: "core.excludesFile",
+        GIT_CONFIG_VALUE_0: "/dev/null",
+        GIT_CONFIG_KEY_1: "core.attributesFile",
+        GIT_CONFIG_VALUE_1: "/dev/null",
+    };
+}
+
+// Allocate a uniquely-named EXCLUSIVE capture directory under <repo>/tmp.
+// <repo>/tmp is the sole writable path in the sandbox DefaultProfile
+// (RWDirs=[repoRoot/tmp]). The directory is created with recursive:false so a
+// pre-existing entry at that name surfaces as EEXIST; on collision we retry
+// with a fresh name. The EXCLUSIVE mkdir is the real collision/symlink defense
+// — an attacker cannot win by pre-placing an entry at our chosen name, because
+// (a) the name includes randomUUID and (b) even on a freak UUID collision the
+// exclusive create fails with EEXIST and we retry. randomUUID alone is NOT the
+// defense (per the O5_TMP brief: "no Date.now+random as sole defense"); the
+// exclusive create is. The capture file lives INSIDE this exclusive dir.
+// Exported for unit testing (exclusive-creation + symlink-defense coverage).
+export function allocCaptureDir() {
+    const base = path.join(repoRoot(), "tmp");
+    fs.mkdirSync(base, { recursive: true });
+    for (let attempt = 0; attempt < 8; attempt++) {
+        const dir = path.join(base, `defer-git-${process.pid}-${randomUUID()}`);
+        try {
+            fs.mkdirSync(dir, { recursive: false, mode: 0o700 });
+            return dir;
+        } catch (e) {
+            if (e.code !== "EEXIST") throw e;
+        }
+    }
+    throw new Error("gitCapture: could not allocate exclusive capture dir after retries");
+}
+
+// Best-effort recursive cleanup of a capture dir. Never throws (called from a
+// finally; must not mask the real result).
+function rmCaptureDir(dir) {
+    try {
+        fs.rmSync(dir, { recursive: true, force: true });
+    } catch (_) { /* best-effort */ }
+}
+
+// Capture git's RAW UNTRIMMED stdout via a regular-file descriptor. spawnSync
+// with stdio:["ignore", fd, "ignore"] passes the numeric FD to the git child
+// via dup2 — NO pipe/socketpair is allocated, so this works under the strict
+// sandbox's NetDeny filter (which would otherwise block libuv's socketpair-
+// based stdio pipes and degrade the checker to "git unavailable"). THROWS on a
+// nonzero git exit (mirrors the prior execFileSync semantics so existing
+// try/catch callers are unchanged) or on a spawn-level error. Callers that
+// only need the exit status use gitSuccess instead. Exported for unit testing
+// (parity, cleanup, large-output, concurrency coverage).
+export function gitCapture(args, cwd) {
+    const dir = allocCaptureDir();
+    const capFile = path.join(dir, "out");
+    let fd;
+    try {
+        fd = fs.openSync(capFile, "w"); // O_WRONLY|O_CREAT|O_TRUNC inside exclusive dir
+        const r = spawnSync(GIT, args, {
+            cwd,
+            stdio: ["ignore", fd, "ignore"],
+            env: gitEnv(),
+        });
+        if (r.error) throw r.error; // spawn-level failure (EPERM/EACCES/...)
+        if (r.status !== 0) { // nonzero git exit — mirror execFileSync throw
+            const e = new Error(`git ${args.join(" ")} exited ${r.status}`);
+            e.code = "GIT_NONZERO";
+            e.status = r.status;
+            throw e;
+        }
+        // Close the write FD before reading so git's buffered output is flushed
+        // and the FD is released; then read the full captured stdout back.
+        fs.closeSync(fd);
+        fd = undefined;
+        return fs.readFileSync(capFile, "utf8");
+    } finally {
+        if (fd !== undefined) {
+            try { fs.closeSync(fd); } catch (_) { /* best-effort */ }
+        }
+        rmCaptureDir(dir);
+    }
+}
+
+// Status-only git probe: returns true iff git exits 0. Uses all-ignore stdio
+// (no pipe, no capture file) — the cheapest sandbox-safe invocation. Used for
+// tagExists (existence check where the stdout is never consumed). Returns false
+// on any spawn-level error or nonzero exit (treated as "ref not verified").
+// Exported for unit testing.
+export function gitSuccess(args, cwd) {
+    try {
+        const r = spawnSync(GIT, args, {
+            cwd,
+            stdio: "ignore",
+            env: gitEnv(),
+        });
+        if (r.error) return false;
+        return r.status === 0;
+    } catch (_) {
+        return false;
+    }
 }
 
 // Split `--flag=value` into [`--flag`, `value`] while leaving `--flag value`
@@ -261,11 +396,11 @@ function resolveSince(options) {
     if (options.since) return options.since;
     try {
         // describe --tags --abbrev=0 gives the nearest tag; ignore failures.
-        // execFileSync with argv array — NEVER interpolate into a shell string
+        // gitCapture uses an argv array — NEVER interpolates into a shell string
         // (defense against injection from operator-supplied --since values).
-        const tag = execFileSync(
-            "git", ["describe", "--tags", "--abbrev=0"],
-            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        const tag = gitCapture(
+            ["describe", "--tags", "--abbrev=0"],
+            repoRoot(),
         ).trim();
         if (tag) return tag;
     } catch (_) {
@@ -279,11 +414,11 @@ function resolveSince(options) {
 function changedPathsSince(since) {
     if (!isSafeRef(since)) return null;
     try {
-        // execFileSync with argv array — `since` may originate from an
+        // gitCapture uses an argv array — `since` may originate from an
         // operator --since flag; never interpolate it into a shell string.
-        const out = execFileSync(
-            "git", ["diff", "--name-only", since],
-            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        const out = gitCapture(
+            ["diff", "--name-only", since],
+            repoRoot(),
         );
         return new Set(
             out.split("\n")
@@ -297,28 +432,24 @@ function changedPathsSince(since) {
 
 // Conservative ref-name validation. Git ref names are restricted to
 // [A-Za-z0-9][A-Za-z0-9._/-]* roughly; we enforce a tight allowlist so a
-// trigger arg can never carry shell metacharacters even if execFileSync
+// trigger arg can never carry shell metacharacters even if gitCapture/gitSuccess
 // were somehow bypassed. Returns true if the arg looks like a safe ref/path.
 function isSafeRef(arg) {
     return /^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(arg);
 }
 
-// True if `tag` exists in the repo. Used by after_tag(). Uses execFileSync
-// with an argv array — NEVER shell interpolation — so a malicious trigger
-// arg cannot inject commands. isSafeRef is defense-in-depth on top.
+// True if `tag` exists in the repo. Used by after_tag(). Uses gitSuccess (argv
+// array, NEVER shell interpolation) so a malicious trigger arg cannot inject
+// commands; status-only (all-ignore stdio) since the stdout is never consumed.
+// isSafeRef is defense-in-depth on top.
 function tagExists(tag) {
     if (!isSafeRef(tag)) return false;
-    try {
-        execFileSync(
-            "git", ["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`],
-            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-        );
-        // rev-parse --verify exits 0 if the ref resolves. We arrived here only
-        // if execFileSync did not throw, which means exit 0 -> the tag exists.
-        return true;
-    } catch (_) {
-        return false;
-    }
+    // rev-parse --verify --quiet exits 0 iff the ref resolves → gitSuccess
+    // returns true exactly when the tag exists.
+    return gitSuccess(
+        ["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`],
+        repoRoot(),
+    );
 }
 
 // Parse a single predicate string into {kind, arg}. Returns null for
@@ -669,9 +800,9 @@ function isFullSha(s) {
 // the path is not tracked at HEAD).
 function gitShowHeadBlob(relPath) {
     try {
-        return execFileSync(
-            "git", ["show", `HEAD:${relPath}`],
-            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        return gitCapture(
+            ["show", `HEAD:${relPath}`],
+            repoRoot(),
         );
     } catch (_) {
         return null;
@@ -685,9 +816,9 @@ function gitShowHeadBlob(relPath) {
 // path (which a dirty edit could swap out from under the ceremony).
 function gitHeadBlobSha(relPath) {
     try {
-        const sha = execFileSync(
-            "git", ["rev-parse", `HEAD:${relPath}`],
-            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        const sha = gitCapture(
+            ["rev-parse", `HEAD:${relPath}`],
+            repoRoot(),
         ).trim();
         return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
     } catch (_) {
@@ -699,9 +830,9 @@ function gitHeadBlobSha(relPath) {
 // (single-commit repo) or git is unusable.
 function gitHeadParent() {
     try {
-        const sha = execFileSync(
-            "git", ["rev-parse", "--verify", "--quiet", "HEAD^"],
-            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        const sha = gitCapture(
+            ["rev-parse", "--verify", "--quiet", "HEAD^"],
+            repoRoot(),
         ).trim();
         return isFullSha(sha) ? sha : null;
     } catch (_) {
@@ -715,9 +846,9 @@ function gitHeadParent() {
 // peeled to its tree). Forward brace — argv form, no shell, so `^{}` is safe.
 function gitHeadParentTree() {
     try {
-        const sha = execFileSync(
-            "git", ["rev-parse", "--verify", "--quiet", "HEAD^^{tree}"],
-            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        const sha = gitCapture(
+            ["rev-parse", "--verify", "--quiet", "HEAD^^{tree}"],
+            repoRoot(),
         ).trim();
         return isFullSha(sha) ? sha : null;
     } catch (_) {
@@ -729,9 +860,9 @@ function gitHeadParentTree() {
 // slashes (git's output convention) for cross-platform comparability.
 function gitDiffHeadRange() {
     try {
-        const out = execFileSync(
-            "git", ["diff", "--name-only", "HEAD^..HEAD"],
-            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        const out = gitCapture(
+            ["diff", "--name-only", "HEAD^..HEAD"],
+            repoRoot(),
         );
         return out.split("\n").map((l) => l.trim()).filter(Boolean).sort(lexCompare);
     } catch (_) {
@@ -765,9 +896,9 @@ function gitLatestTag(excludeVersion) {
             // just-cut release tag is now the most recent reachable tag and
             // release_base must resolve to the prior reachable release) and the
             // branched maintenance-release case.
-            const out = execFileSync(
-                "git", ["tag", "--merged", "HEAD", "--sort=-v:refname"],
-                { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+            const out = gitCapture(
+                ["tag", "--merged", "HEAD", "--sort=-v:refname"],
+                repoRoot(),
             );
             for (const line of out.split("\n")) {
                 const t = line.trim();
@@ -777,9 +908,9 @@ function gitLatestTag(excludeVersion) {
             }
             return null;
         }
-        const tag = execFileSync(
-            "git", ["describe", "--tags", "--abbrev=0"],
-            { cwd: repoRoot(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        const tag = gitCapture(
+            ["describe", "--tags", "--abbrev=0"],
+            repoRoot(),
         ).trim();
         return tag || null;
     } catch (_) {

@@ -2153,7 +2153,8 @@
                     "vh-agent-harness skill list": "allow",
                     "vh-agent-harness skill list *": "allow",
                     "vh-agent-harness overlay docs *": "allow",
-                    "vh-agent-harness exec-sandbox *": "allow"
+                    "vh-agent-harness exec-sandbox *": "allow",
+                    "vh-agent-harness defer-triggers": "allow"
                 },
                 "edit": {
                     "*": "deny",
@@ -2473,7 +2474,8 @@
                     "vh-agent-harness help *": "allow",
                     "vh-agent-harness skill list": "allow",
                     "vh-agent-harness skill list *": "allow",
-                    "vh-agent-harness overlay docs *": "allow"
+                    "vh-agent-harness overlay docs *": "allow",
+                    "vh-agent-harness defer-triggers": "allow"
                 },
                 "edit": {
                     "*": "deny",

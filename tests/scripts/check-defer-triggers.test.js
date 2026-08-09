@@ -24,7 +24,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -37,8 +37,14 @@ const SCRIPT_URL = pathToFileURL(SCRIPT).href;
 // Promoter-mode helpers under test (6-state classification + false-READY
 // refusal). Top-level dynamic import keeps the same SCRIPT source-of-truth
 // pointer the release-mode tests above use, so a stale generated .opencode/
-// copy can never shadow the template under test.
-const { evaluateCandidate, classifyCardState } = await import(SCRIPT_URL);
+// copy can never shadow the template under test. The O5_TMP git-subprocess
+// helpers (gitCapture/gitSuccess/gitEnv/allocCaptureDir) are exercised via a
+// separate scratch-copy import in the O5 block below (so repoRoot() resolves
+// into the scratch dir, not the template source tree).
+const {
+    evaluateCandidate,
+    classifyCardState,
+} = await import(SCRIPT_URL);
 
 // Linux default pipe buffer size. The defect truncated the piped capture at
 // EXACTLY this many bytes (write() returned false here and the immediate
@@ -602,4 +608,217 @@ test("promoter e2e: completed + staged cards re-fire as [RE-FIRE] (NOT [READY]) 
     // and staged DOES increase the re-fire count: 2 (done-refire + staged-refire).
     assert.ok(stdout.includes("Disposed re-fires"), `the re-fire summary line must preserve the regression signal; got:\n${stdout}`);
     assert.ok(stdout.includes(": 2\n"), `re-fire count must be 2 (completed + staged); got:\n${stdout}`);
+});
+
+// ---------------------------------------------------------------------------
+// O5_TMP — git-subprocess helpers (gitCapture / gitSuccess / gitEnv /
+// allocCaptureDir) and checker parity under the strict sandbox.
+//
+// The checker was rewritten from execFileSync(stdio:pipe) to a FILE-BACKED
+// stdout capture (spawnSync with stdio:["ignore", fd, "ignore"]) so libuv no
+// longer allocates the socketpair(AF_UNIX) that NetDeny blocks under the strict
+// sandbox. The tests below pin:
+//
+//   1. PARITY: for every git op the checker uses, the file-backed capture
+//      produces byte-identical stdout to a pipe baseline (the pre-rewrite
+//      behavior). This proves the rewrite changed the TRANSPORT, not the bytes.
+//   2. HELPER SAFETY: capture dirs are cleaned up on success / nonzero / large
+//      output; allocCaptureDir returns exclusive unique dirs; gitSuccess
+//      reports exit status faithfully.
+//
+// These run UNCONTAINED (plain node) — the parity baseline is itself a pipe
+// capture, which only works outside the sandbox. The Phase-0 probe
+// (tmp/o5-phase0) already PROVED the file-backed path works UNDER the strict
+// sandbox end-to-end; the Go integration test
+// (tests/integration/defer_triggers_test.go) observes the crux through the real
+// wrapper.
+// ---------------------------------------------------------------------------
+
+// Copy the template script into a scratch dir and import THAT copy so the
+// helpers' repoRoot() (path.resolve(__dirname,"..","..")) resolves to the
+// scratch dir — capture-dir allocation lands in scratch/tmp, NOT the template
+// source tree (templates/core/tmp would pollute the embed root).
+const HELPER_SCRATCH = mkdtempSync(join(tmpdir(), "cdt-o5-"));
+{
+    const scriptCopy = join(HELPER_SCRATCH, ".opencode", "scripts", "check-defer-triggers.mjs");
+    mkdirSync(join(HELPER_SCRATCH, ".opencode", "scripts"), { recursive: true });
+    writeFileSync(scriptCopy, readFileSync(SCRIPT, "utf8"));
+}
+const O5 = await import(pathToFileURL(join(HELPER_SCRATCH, ".opencode", "scripts", "check-defer-triggers.mjs")).href);
+
+// Build a hermetic scratch git repo with a prior tag and post-tag changes, so
+// every git op the checker uses (describe / diff / rev-parse / show / tag) has
+// real content to return. Returns the repo dir.
+function scratchRepoForHelpers() {
+    const dir = mkdtempSync(join(tmpdir(), "cdt-o5-repo-"));
+    const git = (args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+    git(["init", "-q"]);
+    git(["config", "user.email", "t@t"]);
+    git(["config", "user.name", "t"]);
+    git(["config", "commit.gpgsign", "false"]);
+    writeFileSync(join(dir, "fileA.go"), "package main\n");
+    writeFileSync(join(dir, "fileB.go"), "package main\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "initial"]);
+    git(["tag", "v0.1.0"]);
+    writeFileSync(join(dir, "fileA.go"), "package main\n// changed in arc\n");
+    writeFileSync(join(dir, "fileC.go"), "package main\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "post-tag changes"]);
+    return dir;
+}
+
+// Pipe baseline: the PRE-REWRITE capture shape (execFileSync used
+// stdio:["ignore","pipe","ignore"]). Used to prove the file-backed capture
+// produces identical bytes.
+function pipeBaseline(args, cwd) {
+    const r = spawnSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: O5.gitEnv() });
+    if (r.error) throw r.error;
+    return r.stdout;
+}
+
+// PARITY: file-backed gitCapture must return byte-identical stdout to the pipe
+// baseline for every git op the checker uses. Parameterized over the actual
+// call sites (G01/G02/G04/G05/G08/G09 + the rev-parse --verify captures).
+test("O5 gitCapture parity: file-backed capture == pipe baseline for every checker git op", () => {
+    const repo = scratchRepoForHelpers();
+    const cases = [
+        ["describe", "--tags", "--abbrev=0"],              // G01/G10 resolveSince/gitLatestTag
+        ["diff", "--name-only", "v0.1.0"],                 // G02 changedPathsSince
+        ["show", "HEAD:fileA.go"],                         // G04 gitShowHeadBlob
+        ["rev-parse", "HEAD:fileA.go"],                    // G05 gitHeadBlobSha
+        ["rev-parse", "--verify", "--quiet", "HEAD^"],     // G06 gitHeadParent
+        ["rev-parse", "--verify", "--quiet", "HEAD^^{tree}"], // G07 gitHeadParentTree
+        ["diff", "--name-only", "HEAD^..HEAD"],            // G08 gitDiffHeadRange
+        ["tag", "--merged", "HEAD", "--sort=-v:refname"],  // G09 gitLatestTag(excludeVersion)
+        ["rev-parse", "--verify", "--quiet", "refs/tags/v0.1.0"], // G03 capture form (status uses gitSuccess)
+    ];
+    for (const args of cases) {
+        const expected = pipeBaseline(args, repo);
+        const got = O5.gitCapture(args, repo);
+        assert.equal(got, expected, `gitCapture(${args.join(" ")}) must equal pipe baseline`);
+    }
+});
+
+// gitCapture returns RAW UNTRIMMED stdout (callers do their own trim/split).
+test("O5 gitCapture returns raw untrimmed stdout (trailing newline preserved)", () => {
+    const repo = scratchRepoForHelpers();
+    // git describe prints "v0.1.0\n" — the raw stdout includes the newline.
+    const got = O5.gitCapture(["describe", "--tags", "--abbrev=0"], repo);
+    assert.equal(got, "v0.1.0\n", "gitCapture must NOT trim stdout (callers trim)");
+});
+
+// Nonzero git exit throws GIT_NONZERO (mirrors the pre-rewrite execFileSync
+// throw so existing try/catch callers are unchanged).
+test("O5 gitCapture throws GIT_NONZERO on a nonzero git exit", () => {
+    const repo = scratchRepoForHelpers();
+    // rev-parse --verify of a missing ref exits 1.
+    assert.throws(
+        () => O5.gitCapture(["rev-parse", "--verify", "--quiet", "refs/tags/totally-bogus-xyz"], repo),
+        (e) => e.code === "GIT_NONZERO" && typeof e.status === "number" && e.status !== 0,
+        "gitCapture must throw with code GIT_NONZERO + a numeric status on nonzero git exit",
+    );
+});
+
+// Cleanup on SUCCESS: the capture dir is removed after a successful gitCapture.
+test("O5 gitCapture cleans up the capture dir on success", () => {
+    const before = deferGitEntries();
+    const repo = scratchRepoForHelpers();
+    const out = O5.gitCapture(["describe", "--tags", "--abbrev=0"], repo);
+    assert.equal(out, "v0.1.0\n");
+    const after = deferGitEntries();
+    assert.deepEqual(after, before, "no new defer-git-* capture dir must remain after a successful gitCapture");
+});
+
+// Cleanup on NONZERO: the capture dir is removed even when gitCapture throws.
+test("O5 gitCapture cleans up the capture dir on a nonzero (throwing) call", () => {
+    const before = deferGitEntries();
+    const repo = scratchRepoForHelpers();
+    assert.throws(() => O5.gitCapture(["rev-parse", "--verify", "--quiet", "refs/tags/bogus-cleanup"], repo));
+    const after = deferGitEntries();
+    assert.deepEqual(after, before, "no new defer-git-* capture dir must remain after a throwing gitCapture");
+});
+
+// LARGE output: file-backed capture reads the full stdout past the pipe buffer.
+test("O5 gitCapture captures large output intact (past the 64KiB pipe buffer)", () => {
+    const repo = scratchRepoForHelpers();
+    // Write a file well past the 64KiB pipe buffer and commit it.
+    const big = "x".repeat(200000) + "\n";
+    writeFileSync(join(repo, "fileBig.go"), big);
+    const git = (args) => spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "big file"]);
+    const expected = pipeBaseline(["show", "HEAD:fileBig.go"], repo);
+    assert.ok(Buffer.byteLength(expected, "utf8") > 65536, "fixture must exceed the pipe buffer");
+    const got = O5.gitCapture(["show", "HEAD:fileBig.go"], repo);
+    assert.equal(got, expected, "large file-backed capture must equal pipe baseline");
+    assert.equal(got, big, "large capture must be byte-complete");
+});
+
+// CONCURRENCY / uniqueness: allocCaptureDir returns a unique exclusive dir every
+// call, and each is removable. The exclusive mkdir (recursive:false) is the real
+// collision/symlink defense — randomUUID is not the sole defense.
+test("O5 allocCaptureDir returns unique exclusive dirs (collision/symlink defense)", () => {
+    const dirs = new Set();
+    const N = 30;
+    for (let i = 0; i < N; i++) {
+        const d = O5.allocCaptureDir();
+        // Each call returns a distinct path.
+        assert.ok(!dirs.has(d), `allocCaptureDir returned a duplicate dir: ${d}`);
+        dirs.add(d);
+        // The dir exists and was created exclusively (a second mkdirSync on it
+        // must fail EEXIST — proving recursive:false semantics).
+        assert.ok(existsSync(d), `capture dir not created: ${d}`);
+        assert.throws(
+            () => mkdirSync(d, { recursive: false }),
+            (e) => e.code === "EEXIST",
+            "re-creating an allocated capture dir must fail EEXIST (exclusive-create defense)",
+        );
+    }
+    // Cleanup: every allocated dir is removable.
+    for (const d of dirs) {
+        rmSync(d, { recursive: true, force: true });
+        assert.ok(!existsSync(d), `capture dir not removed: ${d}`);
+    }
+});
+
+// gitSuccess: true iff git exits 0; false on nonzero or spawn error.
+test("O5 gitSuccess reports exit status faithfully", () => {
+    const repo = scratchRepoForHelpers();
+    assert.equal(O5.gitSuccess(["rev-parse", "--verify", "HEAD"], repo), true, "HEAD verify must succeed");
+    assert.equal(O5.gitSuccess(["rev-parse", "--verify", "--quiet", "refs/tags/v0.1.0"], repo), true, "existing tag must succeed");
+    assert.equal(O5.gitSuccess(["rev-parse", "--verify", "--quiet", "refs/tags/totally-bogus-xyz"], repo), false, "missing tag must fail (status-only)");
+    assert.equal(O5.gitSuccess(["rev-parse", "--verify", "--quiet", "refs/tags/another-bogus-9f3c2a1b"], repo), false, "missing tag must fail");
+});
+
+// Helper: list defer-git-* entries under the helper scratch tmp. Used by the
+// cleanup tests to prove no capture dir leaks.
+function deferGitEntries() {
+    const tmpBase = join(HELPER_SCRATCH, "tmp");
+    if (!existsSync(tmpBase)) return [];
+    return readdirSync(tmpBase).filter((n) => n.startsWith("defer-git-")).sort();
+}
+
+// gitEnv overrides the $HOME-rooted git config paths that are FATAL under the
+// strict sandbox (HOME is outside the read profile). This is a regression guard:
+// a future refactor that drops the GIT_CONFIG_COUNT/KEY/VALUE overrides would
+// re-introduce the "git diff <tag> → cannot use ~/.config/git/ignore as exclude
+// file" fatal that degrades the checker to "git unavailable" under the sandbox.
+test("O5 gitEnv overrides $HOME-rooted git config paths (excludesFile/attributesFile fatal guard)", () => {
+    const env = O5.gitEnv();
+    // GIT_CONFIG_GLOBAL=/dev/null neutralizes ~/.gitconfig.
+    assert.equal(env.GIT_CONFIG_GLOBAL, "/dev/null");
+    // core.excludesFile override: `git diff <ref>` applies excludes when
+    // comparing a ref to the WORKING TREE; an unreadable
+    // ~/.config/git/ignore is FATAL ("cannot use ... as an exclude file").
+    // core.attributesFile: same class (~/.config/git/attributes).
+    // The COUNT/KEY/VALUE mechanism is git's in-process config override.
+    assert.equal(env.GIT_CONFIG_COUNT, "2");
+    assert.equal(env.GIT_CONFIG_KEY_0, "core.excludesFile");
+    assert.equal(env.GIT_CONFIG_VALUE_0, "/dev/null");
+    assert.equal(env.GIT_CONFIG_KEY_1, "core.attributesFile");
+    assert.equal(env.GIT_CONFIG_VALUE_1, "/dev/null");
+    // Must not mutate process.env (scoped to the git subprocess only).
+    assert.notEqual(env, process.env);
+    assert.equal(process.env.GIT_CONFIG_COUNT, undefined, "gitEnv must not leak GIT_CONFIG_COUNT into process.env");
 });

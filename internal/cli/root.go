@@ -72,6 +72,7 @@ Health & diagnostics
   skill                list and validate OpenCode skills (frontmatter health)
   diff                 inspect drift vs. the embedded corpus
   diagnostics-export   bundle harness state into a redacted, shareable archive (--dry-run)
+  defer-triggers       run the DEFER-trigger predicate checker under a strict sandbox (read-only, contained)
   status               show install + runtime info
   version              print the vh-agent-harness version and build label
 
@@ -160,6 +161,8 @@ func init() {
 		diffCmd,
 		// diagnostics (operator debug-bundle tooling)
 		diagnosticsExportCmd,
+		// DEFER-trigger predicate checker (contained, read-only)
+		deferTriggersCmd,
 		// runtime
 		execCmd,
 		execRoCmd,
@@ -191,7 +194,7 @@ func init() {
 		guideCmd, exampleCmd, docsCmd, sysPromptCmd, helpCmd)
 	assignGroup(groupHealth,
 		preflightCmd, doctorCmd, proposalsCmd, diffCmd,
-		diagnosticsExportCmd, statusCmd, versionCmd, skillCmd)
+		diagnosticsExportCmd, deferTriggersCmd, statusCmd, versionCmd, skillCmd)
 	assignGroup(groupRuntime,
 		execCmd, execRoCmd, execSandboxCmd, shellCmd,
 		upCmd, downCmd, logsCmd, psCmd)

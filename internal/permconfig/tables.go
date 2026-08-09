@@ -330,7 +330,7 @@ var CoreLocationRules = map[string]LocationRule{
 		// (e.g. DB-cited classification, data dumps to tmp) is in-charter — no
 		// python3 wildcard grant, no build handoff. REVERSIBLE: remove this one
 		// entry to revert researcher to a pure read-only leaf.
-		ReadOnlyExtraAllows: []string{ExecSandboxCommand}},
+		ReadOnlyExtraAllows: []string{ExecSandboxCommand, DeferTriggersCommand}},
 	"project-coordinator": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyAllow, Edit: Deny}, // gate-exempt
 	"debate":              {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	"debate-proposer":     {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
@@ -379,7 +379,14 @@ var CoreLocationRules = map[string]LocationRule{
 	// Inbound edges from build, coordination, and project-coordinator live in
 	// CoreTaskRules and are dropped by Emit's present-agent filter when
 	// core/worker-read-only is unselected (mirrors media-perception).
-	"worker-read-only": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	//
+	// defer-triggers (DeferTriggersCommand) is granted here because it runs
+	// ONLY the canonical predicate checker contained (strict sandbox, no
+	// caller-controlled exe/script/mode), which fits the worker's
+	// trigger-currency inspection charter WITHOUT promoting it to Level-B
+	// (defer-triggers is NOT exec-sandbox — it cannot run arbitrary code).
+	"worker-read-only": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny,
+		ReadOnlyExtraAllows: []string{DeferTriggersCommand}},
 	// Cluster leaves (commit-reviewer-a..d) — the corpus ships these as full
 	// agent blocks. They carry the leafBaseRule (deny wildcard, allow
 	// readonly/git_readonly, deny gate, allow devSh) and a deny-all task rule.
@@ -572,6 +579,26 @@ const DevShCommand = "vh-agent-harness *"
 // because it is NOT safe for the entire read_only roster (pure-deliberation
 // agents like debate/planner/commit-message do not need code execution).
 const ExecSandboxCommand = "vh-agent-harness exec-sandbox *"
+
+// DeferTriggersCommand is the no-arg `vh-agent-harness defer-triggers` verb:
+// runs the DEFER-trigger predicate checker (.opencode/scripts/check-defer-
+// triggers.mjs) under a strict host-local sandbox (ModeStrict + NetDeny +
+// DefaultProfile) in its default promoter mode (read-only report, exit 0,
+// never blocking). It is granted PER-AGENT via ReadOnlyExtraAllows to the
+// read-only specialists that evaluate DEFER/p2/follow-up trigger currency
+// (researcher, worker-read-only). coordination is covered implicitly by its
+// HarnessPolicyAllow broad wildcard.
+//
+// NO wildcard form: the command takes no arguments, so only the scalar literal
+// is admitted — there is nothing to override (mode/net/exe/script are all
+// fixed by the command). This is DISTINCT from exec-sandbox (which runs
+// ARBITRARY caller-supplied code and needs the strict floor for kernel
+// containment): defer-triggers runs ONLY the canonical checker contained, so
+// it is safe to grant to worker-read-only (charter-bounded, NO exec-sandbox)
+// without promoting that agent to Level-B. The command's own hardcoded
+// ModeStrict+NetDeny+DefaultProfile is the containment contract, independent
+// of the repo's exec_sandbox.min_mode floor.
+const DeferTriggersCommand = "vh-agent-harness defer-triggers"
 
 // HarnessReadOnlyCommands is the CANONICAL, Go-owned inventory of safe
 // read-only vh-agent-harness verbs emitted as "allow" AFTER the broad

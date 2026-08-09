@@ -58,6 +58,16 @@ Promote on any of these triggers:
    is a **promotion-review aid only** — it never runs in a commit hook, never
    blocks. A false-negative from the checker is not a hard veto.
 
+   **Read-only roles use the contained wrapper.** A `read_only` agent
+   (`researcher`, `worker-read-only`) cannot run the bare `node …` invocation
+   (no raw `node` grant) and must instead run
+   `vh-agent-harness defer-triggers` — a no-arg command that runs the SAME
+   canonical checker under a strict host-local sandbox (ModeStrict + NetDeny +
+   DefaultProfile), with no caller-controlled exe/script/mode. The wrapper is
+   the sanctioned, contained surface for trigger-currency inspection from a
+   read-only charter; the bare `node` form remains available to `build` /
+   interactive operator use. Both produce the identical promoter report.
+
    The report prints one line per candidate as `[FLAG] <id> (<file>) — <note>`:
 
    | Flag | Meaning | Action |

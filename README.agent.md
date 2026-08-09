@@ -135,7 +135,7 @@ opt-in only:
 | `core/gated-commit` | `commit-message`, `commit-reviewer`, `commit-reviewer-a..d`, `committer` | `supervised` | The gated-commit protocol (commit-message drafting, tiered cascade review, committer-exclusive git mutations). |
 | `core/debate` | `debate`, `debate-proposer`, `debate-critic`, `debate-synth`, `solution-brief` | `supervised` | The multi-model debate pipeline plus the solution-brief wrapper. |
 | `core/media-perception` | `media-perception` (agent + caller-facing skill) | none (opt-in) | A single read-only perception specialist that inspects media (image, diagram, chart, video, document/PDF, audio). For local media, callers pass BOTH `@file <path>` (bytes) and `path:` (locator); for remote media, `url:`. Parent-session attachments do NOT auto-propagate to a task child. |
-| `core/worker-read-only` | `worker-read-only` (dynamic worker leaf) | none (opt-in) | A prompt-scoped read-only worker leaf for bounded repository inspection, path tracing, evidence extraction, and state observation when the dispatch itself completely defines the scope and no durable specialist process is required. `delegateFrom` is `build`, `coordination`, `project-coordinator` (researcher deliberately excluded — it is not a perception specialist, and a researcher already holds the read-only inspection surface itself). Read-only boundary: deny `edit`/`task`/`webfetch`/`skill`, deny-all task (no outbound delegation), candidate-only return; carries NO `exec-sandbox` grant, so it is deliberately narrower than `researcher`/`repo-explorer`/`media-perception`. |
+| `core/worker-read-only` | `worker-read-only` (dynamic worker leaf) | none (opt-in) | A prompt-scoped read-only worker leaf for bounded repository inspection, path tracing, evidence extraction, and state observation when the dispatch itself completely defines the scope and no durable specialist process is required. `delegateFrom` is `build`, `coordination`, `project-coordinator` (researcher deliberately excluded — it is not a perception specialist, and a researcher already holds the read-only inspection surface itself). Read-only boundary: deny `edit`/`task`/`webfetch`/`skill`, deny-all task (no outbound delegation), candidate-only return; carries NO `exec-sandbox` grant, so it is deliberately narrower than `researcher`/`repo-explorer`/`media-perception` (cannot run arbitrary code). It DOES carry `defer-triggers` — the no-arg contained wrapper that runs ONLY the canonical DEFER-trigger predicate checker (no caller-controlled exe/script/mode), which fits its trigger-currency inspection charter without promoting it to Level B. |
 
 Select `core/media-perception` by adding it to `capabilities:`:
 
@@ -579,6 +579,23 @@ genuinely need to run read-code: `researcher`, `repo-explorer`, and
 character. See the Read-Only Execution Policy
 (`.opencode/docs/agents/read-only-execution-policy.md`) for the Level B
 mechanism and the paired floor+grant invariant.
+
+`defer-triggers` is a second special case: it is the no-arg contained wrapper
+that runs ONLY the canonical DEFER-trigger predicate checker
+(`.opencode/scripts/check-defer-triggers.mjs`) under ModeStrict + NetDeny +
+DefaultProfile — NO caller-controlled exe/script/mode/net (there are no
+flags). It is granted PER-AGENT via `ReadOnlyExtraAllows` to `researcher` and
+`worker-read-only` (the agents with a trigger-currency inspection charter).
+Unlike `exec-sandbox`, it does NOT run arbitrary code, so it does NOT promote
+an agent to Level B — `worker-read-only` receives `defer-triggers` but still
+carries NO `exec-sandbox` grant. `coordination` is covered implicitly by its
+broad allow wildcard (it is non-read_only, so it cannot carry the literal).
+`repo-explorer` / `media-perception` keep `exec-sandbox` but deliberately do
+NOT get `defer-triggers` (no trigger-currency charter). The checker writes its
+git-capture scratch to `<repo>/tmp` (the sole RWDir) and uses a file-backed
+stdout descriptor (not a pipe) so libuv does not allocate the
+`socketpair(AF_UNIX)` that `NetDeny` blocks — this is what makes the checker
+functional under the strict sandbox.
 
 **Family read-only admission rule.** Each admitted verb appears as both the
 scalar (`vh-agent-harness doctor`) and the wildcard (`vh-agent-harness
