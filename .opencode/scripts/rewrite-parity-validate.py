@@ -102,10 +102,13 @@ def validate_structural(contract):
 
     # NOTE: a plain `!= 1` check would accept JSON `true` (Python `True == 1`).
     # Reject booleans explicitly so this mirror agrees with the JS (`!== 1`,
-    # strict) and Go (decodes to bool, not float64) validators. See the
-    # cross-language parity note in the module header.
+    # strict, where `1.0 === 1` is true) and Go (decodes to float64) validators.
+    # JSON does not distinguish int/float, so integral floats (1.0) are accepted
+    # by all three mirrors (they numerically equal 1); non-numeric or non-1
+    # values are rejected. See the cross-language parity note in the module
+    # header and TestRewriteParityCrossLanguageConformance for the binding.
     _v = contract.get("version")
-    if isinstance(_v, bool) or not isinstance(_v, int) or _v != 1:
+    if isinstance(_v, bool) or _v != 1:
         errors.append("version must be the integer 1 (got %r)" % (_v,))
     if not _ne_str(contract.get("applies")):
         errors.append("applies must be a non-empty string")

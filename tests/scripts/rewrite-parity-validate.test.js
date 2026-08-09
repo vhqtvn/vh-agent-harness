@@ -2,9 +2,12 @@
 //
 // The python validator (rewrite-parity-validate.py) is the REFERENCE. This JS
 // mirror (rewrite-parity-validate.js) is used by the closeout transition
-// (state-lib.js saveCoordinationTaskCloseout). Both must accept/reject the
-// SAME golden fixtures under tests/fixtures/rewrite-parity/ identically — that
-// is the load-bearing cross-language parity contract.
+// (state-lib.js saveCoordinationTaskCloseout). This suite drives all 9 golden
+// fixtures under tests/fixtures/rewrite-parity/ through the JS mirror. The
+// python and Go mirrors cover the same structural rules via inline cases; the
+// binding that all three agree on identical inputs is established by the Go
+// cross-language conformance test (TestRewriteParityCrossLanguageConformance in
+// internal/cli), NOT by this suite alone.
 //
 // These tests also cover the closeout-body extraction pipeline: the closeout
 // function parses fenced ```rewrite-parity blocks from a markdown body and
@@ -78,7 +81,7 @@ test("validateRewriteParityStructural accepts all structurally-valid fixtures", 
         assert.deepEqual(
             errors,
             [],
-            name + " should have zero structural errors (JS==python parity)",
+            name + " should have zero structural errors (structural validity)",
         );
     }
 });
@@ -89,7 +92,7 @@ test("validateRewriteParityStructural rejects structurally-invalid fixtures", ()
         const errors = validateRewriteParityStructural(contract);
         assert.ok(
             errors.length > 0,
-            name + " should have structural errors (JS==python parity)",
+            name + " should have structural errors (structural invalidity)",
         );
     }
 });

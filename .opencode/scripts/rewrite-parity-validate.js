@@ -53,8 +53,8 @@ function neStr(x) {
  * Extract a contract from raw text. Tries raw JSON first, then the first
  * fenced ```rewrite-parity block. Returns { contract, error }.
  *
- * Mirrors extract_contract() in rewrite-parity-validate.py exactly so the
- * fixtures pin both implementations identically.
+ * Mirrors extract_contract() in rewrite-parity-validate.py (the cross-language
+ * binding is established by TestRewriteParityCrossLanguageConformance in Go).
  */
 export function extractRewriteParityContract(rawText) {
     const raw = String(rawText || "").trim();
