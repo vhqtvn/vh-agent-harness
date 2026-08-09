@@ -2035,7 +2035,7 @@ worktree or relies on the reflog in place of a branch ref.
   no longer holds and the wrapper refuses.
 
 **The G0b untracked-file trap (applies to both).** G0b runs
-`git status --short` (release-tag.sh:558) and refuses on ANY non-empty output.
+`git status --short` (the G0b clean-worktree check) and refuses on ANY non-empty output.
 `git status --short` COUNTS UNTRACKED files — they appear with a `??` prefix —
 not just modified/staged ones, so the worktree can be clean of *modifications*
 yet still fail G0b on untracked files. **Distinguish untracked from modified
@@ -2108,10 +2108,10 @@ the UNDOCUMENTED recovery path, not the gate.
 A successfully-published `vX.Y.Z` tag is **immutable**: the annotated tag object
 AND the commit it dereferences retain the same SHAs for the life of the version.
 The release-tag wrapper enforces this by REFUSING the create flow when
-`refs/tags/<version>` already exists (release-tag.sh:232-238) — it never moves,
+`refs/tags/<version>` already exists (emitting "tag <version> already exists") — it never moves,
 replaces, or force-updates a published tag. There is **no**
 `--force` / `--move` / `--move-published-tag` mode; every such verb is rejected
-as an unknown argument (release-tag.sh:287-290). This is the "never move a
+as an unknown argument (the default flag-parsing case, emitting "unknown argument: <flag>"). This is the "never move a
 published version" policy.
 
 **Correction is forward-only.** A defect in a published release is fixed by

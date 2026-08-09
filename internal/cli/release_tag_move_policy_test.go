@@ -8,7 +8,7 @@ package cli
 // but that were NOT previously covered by an explicit regression test (the E10
 // gap from the brief):
 //
-//   (A) CREATE-FLOW existing-tag refusal (release-tag.sh:232-238) — the
+//   (A) CREATE-FLOW existing-tag refusal (emits "tag <version> already exists") — the
 //       immutability enforcement: an already-cut vX.Y.Z is REFUSED by the
 //       create flow, never moved/replaced/recreated. The annotated tag object
 //       SHA and its dereferenced commit SHA are byte-identical before and after
@@ -16,7 +16,7 @@ package cli
 //
 //   (B) NO-MOVE-MODE — every plausible "move the published tag" verb (--move,
 //       --force, --move-published-tag) reaches the default flag-parsing case
-//       (release-tag.sh:287-290) and is refused as an unknown argument. This
+//       (emitting "unknown argument: <flag>") and is refused as an unknown argument. This
 //       proves the wrapper ships NO force/move branch.
 //
 // These tests do NOT change release-tag.sh behavior. They pin the existing
@@ -40,8 +40,9 @@ import (
 // RELEASE_TAG_MESSAGE_FILE set. cwd is <scratch> so the wrapper resolves its
 // relative-path dependencies. Returns exit code, parsed JSON result, raw
 // stdout, raw stderr. RELEASE_TAG_MESSAGE_FILE is set in every call because
-// the create-flow validation (release-tag.sh:188-193) runs BEFORE the
-// existing-tag refusal (line 234) and the flag-parsing loop (line 260).
+// the create-flow validation (RELEASE_TAG_MESSAGE_FILE set/non-empty check)
+// runs BEFORE the existing-tag refusal (emits "tag <version> already exists")
+// and the flag-parsing loop (the post-VERSION case statement).
 func runCreateFlow(t *testing.T, wrapper, msgFile, version string, extraArgs []string) (int, releaseTagManifestResult, string, string) {
 	t.Helper()
 	args := []string{wrapper, version}
@@ -91,7 +92,7 @@ func runCreateFlow(t *testing.T, wrapper, msgFile, version string, extraArgs []s
 //
 // This test was MISSING from the suite (E10 gap): existing tests covered
 // push-only refusal paths and manifest-gate refusals, but no test pinned the
-// create-flow existing-tag refusal (release-tag.sh:232-238) with an
+// create-flow existing-tag refusal (emits "tag <version> already exists") with an
 // immutability proof. Added here.
 func TestReleaseTag_PublishedTagImmutability_RefusesExistingTagCreate(t *testing.T) {
 	scratch, wrapper, _, msgFile := setupReleaseTagRepo(t)
@@ -140,12 +141,12 @@ func TestReleaseTag_PublishedTagImmutability_RefusesExistingTagCreate(t *testing
 
 // TestReleaseTag_PublishedTagImmutability_RefusesMoveVerbs — the wrapper ships
 // NO --force / --move / --move-published-tag branch. Any such verb reaches the
-// default flag-parsing case (release-tag.sh:287-290) and is refused as an
+// default flag-parsing case (emitting "unknown argument: <flag>") and is refused as an
 // unknown argument. This pins that no move mode exists: a future edit adding a
 // move branch fails this test before it lands.
 //
 // The version requested (v0.2.0) is UNPUBLISHED in the default fixture (uncut),
-// so the existing-tag check (release-tag.sh:234) passes and the parser reaches
+// so the existing-tag check (the "tag <version> already exists" guard) passes and the parser reaches
 // the move-verb refusal rather than the existing-tag refusal exercised in test
 // (A). Both refusals uphold immutability; this test isolates the no-move-mode
 // path.
