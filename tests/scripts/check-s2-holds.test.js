@@ -11,16 +11,16 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(__dirname, "..", "..", "templates", "core", ".opencode", "scripts", "check-s2-holds.mjs");
 const SCRIPT_URL = pathToFileURL(SCRIPT).href;
-const { evaluate } = await import(SCRIPT_URL);
+const { evaluate, allocCaptureDir } = await import(SCRIPT_URL);
 
 // --- scratch-repo helpers ---------------------------------------------------
 
@@ -624,6 +624,158 @@ test("archive file pattern: non-matching archive name is ignored", () => {
         // Not discovered (archive file name doesn't match the pattern) → clear.
         assert.equal(r.classification, "clear");
         assert.deepEqual(r.hold_ids, []);
+    } finally { dispose(repo); }
+});
+
+// --- capture-dir hygiene (test-hygiene: no spill into real repo tmp) --------
+
+test("allocCaptureDir: root param localizes the capture dir under the scratch repo (no spill)", () => {
+    // allocCaptureDir threads a root so evaluate(scratchRoot) → gitCapture(args,
+    // scratchRoot) → allocCaptureDir(scratchRoot) writes capture dirs under the
+    // SCRATCH repo's tmp/ instead of the real repo's tmp/. The default (no arg)
+    // resolves from the evaluator's own repoRoot() — behavior-preserving for the
+    // production CLI path.
+    const scratch = mkdtempSync(join(tmpdir(), "s2-cap-"));
+    let defDir = null;
+    try {
+        const dir = allocCaptureDir(scratch);
+        assert.ok(
+            dir.startsWith(join(scratch, "tmp") + sep),
+            `capture dir should be under scratch tmp/, got ${dir}`,
+        );
+        assert.ok(existsSync(dir), "capture dir should exist");
+        // Default (no arg) lands under the evaluator's own repoRoot()/tmp —
+        // repoRoot() = resolve(__dirname, "..", "..") where __dirname is the
+        // evaluator's scripts dir; mirror it exactly via dirname(SCRIPT).
+        defDir = allocCaptureDir();
+        const evalRoot = resolve(dirname(SCRIPT), "..", "..");
+        assert.ok(
+            defDir.startsWith(join(evalRoot, "tmp") + sep),
+            `default capture dir should be under evaluator repoRoot/tmp, got ${defDir}`,
+        );
+    } finally {
+        try { rmSync(scratch, { recursive: true, force: true }); } catch (_) { /* best-effort */ }
+        try { if (defDir) rmSync(defDir, { recursive: true, force: true }); } catch (_) { /* best-effort */ }
+    }
+});
+
+// --- fenced-code-block awareness (parser robustness) ------------------------
+
+test("fenced-code-block: a ``` quoted example record is not parsed as a real record", () => {
+    // A real SATISFIED record + a fenced EXAMPLE record (same id, PENDING) must
+    // NOT be treated as a second/conflicting record. Before fence-awareness the
+    // fenced heading parsed as real → duplicate/conflict → evaluator-error
+    // (fail-closed NOISE). After: the fenced block is skipped → clear.
+    const repo = makeRepo();
+    try {
+        writeBacklog(repo, [{ id: "S2-x-001", status: "done", packet: "p1.md" }]);
+        const body = "# Packet\n\n### S2 hold: S2-x-001\n- Verdict: SATISFIED\n- Skill: x\n- Pilot: scratch (retrospective)\n\n```\n### S2 hold: S2-x-001\n- Verdict: PENDING\n- Skill: x\n```\n";
+        commitFile(repo, "researches/sources/p1.md", body);
+        const r = evaluate(repo);
+        assert.equal(r.classification, "clear");
+        assert.deepEqual(r.hold_ids, ["S2-x-001"]);
+    } finally { dispose(repo); }
+});
+
+test("fenced-code-block: fenced heading/fields inside a record body do not break it", () => {
+    // A real SATISFIED record whose body contains a fenced block with a
+    // heading-like line + a fenced -Verdict line: the fenced heading must NOT
+    // end the record early, and the fenced field must NOT count. Before the fix
+    // the fenced `### example heading` broke the body loop → missing -Skill →
+    // evaluator-error. After: the fence is absorbed → clear.
+    const repo = makeRepo();
+    try {
+        writeBacklog(repo, [{ id: "S2-x-001", status: "done", packet: "p1.md" }]);
+        const body = "# Packet\n\n### S2 hold: S2-x-001\n- Verdict: SATISFIED\n```\n### example heading\n- Verdict: PENDING\n```\n- Skill: x\n- Pilot: scratch (retrospective)\n";
+        commitFile(repo, "researches/sources/p1.md", body);
+        const r = evaluate(repo);
+        assert.equal(r.classification, "clear");
+    } finally { dispose(repo); }
+});
+
+test("fenced-code-block: a real record outside the fence still parses (fail-closed preserved)", () => {
+    // A fenced SATISFIED example (ignored) + a REAL PENDING record outside the
+    // fence must still be recognized — the fence-awareness fix must NOT relax
+    // the fail-closed discipline. in_progress backlog + PENDING → blocker.
+    const repo = makeRepo();
+    try {
+        writeBacklog(repo, [{ id: "S2-x-001", status: "in_progress", packet: "p1.md" }]);
+        const body = "# Packet\n\n```\n### S2 hold: S2-x-001\n- Verdict: SATISFIED\n- Skill: x\n- Pilot: scratch (retrospective)\n```\n\n### S2 hold: S2-x-001\n- Verdict: PENDING\n- Skill: x\n";
+        commitFile(repo, "researches/sources/p1.md", body);
+        const r = evaluate(repo);
+        assert.equal(r.classification, "blocker");
+        assert.deepEqual(r.blocking_ids, ["S2-x-001"]);
+    } finally { dispose(repo); }
+});
+
+test("fenced-code-block: an UNCLOSED fence fails closed (malformed markdown must not silently clear)", () => {
+    // Regression guard for the fail-closed property. A done backlog hold + a
+    // real SATISFIED record + an UNCLOSED ``` + a real PENDING record (same id):
+    // an unclosed fence is malformed markdown — the parser cannot tell a quoted
+    // example from real evidence past the opening ```, so it MUST error rather
+    // than swallow the PENDING record and silently clear (only the SATISFIED
+    // record surviving → a spurious clear). Before the EOF fail-closed guard,
+    // this case cleared; now it is evaluator-error.
+    const repo = makeRepo();
+    try {
+        writeBacklog(repo, [{ id: "S2-x-001", status: "done", packet: "p1.md" }]);
+        const body = "# Packet\n\n### S2 hold: S2-x-001\n- Verdict: SATISFIED\n- Skill: x\n- Pilot: scratch (retrospective)\n\n```\n### S2 hold: S2-x-001\n- Verdict: PENDING\n- Skill: x\n";
+        commitFile(repo, "researches/sources/p1.md", body);
+        const r = evaluate(repo);
+        assert.equal(r.classification, "evaluator-error");
+    } finally { dispose(repo); }
+});
+
+test("fenced-code-block: an info-string line (```js) does NOT close a fence (CommonMark)", () => {
+    // Per CommonMark a closing fence carries NO info string, so a ```js line is
+    // CONTENT inside an open fence. If it falsely closed the fence, the parser
+    // would re-enter normal parsing, inFence would be false at EOF, the EOF
+    // guard would NOT fire, the swallowed PENDING would be lost, and the
+    // surviving SATISFIED would clear — the fail-closed->clear regression.
+    // Must classify evaluator-error (the fence is still open at EOF).
+    const repo = makeRepo();
+    try {
+        writeBacklog(repo, [{ id: "S2-x-001", status: "done", packet: "p1.md" }]);
+        const body = "# Packet\n\n### S2 hold: S2-x-001\n- Verdict: SATISFIED\n- Skill: x\n- Pilot: scratch (retrospective)\n\n```\n### S2 hold: S2-x-001\n- Verdict: PENDING\n- Skill: x\n```js\n";
+        commitFile(repo, "researches/sources/p1.md", body);
+        const r = evaluate(repo);
+        assert.equal(r.classification, "evaluator-error");
+    } finally { dispose(repo); }
+});
+
+test("fenced-code-block: a shorter backtick run does NOT close a longer fence (CommonMark)", () => {
+    // Per CommonMark a closing fence run must be at least as long as the
+    // opening run, so a 3-backtick line does NOT close a 4-backtick (````)
+    // fence. If it falsely closed, inFence would be false at EOF, the guard
+    // would not fire, the swallowed PENDING would be lost, and the surviving
+    // SATISFIED would clear. Must classify evaluator-error.
+    const repo = makeRepo();
+    try {
+        writeBacklog(repo, [{ id: "S2-x-001", status: "done", packet: "p1.md" }]);
+        const body = "# Packet\n\n### S2 hold: S2-x-001\n- Verdict: SATISFIED\n- Skill: x\n- Pilot: scratch (retrospective)\n\n````\n### S2 hold: S2-x-001\n- Verdict: PENDING\n- Skill: x\n```\n";
+        commitFile(repo, "researches/sources/p1.md", body);
+        const r = evaluate(repo);
+        assert.equal(r.classification, "evaluator-error");
+    } finally { dispose(repo); }
+});
+
+test("fenced-code-block: a backtick-bearing info string is NOT a valid opener (CommonMark §4.5)", () => {
+    // Per CommonMark §4.5 a BACKTICK fence's info string may not contain any
+    // backtick characters, so a line like "``` ```" (3 backticks, space, 3
+    // backticks) is NOT a valid opener — it is paragraph text. Without this
+    // rule the parser would open a fence on it, swallow the subsequent REAL
+    // PENDING record, then close cleanly on the trailing bare "```" -> the
+    // single surviving SATISFIED record would clear (a fail-closed->clear
+    // regression via the OPEN branch). With the [^`] restriction the malformed
+    // line stays in normal parsing so BOTH records surface -> duplicate/conflict
+    // -> fail-closed evaluator-error.
+    const repo = makeRepo();
+    try {
+        writeBacklog(repo, [{ id: "S2-x-001", status: "done", packet: "p1.md" }]);
+        const body = "# Packet\n\n### S2 hold: S2-x-001\n- Verdict: SATISFIED\n- Skill: x\n- Pilot: scratch (retrospective)\n\n``` ```\n### S2 hold: S2-x-001\n- Verdict: PENDING\n- Skill: x\n```\n";
+        commitFile(repo, "researches/sources/p1.md", body);
+        const r = evaluate(repo);
+        assert.equal(r.classification, "evaluator-error");
     } finally { dispose(repo); }
 });
 

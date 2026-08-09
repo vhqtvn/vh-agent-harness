@@ -89,12 +89,17 @@ export function gitEnv() {
     };
 }
 
-// Allocate a uniquely-named EXCLUSIVE capture directory under <repo>/tmp
-// (the sole writable path in the sandbox DefaultProfile). The EXCLUSIVE mkdir
+// Allocate a uniquely-named EXCLUSIVE capture directory under <root>/tmp (the
+// sole writable path in the sandbox DefaultProfile). The EXCLUSIVE mkdir
 // (recursive:false) is the real collision/symlink defense; randomUUID alone
-// is not. Exported for unit testing.
-export function allocCaptureDir() {
-    const base = path.join(repoRoot(), "tmp");
+// is not. `root` localizes the capture base to the repo being evaluated so a
+// direct unit-test import — evaluate(scratchRoot) → gitCapture(args, scratchRoot)
+// → allocCaptureDir(scratchRoot) — writes capture dirs under the SCRATCH repo's
+// tmp/ instead of spilling into the real repo's tmp/ (the production CLI path
+// and the test-path both pass cwd through gitCapture). Defaults to repoRoot()
+// for the standalone CLI path (behavior-preserving). Exported for unit testing.
+export function allocCaptureDir(root) {
+    const base = path.join(root || repoRoot(), "tmp");
     fs.mkdirSync(base, { recursive: true });
     for (let attempt = 0; attempt < 8; attempt++) {
         const dir = path.join(base, `s2-git-${process.pid}-${randomUUID()}`);
@@ -118,7 +123,7 @@ function rmCaptureDir(dir) {
 // sandbox's NetDeny filter. THROWS on a nonzero git exit or spawn-level error.
 // Exported for unit testing.
 export function gitCapture(args, cwd) {
-    const dir = allocCaptureDir();
+    const dir = allocCaptureDir(cwd);
     const capFile = path.join(dir, "out");
     let fd;
     try {
@@ -191,6 +196,42 @@ const EVIDENCE_HEADING_RE = /^###\s+S2 hold:\s+(S2-[a-z][a-z0-9-]*-[0-9]{3})\s*$
 // its attempted hold ID (and participate in the per-ID conflict check).
 const EVIDENCE_HEADING_START_RE = /^###\s+S2 hold:/;
 const EVIDENCE_HEADING_LOOSE_ID_RE = /^###\s+S2 hold:\s+(S2-[a-z][a-z0-9-]*-[0-9]{3})(.*)$/;
+// Fenced-code-block tracking (CommonMark semantics). extractEvidenceRecords
+// tracks open/close state so a ``` quoted EXAMPLE record (heading + fields)
+// inside a cited packet is NOT parsed as real evidence — otherwise an author
+// quoting a contradictory PENDING record inside a fence alongside a real
+// SATISFIED record could construct a spurious evaluator-error (fail-closed
+// NOISE, not a release-safety bypass). This is robustness; it does NOT relax
+// the fail-closed discipline (real records outside a fence parse unchanged).
+//
+// Closing-fence rules (per CommonMark): a closing fence line carries NO info
+// string and its backtick run is at least as long as the opening run. So a
+// ```js info-string line does NOT close a fence (it is content), and a
+// 3-backtick line does not close a 4-backtick fence. Honoring these prevents
+// a malformed "close" from silently re-entering normal parsing and swallowing a
+// subsequent real record (a fail-closed->clear regression the EOF guard, which
+// only fires when inFence is still true, would not catch).
+//
+// Opening-fence rule (per CommonMark §4.5): a BACKTICK fence's info string may
+// NOT contain any backtick characters. So a line like "``` ```" (3 backticks,
+// space, 3 backticks) is NOT a valid opener — it is paragraph text. Without
+// this rule the parser would open a fence on it, swallow a subsequent real
+// PENDING record, then close cleanly on a trailing bare "```" -> false clear.
+// Restricting the info string to [^`] (no backticks) keeps the malformed line
+// in normal parsing so the real second record surfaces -> duplicate/conflict
+// -> fail-closed evaluator-error.
+function updateFenceState(line, state) {
+    if (!state.inFence) {
+        const open = line.match(/^\s{0,3}(`{3,})([^`]*)$/);
+        if (open) return { inFence: true, fenceLen: open[1].length };
+        return state;
+    }
+    const close = line.match(/^\s{0,3}(`{3,})[\t ]*$/);
+    if (close && close[1].length >= state.fenceLen) {
+        return { inFence: false, fenceLen: 0 };
+    }
+    return state;
+}
 // Verdict field (closed enum).
 const VERDICT_RE = /^-\s*Verdict:\s*(PENDING|SATISFIED|WITHDRAWN)\s*$/;
 const SKILL_RE = /^-\s*Skill:\s*(.+?)\s*$/;
@@ -338,7 +379,23 @@ export function extractEvidenceRecords(blob, file) {
     const errors = [];
     const lines = blob.split("\n");
     let i = 0;
+    // Fenced-code-block toggle, tracked across the WHOLE scan (main discovery
+    // loop + record-body loop) so a ``` quoted example record is never parsed
+    // as real evidence. A fenced heading is NOT recognized (no cascade); a
+    // fenced field-like line does NOT count and does NOT break the open record.
+    // Real records outside a fence parse unchanged — this is robustness against
+    // fail-closed NOISE, NOT a relaxation of the fail-closed discipline.
+    let inFence = false;
+    let fenceLen = 0;
     while (i < lines.length) {
+        const wasInFence = inFence;
+        const st = updateFenceState(lines[i], { inFence, fenceLen });
+        inFence = st.inFence;
+        fenceLen = st.fenceLen;
+        if (inFence !== wasInFence || inFence) {
+            i += 1;
+            continue; // fence delimiter line, or content inside an open fence
+        }
         const hm = lines[i].match(EVIDENCE_HEADING_RE);
         if (!hm) {
             // LINE-LEVEL evidence discovery: a line that STARTS like an S2-hold
@@ -378,6 +435,14 @@ export function extractEvidenceRecords(blob, file) {
         let j = i + 1;
         while (j < lines.length) {
             const ln = lines[j];
+            const wasInFence = inFence;
+            const st = updateFenceState(ln, { inFence, fenceLen });
+            inFence = st.inFence;
+            fenceLen = st.fenceLen;
+            if (inFence !== wasInFence || inFence) {
+                j += 1;
+                continue; // fence delimiter, or content inside an open fence
+            }
             if (/^#{1,6}\s/.test(ln)) break; // next heading ends the record
             const v = ln.match(VERDICT_RE);
             if (v) { verdictCount += 1; verdict = v[1]; }
@@ -431,6 +496,22 @@ export function extractEvidenceRecords(blob, file) {
             }
         }
         i = j;
+    }
+    // An UNCLOSED fenced code block is malformed markdown: past the opening ```
+    // the parser cannot reliably tell a quoted example record from real
+    // evidence, so a stray unclosed fence could swallow a subsequent real record
+    // (e.g. a real PENDING after an unclosed fence would be skipped → only the
+    // earlier SATISFIED survives → a spurious clear). Fail closed
+    // (evaluator-error) rather than risk a silent clear — this preserves the
+    // fail-closed discipline the fence toggle exists to protect.
+    if (inFence) {
+        errors.push({
+            id: null,
+            structural: true,
+            file,
+            line: lines.length,
+            reason: `malformed evidence: an unclosed fenced code block (\`\`\`) reaches end-of-file — close the fence so a quoted example record can be told apart from real evidence`,
+        });
     }
     return { records, errors };
 }
@@ -684,6 +765,24 @@ export function evaluate(root, commit) {
             reason,
         });
         if (classification === "blocker") blockingIds.add(id);
+    }
+
+    // A packet with a STRUCTURAL parse defect (e.g. an unclosed fenced code
+    // block) makes the whole parse unreliable — valid records extracted before
+    // the defect opened may have survived, but the parser could not tell quoted
+    // example records from real evidence past the opening ```. Surface every
+    // structural defect as an UNCONDITIONAL evaluator-error so the aggregate
+    // classification fails closed (never a silent clear), regardless of whether
+    // valid records were also extracted from the same packet.
+    for (const e of evidenceErrors) {
+        if (!e.structural) continue;
+        records.push({
+            hold_id: `__evidence:${e.file}`,
+            classification: "evaluator-error",
+            backlog: null,
+            evidence: { found: true, malformed: true, structural: true, file: e.file, line: e.line },
+            reason: e.reason,
+        });
     }
 
     // Deterministic ordering.
