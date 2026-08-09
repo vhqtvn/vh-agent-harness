@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,4 +207,60 @@ func TestSeamPreflight_PassThenDrift(t *testing.T) {
 			t.Errorf("want managed-drift FAIL, got %q", out)
 		}
 	})
+}
+
+// TestOriginHashStore_RegularFile_SurvivesClone is the F7 clone-safety lock.
+// origin-hashes.json is COMMITTED binary-owned platform state (not gitignored):
+// losing it on clone loses the protection baseline. A git clone copies regular
+// tracked files — so the sidecar MUST be a regular file (not a symlink, pipe, or
+// special device) with valid JSON containing managed-path entries. This is the
+// property that makes the committed-sidecar convention safe: clone reproduces
+// the exact regular file, preserving the origin baseline across clone lifecycle.
+// (Uninstall-removal is covered by TestSeamUninstall_RemovesOriginHashStoreSoReinstallReseeds;
+// this test covers the clone-retention half of the lifecycle.)
+func TestOriginHashStore_RegularFile_SurvivesClone(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	sidecar := originhash.FilePath(root)
+
+	// 1. Must exist as a REGULAR file (the property git clone preserves).
+	info, err := os.Stat(sidecar)
+	if err != nil {
+		t.Fatalf("origin-hashes.json should exist after install: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("origin-hashes.json must be a regular file (survives git clone); got mode %v", info.Mode())
+	}
+
+	// 2. Must be valid JSON with the expected schema (proves it is the real
+	// protection baseline, not a corrupt/empty placeholder). Read+parse here
+	// independently of originhash.Read to assert the on-disk bytes are valid.
+	raw, err := os.ReadFile(sidecar)
+	if err != nil {
+		t.Fatalf("read origin-hashes.json: %v", err)
+	}
+	var store originhash.Store
+	if err := json.Unmarshal(raw, &store); err != nil {
+		t.Fatalf("origin-hashes.json must be valid JSON: %v", err)
+	}
+	if store.SchemaVersion == "" {
+		t.Errorf("origin-hashes.json schema_version must be non-empty")
+	}
+	// 3. Must contain managed-path entries (the baseline is non-empty after a
+	// real install — every platform_managed file gets an origin hash).
+	if len(store.OriginHashes) == 0 {
+		t.Errorf("origin-hashes.json must contain managed-path origin hashes after install; got empty map")
+	}
+
+	// 4. Cross-check: originhash.Read agrees the on-disk store is valid + non-nil
+	// (the strict reader Apply uses). This binds the on-disk JSON validity to the
+	// contract the apply path enforces.
+	parsed, err := originhash.Read(root)
+	if err != nil {
+		t.Errorf("originhash.Read should succeed on the on-disk store: %v", err)
+	}
+	if parsed == nil {
+		t.Errorf("originhash.Read should return non-nil store after install")
+	}
 }

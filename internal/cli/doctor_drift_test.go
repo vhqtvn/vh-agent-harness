@@ -57,8 +57,8 @@ func findLivePlatformManagedPath(t *testing.T, root string) string {
 }
 
 // findLiveAuthoredPlatformManagedPath is like findLivePlatformManagedPath but
-// EXCLUDES the platform-regenerated paths (regeneratedPlatformPaths, today:
-// allowed-commands.js). Use this for tests that need a managed path whose
+// EXCLUDES the platform-regenerated paths (regeneratedPlatformPaths, currently
+// allowed-commands.js and opencode.jsonc). Use this for tests that need a managed path whose
 // origin-hash three-way preservation actually applies (consumer edits/deletions
 // update respects) — i.e. NOT a path the platform overwrites canonically every
 // apply. The base helper can return a regenerated path (allowed-commands.js IS
@@ -197,9 +197,13 @@ func TestManagedDrift_ConsumerEdit_Preserved_NotDrift(t *testing.T) {
 		t.Fatalf("precondition: origin-hash store should be readable after install: %v", err)
 	}
 
-	// Consumer hand-edits a platform_managed file (the surface where
-	// vh-video-maker's rule 6 lives only in the render).
-	p := findLivePlatformManagedPath(t, root)
+	// Consumer hand-edits a platform_managed AUTHORED (non-regenerated) file
+	// (the surface where vh-video-maker's rule 6 lives only in the render).
+	// findLiveAuthoredPlatformManagedPath excludes the regenerated set
+	// (allowed-commands.js, opencode.jsonc) — a consumer edit to a regenerated
+	// path is genuine drift (update overwrites it), not a preserved state, so
+	// picking one would silently flip this test's expected INFO verdict to FAIL.
+	p := findLiveAuthoredPlatformManagedPath(t, root)
 	live := filepath.Join(root, filepath.FromSlash(p))
 	const consumerEdit = "// CONSUMER HAND-EDIT (rule 6) — update must preserve, doctor must not FAIL\n"
 	if err := os.WriteFile(live, []byte(consumerEdit), 0o644); err != nil {
@@ -265,6 +269,84 @@ func TestManagedDrift_RegeneratedConsumerEdit_IsGenuineDrift(t *testing.T) {
 	}
 	if strings.Contains(r.detail, "consumer-preserved") {
 		t.Errorf("REGENERATED managed file must NOT be reported consumer-preserved (update overwrites it); got %q", r.detail)
+	}
+}
+
+// TestEffectiveRegeneratedPaths_OpencodeJSONCGatedByOriginStore is the F3
+// unit-test lock for the F6 coordination hook. opencode.jsonc is DECLARED in
+// regeneratedPlatformPaths but EFFECTIVELY regenerated only when a valid origin
+// record exists (originStore != nil). Pre-migration (nil store), opencode.jsonc
+// is dropped from the effective set so the F6 first-run stall retains authority
+// over a colliding pre-feature baseline. allowed-commands.js is ALWAYS
+// regenerated (never gated by the origin store).
+func TestEffectiveRegeneratedPaths_OpencodeJSONCGatedByOriginStore(t *testing.T) {
+	declared := map[string]bool{
+		allowedCommandsRel: true,
+		opencodeJSONCRel:   true,
+	}
+
+	// Pre-migration: no valid origin store → opencode.jsonc excluded (F6 hook).
+	pre := effectiveRegeneratedPaths(declared, nil)
+	if !pre[allowedCommandsRel] {
+		t.Errorf("allowed-commands.js must ALWAYS be effectively regenerated")
+	}
+	if pre[opencodeJSONCRel] {
+		t.Errorf("opencode.jsonc must NOT be effectively regenerated pre-migration (nil store); got included")
+	}
+
+	// Post-migration: valid origin store → opencode.jsonc included.
+	post := effectiveRegeneratedPaths(declared, originhash.New())
+	if !post[allowedCommandsRel] {
+		t.Errorf("allowed-commands.js must be effectively regenerated post-migration")
+	}
+	if !post[opencodeJSONCRel] {
+		t.Errorf("opencode.jsonc must be effectively regenerated post-migration (valid store); got excluded")
+	}
+}
+
+// TestManagedDrift_OpencodeJSONC_RegeneratedConsumerEdit_IsGenuineDrift is the
+// F3 behavioral lock (mirror of TestManagedDrift_RegeneratedConsumerEdit_IsGenuineDrift
+// for opencode.jsonc). Post-migration (valid origin store exists), a consumer
+// edit to opencode.jsonc is GENUINE drift — update overwrites it because the
+// permission emitter canonically regenerates it on every apply, and doctor's
+// consumer-preserved carve-out must NOT promise to preserve an edit update will
+// discard. This proves the effective-regenerated admission works end-to-end
+// through doctor's drift check.
+func TestManagedDrift_OpencodeJSONC_RegeneratedConsumerEdit_IsGenuineDrift(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	// Precondition: the install recorded a valid origin-hash store (non-nil).
+	// This is what activates opencode.jsonc's effective-regenerated status.
+	store, err := originhash.Read(root)
+	if err != nil {
+		t.Fatalf("precondition: origin-hash store should be readable after install: %v", err)
+	}
+	if store == nil {
+		t.Fatalf("precondition: origin-hash store should be non-nil after install")
+	}
+
+	// Consumer edits opencode.jsonc (the REGENERATED managed file).
+	p := opencodeJSONCRel
+	live := filepath.Join(root, filepath.FromSlash(p))
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("precondition: %s should exist after install: %v", p, err)
+	}
+	if err := os.WriteFile(live, []byte("// CONSUMER HAND-EDIT (regenerated file — update WILL overwrite)\n"), 0o644); err != nil {
+		t.Fatalf("consumer-edit %s: %v", p, err)
+	}
+
+	r := checkManagedDrift(root)
+	// MUST be a FAIL: with a valid origin store, opencode.jsonc is effectively
+	// regenerated, so a consumer edit is genuine drift (update overwrites it).
+	if r.tier != tierFail {
+		t.Fatalf("consumer-edited opencode.jsonc must drift-FAIL post-migration (update overwrites it), got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, p) {
+		t.Errorf("FAIL detail should name the drifted regenerated path %q; got %q", p, r.detail)
+	}
+	if strings.Contains(r.detail, "consumer-preserved") {
+		t.Errorf("opencode.jsonc must NOT be reported consumer-preserved post-migration; got %q", r.detail)
 	}
 }
 

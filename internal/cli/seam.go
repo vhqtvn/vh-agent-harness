@@ -12,6 +12,7 @@ import (
 	"text/template"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
+	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/overlay"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 	"github.com/vhqtvn/vh-agent-harness/internal/permconfig"
@@ -191,6 +192,17 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	// authority and must NOT enter the install-answer digest (else install→update
 	// would false-flag answer drift the moment the profile exists). Render used the
 	// merged answers above; Apply records the original install answers below.
+	//
+	// F3 (regenerated opencode.jsonc): the DECLARED regenerated set includes
+	// opencode.jsonc, but it is EFFECTIVELY regenerated only once a valid origin
+	// record exists (effectiveRegeneratedPaths). We read the origin store
+	// tolerantly here to compute the effective set — this is the F6 coordination
+	// hook. Apply performs its own STRICT read of the same store internally; the
+	// two reads agree on the valid/absent cases, and a corrupt store aborts Apply
+	// before any write. A tolerant read here (ignoring the error) is safe: nil
+	// store → opencode.jsonc excluded from the effective set (pre-migration fall-
+	// through to the three-way check); non-nil store → opencode.jsonc included.
+	originStoreForRegen, _ := originhash.Read(target)
 	report, err := substrate.Apply(renderer, substrate.ApplyOptions{
 		ProjectRoot:    target,
 		StagingDir:     staging,
@@ -208,8 +220,13 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 		// otherwise keep a stale copy that desyncs the shell-guard from the
 		// permission surface. It is overwritten wholesale whenever it differs
 		// from the canonical form, the same as before origin-hash existed.
-		// regeneratedPlatformPaths is the shared set doctor also reads (R4-B1).
-		RegeneratedPlatformPaths: regeneratedPlatformPaths,
+		// opencode.jsonc is likewise REGENERATED (post-migration) — see
+		// effectiveRegeneratedPaths for the F6 coordination hook. The effective
+		// set (not the bare declared set) is what Apply consumes so pre-migration
+		// a colliding opencode.jsonc is NOT bypassed by the regenerated
+		// admission. regeneratedPlatformPaths is the shared set doctor also
+		// reads (R4-B1), via the same effective-set computation.
+		RegeneratedPlatformPaths: effectiveRegeneratedPaths(regeneratedPlatformPaths, originStoreForRegen),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("seam: apply: %w", err)
@@ -997,19 +1014,74 @@ const (
 	// isAllowedCommandsCustomized, and regeneratedPlatformPaths (the exemption set
 	// shared with doctor's managed-drift check so the two cannot drift apart).
 	allowedCommandsRel = ".opencode/repo-configs/allowed-commands.js"
+
+	// opencodeJSONCRel is the live OpenCode config the seam regenerates
+	// canonically on every apply via the Go permission emitter
+	// (permconfig.EmitWithExtra). It joins the regenerated set so a consumer
+	// edit is overwritten post-migration — preserving a hand-edited live copy
+	// while advancing generated companion policy (allowed-commands.js) would
+	// leave live OpenCode permissions inconsistent with shell-guard. Supported
+	// customization stays in profile/overlay inputs + config-transform.mjs,
+	// not the rendered live file.
+	opencodeJSONCRel = "opencode.jsonc"
 )
 
 // regeneratedPlatformPaths is the set of platform_managed paths the platform
 // REGENERATES canonically on every apply (not template-rendered content). These
 // are exempt from origin-hash preservation — a consumer edit is always
 // overwritten so the file stays byte-in-sync with the platform's canonical
-// emission (e.g. allowed-commands.js must track the emitted permission blocks).
+// emission (e.g. allowed-commands.js must track the emitted permission blocks;
+// opencode.jsonc must track the emitted permission blocks).
 // Apply consumes this via ApplyOptions.RegeneratedPlatformPaths; doctor's
 // managed-drift check consumes the SAME set so its consumer-preserved carve-out
 // (R3-B3) does not falsely promise to "preserve" a file update will overwrite
 // (R4-B1). Keep this the single source of truth — do not re-list these paths
 // inline in seam or doctor.
-var regeneratedPlatformPaths = map[string]bool{allowedCommandsRel: true}
+//
+// opencode.jsonc is DECLARED here but EFFECTIVELY regenerated only once a valid
+// origin-record exists (see effectiveRegeneratedPaths). Pre-migration (no origin
+// store), opencode.jsonc falls through to the normal three-way preservation
+// check so the F6 first-run stall can intervene on a colliding pre-feature
+// baseline. This preserves the migration-precedence rule: the regenerated
+// admission must not short-circuit F6's protection.
+var regeneratedPlatformPaths = map[string]bool{
+	allowedCommandsRel: true,
+	opencodeJSONCRel:   true,
+}
+
+// effectiveRegeneratedPaths returns the regenerated set actually in force for a
+// given apply/drift pass. It is identical to `declared` (the canonical
+// regeneratedPlatformPaths) UNLESS the origin store is nil — in which case
+// opencode.jsonc is dropped from the effective set.
+//
+// Rationale: the regenerated flag's only observable effect is when the path has
+// a prior origin (hadOrigin==true) AND a consumer edit — the flag converts that
+// case from "preserve the edit" to "overwrite". Without a valid origin store
+// (the pre-migration, first-origin-aware-run state), no path carries origin
+// metadata, so the regenerated flag is a no-op there. We still drop
+// opencode.jsonc explicitly from the effective set in that window so the
+// three-way preservation check (and the future F6 stall) retains full authority
+// over a colliding pre-feature opencode.jsonc rather than being bypassed by the
+// regenerated admission.
+//
+// This is the F3↔F6 coordination hook: F3 marks opencode.jsonc as regenerated;
+// F6 (Slice 3) will gate the migration that establishes the valid origin record
+// this hook keys on. Declaring the policy now and keying it on the origin store
+// means F6 can land later without re-opening F3's classification.
+//
+// `declared` is the caller's source-of-truth map (regeneratedPlatformPaths); it
+// is read-only here. `originStore` may be nil — nil means "no valid origin
+// record / pre-migration".
+func effectiveRegeneratedPaths(declared map[string]bool, originStore *originhash.Store) map[string]bool {
+	out := make(map[string]bool, len(declared))
+	for p := range declared {
+		if p == opencodeJSONCRel && originStore == nil {
+			continue // pre-migration: opencode.jsonc not effectively regenerated (F6 hook)
+		}
+		out[p] = true
+	}
+	return out
+}
 
 // walkStagedLivePaths returns the set of LIVE .opencode-relative paths already
 // present in staging (the builtin corpus the renderer just wrote, plus anything

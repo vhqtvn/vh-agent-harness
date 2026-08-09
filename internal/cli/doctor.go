@@ -980,6 +980,13 @@ func checkManagedDrift(target string) checkResult {
 	// (no carve-out) is fail-LOUD (reports drift/missing), never fail-silent —
 	// the hard fail-closed contract lives in Apply, not here.
 	originStore, _ := originhash.Read(target)
+	// F3: doctor consults the SAME effective regenerated set Apply uses
+	// (effectiveRegeneratedPaths) — not the bare declared set. opencode.jsonc is
+	// DECLARED regenerated but EFFECTIVELY so only when a valid origin record
+	// exists; pre-migration (nil store) it falls through to the three-way check.
+	// Reading the set once here (after the tolerant origin read) keeps the two
+	// consumer-preserved carve-out sites below in lock-step with Apply.
+	effectiveRegen := effectiveRegeneratedPaths(regeneratedPlatformPaths, originStore)
 	// Surface-at-friction (researches/decisions/2026-08-04-capability-discovery-
 	// audit.md §6 entry 1): carry the drifted/missing PATHS (not just counts)
 	// into the FAIL detail so the message is self-routing. A drift an operator
@@ -1054,7 +1061,7 @@ func checkManagedDrift(target string) checkResult {
 				// reconciled here: it stays drifted to keep this slice bounded to
 				// the deletion gap. Apply preserves it; a future slice can align
 				// doctor by adding one more ClassifyPreserved call here.)
-				regenerated := regeneratedPlatformPaths[path]
+				regenerated := effectiveRegen[path]
 				origin, hadOrigin := "", false
 				if originStore != nil {
 					origin, hadOrigin = originStore.Lookup(path)
@@ -1091,7 +1098,7 @@ func checkManagedDrift(target string) checkResult {
 			// / pre-feature) is also genuine drift. We are inside the
 			// live!=staged branch, so live.Hash != stagedHash always holds here
 			// and the classifier's self-heal branch (live==staged) never fires.
-			regenerated := regeneratedPlatformPaths[path]
+			regenerated := effectiveRegen[path]
 			origin, hadOrigin := "", false
 			if originStore != nil {
 				origin, hadOrigin = originStore.Lookup(path)
