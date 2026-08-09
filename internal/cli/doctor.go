@@ -17,6 +17,7 @@ import (
 	corpus "github.com/vhqtvn/vh-agent-harness"
 	"github.com/vhqtvn/vh-agent-harness/internal/jsonc"
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
+	"github.com/vhqtvn/vh-agent-harness/internal/managedfile"
 	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 	"github.com/vhqtvn/vh-agent-harness/internal/schema"
@@ -968,20 +969,32 @@ func checkManagedDrift(target string) checkResult {
 	}
 	// Origin-hash update sync: load the persisted origin-hash store so a
 	// platform_managed file the consumer EDITED (live diverged from the
-	// platform's last-recorded origin) is recognized as a SANCTIONED preserved
-	// state (update deliberately preserves it via ActionManagedDiverged) rather
-	// than reported as unresolvable drift. A read error / missing store is
-	// tolerated here: doctor is diagnostic, and falling back to the raw
-	// live-vs-staged compare (no carve-out) is fail-LOUD (reports drift), never
-	// fail-silent — the hard fail-closed contract lives in Apply, not here.
+	// platform's last-recorded origin) OR DELETED (absent but previously
+	// rendered) is recognized as a SANCTIONED preserved state (update
+	// deliberately preserves/respects it via ActionManagedDiverged) rather than
+	// reported as unresolvable drift/missing. Both decisions route through the
+	// SHARED managedfile.ClassifyPreserved so doctor AGREES with Apply's
+	// planOutcome (F1): the two call the same classifier and so never disagree
+	// on preserved-vs-genuine. A read error / missing store is tolerated here:
+	// doctor is diagnostic, and falling back to the raw live-vs-staged compare
+	// (no carve-out) is fail-LOUD (reports drift/missing), never fail-silent —
+	// the hard fail-closed contract lives in Apply, not here.
 	originStore, _ := originhash.Read(target)
 	// Surface-at-friction (researches/decisions/2026-08-04-capability-discovery-
 	// audit.md §6 entry 1): carry the drifted/missing PATHS (not just counts)
 	// into the FAIL detail so the message is self-routing. A drift an operator
 	// cannot programmatically distinguish from bit-rot gets BOTH remedies inline.
-	drifted, missing, preserved, consumerPreserved := 0, 0, 0, 0
+	// consumerPreservedEdit/Delete carry the sanctioned preserved-state PATHS
+	// (consumer hand-edits / consumer deletions update respects) into the
+	// non-failing INFO detail so the operator can find/re-baseline them — and
+	// crucially the deletion signal does NOT carry the false "run update to
+	// re-render missing files" claim (update will NOT restore a deletion it
+	// respects; F1).
+	drifted, missing, preserved := 0, 0, 0
+	consumerPreservedEdit, consumerPreservedDelete := 0, 0
 	checked := 0
-	var driftedPaths, missingPaths, consumerPreservedPaths []string
+	var driftedPaths, missingPaths []string
+	var consumerPreservedEditPaths, consumerPreservedDeletePaths []string
 	for path := range defaults {
 		// Resolve seeds every default path, so eff[path] is always present; its
 		// Origin records whether an override genuinely raised the class.
@@ -1023,6 +1036,35 @@ func checkManagedDrift(target string) checkResult {
 		}
 		if lerr != nil {
 			if os.IsNotExist(lerr) {
+				// F1 — consumer-deletion reconciliation. Before counting an
+				// absent managed path as missing drift, consult the SHARED
+				// managedfile.ClassifyPreserved so doctor AGREES with Apply's
+				// planOutcome (which routes this exact case to
+				// ActionManagedDiverged "consumer-deleted; not re-seeded"). A
+				// tracked (recorded origin) + non-regenerated path the consumer
+				// DELETED is a sanctioned preserved state update RESPECTS — NOT
+				// missing drift whose prescribed remedy ("run update to re-render
+				// missing files") is a FALSE claim for this path (update will
+				// NOT re-seed a deletion it respects). Route it to the non-failing
+				// consumer-preserved-deletion signal. A path with NO recorded
+				// origin (bootstrap / pre-feature) or a REGENERATED path stays
+				// genuine missing (update will seed / overwrite it), so the FAIL
+				// remedy stays accurate there. (The lerr != nil && !NotExist
+				// case — a live file that exists but cannot be read — is NOT
+				// reconciled here: it stays drifted to keep this slice bounded to
+				// the deletion gap. Apply preserves it; a future slice can align
+				// doctor by adding one more ClassifyPreserved call here.)
+				regenerated := regeneratedPlatformPaths[path]
+				origin, hadOrigin := "", false
+				if originStore != nil {
+					origin, hadOrigin = originStore.Lookup(path)
+				}
+				if reason := managedfile.ClassifyPreserved(regenerated, hadOrigin, origin,
+					managedfile.LiveState{Absent: true}, ""); reason == managedfile.ConsumerDelete {
+					consumerPreservedDelete++
+					consumerPreservedDeletePaths = append(consumerPreservedDeletePaths, path)
+					continue
+				}
 				missing++
 				missingPaths = append(missingPaths, path)
 			} else {
@@ -1032,38 +1074,34 @@ func checkManagedDrift(target string) checkResult {
 			continue
 		}
 		if string(live) != string(staged) {
-			// Origin-hash carve-out: if this platform_managed file has a recorded
-			// origin AND the live bytes diverge from that origin, the consumer
-			// edited it (update deliberately PRESERVES it via
-			// ActionManagedDiverged). That is a sanctioned state, NOT drift
-			// `update` would repair — surface it as a non-failing consumer-
-			// preserved signal (mirrors the override-raise preserved carve-out
-			// above) so the operator is told the edit is known/preserved and
-			// `update` will NOT overwrite it. A file whose live hash MATCHES its
-			// origin (stale-but-unedited: platform moved on, consumer did not)
-			// stays genuine drift — `update` overwrites it, so the FAIL remedy
-			// is correct there. A file with no recorded origin (bootstrap / pre-
-			// origin-hash) is also genuine drift (update will seed/overwrite it).
-			//
-			// REGENERATED-PATH EXCLUSION (R4-B1): seamApply exempts the paths in
-			// regeneratedPlatformPaths (today: allowed-commands.js) from origin-
-			// hash preservation — it OVERWRITES a consumer edit to keep the file
-			// byte-sync with the emitted permission blocks. The carve-out MUST
-			// agree: a consumer edit to a regenerated file is genuine drift
-			// (update will clobber it, and warnIfAllowedCommandsCustomized warns
-			// at update time), NOT "consumer-preserved". Reading the SAME shared
-			// set (regeneratedPlatformPaths) the seam uses keeps the two from
-			// drifting apart. Without this, doctor's "update preserves your edit"
-			// message would be a false promise for exactly this path.
-			isRegenerated := regeneratedPlatformPaths[path]
-			if !isRegenerated && originStore != nil {
-				if origin, hadOrigin := originStore.Lookup(path); hadOrigin {
-					if originhash.Digest(live) != origin {
-						consumerPreserved++
-						consumerPreservedPaths = append(consumerPreservedPaths, path)
-						continue
-					}
-				}
+			// Origin-hash carve-out (R3-B3 + F1 shared model). A platform_managed
+			// file the consumer EDITED (live diverged from the recorded origin)
+			// is a sanctioned preserved state — update deliberately preserves it
+			// (ActionManagedDiverged) — so doctor surfaces it as non-failing
+			// consumer-preserved, NOT a perpetual drifted FAIL whose prescribed
+			// remedy (`update`) is a no-op for this path. The decision routes
+			// through the SHARED managedfile.ClassifyPreserved (the same
+			// classifier Apply's planOutcome calls) so doctor AGREES with update
+			// rather than hand-rolling an origin comparison. A file whose live
+			// hash MATCHES its origin (stale-but-unedited: platform moved on,
+			// consumer did not) is genuine drift — update overwrites it, the FAIL
+			// remedy is correct. A REGENERATED path is genuine drift (update
+			// overwrites it; warnIfAllowedCommandsCustomized warns at update time)
+			// — never preserved (R4-B1). A file with no recorded origin (bootstrap
+			// / pre-feature) is also genuine drift. We are inside the
+			// live!=staged branch, so live.Hash != stagedHash always holds here
+			// and the classifier's self-heal branch (live==staged) never fires.
+			regenerated := regeneratedPlatformPaths[path]
+			origin, hadOrigin := "", false
+			if originStore != nil {
+				origin, hadOrigin = originStore.Lookup(path)
+			}
+			liveState := managedfile.LiveState{IsRegular: true, Readable: true, Hash: originhash.Digest(live)}
+			if reason := managedfile.ClassifyPreserved(regenerated, hadOrigin, origin,
+				liveState, originhash.Digest(staged)); reason == managedfile.ConsumerEdit {
+				consumerPreservedEdit++
+				consumerPreservedEditPaths = append(consumerPreservedEditPaths, path)
+				continue
 			}
 			drifted++
 			driftedPaths = append(driftedPaths, path)
@@ -1080,16 +1118,23 @@ func checkManagedDrift(target string) checkResult {
 			detail: formatManagedDriftFail(
 				fmt.Sprintf("%d missing of %d managed", missing, checked),
 				driftedPaths, missingPaths)}
-	case consumerPreserved > 0 || preserved > 0:
+	case consumerPreservedEdit > 0 || consumerPreservedDelete > 0 || preserved > 0:
 		// Non-failing: all checked managed files are either in sync OR in a
-		// sanctioned preserved state. consumerPreserved = consumer hand-edits
-		// update preserves by origin-hash (NOT drift update would repair);
-		// preserved = override-raised out of platform_managed. Name the
-		// consumer-preserved paths so the operator can find/re-baseline them.
+		// sanctioned preserved state. consumer-preserved-edit = consumer hand-
+		// edits update preserves by origin-hash (NOT drift update would repair);
+		// consumer-preserved-deletion = consumer deletions update respects
+		// (NOT re-seeded — and NOT accompanied by the false "run update to
+		// re-render missing files" claim, F1); preserved = override-raised out
+		// of platform_managed. Name the consumer-preserved paths so the operator
+		// can find/re-baseline them.
 		parts := []string{fmt.Sprintf("%d managed file(s) in sync", checked)}
-		if consumerPreserved > 0 {
-			parts = append(parts, fmt.Sprintf("%d consumer-preserved (origin-hash: update preserves your edit)", consumerPreserved))
-			parts = append(parts, capPathList("consumer-preserved", consumerPreservedPaths))
+		if consumerPreservedEdit > 0 {
+			parts = append(parts, fmt.Sprintf("%d consumer-preserved edit(s) (origin-hash: update preserves your edit)", consumerPreservedEdit))
+			parts = append(parts, capPathList("consumer-preserved-edit", consumerPreservedEditPaths))
+		}
+		if consumerPreservedDelete > 0 {
+			parts = append(parts, fmt.Sprintf("%d consumer-preserved deletion(s) (origin-hash: update respects your deletion; not re-seeded)", consumerPreservedDelete))
+			parts = append(parts, capPathList("consumer-preserved-deletion", consumerPreservedDeletePaths))
 		}
 		if preserved > 0 {
 			parts = append(parts, fmt.Sprintf("%d project-preserved (ownership override)", preserved))

@@ -1,6 +1,7 @@
 package substrate
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	corpus "github.com/vhqtvn/vh-agent-harness" // root package: embed + CoreOwnershipDefaults
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
+	"github.com/vhqtvn/vh-agent-harness/internal/managedfile"
 	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 )
@@ -1073,13 +1075,22 @@ func TestApply_OriginHashPartialFailureSelfHealsOnRetry(t *testing.T) {
 	}
 }
 
-// TestApply_OriginHashUnreadableLiveFileIsPreserved locks the fail-closed path
-// for an authored managed file whose bytes cannot be read by the update process
-// (commit-review b-F1, round 2): os.Stat succeeds but hashSHA256(live) fails
-// (e.g. write-permitted-but-not-readable, mode 0200). We CANNOT confirm whether
-// the consumer edited it, so the safe choice — the feature's core guarantee —
-// is to PRESERVE (ActionManagedDiverged), NOT fall through to overwrite, which
-// would silently clobber a possible edit (the write only needs WRITE perm).
+// TestApply_OriginHashUnreadableLiveFileIsPreserved is the SUPPORTED-PLATFORM
+// integration check for the fail-closed path on an authored managed file whose
+// bytes cannot be read by the update process (commit-review b-F1, round 2):
+// os.Stat succeeds but the live read fails (write-permitted-but-not-readable,
+// mode 0200). We CANNOT confirm whether the consumer edited it, so the safe
+// choice — the feature's core guarantee — is to PRESERVE (ActionManagedDiverged),
+// NOT fall through to overwrite, which would silently clobber a possible edit.
+//
+// This test relies on OS permission bits to enforce the read failure and SKIPS
+// under root / permissive filesystems (where reads succeed regardless of mode).
+// The DETERMINISTIC coverage of the same safety path — proving read-failure is
+// distinct from absent and unedited WITHOUT depending on OS perms — lives in
+// TestApply_OriginHashUnreadableLiveFile_Deterministic, which injects a known
+// read failure through the readLiveFile seam. Keep both: this one proves the
+// real-filesystem path works on platforms that honor the bits; the deterministic
+// one guarantees the behavior is observed in every CI environment.
 func TestApply_OriginHashUnreadableLiveFileIsPreserved(t *testing.T) {
 	live := t.TempDir()
 	r := FixtureRenderer{TemplateRoot: corpusRoot}
@@ -1144,5 +1155,133 @@ func TestApply_OriginHashUnreadableLiveFileIsPreserved(t *testing.T) {
 	}
 	if got := readFile(t, live, rel); got != origContent {
 		t.Fatalf("unreadable live file was overwritten (clobbered); content changed from %q to %q", origContent, got)
+	}
+}
+
+// TestApply_OriginHashUnreadableLiveFile_Deterministic is the DETERMINISTIC
+// behavioral-closure crux for the unreadable-live-file safety path (F8). It
+// injects a KNOWN read failure through the readLiveFile seam — NO reliance on
+// OS permission bits (which the OS-permission integration test above cannot
+// enforce under root / permissive filesystems). The deterministic test proves,
+// in every CI environment:
+//
+//  1. read-failure ≠ absent ≠ unedited: a live file that EXISTS (stat ok,
+//     regular) but whose read FAILS routes to the TYPED PreservedReason ==
+//     managedfile.Unreadable — distinct from ConsumerDelete (absent) and from
+//     the empty/unedited disposition that falls through to overwrite/noop.
+//  2. no overwrite: the consumer's bytes are preserved byte-for-byte.
+//  3. fail-closed/preserved: Action == ActionManagedDiverged (NEVER clobber a
+//     possible edit the read could not inspect).
+//  4. origin not advanced: the diverged outcome carries the prior origin
+//     forward, so the next apply still detects the divergence.
+//  5. report names path+reason: the Note identifies the path as unreadable.
+//
+// The seam (package-scoped readLiveFile) is restored to os.ReadFile on cleanup
+// so no other test is affected.
+func TestApply_OriginHashUnreadableLiveFile_Deterministic(t *testing.T) {
+	live := t.TempDir()
+	r := FixtureRenderer{TemplateRoot: corpusRoot}
+	const rel = ".vh-agent-harness/AGENTS.core.md" // authored platform_managed
+
+	// --- Apply #1: install. Records an origin hash so the three-way check runs. ---
+	staging := t.TempDir()
+	if err := r.Render(staging, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render #1: %v", err)
+	}
+	if _, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-originhash",
+		TemplateSource: "templates/core",
+	}); err != nil {
+		t.Fatalf("Apply #1: %v", err)
+	}
+	store1, err := originhash.Read(live)
+	if err != nil || store1 == nil {
+		t.Fatalf("store not written by Apply #1: %v", err)
+	}
+	origOrigin, ok := store1.Lookup(rel)
+	if !ok {
+		t.Fatalf("store missing origin for %q after Apply #1", rel)
+	}
+	origContent := readFile(t, live, rel)
+
+	// --- Inject a DETERMINISTIC read failure via the readLiveFile seam. The
+	// live file genuinely EXISTS on disk (stat succeeds, regular file) — only
+	// the read is forced to fail, exactly the write-permitted-but-not-readable
+	// condition the OS-perm test can only enforce under restrictive perms. ---
+	prevReadLiveFile := readLiveFile
+	readLiveFile = func(p string) ([]byte, error) {
+		return nil, errors.New("injected deterministic read failure (F8 seam)")
+	}
+	t.Cleanup(func() { readLiveFile = prevReadLiveFile })
+
+	// --- Apply #2: the live file exists but is unreadable. ---
+	staging2 := t.TempDir()
+	if err := r.Render(staging2, RenderSpec{TemplateSource: "templates/core"}); err != nil {
+		t.Fatalf("render #2: %v", err)
+	}
+	// Mutate the staged copy so a real platform change exists — proves the
+	// unreadable file is NOT being treated as a byte-identical noop.
+	stagedRel2 := filepath.Join(staging2, rel)
+	stagedBase, serr := os.ReadFile(stagedRel2)
+	if serr != nil {
+		t.Fatalf("read staged %s: %v", rel, serr)
+	}
+	if werr := os.WriteFile(stagedRel2, append(stagedBase, []byte("\n# platform release marker (unreadable test)\n")...), 0o644); werr != nil {
+		t.Fatalf("mutate staged %s: %v", rel, werr)
+	}
+
+	report, err := Apply(r, ApplyOptions{
+		ProjectRoot: live, StagingDir: staging2,
+		Classifier: corpusClassifier(t), HarnessVersion: "0.1.0-originhash",
+		TemplateSource: "templates/core",
+	})
+	if err != nil {
+		t.Fatalf("Apply #2: %v", err)
+	}
+	var got FileOutcome
+	for _, o := range report.Outcomes {
+		if o.Path == rel {
+			got = o
+		}
+	}
+
+	// (3) fail-closed/preserved: Action == ActionManagedDiverged (NEVER overwrite).
+	if got.Action != ActionManagedDiverged {
+		t.Fatalf("unreadable live managed file: want %s (preserved, never clobber), got %s (note=%q)",
+			ActionManagedDiverged, got.Action, got.Note)
+	}
+
+	// (1) read-failure ≠ absent ≠ unedited: the TYPED PreservedReason is exactly
+	// managedfile.Unreadable — NOT ConsumerDelete (absent) and NOT the empty
+	// disposition of an unedited file (which would have fallen through to
+	// overwrite/noop). This is the typed correctness signal the F8 seam exists
+	// to make assertable without OS-perm dependence.
+	if got.PreservedReason != managedfile.Unreadable {
+		t.Fatalf("unreadable live file: want typed PreservedReason %q, got %q (note=%q) — read-failure must be distinct from absent (ConsumerDelete) and unedited (empty)",
+			managedfile.Unreadable, got.PreservedReason, got.Note)
+	}
+
+	// (5) report names path+reason: the Note identifies the file as unreadable.
+	if !strings.Contains(got.Note, "unreadable") {
+		t.Errorf("Note should name the unreadable reason; got %q", got.Note)
+	}
+
+	// (2) no overwrite: the consumer's original bytes survived byte-for-byte.
+	// Read directly via os.ReadFile (NOT the seam — the seam only governs the
+	// three-way live read inside planOutcome).
+	if gotContent := readFile(t, live, rel); gotContent != origContent {
+		t.Fatalf("unreadable live file was overwritten (clobbered); content changed from %q to %q", origContent, gotContent)
+	}
+
+	// (4) origin not advanced: the diverged outcome carries the prior origin
+	// forward, so the next apply still detects the (still-unreadable) divergence.
+	store2, err := originhash.Read(live)
+	if err != nil || store2 == nil {
+		t.Fatalf("store not written by Apply #2: %v", err)
+	}
+	if got2, ok2 := store2.Lookup(rel); !ok2 || got2 != origOrigin {
+		t.Fatalf("origin must carry forward unchanged across an unreadable skip; want %q (ok=%v), got %q (ok=%v)",
+			origOrigin, ok, got2, ok2)
 	}
 }

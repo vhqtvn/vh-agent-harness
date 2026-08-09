@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
+	"github.com/vhqtvn/vh-agent-harness/internal/managedfile"
 	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 	"github.com/vhqtvn/vh-agent-harness/internal/renderstate"
@@ -108,13 +109,24 @@ const (
 
 // FileOutcome is the seam's per-file result.
 type FileOutcome struct {
-	Path       string
-	Class      ownership.Class
-	Action     FileAction
-	Applied    []string          // human-readable merge notes (armed-merged)
-	Proposals  []schema.Proposal // populated when Action == ActionArmedProposal
-	Note       string            // extra context (e.g. why skipped) — human diagnostics ONLY, never a correctness signal
-	WriteState WriteState        // typed live-write execution state (not_attempted/succeeded/failed)
+	Path      string
+	Class     ownership.Class
+	Action    FileAction
+	Applied   []string          // human-readable merge notes (armed-merged)
+	Proposals []schema.Proposal // populated when Action == ActionArmedProposal
+	Note      string            // extra context (e.g. why skipped) — human diagnostics ONLY, never a correctness signal
+	// PreservedReason is the TYPED correctness signal for WHY a platform_managed
+	// outcome is ActionManagedDiverged (the origin-hash three-way preservation).
+	// It is set (non-empty) only for diverged outcomes and carries one of the
+	// managedfile taxonomy values (ConsumerEdit / ConsumerDelete / Unreadable);
+	// the human Note string carries the same reason as diagnostics only. Before
+	// this field existed the reason lived solely in the Note string — which is
+	// explicitly "never a correctness signal" — so any consumer (or the lint
+	// path, doctor) that needed the reason had to scan Note text, the corrupt
+	// pattern this typed field retires. The empty value means "not a preserved
+	// divergence" (every non-diverged action).
+	PreservedReason managedfile.PreservedReason
+	WriteState      WriteState // typed live-write execution state (not_attempted/succeeded/failed)
 }
 
 // ApplyReport is the seam's result.
@@ -395,84 +407,43 @@ func planOutcome(opts ApplyOptions, rel string, priorOrigin *originhash.Store) (
 	switch cls.Class {
 	case ownership.ClassPlatformManaged:
 		// Three-way origin-hash divergence check (port of hermes skills_sync),
-		// SKIPPED for platform-regenerated paths (ApplyOptions.
-		// RegeneratedPlatformPaths): those are generated canonically each apply
-		// and must stay in sync with the platform's emission, so a consumer
-		// customization is always overwritten (never preserved as "diverged").
+		// routed through the SHARED managedfile.ClassifyPreserved decision so
+		// update (here) and doctor's lint path reach the SAME preserved-vs-
+		// genuine verdict from identical inputs. SKIPPED for platform-
+		// regenerated paths (ApplyOptions.RegeneratedPlatformPaths): those are
+		// generated canonically each apply and must stay byte-in-sync with the
+		// platform's emission, so a consumer edit is always overwritten (never
+		// preserved as "diverged").
 		//
-		// For all other platform_managed files, the origin-hash store records
-		// the hash of the bytes the platform last wrote. When the on-disk content
-		// no longer matches that origin hash, the consumer has edited it
-		// (ownership-transferred) or deleted it: route to ActionManagedDiverged
-		// — skip the write, NEVER clobber — UNLESS the on-disk bytes already match
-		// the platform's current staged corpus (a partial-failure self-heal: see
-		// the branch body). A file with no prior origin (first install / bootstrap)
-		// and an unedited file (on-disk still matches origin) proceed to the
-		// normal overwrite/noop path below.
-		if _, regenerated := opts.RegeneratedPlatformPaths[rel]; !regenerated {
-			if origin, hadOrigin := priorOrigin.Lookup(rel); hadOrigin {
-				liveInfo, liveStatErr := os.Stat(livePath)
-				if os.IsNotExist(liveStatErr) {
-					// Truly absent → consumer-deleted → respect, do NOT re-seed
-					// (mirrors hermes :914-916). A NON-file at the path (e.g. a
-					// directory) is NOT treated as deletion: it falls through to
-					// the write path below, where the write fails (WriteFailed)
-					// rather than being hidden as a "respected deletion" —
-					// preserving the partial-failure semantics that a blocked
-					// write is reported.
-					return FileOutcome{Path: rel, Class: cls.Class, Action: ActionManagedDiverged,
-						Note: "platform_managed previously rendered; absent on disk (consumer-deleted); not re-seeded"}, nil
+		// For all other platform_managed files, build the live-file observation
+		// (stat + read via the readLiveFile seam + hash) and let
+		// managedfile.ClassifyPreserved decide. When it returns a preserved
+		// reason, route to ActionManagedDiverged — skip the write, NEVER clobber
+		// — carrying the typed PreservedReason (the correctness signal) and a
+		// human Note. When it returns "" (unedited / bootstrap / self-heal /
+		// regenerated-divergence / directory), fall through to the normal
+		// overwrite/noop path below. The fast-path skips live-file IO entirely
+		// for regenerated paths and paths with no recorded origin.
+		regenerated := opts.RegeneratedPlatformPaths[rel]
+		origin, hadOrigin := priorOrigin.Lookup(rel)
+		if !regenerated && hadOrigin {
+			live := buildLiveState(livePath)
+			// stagedHash is consulted ONLY to distinguish a genuine consumer
+			// edit from a partial-failure self-heal (live already == what the
+			// platform would write). Compute it lazily: only when the live file
+			// is a readable regular file that diverged from its origin. A
+			// staged-hash read failure leaves stagedHash "" and
+			// ClassifyPreserved classifies a diverged live file as ConsumerEdit
+			// (the safe, never-clobber choice) — matches the original behavior.
+			var stagedHash string
+			if live.IsRegular && live.Readable && live.Hash != origin {
+				if h, sErr := hashSHA256(stagedPath); sErr == nil {
+					stagedHash = h
 				}
-				if liveStatErr == nil && !liveInfo.IsDir() {
-					liveHash, hErr := hashSHA256(livePath)
-					if hErr != nil {
-						// The live file is stat-able but its bytes cannot be read
-						// (e.g. write-permitted-but-not-readable to this process).
-						// We CANNOT confirm whether the consumer edited it, so the
-						// safe choice — consistent with this feature's core "never
-						// clobber a consumer edit" guarantee — is to PRESERVE (route
-						// to diverged) rather than fall through to managedUpToDate/
-						// overwrite. Falling through would be unsafe here:
-						// executeOutcome's write only needs WRITE permission (not
-						// read), so it would SUCCEED at overwriting a possible edit
-						// with the staged bytes — silently clobbering a file we
-						// never inspected. (The regenerated-path exemption above
-						// already skipped this whole block, so this preserve only
-						// applies to authored managed files.)
-						return FileOutcome{Path: rel, Class: cls.Class, Action: ActionManagedDiverged,
-							Note: "platform_managed live file unreadable (cannot confirm consumer edit); preserved (not clobbered)"}, nil
-					}
-					if liveHash != origin {
-						// On-disk differs from the recorded origin. Distinguish a
-						// genuine consumer edit from a PARTIAL-FAILURE SELF-HEAL: if
-						// the on-disk bytes already match the platform's CURRENT
-						// staged corpus, the platform already wrote these bytes (the
-						// origin store simply did not advance — e.g. a prior apply
-						// whose live writes landed but whose origin-store write
-						// failed, leaving the store at the prior version). That is
-						// NOT a consumer edit: fall through so managedUpToDate routes
-						// it to ActionManagedNoop and the recording loop advances the
-						// origin, self-healing the interrupted generation rather than
-						// permanently skipping a file the consumer never touched.
-						// Only when on-disk differs from BOTH origin and staged is
-						// this a genuine consumer edit → diverged (mirrors hermes
-						// :862-867 "user-modified, skipping"). A staged-hash read
-						// failure (the staged file should exist post-render) is
-						// treated as diverged — the safe, never-clobber choice.
-						if stagedHash, sErr := hashSHA256(stagedPath); sErr != nil || liveHash != stagedHash {
-							return FileOutcome{Path: rel, Class: cls.Class, Action: ActionManagedDiverged,
-								Note: "platform_managed diverged from origin hash (consumer-modified); preserved (not clobbered)"}, nil
-						}
-						// live == staged: fall through (managedNoop + origin advance
-						// self-heals the interrupted generation).
-					}
-					// liveHash == origin (unedited): fall through to managedUpToDate's
-					// safe overwrite/noop default (both staged and live are readable
-					// here, so managedUpToDate can compare them honestly).
-				}
-				// A directory (or stat error other than NotExist) at the path is
-				// not a confirmed divergence: fall through so the write is
-				// attempted and any failure is reported as WriteFailed.
+			}
+			if reason := managedfile.ClassifyPreserved(regenerated, hadOrigin, origin, live, stagedHash); reason != "" {
+				return FileOutcome{Path: rel, Class: cls.Class, Action: ActionManagedDiverged,
+					PreservedReason: reason, Note: noteForPreservedReason(reason)}, nil
 			}
 		}
 		// IsMutableByGenericRender(ClassPlatformManaged) == true: the generic
@@ -731,6 +702,65 @@ func hashSHA256(p string) (string, error) {
 		return "", err
 	}
 	return originhash.Digest(data), nil
+}
+
+// readLiveFile is the SEAM over the live-tree read used by the origin-hash
+// three-way check (buildLiveState). Production uses os.ReadFile; unit tests
+// override it to inject a DETERMINISTIC read failure (F8) — proving the
+// unreadable-file safety path without relying on OS permission bits, which
+// skip under root / permissive filesystems (the pre-F8 test's t.Skip hole).
+// It is package-scoped (not exported) so ONLY the managed-file three-way live
+// read goes through it; staged reads (hashSHA256 of stagedPath) and the
+// managedUpToDate comparison keep using os.ReadFile directly. Tests that
+// override it MUST restore the default (readLiveFile = os.ReadFile) on cleanup.
+var readLiveFile = os.ReadFile
+
+// buildLiveState observes a live managed file (stat + read via the readLiveFile
+// seam + hash) and returns the managedfile.LiveState ClassifyPreserved consumes.
+// It is the single place the origin-hash three-way check touches the live
+// filesystem, kept IO-isolated so the classifier stays a pure, unit-testable
+// function. See managedfile.LiveState for the field construction contract.
+func buildLiveState(livePath string) managedfile.LiveState {
+	info, err := os.Stat(livePath)
+	if os.IsNotExist(err) {
+		return managedfile.LiveState{Absent: true}
+	}
+	if err != nil || info.IsDir() {
+		// A directory at a managed path, or a stat error other than NotExist:
+		// the zero LiveState (NOT a preserved state). The caller falls through
+		// to the write path, where a blocked write surfaces as WriteFailed
+		// rather than being hidden as a "respected deletion" — preserving the
+		// partial-failure semantics that a blocked write is reported.
+		return managedfile.LiveState{}
+	}
+	ls := managedfile.LiveState{IsRegular: true}
+	if data, rerr := readLiveFile(livePath); rerr == nil {
+		ls.Readable = true
+		ls.Hash = originhash.Digest(data)
+	}
+	// rerr != nil (e.g. write-permitted-but-not-readable, or an injected F8
+	// failure): Readable stays false, Hash "". ClassifyPreserved classifies a
+	// stat-able regular file it cannot read as Unreadable (preserve, never
+	// clobber a possible edit the read could not inspect).
+	return ls
+}
+
+// noteForPreservedReason maps a typed preserved reason to the human-readable
+// diagnostics Note carried on the FileOutcome. The Note is diagnostics ONLY
+// (never a correctness signal — the typed FileOutcome.PreservedReason field is
+// the correctness signal). The strings are kept byte-stable with the pre-refactor
+// values so existing Note-substring assertions and human readers are unaffected.
+func noteForPreservedReason(r managedfile.PreservedReason) string {
+	switch r {
+	case managedfile.ConsumerDelete:
+		return "platform_managed previously rendered; absent on disk (consumer-deleted); not re-seeded"
+	case managedfile.ConsumerEdit:
+		return "platform_managed diverged from origin hash (consumer-modified); preserved (not clobbered)"
+	case managedfile.Unreadable:
+		return "platform_managed live file unreadable (cannot confirm consumer edit); preserved (not clobbered)"
+	default:
+		return ""
+	}
 }
 
 func fieldErrorsString(errs []schema.FieldError) string {

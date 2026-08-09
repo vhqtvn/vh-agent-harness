@@ -56,6 +56,35 @@ func findLivePlatformManagedPath(t *testing.T, root string) string {
 	return ""
 }
 
+// findLiveAuthoredPlatformManagedPath is like findLivePlatformManagedPath but
+// EXCLUDES the platform-regenerated paths (regeneratedPlatformPaths, today:
+// allowed-commands.js). Use this for tests that need a managed path whose
+// origin-hash three-way preservation actually applies (consumer edits/deletions
+// update respects) — i.e. NOT a path the platform overwrites canonically every
+// apply. The base helper can return a regenerated path (allowed-commands.js IS
+// platform_managed in the corpus defaults), which would silently flip a test's
+// expected preserved-vs-genuine verdict; this variant removes that flake.
+func findLiveAuthoredPlatformManagedPath(t *testing.T, root string) string {
+	t.Helper()
+	def, err := corpus.CoreOwnershipDefaults()
+	if err != nil {
+		t.Fatalf("core ownership defaults: %v", err)
+	}
+	for p, rule := range def {
+		if rule.Class != ownership.ClassPlatformManaged {
+			continue
+		}
+		if regeneratedPlatformPaths[p] {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(p))); err == nil {
+			return p
+		}
+	}
+	t.Fatalf("no live authored (non-regenerated) platform_managed path found under %s", root)
+	return ""
+}
+
 // findLiveDefaultNonManagedPath returns the repo-relative slash path of a corpus
 // path whose DEFAULT ownership class is project_owned (e.g. a render-independent
 // seed like README.md, Makefile, CLAUDE.md, .gitignore, docs/planning/backlog.md,
@@ -496,5 +525,179 @@ func TestFormatManagedDriftFail(t *testing.T) {
 	}
 	if !strings.Contains(got, "overlay pack source") {
 		t.Errorf("non-destructive remedy must appear; got %q", got)
+	}
+}
+
+// TestManagedDrift_ConsumerDelete_Preserved_NotMissing is the F1 regression
+// lock: a platform_managed file the consumer DELETED (but the platform
+// previously rendered, so it has a recorded origin hash) must be reported as a
+// NON-FAILING consumer-preserved-deletion signal (tierInfo), mirroring Apply —
+// which routes this exact case to ActionManagedDiverged "consumer-deleted; not
+// re-seeded" and does NOT restore the file. It must NOT be counted as missing
+// drift, because the missing-drift FAIL detail carries the remedy "run update to
+// re-render drifted/missing files from the corpus" — a FALSE claim for a path
+// update will NOT re-seed. This keeps doctor and Apply in agreement on day one
+// of the deletion-reconciliation (F1), the mirror of
+// TestManagedDrift_ConsumerEdit_Preserved_NotDrift for the deletion half.
+func TestManagedDrift_ConsumerDelete_Preserved_NotMissing(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	// Precondition: the install recorded an origin-hash store (so the deletion
+	// is TRACKED — the platform previously rendered this path).
+	if store, err := originhash.Read(root); err != nil || store == nil {
+		t.Fatalf("precondition: origin-hash store should be readable+non-nil after install: %v", err)
+	}
+
+	// Consumer deletes an AUTHORED (non-regenerated) managed file.
+	p := findLiveAuthoredPlatformManagedPath(t, root)
+	live := filepath.Join(root, filepath.FromSlash(p))
+	if err := os.Remove(live); err != nil {
+		t.Fatalf("consumer-delete %s: %v", p, err)
+	}
+
+	r := checkManagedDrift(root)
+	// Must NOT FAIL: the consumer deletion is a sanctioned preserved state.
+	if r.tier == tierFail {
+		t.Fatalf("consumer-deleted managed file must NOT missing-FAIL (update respects the deletion); got FAIL: %s", r.detail)
+	}
+	// Must surface as non-failing consumer-preserved-deletion (tierInfo), naming the path.
+	if r.tier != tierInfo {
+		t.Fatalf("want INFO (consumer-preserved-deletion) for consumer-deleted managed file, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "consumer-preserved") {
+		t.Errorf("INFO detail should mention consumer-preserved; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "deletion") {
+		t.Errorf("INFO detail should distinguish deletion from edit; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, p) {
+		t.Errorf("INFO detail should name the consumer-preserved-deletion path %q; got %q", p, r.detail)
+	}
+	// The deletion signal must NOT carry the false "run update to re-render
+	// missing files" claim (update will NOT restore a deletion it respects).
+	if strings.Contains(r.detail, "re-render drifted/missing") {
+		t.Errorf("INFO detail must NOT prescribe re-rendering missing files for a deletion update respects; got %q", r.detail)
+	}
+}
+
+// TestManagedDrift_UntrackedDelete_IsGenuineMissing is the F1 counterweight: a
+// managed file with NO recorded origin (bootstrap / pre-feature) that is absent
+// from disk is GENUINE missing drift — update WILL seed it. doctor must FAIL it
+// (the missing-drift remedy "run update" is accurate here), NOT carve it out as
+// consumer-preserved. This proves the F1 carve-out is gated on a TRACKED origin
+// (mirroring Apply's bootstrap handling) and does not swallow genuine missing.
+func TestManagedDrift_UntrackedDelete_IsGenuineMissing(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	// Remove the origin-hash store so the deleted file has NO recorded origin
+	// (bootstrap / pre-feature semantics): genuine missing, not a tracked
+	// consumer deletion.
+	if err := os.Remove(originhash.FilePath(root)); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove origin-hash store: %v", err)
+	}
+	p := findLiveAuthoredPlatformManagedPath(t, root)
+	live := filepath.Join(root, filepath.FromSlash(p))
+	if err := os.Remove(live); err != nil {
+		t.Fatalf("consumer-delete %s: %v", p, err)
+	}
+
+	r := checkManagedDrift(root)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for untracked (no origin) missing managed file, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "missing") {
+		t.Errorf("FAIL detail should report missing; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, p) {
+		t.Errorf("FAIL detail should name the missing path %q; got %q", p, r.detail)
+	}
+	if strings.Contains(r.detail, "consumer-preserved") {
+		t.Errorf("untracked missing must NOT be carved out as consumer-preserved; got %q", r.detail)
+	}
+}
+
+// TestManagedDrift_RegeneratedDelete_IsGenuineMissing is the F1 mirror of
+// TestManagedDrift_RegeneratedConsumerEdit_IsGenuineDrift for the deletion
+// case: a deleted platform-REGENERATED managed file (allowed-commands.js) is
+// GENUINE missing — seamApply EXEMPTS regenerated paths from origin-hash
+// preservation and would RE-SEED/re-emit it on the next update. doctor's
+// consumer-preserved-deletion carve-out must agree: reporting it as "update
+// respects your deletion" would be a false promise. A regenerated deletion
+// must FAIL as genuine missing.
+func TestManagedDrift_RegeneratedDelete_IsGenuineMissing(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	if store, err := originhash.Read(root); err != nil || store == nil {
+		t.Fatalf("precondition: origin-hash store should be readable after install: %v", err)
+	}
+
+	// Delete the REGENERATED managed file (allowed-commands.js). It HAS a
+	// recorded origin (apply records regenerated paths too), but the
+	// regenerated exemption must keep it genuine-missing.
+	p := ".opencode/repo-configs/allowed-commands.js"
+	live := filepath.Join(root, filepath.FromSlash(p))
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("precondition: %s should exist after install: %v", p, err)
+	}
+	if err := os.Remove(live); err != nil {
+		t.Fatalf("delete %s: %v", p, err)
+	}
+
+	r := checkManagedDrift(root)
+	if r.tier != tierFail {
+		t.Fatalf("deleted REGENERATED managed file (%s) must missing-FAIL (update re-emits it), got %s: %s", p, r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "missing") {
+		t.Errorf("FAIL detail should report missing; got %q", r.detail)
+	}
+	if strings.Contains(r.detail, "consumer-preserved") {
+		t.Errorf("deleted REGENERATED managed file must NOT be reported consumer-preserved (update re-emits it); got %q", r.detail)
+	}
+}
+
+// TestManagedDrift_CorruptOriginState_DeleteFailsLoud locks the fail-LOUD
+// contract for the F1 carve-out when the origin-hash store itself is corrupt or
+// unreadable: doctor tolerates the read error (it is diagnostic) by falling
+// back to a nil store, which makes Lookup report no prior origin everywhere.
+// A consumer-deleted file under a corrupt store is therefore NOT carved out as
+// consumer-preserved (no tracked origin to honor) — it FAILs as genuine
+// missing, which is the correct fail-LOUD behavior (the hard fail-closed
+// contract lives in Apply, not doctor). doctor must not crash and must not
+// falsely preserve the deletion.
+func TestManagedDrift_CorruptOriginState_DeleteFailsLoud(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	// Plant a corrupt origin-hash store (malformed JSON).
+	dir := filepath.Join(root, originhash.DirName)
+	if err := os.MkdirAll(dir, 0o75); err != nil {
+		t.Fatalf("mkdir store dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, originhash.FileName),
+		[]byte("{ this is not valid json "), 0o644); err != nil {
+		t.Fatalf("plant corrupt store: %v", err)
+	}
+
+	// Consumer deletes an authored managed file. Under a healthy store this
+	// would be consumer-preserved-deletion; under a corrupt store it MUST be
+	// genuine missing (fail-LOUD), never falsely preserved.
+	p := findLiveAuthoredPlatformManagedPath(t, root)
+	live := filepath.Join(root, filepath.FromSlash(p))
+	if err := os.Remove(live); err != nil {
+		t.Fatalf("consumer-delete %s: %v", p, err)
+	}
+
+	r := checkManagedDrift(root)
+	// doctor did not crash (it returned a result) and FAILs loud as missing.
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL (genuine missing) under corrupt origin store, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "missing") {
+		t.Errorf("FAIL detail should report missing; got %q", r.detail)
+	}
+	if strings.Contains(r.detail, "consumer-preserved") {
+		t.Errorf("corrupt origin store must NOT allow a deletion to be falsely preserved; got %q", r.detail)
 	}
 }
