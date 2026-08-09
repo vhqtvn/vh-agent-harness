@@ -94,6 +94,31 @@ test("validateRewriteParityStructural rejects structurally-invalid fixtures", ()
     }
 });
 
+// Regression lock for a cross-surface parity bug: Python `True == 1` meant the
+// python validator accepted `{"version": true}` while JS (strict !==) and Go
+// (decodes to bool) rejected it. The python validator now rejects booleans
+// explicitly; this test pins the JS side of that agreement so a future
+// relaxation is caught. See defer-rp-fixture-parity for full cross-language
+// fixture-driver parity (currently only JS drives all 9 golden fixtures).
+test("validateRewriteParityStructural rejects version:true (cross-surface parity with python/Go)", () => {
+    const errors = validateRewriteParityStructural({
+        version: true,
+        applies: "x",
+        mode: "deletion_replacement",
+        prior_surface: {
+            id: "a",
+            revision: "sha",
+            paths: ["p"],
+            inventory_complete: false,
+        },
+        behaviors: [],
+    });
+    assert.ok(
+        errors.some((e) => e.includes("version")),
+        "version:true must be rejected (parity with python/Go)",
+    );
+});
+
 // Completion-failing fixtures are structurally valid.
 test("completion-failing fixtures are structurally valid (fail at completion stage only)", () => {
     for (const name of [

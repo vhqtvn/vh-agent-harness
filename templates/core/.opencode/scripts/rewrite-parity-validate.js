@@ -2,9 +2,12 @@
 // rewrite-parity contract gate (OPT-D two-stage hybrid gate), JS mirror.
 //
 // This module is the JS mirror of rewrite-parity-validate.py (the REFERENCE
-// implementation). It is pinned to the same golden fixtures under
-// tests/fixtures/rewrite-parity/ so the python (commit-gate), JS (closeout),
-// and Go (doctor) implementations accept/reject identically.
+// implementation). The three implementations (python commit-gate, JS closeout,
+// Go doctor) aim for structural-rule-equivalence against one frozen v1 schema.
+// This JS mirror is pinned to all 9 golden fixtures under
+// tests/fixtures/rewrite-parity/; the python reference and Go mirror cover the
+// same structural rules via inline test cases. Cross-language fixture-driver
+// parity is a tracked follow-up (defer-rp-fixture-parity), not a present claim.
 //
 // Pure module: NO filesystem access, NO network, NO side effects. It is a
 // deterministic function of (contract, stage, context). That purity is

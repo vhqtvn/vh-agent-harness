@@ -134,7 +134,10 @@ func checkRewriteParity(target string) checkResult {
 // structurally inconsistent. A well-formed block contributes no reason. This
 // is the pure parsing core, separated so tests can drive it without touching
 // the filesystem. It mirrors the structural core of the python/JS validators
-// (rewrite-parity-validate.py / .js) so all three agree on the golden fixtures.
+// (rewrite-parity-validate.py / .js); the three aim for structural-rule-
+// equivalence against one frozen v1 schema. This Go mirror covers the rules
+// via inline test cases; only the JS mirror is pinned to all 9 golden fixtures
+// (cross-language fixture-driver parity is a tracked follow-up).
 func analyzeRewriteParityBlocks(body string) []string {
 	blocks := rewriteParityRe.FindAllStringSubmatch(body, -1)
 	var reasons []string

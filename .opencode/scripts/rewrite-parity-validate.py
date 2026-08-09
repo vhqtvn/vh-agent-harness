@@ -11,8 +11,12 @@
 #
 # This script is the REFERENCE implementation. The closeout transition
 # (state-lib.js, JS) and the doctor structural audit (Go) mirror its structural
-# core and are pinned by the same golden fixtures under tests/fixtures/
-# rewrite-parity/ so all three accept/reject identically.
+# core. The three implementations aim for structural-rule-equivalence against
+# one frozen v1 schema; the JS mirror is pinned to all 9 golden fixtures under
+# tests/fixtures/rewrite-parity/, while this python reference and the Go mirror
+# cover the same structural rules via inline test cases. Cross-language
+# fixture-driver parity is a tracked follow-up (defer-rp-fixture-parity), not a
+# present claim — do not assume fixture-for-fixture identity.
 #
 # TWO STAGES (mirrors behavioral-closure's authority split):
 #   Stage 1 (commit-gate, precommit): mechanical precheck with the tree in
@@ -96,8 +100,13 @@ def validate_structural(contract):
     if not isinstance(contract, dict):
         return ["contract must be a JSON object"]
 
-    if contract.get("version") != 1:
-        errors.append("version must be 1 (got %r)" % (contract.get("version"),))
+    # NOTE: a plain `!= 1` check would accept JSON `true` (Python `True == 1`).
+    # Reject booleans explicitly so this mirror agrees with the JS (`!== 1`,
+    # strict) and Go (decodes to bool, not float64) validators. See the
+    # cross-language parity note in the module header.
+    _v = contract.get("version")
+    if isinstance(_v, bool) or not isinstance(_v, int) or _v != 1:
+        errors.append("version must be the integer 1 (got %r)" % (_v,))
     if not _ne_str(contract.get("applies")):
         errors.append("applies must be a non-empty string")
     if contract.get("mode") not in VALID_MODES:
