@@ -414,25 +414,43 @@ release before its pilot validation landed.
 
 **Two-surface cross-check, joined by a stable hold ID — never prose matching:**
 
-- **Backlog row** (`docs/planning/backlog.md`) — authoritative for "a hold
-  exists." Enumerate rows carrying the S2-hold token; each carries a stable hold
-  ID (`s2-hold: S2-<skill>-001`) and a reference into the evidence packet.
+- **Backlog row** — authoritative for "a hold exists." Enumerate rows carrying
+  the S2-hold token across the **active backlog** (`docs/planning/backlog.md`,
+  all task sections) AND the **archive** (`docs/planning/archive/backlog-archive-*.md`).
+  Each carries a stable hold ID (`s2-hold: S2-<skill>-001`) in its Notes column
+  and the evidence-packet path (`researches/sources/<file>.md`) in its Links
+  column.
 - **Evidence packet** (`researches/sources/`) — authoritative for "the pilot
-  succeeded." Each record is joined to its backlog row by the SAME stable hold
-  ID and carries a verdict: `PENDING` (pilot not yet landed) or `SATISFIED`
-  (real pilot provenance + positive evidence recorded).
+  succeeded." Each record is a machine-parseable block joined to its backlog
+  row by the SAME stable hold ID and carries a verdict from the closed enum
+  `PENDING | SATISFIED | WITHDRAWN`:
+  ```
+  ### S2 hold: S2-<skill>-001
+  - Verdict: PENDING | SATISFIED | WITHDRAWN
+  - Skill: <skill-slug>
+  - Pilot: <repo> (retrospective)
+  ```
+  (the `Pilot` parenthetical is either `(retrospective)` or `(forward)` — a
+  literal value, not a pipe expression). `PENDING` = pilot not yet landed;
+  `SATISFIED` = real pilot provenance + positive evidence recorded (the
+  `- Pilot:` field is required); `WITHDRAWN` = the hold was explicitly
+  withdrawn. The `- Skill:` value MUST equal the `<skill>` encoded in the hold
+  ID (`S2-<skill>-NNN`); a mismatch is an evaluator-error.
 
 G6 cross-checks BOTH surfaces and blocks on disagreement. Do NOT infer
 satisfaction from narrative prose — only the joined records count.
 
 **Evidence collection (read-only):**
 
-1. Enumerate backlog rows carrying the S2-hold token.
-2. For each, follow its stable hold ID + evidence-packet reference.
-3. Require EXACTLY ONE matching evidence record (joined by the same hold ID).
-4. Confirm the evidence record identifies the held skill AND a real pilot.
+1. Enumerate backlog rows carrying the S2-hold token across active + archive.
+2. For each, follow its stable hold ID + the evidence-packet path in its Links
+   column.
+3. Require EXACTLY ONE matching evidence record (joined by the same hold ID) —
+   a single-record / single-verdict invariant over the UNION of active + archive.
+4. Confirm the evidence record identifies the held skill AND, when `SATISFIED`,
+   a real pilot.
 
-**Evaluation:**
+**Advisory evaluation (this agent's handoff):**
 
 - **BLOCKER** (`id: "G6_Skill_Pilot_Evidence"`) when ANY of:
   - a tagged S2 hold is still `PENDING`;
@@ -450,19 +468,52 @@ satisfaction from narrative prose — only the joined records count.
 demoted to a soft warning.** A `PENDING` or disagreed hold is a hard stop on the
 handoff.
 
+**cancelled / WITHDRAWN disposition.** A `cancelled` backlog row carrying an
+`s2-hold:` token is ambiguous, so the gate treats it fail-closed: it blocks
+until resolved by EITHER removing the token OR a matching evidence record with
+`Verdict: WITHDRAWN`. `cancelled` + `WITHDRAWN` is the one clear disposition for
+a cancelled hold; `cancelled` + any other verdict is a structural refusal.
+
+**Authoritative wrapper classification (the deterministic gate).** The
+release-tag wrapper re-derives G6 from committed state (HEAD:) via the
+deterministic evaluator `check-s2-holds.mjs` (ships from `templates/core/`).
+Its top-level classification is a three-value taxonomy:
+
+- **clear** — no holds, or every hold resolved (`done` + `SATISFIED`, or
+  `cancelled` + `WITHDRAWN`).
+- **blocker** — structurally VALID inputs, legitimate no-release: a `PENDING`
+  hold, or a status/verdict disagreement. Remedy: resolve the hold.
+- **evaluator-error** — structurally INVALID inputs: evidence missing/malformed/
+  duplicate/unreadable; backlog token malformed; unknown verdict; join ambiguous
+  (zero/>1); `cancelled` + `s2-hold` unresolved. Remedy: REPAIR records.
+
+Both `blocker` and `evaluator-error` force `ready: no` and refuse BEFORE
+`git tag -a`. The wrapper cross-checks the evaluator's exit code against its
+classification and fail-closes on any mismatch. The readiness agent's own G6
+verdict is ADVISORY only — the wrapper does NOT consume it (model output is
+never transition authority).
+
 **Remediation:** delegate to the pilot-evidence/backlog owner — they land the
 real pilot provenance + positive evidence in `researches/sources/`, set the
 record `SATISFIED`, and resolve the matching backlog row in
 `docs/planning/backlog.md`. The readiness agent edits NEITHER record.
 
 **Scope fence (honest framing):** G6 blocks the readiness HANDOFF — the positive
-`handoff_to_releaser` field. It does NOT by itself physically prevent a tag: the
-mutation-capable release wrapper (`releaser`) is a separate boundary that may
-become a follow-up enforcement point. This agent never lets its own model output
-become transition authority — it only refuses to populate the handoff. There is
-NO bypass in this slice: no env var, no operator-directive override clears a G6
-block. (A future emergency exception would be a SEPARATE policy mechanism, not
-ordinary G6 clearance, and would leave the S2 verdict visibly `PENDING`.)
+`handoff_to_releaser` field — AND this repository's release-tag wrapper enforces
+the same contract AUTHORITATIVELY at tag time. The deterministic EVALUATOR and
+its machine-parseable contract ship from `templates/core/`, so the contract is
+no longer dogfood-local; however, the wrapper that invokes the evaluator
+(`scripts/release-tag.sh`) IS still dogfood-local, so the precise claim is:
+every consumer receives the evaluator + contract, and THIS repo's wrapper
+enforces it at tag time (a consumer that wires its own release wrapper to the
+same evaluator gets the same enforcement). The wrapper binds G6 to the exact
+commit being tagged (HEAD_SHA), not the moving HEAD. This agent never lets its
+own model output become transition authority — it only refuses to populate the
+handoff; the wrapper independently re-derives G6 from committed state. There is
+NO bypass: no env var, no operator-directive override clears an S2-hold block at
+either surface. (A future emergency exception would be a SEPARATE policy
+mechanism, not ordinary G6 clearance, and would leave the S2 verdict visibly
+`PENDING`.)
 
 ### G7 — release-time DEFER enforcement gate (advisory)
 

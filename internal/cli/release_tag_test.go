@@ -182,6 +182,20 @@ func setupReleaseTagRepo(t *testing.T) (scratch, wrapper, tasksDir, msgFile stri
 	if err := os.WriteFile(evalDst, []byte(renderedEval), 0o644); err != nil {
 		t.Fatalf("write evaluator: %v", err)
 	}
+	// G6 evaluator (check-s2-holds.mjs) — domain-free, no render tokens. The
+	// wrapper's G6 gate invokes it at tag time; copy it so the green-path
+	// scratch repo clears G6 (no S2 holds committed → clear). Without it, G6
+	// fails fail-closed (evaluator missing → exit 2) and every green-path test
+	// breaks.
+	s2EvalSrc := filepath.Join(root, "templates", "core", ".opencode", "scripts", "check-s2-holds.mjs")
+	s2EvalBody, err := os.ReadFile(s2EvalSrc)
+	if err != nil {
+		t.Fatalf("read s2 evaluator template %s: %v", s2EvalSrc, err)
+	}
+	s2EvalDst := filepath.Join(scratch, ".opencode", "scripts", "check-s2-holds.mjs")
+	if err := os.WriteFile(s2EvalDst, s2EvalBody, 0o644); err != nil {
+		t.Fatalf("write s2 evaluator: %v", err)
+	}
 	// Create .local/coordinator/tasks/ (the rendered default tasks dir).
 	tasksDir = filepath.Join(scratch, ".local", "coordinator", "tasks")
 	if err := os.MkdirAll(tasksDir, 0o755); err != nil {

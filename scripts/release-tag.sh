@@ -509,11 +509,12 @@ fi
 #        mask what CI's fresh checkout will see and breaks the
 #        committed-blob authority contract the override ceremony binds to)
 #
-# G6-structure (S2 cross-check) is intentionally DEFERRED to a follow-up
-# phase: the backlog prose parsing for `s2-hold:` tokens is heuristic and
-# the readiness agent's G6 model-driven judgment already covers this gate
-# at the model layer. A wrapper-side deterministic re-computation will
-# land when the parsing contract is firmly established.
+# G6-structure (S2 skill-pilot cross-check) is now ENFORCED deterministically
+# below — see the "release S2-hold deterministic gate (G6)" block that runs
+# after G1-G5 and before `git tag -a`. The evaluator at
+# .opencode/scripts/check-s2-holds.mjs derives G6 from committed backlog rows
+# (active + archive) + evidence packets joined by a stable hold ID, so a model
+# surface (the readiness report's G6 verdict) cannot bypass it.
 #
 # Cost: G0 typically takes ~15s on this repo (dominated by `go test ./...`).
 # This is the price of mechanical readiness enforcement at the tag
@@ -830,6 +831,114 @@ if printf '%s' "$RV_GATES" | grep -Eq '=blocked|=skipped'; then
     "release-readiness-gate: G1-G5 not all ready (${RV_GATES}); every model-driven gate must report ready before tagging" \
     "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
   exit 1
+fi
+
+# --- release S2-hold deterministic gate (G6) ---
+#
+# Independent re-computation at tag time of the G6 (skill-pilot S2-hold) gate.
+# The wrapper DERIVES G6 from committed primary state (HEAD:), so a model
+# surface (the readiness report's G6 verdict) cannot bypass it. This preserves
+# the sacred invariant: model output is never transition authority. The
+# readiness agent's G6 verdict is NOT consumed here.
+#
+# The deterministic evaluator at .opencode/scripts/check-s2-holds.mjs reads
+# COMMITTED backlog rows (active + archive) and evidence packets
+# (researches/sources/) joined by a stable hold ID, and refuses on any PENDING
+# hold, status/verdict disagreement, or structurally invalid input. Mirrors
+# the G7 two-tier model (check-defer-triggers.mjs): the same surface contract
+# is consumed ADVISORY by the readiness agent and AUTHORITATIVELY here.
+#
+# This deterministic EVALUATOR + its machine-parseable contract ship from
+# templates/core/ (platform_managed), so every consumer receives them. THIS
+# wrapper (release-tag.sh, dogfood-local — not in templates/core) enforces the
+# contract authoritatively at tag time; a consumer that wires its own release
+# wrapper to the same evaluator gets the same enforcement. The readiness agent
+# remains the dogfood demonstrator of the same contract (advisory).
+#
+# Revision binding: the evaluator is invoked with --commit "$HEAD_SHA" so G6 is
+# derived from the EXACT commit the wrapper will tag, not the moving HEAD. This
+# closes the race where a concurrent commit resolves a hold in a newer HEAD
+# while the tag stays pinned to the earlier captured commit.
+#
+# Classification (top-level): clear | blocker | evaluator-error (NO disclose —
+# S2 holds are a binary gate). Both blocker and evaluator-error force ready:no
+# and refuse BEFORE `git tag -a`. NO override cures an S2-hold block.
+#   clear            — no holds, or every hold resolved (done+SATISFIED or
+#                      cancelled+WITHDRAWN).
+#   blocker          — structurally VALID, legitimate no-release: a PENDING
+#                      hold or a status/verdict disagreement. Remedy: resolve
+#                      the hold.
+#   evaluator-error  — structurally INVALID: evidence missing/malformed/
+#                      duplicate/unreadable; backlog token malformed; unknown
+#                      verdict; join ambiguous (zero/>1); cancelled+s2-hold
+#                      unresolved. Remedy: REPAIR records.
+S2_OUTPUT=""
+S2_EXIT=0
+S2_OUTPUT=$(node .opencode/scripts/check-s2-holds.mjs --commit "$HEAD_SHA" 2>/dev/null) || S2_EXIT=$?
+
+# Parse the evaluator JSON, cross-check exit + classification, and produce a
+# single pass/refuse verdict. Fail-closed: missing/crashed/unparseable
+# evaluator, a classification other than clear, OR an exit code that disagrees
+# with the classification all refuse BEFORE `git tag -a`.
+S2_PARSED=$(printf '%s' "$S2_OUTPUT" | node -e '
+  let data = "";
+  process.stdin.on("data", (c) => (data += c));
+  process.stdin.on("end", () => {
+    function refuse(reason, classification) {
+      process.stdout.write(JSON.stringify({ pass: false, classification: classification || "evaluator-error", reason: reason }));
+    }
+    if (!data) {
+      refuse("release-s2-gate: evaluator produced no output (missing or crashed .opencode/scripts/check-s2-holds.mjs)");
+      return;
+    }
+    let o;
+    try { o = JSON.parse(data); } catch (e) {
+      refuse("release-s2-gate: evaluator output unparseable");
+      return;
+    }
+    const exitMap = { clear: 0, blocker: 1, "evaluator-error": 2 };
+    const cls = o.classification;
+    if (exitMap[cls] === undefined) {
+      refuse("release-s2-gate: evaluator returned unknown classification " + JSON.stringify(cls));
+      return;
+    }
+    const ids = Array.isArray(o.blocking_ids) && o.blocking_ids.length
+      ? (" ids=[" + o.blocking_ids.join(",") + "]") : "";
+    const errTail = o.error ? (" (" + o.error + ")") : "";
+    process.stdout.write(JSON.stringify({
+      pass: cls === "clear",
+      classification: cls,
+      expected_exit: exitMap[cls],
+      reason: cls === "clear" ? "" : ("release-s2-gate: " + cls + ids + errTail),
+    }));
+  });
+' 2>/dev/null) || true
+
+if [ -z "$S2_PARSED" ]; then
+  S2_PARSED='{"pass":false,"classification":"evaluator-error","reason":"release-s2-gate: evaluator verdict parse crashed"}'
+fi
+
+S2_PASS=$(printf '%s' "$S2_PARSED" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(JSON.parse(d).pass?"1":"0");})') || S2_PASS=0
+S2_CLASSIFICATION=$(printf '%s' "$S2_PARSED" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(JSON.parse(d).classification||"");})') || S2_CLASSIFICATION="evaluator-error"
+S2_EXPECTED_EXIT=$(printf '%s' "$S2_PARSED" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{const v=JSON.parse(d).expected_exit;process.stdout.write(v===undefined?"":String(v));})') || S2_EXPECTED_EXIT=""
+S2_REASON=$(printf '%s' "$S2_PARSED" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(JSON.parse(d).reason||"");})') || S2_REASON="release-s2-gate: failed"
+
+# Cross-check: the evaluator's exit code must match its classification. A
+# mismatch (e.g. classification=clear but exit≠0, or a crash exit like 127 with
+# a parseable payload) is a fail-closed evaluator-error — a buggy or stale
+# evaluator must never silently pass.
+S2_CROSS_OK=1
+if [ -n "$S2_EXPECTED_EXIT" ] && [ "$S2_EXIT" != "$S2_EXPECTED_EXIT" ]; then
+  S2_CROSS_OK=0
+  S2_REASON="release-s2-gate: evaluator exit (${S2_EXIT}) disagrees with its classification (${S2_CLASSIFICATION}, expected exit ${S2_EXPECTED_EXIT})"
+fi
+
+if [ "$S2_PASS" != "1" ] || [ "$S2_CROSS_OK" != "1" ]; then
+  emit false "$VERSION" "" false "$S2_REASON" "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON"
+  if [ "$S2_CROSS_OK" = "1" ] && [ "$S2_CLASSIFICATION" = "blocker" ]; then
+    exit 1
+  fi
+  exit 2
 fi
 
 # --- pre-tag disclosure print ---
