@@ -60,10 +60,11 @@ retirement, with promotion as an exceptional side path) lives in
   `vh-agent-harness exec node .opencode/scripts/normalize-backlog.js`) after a
   batch edit.
 - **Retire on landing, not on review approval.** A `completed` card is retired
-  only after a commit carrying `Task-Card: <card-id>` is reachable from the
-  integration branch (a `git log <branch> --fixed-strings --grep` reachability
-  check, NOT object existence; see RECORD_LIFECYCLE.md → landing-proof contract
-  for the exact form).
+  only after a commit carrying the exact `Task-Card: <card-id>` trailer line is
+  reachable from a branch (a `git log --branches --fixed-strings --grep`
+  reachability check, each candidate post-filtered to an exact trailer line, NOT
+  object existence; see RECORD_LIFECYCLE.md → landing-proof contract for the
+  exact form).
 - **DEFER / p2 / follow-up:** capture to `.local/coordinator/tasks/`
   via `/write-task` with Notes provenance — but only after the admission bar.
   Do **not** add a backlog row directly. Promotion happens only after a

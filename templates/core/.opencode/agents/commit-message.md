@@ -34,8 +34,8 @@ Rules:
   message body (one line per card the commit satisfies). This is the join key
   for the card/DEFER landing-proof contract (see
   `docs/coordination/RECORD_LIFECYCLE.md`): a `completed` card may be retired
-  as done only when a commit carrying the exact trailer is reachable from the
-  integration branch. The committer is **pass-through** (it does not rewrite
+  as done only when a commit carrying the exact trailer line is reachable from a
+  branch. The committer is **pass-through** (it does not rewrite
   the message — see the committer agent's rule "Preserve the commit message"),
   so the trailer MUST originate here in the draft; it cannot be gate-appended
   today. If no card tracks the work, omit the trailer (an ad-hoc commit needs
@@ -58,10 +58,13 @@ Rules:
 
 - The verifier is reachability, never object existence (per the
   closure-verifier reachability rule):
-  `git log <branch> --fixed-strings --grep="Task-Card: <card-id>"` ≥ 1 means
-  the work landed and the card may be retired.
-- The `<branch>` is the commit-gate's reported branch (the integration branch
-  the gate commits against) — repo-configured, never a hardcoded name.
+  `git log --branches --fixed-strings --grep=Task-Card: <card-id>` (each
+  candidate post-filtered to an exact `Task-Card: <card-id>` trailer line) ≥ 1
+  means the work landed and the card may be retired.
+- `--branches` walks all local branch tips — branch-GENERIC, no hardcoded
+  branch name (mirrors doctor #24's `git rev-list --branches`). The match is an
+  exact trailer line, not a substring, so `Task-Card: alpha-next` does NOT
+  satisfy card `alpha`. See `docs/coordination/RECORD_LIFECYCLE.md`.
 
 Default output:
 - review gate summary

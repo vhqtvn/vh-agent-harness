@@ -274,10 +274,11 @@ C follows the repo convention from `commit-message` agent output. The message A 
 
 **`Task-Card:` trailer (pass-through).** A card-driven commit carries a
 `Task-Card: <card-id>` trailer in its body (one per card the commit satisfies;
-exact prefix for machine query). This is the join key for the card/DEFER
+exact line for machine query). This is the join key for the card/DEFER
 landing-proof contract — a `completed` card may be retired only when a commit
-carrying the exact trailer is reachable from the integration branch
-(`git log <branch> --fixed-strings --grep="Task-Card: <card-id>"` ≥ 1; see
+carrying the exact trailer line is reachable from a branch
+(`git log --branches --fixed-strings --grep=Task-Card: <card-id>`, each
+candidate post-filtered to an exact trailer line, ≥ 1; see
 `docs/coordination/RECORD_LIFECYCLE.md`). C is **pass-through** (rule 7: never
 rewrite the message), so the trailer MUST originate in the `commit-message`
 draft that A hands to C — it cannot be gate-appended today. A gate-appended

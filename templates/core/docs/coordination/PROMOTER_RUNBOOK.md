@@ -210,11 +210,11 @@ cycle with a narrow reconciliation pass. Run ALL of:
      its trigger has fired (for trigger-gated candidates) AND it meets the
      Definition of Ready (1d). No boundary ⇒ drain it directly (work, land,
      retire) — do NOT promote.
-   - **Retire done cards on landing.** A `completed` card is retired only after
-     a commit carrying `Task-Card: <card-id>` is reachable from the integration
-     branch (see [RECORD_LIFECYCLE.md](RECORD_LIFECYCLE.md) → landing-proof
-     contract). A lingering `completed` card corrupts the count signal — drain
-     it, do not park it.
+    - **Retire done cards on landing.** A `completed` card is retired only after
+      a commit carrying the exact `Task-Card: <card-id>` trailer line is
+      reachable from a branch (see [RECORD_LIFECYCLE.md](RECORD_LIFECYCLE.md) →
+      landing-proof contract). A lingering `completed` card corrupts the count
+      signal — drain it, do not park it.
    - **Detect orphans.** A backlog row with no corresponding card, no closeout,
      and no recent activity is an anomaly — either close it (`cancelled` with a
      reason) or flag it for the operator. Do NOT silently delete history.

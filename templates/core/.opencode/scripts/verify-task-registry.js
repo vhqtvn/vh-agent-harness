@@ -2798,9 +2798,16 @@ function main() {
         // root confinement, (11j) cleanup compatibility, (11k) symlink-escape
         // refusal (physical confinement — a symlinked report target is refused
         // and the external sentinel survives), (11l) reported lifecycle-guard
-        // refusal + forced override, and (11m/11n/11o) blocked, completed, and
-        // stale-working lifecycle-guard refusals proving card + report evidence
-        // survive intact when a pending coordinator gate owns the card.
+        // refusal + forced override, and (11m/11o) blocked and stale-working
+        // lifecycle-guard refusals proving card + report evidence survive
+        // intact when a pending coordinator gate owns the card.
+        //
+        // `completed` is NOT in this block: it enters the landing-gated
+        // retirement path (4c in deleteCoordinationTask — completed + a
+        // reachable `Task-Card:` trailer → deleted; otherwise a structured
+        // landing_not_confirmed refusal). That path needs a git fixture, so it
+        // is covered by the dedicated hermetic suite
+        // tests/scripts/task-delete-retirement.test.js rather than here.
         //
         // Every fixture id is pushed to createdTaskIDs so the finally-block
         // cleanupArtifacts runs over ids whose card + report dir were already
@@ -3466,15 +3473,19 @@ function main() {
         }
         assertAbsent(reportedID, "Case 11l");
 
-        // 11m/11n/11o. Blocked, completed, and stale-working (no active owner)
-        //      cards: each is protected by the lifecycle guard. A blocked card
-        //      awaits a coordinator decision; a completed card has a closeout
-        //      report awaiting review; a stale working card (no active owner)
-        //      may carry in-progress artifacts. Each refusal must leave the
-        //      card + report dir + sentinel byte-identical and intact.
+        // 11m/11o. Blocked and stale-working (no active owner) cards: each is
+        //      protected by the in-flight lifecycle guard (4b). A blocked card
+        //      awaits a coordinator decision; a stale working card (no active
+        //      owner) may carry in-progress artifacts. `completed` is NOT in
+        //      this set — it enters the landing-gated retirement path (4c:
+        //      verifyLandingProof — completed + reachable Task-Card trailer →
+        //      deleted; otherwise landing_not_confirmed), covered by the
+        //      dedicated hermetic suite
+        //      tests/scripts/task-delete-retirement.test.js. Each refusal here
+        //      must leave the card + report dir + sentinel byte-identical and
+        //      intact.
         const lifecycleStatusFixtures = [
             { label: "11m", status: "blocked", title: "Delete test blocked card" },
-            { label: "11n", status: "completed", title: "Delete test completed card" },
             { label: "11o", status: "working", title: "Delete test stale-working card" },
         ];
         for (const spec of lifecycleStatusFixtures) {

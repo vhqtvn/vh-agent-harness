@@ -108,7 +108,8 @@ landing commit.
   This means the change is acceptable to commit. It does NOT mean the change
   landed.
 - **Landing** — the commit-gate committed the slice and the resulting commit is
-  reachable from the integration branch (the commit-gate's reported branch).
+  reachable from a branch (any local branch tip — see the landing-proof
+  contract below).
 
 A card is retired as `done` only on **landing**, never on review approval
 alone. The 2026-08-07 lesson: a card was deleted on review approval alone and
@@ -117,24 +118,34 @@ gate reported failure. Review approval is necessary but not sufficient.
 
 ## The landing-proof contract
 
-A `completed` card may be retired as `done` ONLY when a commit carrying the
-exact `Task-Card: <card-id>` trailer is reachable from the integration branch.
-The verifier is a **reachability** check (per the closure-verifier reachability
-rule — never object existence):
+A `completed` card may be retired as done ONLY when a commit carrying the exact
+`Task-Card: <card-id>` trailer line is reachable from a branch. The verifier is
+a **reachability** check (per the closure-verifier reachability rule — never
+object existence):
 
 ```
-git log <branch> --fixed-strings --grep="Task-Card: <card-id>"
+git log --branches --fixed-strings --grep=Task-Card: <card-id>
 ```
 
-≥1 match means the work landed and the card may be retired. 0 matches means the
-work has NOT landed; the card MUST NOT be retired (it stays in `working` /
-`reported`, and if the commit failed it is re-driven).
+The `--grep` is a substring pre-filter; the verifier then post-filters each
+candidate commit's body to a line EXACTLY equal to `Task-Card: <card-id>` (a
+`Task-Card: alpha-next` line does NOT satisfy card `alpha`). ≥1 exact, reachable
+match means the work landed and the card may be retired. 0 matches means the
+work has NOT landed; the card MUST NOT be retired (it stays `completed`, and if
+the commit failed it is re-driven).
 
-- **Branch.** `<branch>` is the commit-gate's reported branch (the integration
-  branch the gate commits against). It is repo-configured, never a hardcoded
-  name.
-- **One trailer per card.** A commit body carries one `Task-Card: <card-id>`
-  line per card the commit satisfies (exact prefix for machine query).
+- **Branch scope.** `--branches` walks ALL local branch tips (`refs/heads/*`)
+  — branch-GENERIC with no hardcoded `main` (mirrors doctor #24's
+  `git rev-list --branches`); a match proves BOTH landing AND reachability in
+  one query. The choice is deliberately broader than a single integration
+  branch: it avoids bricking retirement on a stale/wrong gate-reported branch
+  name, and a card is local transport (gitignored), so a premature retire is a
+  local self-footgun, not a system-integrity breach. The singular `<branch>`
+  notation used in earlier drafts is realized branch-generically by `--branches`.
+- **Exact trailer line.** A commit body carries one `Task-Card: <card-id>`
+  line per card the commit satisfies. The verifier matches the line exactly
+  (trimmed equality), not as a substring — prefix collisions (`alpha` vs
+  `alpha-next`) do not authorize the shorter id.
 - **Committer is pass-through.** The committer agent does not rewrite the
   commit message, so the trailer MUST originate in the `commit-message` draft
   — it cannot be gate-appended today.
@@ -172,9 +183,8 @@ the durable record of completed work. There are:
 - The operator escape hatch and the gated-commit protocol are unchanged.
 - `/task-delete <id>` remains the sanctioned single-card retire wrapper for
   `draft`/`ready`/`cancelled` cards. For `completed` cards, retirement is
-  landing-gated: the sanctioned op enforces (will enforce, Slice 2) the
-  reachability check, so a direct `rm` of a `completed` card is NOT equivalent
-  — it bypasses the landing check.
+  landing-gated: the sanctioned op enforces the reachability check, so a direct
+  `rm` of a `completed` card is NOT equivalent — it bypasses the landing check.
 
 ## Reference
 

@@ -570,19 +570,20 @@ The canonical lifecycle is documented in
   sanctioned retire path equivalent to the wrapper for operators who know
   exactly what they are doing. For a **`completed` card this is NOT true**:
   retirement is landing-gated (below), so direct `rm` bypasses the landing
-  check and is forbidden — use the sanctioned op, which enforces (will enforce,
-  Slice 2) the reachability check.
+  check and is forbidden — use the sanctioned op, which enforces the
+  reachability check.
 - **Retire on landing, not on review approval.** A `completed` card may be
   retired as done ONLY when a commit carrying the exact `Task-Card: <card-id>`
-  trailer is reachable from the integration branch
-  (`git log <branch> --fixed-strings --grep="Task-Card: <card-id>"` ≥ 1). Never
-  retire on review approval alone — the 2026-08-07 lesson: a card was deleted on
+  trailer line is reachable from a branch
+  (`git log --branches --fixed-strings --grep=Task-Card: <card-id>`, each
+  candidate post-filtered to an exact trailer line, ≥ 1). Never retire on
+  review approval alone — the 2026-08-07 lesson: a card was deleted on
   review approval and the commit later failed to land. The `Task-Card:` trailer
   originates in the `commit-message` draft (the committer is pass-through and
   does not rewrite it). A gate-appended trailer / gate-ledger card-id→commit
   join is documented future-hardening, not v1. Legacy: the landing-proof
   requirement applies to new cards post-codification; pre-existing cards are
-  grandfathered until the Slice-2 retirement code lands.
+  grandfathered until the Slice-2 retirement code landed.
 - **Fog vs ticket (triage test).** A finding is **ticket-ready** when you can
   state the question precisely now — even if blocked. A finding is **fog** when
   you cannot yet phrase it that sharply: in-scope, but not yet specifiable. Fog
