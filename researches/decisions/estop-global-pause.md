@@ -1,25 +1,26 @@
 ---
 type: decision
 date: 2026-08-08
-scope: coordination/runtime layer — single-bit fail-safe global pause (pause NEW work only)
-status: research-complete, decision-recorded (operator-pre-classified P1 BORROW)
+scope: coordination/runtime layer — bounded repo-scoped pause on new work across enumerated dispatch entrypoints
+status: research-complete, decision-recorded, implemented-as-ad5f2e16
 source-basis: refs/hermes-agent @ 005421d888a40865cc61d143ff77efd87a037a1e (gitignored transport), cross-checked
 ---
 
-# ESTOP Global Pause — Decision Memo
+# Bounded Repo-Scoped Pause on New Work — Decision Memo
 
 ## Decision statement
 
-**BORROW** hermes's ESTOP-shaped global pause for the harness's
-coordination/runtime layer: a **single-bit, fail-safe, pause-NEW-work-only**
-global control. Engaging the pause holds back new dispatch (subagent spawn,
-background-job launch, coordinator/cron tick) without killing in-flight work.
-It is a resumable circuit breaker, not a panic/exit. This gives the operator
-a one-action kill-switch for the runaway-turn / stranded-work / token-loop
-failure class that saturates the dogfood opencode history.
+Implement a **bounded repo-scoped pause on new work across enumerated harness and OpenCode dispatch entrypoints** — explicitly NOT "global ESTOP," NOT "pause every agent," NOT an agent-loop interlock, and NOT an abort/kill switch. Engaging the pause holds back new dispatch (subagent spawn, background-job launch, coordinator/cron tick) without killing in-flight work. It is a resumable circuit breaker, honestly named `pause-new-work`. This gives the operator a one-action lever for the runaway-turn / stranded-work / token-loop failure class that saturates the dogfood opencode history.
 
-This is a recommendation the operator will decide on; the memo body does not
-speak as live repo policy.
+(Hermes's ESTOP mechanism inspired this, but the harness adoption is scoped strictly to what it can honestly own.)
+
+## Refinement history
+
+The original version of this memo proposed borrowing hermes's "global ESTOP" broadly. Three subsequent passes refined its specifics into the committed reality:
+
+1. **Solution-brief pass:** Reframed "global ESTOP" into a bounded repo-scoped pause on new work (`pause-new-work`). Corrected the fail-safe semantics to match the harness's reality (absent = disengaged, which is the opposite of hermes).
+2. **Dispatch-path inventory (PROCEED):** A read-only pass classified all 9 new-work admission paths. The load-bearing question — does `@subagent` cross the `TaskTool`/`tool.execute.before` seam? — resolved YES (high confidence). OpenCode's `resolvePart` (`refs/opencode/packages/opencode/src/session/prompt.ts:974-990`) appends synthetic instructions forcing the model to use `TaskTool`, so `@subagent` is model-mediated and covered by the plugin hook.
+3. **Build slice (`ad5f2e16`):** Shipped the `pause-new-work` command and sentinel contract. Discovered a contradiction: the solution brief blocked `/resume-task`, but `/resume-task` serves BOTH new dispatch (`ready→working`) and in-flight continuation (`working→working`). Blanket-blocking it would violate the invariant that in-flight work is untouched. Resolved in favor of the invariant: `/resume-task` is permitted, the precise JS gate sits at `activateCoordinationTask @ state-lib.js:6136-6255` (ready→working seam), and the OpenCode plugin blocks `tool==="task"` (new-child dispatch) ONLY. (The solution-brief incorrectly cited `state-lib.js:5961-6044` for this function; the correct address is `6136-6255`.)
 
 ## Why this is P1 (decision context)
 
@@ -114,7 +115,7 @@ sentinel consulted by the dispatch surfaces.
 
 ## Options considered
 
-- **OPT-A — Borrow hermes ESTOP (sentinel file, fail-safe, pause-new-work-only) (RECOMMENDED).**
+- **OPT-A — Implement pause-new-work (sentinel file, fail-safe, pause-new-work-only) (RECOMMENDED).**
   A sentinel file under repo-local state; `is_engaged()` = one `os.stat`;
   fail-safe (corrupt/empty still engaged); per-component log-once; pause-NEW-
   work only (never kill in-flight). The dispatch surfaces (subagent dispatch,
@@ -129,48 +130,40 @@ sentinel consulted by the dispatch surfaces.
 - **OPT-C — Kill-based panic/exit (hermes `/panic` shape).** Rejected: kill
   semantics destroy in-flight work (a half-written commit-gate, a partial
   render), which is exactly the "destroying the feature it secures" anti-
-  pattern. ESTOP is deliberately resumable; panic is not. The harness already
+  pattern. A pause is deliberately resumable; panic is not. The harness already
   has kill per-job (bgshell `stop`); it lacks pause.
 
 ## Recommendation
 
-**OPT-A.** Borrow hermes's ESTOP (framing for a separately-authorized slice):
+**OPT-A.** Implement `pause-new-work` (inspired by hermes's ESTOP) for a bounded repo-scoped pause:
 
-1. **Sentinel.** A sentinel file under repo-local state
-   (`.opencode/state/ESTOP` — repo-scoped, not a `HERMES_HOME`-equivalent;
-   see open question). `is_engaged()` = a single `os.Stat`; run on every
-   tick, no caching beyond the OS, so engage/disengage takes effect on the
-   next check (mirrors `estop.py:59-64`).
-2. **Fail-safe.** A corrupt/empty/partial sentinel still counts engaged
-   (mirrors `estop.py:17-19`). The pause is authoritative; the optional
-   `{reason, engaged_at}` JSON body is metadata only.
-3. **Pause NEW work only.** The surfaces that check it (and ONLY these):
-   subagent dispatch (before spawning a child), bgshell-job launch (before
-   starting a new job — NOT `stop`, which keeps its kill semantics for a
-   specific job), and the coordinator/cron tick (before claiming/resuming a
-   task). In-flight work is NEVER killed by the pause — it finishes or is
-   interrupted separately (mirrors `estop.py:12`).
-4. **Per-component log-once.** Each dispatch surface logs once per engagement
-   (re-arms after resume) so a long pause does not spam (mirrors
-   `estop.py:135-161`).
-5. **Recovery.** Disengage the sentinel → resume. Open: auto-resume on
-   disengage (surfaces pick up on next tick naturally) vs an explicit
-   operator-triggered resume verb.
+1. **Sentinel.** A sentinel file under repo-local state (`.opencode/state/PAUSE_NEW_WORK` or similar — repo-scoped). `is_engaged()` = a single `os.Stat`; run on every tick, no caching beyond the OS, so engage/disengage takes effect on the next check.
+2. **Fail-safe (Contract opposite of hermes).** In the harness, ordinary operation has NO sentinel, so "missing=engaged" is impossible. The contract: absent=disengaged; present+valid=engaged; present+malformed/empty/unreadable=engaged (fail-safe); indeterminate filesystem failure=refuse covered work + report degraded. Disengagement, status, diagnostics, and recovery remain reachable even under degraded state.
+3. **Pause NEW work only (Implemented as ad5f2e16).** The 3 gate seams that check it (and ONLY these):
+   - JS: `activateCoordinationTask @ state-lib.js:6136-6255` (prevents `ready→working` claim, while allowing `working→working` continuation via `/resume-task`).
+   - Python: `bgshell_job.py` pre-spawn (before starting a new job, keeping kill semantics for `stop`).
+   - Plugin: OpenCode `tool.execute.before` intercepting `TaskTool` (blocks new-child dispatch only, never blanket), plus 4-command dispatch interception.
+   In-flight work is NEVER killed by the pause — it finishes or is interrupted separately.
+4. **Coverage exclusions.** Ordinary chat (no hook), diagnostic tools (tool-id whitelist), closeout/status/recovery commands (command-name whitelist), and non-dispatch tool calls by an in-flight turn are deliberately NOT blocked.
+5. **Per-component log-once.** Each dispatch surface logs once per engagement (re-arms after resume) so a long pause does not spam.
+6. **Recovery.** Disengage the sentinel → resume. Auto-resume on disengage; the sentinel's absence IS the resume signal.
 
-The interaction with the existing interrupt/steer surfaces is additive, not
-overlapping: interrupt/steer acts on a running session; ESTOP acts on the
-dispatch boundary. They compose.
+The interaction with the existing interrupt/steer surfaces is additive, not overlapping: interrupt/steer acts on a running session; `pause-new-work` acts on the dispatch boundary. They compose.
 
 ## Findings
 
 - **(finding)**: source=refs/hermes-agent/agent/estop.py:1-167, confidence=high, type=fact — hermes ships a verified single-bit fail-safe global pause: sentinel file, one-stat check, fail-safe on corrupt/empty, pause-new-work-only (never kill in-flight), per-component log-once. [confidence high — read directly]
 - **(finding)**: source=internal grep (ESTOP|global.pause|sentinel), confidence=high, type=fact — the harness has NO global pause-new-work sentinel; all "sentinel" hits are token/N-A/test-fixture sentinels, none function as a pause control.
 - **(finding)**: source=.opencode/skills/bgshell-job/scripts/bgshell_job.py:371-399, confidence=high, type=fact — the only job-level control (`stop`) KILLS in-flight (SIGTERM/SIGKILL); it is the right tool for one job and the wrong tool for global pause-new-work. bgshell has no global pause.
+- **(finding)**: source=refs/opencode/packages/opencode/src/session/prompt.ts:974-990, confidence=high, type=fact — `@subagent` mentions in OpenCode are model-mediated via `TaskTool` (synthetic instruction appended by `resolvePart`), meaning they are safely intercepted by a `tool.execute.before` hook on `TaskTool`.
+- **(finding)**: source=templates/core/.opencode/scripts/state-lib.js:1560-1572, confidence=high, type=fact — the normalizer's ownerless-working downgrade correctly reverts a `working` card with no active owner to `ready`, making it subject to the `activateCoordinationTask` new-work gate on reclaim.
+- **(finding)**: source=behavioral-closure, confidence=high, type=fact — engaged sentinel refuses covered new-work admissions while in-flight work is untouched (16/16 JS tests + 10/10 Go tests + live e2e CLI). Commit reachable on main.
 - **(inference)**: source=synthesis, confidence=medium, type=inference — a repo-local ESTOP sentinel consulted by the three dispatch surfaces (subagent dispatch, bgshell launch, coordinator/cron tick) is the minimal mechanism that contains the runaway blast radius in one operator action.
 - **(assumption)**: source=operator-cross-check, confidence=medium, type=assumption — the dogfood opencode history is saturated with the runaway/stranded/token-loop failure class; this is operator-provided and not independently re-verified here.
 
 ## Contradictions
 
+- **Contradiction (Brief vs Contract):** The solution-brief proposed blocking the `/resume-task` command, but `/resume-task` is used for continuing in-flight work as well as new dispatch. Resolved in favor of the invariant (in-flight work is NEVER touched): `/resume-task` is permitted, and the specific `ready→working` transition is gated instead at `activateCoordinationTask @ state-lib.js:6136-6255`.
 - Hermes's ESTOP is explicitly contrasted with `/panic` (kill/exit) and with
   interrupting in-flight cron (`estop.py:21-24`). This memo honors that
   distinction: the recommendation is pause-new-work ONLY, and the existing
@@ -186,6 +179,7 @@ dispatch boundary. They compose.
 
 ## Risks / open-questions
 
+- **Live OpenCode Runtime Execution:** The OpenCode plugin hooks are proven at the handler-logic level, but live OpenCode runtime invocation is the one not-demonstrable element (tracked as a DEFER, resting on the shell-guard precedent).
 - **Sentinel location.** Repo-local `.opencode/state/ESTOP` (gitignored,
   drift-exempt — consistent with the existing `.opencode/state` exemption in
   `drift.go:137-142`) vs a `HERMES_HOME`-equivalent global. Recommendation:
@@ -222,14 +216,8 @@ dispatch boundary. They compose.
 `tmp/decisions-staging/` — read-only execution policy denied the direct
 write; see session handoff).
 
-## Promotion targets (if the operator accepts)
+## Promotion targets (Implemented)
 
-When this becomes active guidance, the live targets a follow-up slice would
-touch — **not** this memo's job to edit: a new `internal/runtime/` (or
-`internal/coordination/`) ESTOP helper (sentinel path, `is_engaged`,
-`check_paused`, `engage`/`disengage`), wired into the three dispatch surfaces
-(subagent dispatch, bgshell-job launch in `.opencode/skills/bgshell-job/`,
-coordinator/cron tick under `.local/coordinator/`), plus engage/disengage
-verbs (e.g. a `/pause` + `/resume` slash command or `vh-agent-harness pause`
-CLI). Tests: `check_paused` fail-safe-on-corrupt, per-component log-once,
-and a "paused → new dispatch held, in-flight NOT killed" behavioral test.
+This was implemented as `ad5f2e16` on main (reachable) "pause on new work". The slice shipped the ESTOP helper, the 3 gate seams (JS `activateCoordinationTask`, Python `bgshell_job.py` pre-spawn, OpenCode plugin `tool.execute.before` TaskTool + 4-command dispatch interception), and the `pause-new-work` CLI command.
+
+Behavioral-closure proven: engaged sentinel refuses covered new-work admissions while in-flight work is untouched (16/16 JS tests + 10/10 Go tests + live e2e CLI).
