@@ -116,7 +116,9 @@ attempt), **ownership classification** (which files a plain render may overwrite
 vs. must preserve), and **gate-controlled side effects** (commits, promotions,
 and other state transitions that pass through a reviewer or gate before they
 land). Treat any model-produced artifact as a proposal to be checked and
-applied, not as an authority that acts on its own.
+applied, not as an authority that acts on its own. See
+`docs/coordination/AUTHORITY_CLASSES.md` for the explicit distinction between
+advisory checks (which report but never block) and hard evidence-gated completion.
 
 ## Shell, container, and workspace hygiene
 

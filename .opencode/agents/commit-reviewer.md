@@ -106,7 +106,7 @@ Follow this state machine exactly. Do NOT deviate or exercise independent judgme
   - When `fail_fast` = `true` (default): The moment ANY tier produces a block or split, escalation stops immediately. Findings from all tiers that ran (including the blocking tier) are combined.
   - When `fail_fast` = `false`: All tiers run regardless of individual tier verdicts. Final verdict is the worst across all tiers (blocked > split > approve). This costs more but provides complete coverage from all configured tiers.
 - **findings merge:** All findings (BLOCK, DEFER, DROP) from ALL executed tiers are combined, not just the last one.
-- **disposition-aware gating:** The orchestrator gates on BLOCK findings ONLY. DEFER and DROP findings are never gating, regardless of severity.
+- **disposition-aware gating:** The orchestrator gates on BLOCK findings ONLY. DEFER and DROP findings are advisory checks (they never gate, regardless of severity; see `docs/coordination/AUTHORITY_CLASSES.md`).
 
 ### Confidence and risk
 

@@ -20,7 +20,7 @@ The original version of this memo proposed borrowing hermes's "global ESTOP" bro
 
 1. **Solution-brief pass:** Reframed "global ESTOP" into a bounded repo-scoped pause on new work (`pause-new-work`). Corrected the fail-safe semantics to match the harness's reality (absent = disengaged, which is the opposite of hermes).
 2. **Dispatch-path inventory (PROCEED):** A read-only pass classified all 9 new-work admission paths. The load-bearing question — does `@subagent` cross the `TaskTool`/`tool.execute.before` seam? — resolved YES (high confidence). OpenCode's `resolvePart` (`refs/opencode/packages/opencode/src/session/prompt.ts:974-990`) appends synthetic instructions forcing the model to use `TaskTool`, so `@subagent` is model-mediated and covered by the plugin hook.
-3. **Build slice (`ad5f2e16`):** Shipped the `pause-new-work` command and sentinel contract. Discovered a contradiction: the solution brief blocked `/resume-task`, but `/resume-task` serves BOTH new dispatch (`ready→working`) and in-flight continuation (`working→working`). Blanket-blocking it would violate the invariant that in-flight work is untouched. Resolved in favor of the invariant: `/resume-task` is permitted, the precise JS gate sits at `activateCoordinationTask @ state-lib.js:6136-6255` (ready→working seam), and the OpenCode plugin blocks `tool==="task"` (new-child dispatch) ONLY. (The solution-brief incorrectly cited `state-lib.js:5961-6044` for this function; the correct address is `6136-6255`.)
+3. **Build slice (`ad5f2e16`):** Shipped the `pause-new-work` command and sentinel contract. Discovered a contradiction: the solution brief blocked `/resume-task`, but `/resume-task` serves BOTH new dispatch (`ready→working`) and in-flight continuation (`working→working`). Blanket-blocking it would violate the invariant that in-flight work is untouched. Resolved in favor of the invariant: `/resume-task` is permitted, the precise JS gate sits at `activateCoordinationTask @ state-lib.js:6137-6255` (ready→working seam), and the OpenCode plugin blocks `tool==="task"` (new-child dispatch) ONLY. (The solution-brief incorrectly cited `state-lib.js:5961-6044` for this function; the correct address is `6137-6255`.)
 
 ## Why this is P1 (decision context)
 
@@ -140,7 +140,7 @@ sentinel consulted by the dispatch surfaces.
 1. **Sentinel.** A sentinel file under repo-local state (`.opencode/state/PAUSE_NEW_WORK` or similar — repo-scoped). `is_engaged()` = a single `os.Stat`; run on every tick, no caching beyond the OS, so engage/disengage takes effect on the next check.
 2. **Fail-safe (Contract opposite of hermes).** In the harness, ordinary operation has NO sentinel, so "missing=engaged" is impossible. The contract: absent=disengaged; present+valid=engaged; present+malformed/empty/unreadable=engaged (fail-safe); indeterminate filesystem failure=refuse covered work + report degraded. Disengagement, status, diagnostics, and recovery remain reachable even under degraded state.
 3. **Pause NEW work only (Implemented as ad5f2e16).** The 3 gate seams that check it (and ONLY these):
-   - JS: `activateCoordinationTask @ state-lib.js:6136-6255` (prevents `ready→working` claim, while allowing `working→working` continuation via `/resume-task`).
+   - JS: `activateCoordinationTask @ state-lib.js:6137-6255` (prevents `ready→working` claim, while allowing `working→working` continuation via `/resume-task`).
    - Python: `bgshell_job.py` pre-spawn (before starting a new job, keeping kill semantics for `stop`).
    - Plugin: OpenCode `tool.execute.before` intercepting `TaskTool` (blocks new-child dispatch only, never blanket), plus 4-command dispatch interception.
    In-flight work is NEVER killed by the pause — it finishes or is interrupted separately.
@@ -163,7 +163,7 @@ The interaction with the existing interrupt/steer surfaces is additive, not over
 
 ## Contradictions
 
-- **Contradiction (Brief vs Contract):** The solution-brief proposed blocking the `/resume-task` command, but `/resume-task` is used for continuing in-flight work as well as new dispatch. Resolved in favor of the invariant (in-flight work is NEVER touched): `/resume-task` is permitted, and the specific `ready→working` transition is gated instead at `activateCoordinationTask @ state-lib.js:6136-6255`.
+- **Contradiction (Brief vs Contract):** The solution-brief proposed blocking the `/resume-task` command, but `/resume-task` is used for continuing in-flight work as well as new dispatch. Resolved in favor of the invariant (in-flight work is NEVER touched): `/resume-task` is permitted, and the specific `ready→working` transition is gated instead at `activateCoordinationTask @ state-lib.js:6137-6255`.
 - Hermes's ESTOP is explicitly contrasted with `/panic` (kill/exit) and with
   interrupting in-flight cron (`estop.py:21-24`). This memo honors that
   distinction: the recommendation is pause-new-work ONLY, and the existing
