@@ -75,6 +75,8 @@ Health & diagnostics
   diagnostics-export   bundle harness state into a redacted, shareable archive (--dry-run)
   defer-triggers       run the DEFER-trigger predicate checker under a strict sandbox (read-only, contained)
   pause-new-work       manage the repo-scoped pause on NEW work (engage/status/disengage; NOT a global pause)
+  redlines guidance    print LOCAL agent context for binding sensitivity subjects (full private terms; stdout only)
+  redlines scan        scan an exact git tree for redline violations (opaque output; exit-code machine contract)
   status               show install + runtime info
   version              print the vh-agent-harness version and build label
 
@@ -168,6 +170,8 @@ func init() {
 		deferTriggersCmd,
 		// repo-scoped pause on NEW work (memo-4)
 		pauseNewWorkCmd,
+		// machine-local private redlines (guidance + scan; gate integrates via commit-gate.sh)
+		redlinesCmd,
 		// runtime
 		execCmd,
 		execRoCmd,
@@ -200,7 +204,7 @@ func init() {
 	assignGroup(groupHealth,
 		preflightCmd, doctorCmd, proposalsCmd, diffCmd,
 		diagnosticsExportCmd, deferTriggersCmd, statusCmd, versionCmd, skillCmd,
-		pauseNewWorkCmd)
+		pauseNewWorkCmd, redlinesCmd)
 	assignGroup(groupRuntime,
 		execCmd, execRoCmd, execSandboxCmd, shellCmd,
 		upCmd, downCmd, logsCmd, psCmd)
@@ -231,6 +235,11 @@ func Execute() {
 // runShell), the real code is propagated. errors.As traverses cobra's wrapping
 // so the exit error is still detected here even if a future RunE wraps it.
 //
+// Structured command errors that carry an explicit code (the redlines scan
+// contract: exit 1 for violations, exit 2 for fail-closed config errors) are
+// detected via the codedError interface, checked after the *exec.ExitError
+// path so the exec-family propagation is untouched.
+//
 // Everything else falls through to exit 1 unchanged: errSilent (the no-message
 // sentinel used by diff/doctor/help-migrate to force a non-zero exit with no
 // "Error:" line), genuine runtime errors (hook failures, permission denials,
@@ -251,5 +260,19 @@ func exitCodeFromError(err error) int {
 	if errors.As(err, &exitErr) {
 		return exitErr.ExitCode()
 	}
+	var ce codedError
+	if errors.As(err, &ce) {
+		return ce.ExitCode()
+	}
 	return 1
+}
+
+// codedError is the interface for errors that carry an explicit process exit
+// code distinct from the default 1. It lets a command signal a structured
+// non-zero exit (e.g. redlines scan's exit 2 for fail-closed config errors)
+// without resorting to os.Exit or a sentinel hack. *exec.ExitError satisfies it
+// too, but the dedicated *exec.ExitError branch in exitCodeFromError handles
+// that case first so the exec-family propagation path is untouched.
+type codedError interface {
+	ExitCode() int
 }

@@ -76,6 +76,7 @@ var doctorCmd = &cobra.Command{
   exec-sandbox-floor exec-sandbox grant carried w/o a floor     WARN if grant carried and no floor resolves (advisory only; NEVER FAIL)
   shipped-pilots  shipped default-on overlay pilot enablement    INFO if advisory orphan (deselected pilot with stale files); PASS otherwise; SKIP not installed
   closeout-reach  ledger reconciles with branch reachability     WARN if committed entry post_commit_head unreachable from any branch; INFO if unledgered branch commits; SKIP greenfield
+  redlines        private-redlines registry hygiene (applicability-gated) FAIL if sensitive registry tracked/unignored; WARN if unreadable/insecure-mode; PASS with opaque binding ids; OMITTED (no section) when no registry
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -470,6 +471,22 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	rpr := checkRewriteParity(abs)
 	fmt.Fprintln(out, "    "+rpr.String())
 	applyTier(rpr.tier, &problems, &warns)
+
+	// Check #26 — private-redlines registry hygiene. APPLICABILITY-GATED: the
+	// entire section is OMITTED (not SKIP-printed) when no user-level redlines
+	// registry exists — zero footprint for non-adopters (no warning, no output,
+	// no file). Mirrors the dev-stale-embed #15 conditional-section precedent.
+	// When a registry IS present, checkPrivateRedlines runs four paste-safe
+	// sub-checks (file security, tracked-despite-sensitive, loadability, binding
+	// hygiene) emitting only opaque subject IDs, registry paths, generic reason
+	// codes, and raw permission bits. The full-term surface is `redlines
+	// guidance` alone (unchanged).
+	if redlinesUserRegistryPresent() {
+		fmt.Fprintln(out, "  redlines:")
+		rrr := checkPrivateRedlines(abs)
+		fmt.Fprintln(out, "    "+rrr.String())
+		applyTier(rrr.tier, &problems, &warns)
+	}
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)

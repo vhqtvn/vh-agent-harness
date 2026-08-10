@@ -67,6 +67,12 @@ dist/
 .opencode/repo-configs/*.local.json
 .opencode/repo-configs/auto-gate-llm.json
 
+# --- private-redlines local registry (never commit) ---
+# The optional repo-local ADDITIVE registry (.vh-agent-harness/redlines.local.yml)
+# holds private terms. It is machine-local operator knowledge that must NEVER
+# enter history. Narrowly scoped to this exact path (NOT a broad *.local.* rule).
+.vh-agent-harness/redlines.local.yml
+
 # --- Editor / OS ---
 .DS_Store
 Thumbs.db

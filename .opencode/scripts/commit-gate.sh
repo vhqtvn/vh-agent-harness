@@ -1023,6 +1023,63 @@ print(json.dumps(files))
   " 2>/dev/null || echo "[]")
 
   # -------------------------------------------------------------------
+  # Private redlines scan — MANDATORY pre-acquire check.
+  #
+  # Scans the EXACT immutable tree object ($tree_hash, content-addressed by
+  # `git write-tree` above) for private-redline violations BEFORE the acquire
+  # is authorized. The scanner reads ONLY the named tree — never the working
+  # tree, shared index, or HEAD — and is paste-safe: stdout carries only
+  # opaque subj-* ids, generic reason codes, and committed-tree paths;
+  # configured terms are NEVER echoed.
+  #
+  # EXIT CODE CONTRACT the gate depends on:
+  #   0 = pass OR non-applicable (no registry / no binding subject / clean).
+  #       The scanner prints a short status line on exit 0, but the gate
+  #       DISCARDS captured output here so a non-adopter sees ZERO footprint.
+  #   1 = violation(s) found     -> BLOCK the acquire.
+  #   2 = fail-closed (invalid/unreadable registry, git failure) -> BLOCK.
+  #   any other non-zero          -> BLOCK (fail-closed; never silently pass).
+  #
+  # The harness binary is resolved via PATH (the installed-harness surface).
+  # redlines is a feature of a CURRENT installed harness, so the check is a
+  # silent no-op when EITHER (a) `vh-agent-harness` is not on PATH at all, OR
+  # (b) the installed binary predates the `redlines scan` subcommand. Both mean
+  # "feature not available here" — the gate never blocks on a binary that cannot
+  # run the scan. The cheap `redlines scan --help` probe (output discarded)
+  # distinguishes a redlines-capable binary from a stale/older one and keeps the
+  # gate robust across version skew and in minimal test environments.
+  # -------------------------------------------------------------------
+  if command -v vh-agent-harness >/dev/null 2>&1 && vh-agent-harness redlines scan --help >/dev/null 2>&1; then
+    local rl_repo_root rl_out rl_rc
+    rl_repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    rl_rc=0
+    rl_out=$(vh-agent-harness redlines scan -C "$rl_repo_root" --tree "$tree_hash" 2>&1) || rl_rc=$?
+    if [[ "$rl_rc" -ne 0 ]]; then
+      rm -f "$private_index" 2>/dev/null || true
+      rm -f "$(_session_meta_path "$uuid")" 2>/dev/null || true
+      local rl_reason rl_status rl_detail_enc
+      if [[ "$rl_rc" -eq 1 ]]; then
+        rl_status="redlines_violation"
+        rl_reason="private_redlines_blocked"
+        echo "commit-gate: acquire BLOCKED - private redlines violation(s) in tree ${tree_hash}:" >&2
+      elif [[ "$rl_rc" -eq 2 ]]; then
+        rl_status="redlines_error"
+        rl_reason="private_redlines_fail_closed"
+        echo "commit-gate: acquire BLOCKED (fail-closed) - private redlines scan could not complete (invalid registry or scan error); tree ${tree_hash}:" >&2
+      else
+        rl_status="redlines_error"
+        rl_reason="private_redlines_unexpected_exit"
+        echo "commit-gate: acquire BLOCKED (fail-closed) - private redlines scan returned unexpected exit code ${rl_rc}; tree ${tree_hash}:" >&2
+      fi
+      printf '%s\n' "$rl_out" >&2
+      rl_detail_enc=$(json_encode "$rl_out")
+      json_out "{\"status\":\"${rl_status}\",\"reason\":\"${rl_reason}\",\"exit_code\":${rl_rc},\"tree_hash\":\"${tree_hash}\",\"detail\":${rl_detail_enc}}"
+      return 1
+    fi
+    # exit 0 -> pass / non-applicable. DISCARD captured output (zero-footprint).
+  fi
+
+  # -------------------------------------------------------------------
   # Stage 1: rewrite-parity contract mechanical precheck (OPT-D).
   #
   # OPT-IN: only fires when --rewrite-parity-contract <file> is passed.

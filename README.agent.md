@@ -1332,6 +1332,154 @@ export default function transform({ context }) {
   validator's fixtures, so it runs in `go test ./...`. This INFORMs only — it is
   a diagnostic, not a transition authority.
 
+## Private redlines (`redlines guidance`, `redlines scan`)
+
+`vh-agent-harness redlines guidance` is the **agent's local context-loading
+channel** for machine-private sensitivity knowledge. Run it at session start —
+the same way you read `docs/planning/backlog.md` — to learn which terms and
+relations you must avoid generating for this repository.
+
+The knowledge lives in a never-committed user-level registry at
+`$XDG_CONFIG_HOME/vh-agent-harness/redlines/registry.yml` (or
+`$HOME/.config/vh-agent-harness/redlines/registry.yml` when XDG is unset). It
+holds two subject kinds: **scrub-projects** (labels/aliases to scrub before
+derived work lands in git) and **forbidden-relations** (two term-sets whose
+co-occurrence in committed artifacts leaks a private relation; with an **ambient**
+case where a repo's identity implies one side, so the other side's terms are
+banned outright within that repo). A repo may optionally carry an additive
+registry at `.vh-agent-harness/redlines.local.yml` (gitignored) that introduces
+additional subjects — see the repo-local section below.
+
+**Inert by default.** When no registry exists, or no subject binds the current
+repo, the command exits 0 and prints a single short line (`redlines: no registry
+configured` or `redlines: no redlines bind this repository`). No terms, no error,
+no files written. A present-but-invalid/unreadable registry fails closed with an
+opaque error (it names paths and `subj-*` ids only, never terms).
+
+**Leak-surface distinction (load-bearing).** `guidance` is the ONE redlines
+surface that emits the real registry terms — the full labels / side-A / side-B
+term sets, the ambient flag, the policy, the unit, and the private `why` line.
+This is intentional: an agent that does not know the forbidden relation will
+eventually write one side next to the other by accident; prevention requires
+disclosure at the generation boundary. Local agent context is not egress, and the
+commit gate is the mechanical backstop that catches any accidental echo into a
+commit. Every other redlines surface (`scan`, `doctor`) stays
+**opaque `subj-*` only** — safe to paste into issues and PRs. Do not add opaque
+restrictions to `guidance`; do not add real-term emission to anything else.
+
+**stdout only, no file writes.** `guidance` prints to stdout and NEVER writes
+terms to any file (generated guidance files were rejected by the design brief —
+they create a committed-artifact leak vector and hit the drift scanner). There is
+no materialization step.
+
+**Honesty contract.** The command prints the v1 detection-honesty statement at
+the bottom of its output. Detection is lexical and best-effort: it catches
+configured terms and aliases within the defined scan unit, including ambient-side
+degeneration. It does NOT detect paraphrases, translations, undeclared aliases,
+semantic equivalence, or relations that require cross-unit inference. Avoiding
+the listed terms prevents the common case; it is not proof that no sensitive
+relation can be inferred. (The `scan` command enforces this against the exact
+commit tree; `guidance` is the generation-time channel.)
+
+### `redlines scan` — exact-tree scanner (headless-safe)
+
+```
+vh-agent-harness redlines scan --tree <40-or-64-hex> [-C <repoRoot>]
+```
+
+Scans an **exact immutable git tree object** for redline violations. This is the
+headless surface the commit gate invokes: it reads ONLY the specified tree —
+never the working tree, the shared index, or HEAD. There is **no fallback**:
+`--tree` is required, and the hash must be a valid 40- or 64-hex git object id.
+The command never offers `--staged`, `--worktree`, or `--head`.
+
+**Exit codes (the machine contract):**
+
+| Code | Meaning |
+|------|---------|
+| 0    | Pass or non-applicable (no registry, no binding subject, or no findings). |
+| 1    | Violation(s) found — at least one finding. |
+| 2    | Fail-closed: missing/invalid `--tree`, applicable-but-invalid/unreadable registry, git failure, or any other error. |
+
+Slice 4 (the commit gate) reads the **exit code**, not parsed stdout.
+
+**Output is opaque and paste-safe.** Each finding prints as
+`<path>: <subj-id> (<reason>)` where `path` is the committed-tree path (the
+violation location — literally what is being committed), `subj-id` is the opaque
+`subj-*` identifier, and `reason` is a generic code (`scrub-term`,
+`relation-co-occurrence`, `relation-ambient-side-b`). Configured terms, labels,
+sides, and the `why` field are **never** echoed. A path-fragment label that
+happens to appear in a Path is acceptable for v1 — the scanner's job is to
+BLOCK that path.
+
+**Inert by default.** When no registry exists, or no subject binds this repo,
+exits 0 with a short status line and writes no files.
+
+**Honesty.** The command prints a one-line honesty pointer
+(`lexical/best-effort scan — pass ≠ safe; see redlines guidance honesty contract`)
+so a pass is not over-trusted.
+
+### Commit-gate integration (mandatory, exact-tree)
+
+The rendered `commit-gate.sh` invokes `vh-agent-harness redlines scan --tree
+<hash>` on the **exact staged tree** the gate is about to authorize — the private
+index/tree hash, never `--staged` or the working tree. This is mandatory when a
+binding registry exists: the gate binds to the immutable content-addressed tree
+the commit will land, so the scan result cannot drift between the check and the
+write.
+
+- Exit 0 → the gate proceeds (the scan output is **captured and discarded** — a
+  clean tree prints status lines on exit 0, and the gate suppresses them to
+  guarantee zero footprint in the gate's own output).
+- Exit 1 → the gate BLOCKS the commit (`redlines_violation`). The finding's
+  opaque `<path>: <subj-id> (<reason>)` line is shown so the operator can locate
+  the leak without the configured term being echoed.
+- Exit 2 → the gate BLOCKS (`redlines_error`) — an applicable-but-invalid
+  registry, a bad tree hash, or a git failure. Fail-closed.
+
+**Skip-silently when the binary is missing or stale.** The gate probes
+`vh-agent-harness redlines scan --help` first; if the binary is absent or
+predates the `redlines scan` subcommand, the scan step is skipped silently (no
+block, no warning). This keeps the gate forward-compatible: an older clone
+without a current binary is not dead-locked by a command it does not have. The
+binary-version-skew probe is the robustness layer; the scan itself is the
+enforcement layer.
+
+**Zero footprint for non-adopters.** When no registry exists or no subject binds
+the repo, `scan` exits 0 immediately, the gate captures-and-discards, and no
+redlines line appears in the gate output. An adopter who never configures a
+registry sees no difference.
+
+### Repo-local additive registry (optional, tightening-only)
+
+A repo may carry an OPTIONAL additive registry at
+`.vh-agent-harness/redlines.local.yml` (gitignored by the seed). It is
+**additive/tightening-only**: it may INTRODUCE NEW subjects but never redefine,
+weaken, or mask a user-level entry (an id collision fails closed at load). Use it
+for repo-specific subjects that should not clutter the machine-global registry.
+
+### `doctor` redlines check (applicability-gated, paste-safe)
+
+`vh-agent-harness doctor` runs a redlines hygiene check that is **OMITTED
+entirely** (no section, no warning, no output) when no user-level registry
+exists — zero footprint for non-adopters. When a registry IS present it runs four
+paste-safe sub-checks:
+
+1. **File security (WARN):** the user-level and repo-local registry files must
+   not be group/world-readable (tighten to `0600`). POSIX-only.
+2. **Tracked-despite-sensitive (FAIL):** if the repo-local additive registry
+   (`.vh-agent-harness/redlines.local.yml`) is tracked by git, or present and NOT
+   gitignored, that is an active leak — FAIL with remediation (`git rm --cached`).
+3. **Loadability (WARN):** the registry must parse. A present-but-invalid
+   registry fails closed in the commit gate on every commit; doctor surfaces it
+   with an **opaque** error (paths and reason codes only, never terms).
+4. **Binding hygiene (paste-safe detail):** when the registry loads, reports how
+   many subjects bind this repository, listing **opaque `subj-*` IDs only**.
+   Never labels/sides/`why` — those are `guidance`-only.
+
+All doctor diagnostics are paste-safe: opaque subject IDs, registry file paths
+(no terms), generic reason codes, and raw permission bits.
+
 ## Extending the harness (`/harness`)
 
 `/harness` is the OpenCode slash command that carries the full
