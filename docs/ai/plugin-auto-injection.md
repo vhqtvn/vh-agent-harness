@@ -11,7 +11,7 @@ runtime auto-injection, not by the template's own `node_modules`.
 > import disables the `plan-state` tool wired into the coordination agent.
 
 This was authored as decision **B3** of the C→A→B maintainer fix (agreed with
-consumer TrueAI): document the interaction rather than pin the package.
+a consumer repo): document the interaction rather than pin the package.
 
 ## The runtime dependency
 

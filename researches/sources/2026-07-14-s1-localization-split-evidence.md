@@ -1,4 +1,4 @@
-# Sources: S1 localization-split evidence (VH-Solara, TrueAI)
+# Sources: S1 localization-split evidence (VH-Solara, another consumer repo)
 
 **Date:** 2026-07-14
 **Topic:** First real S1 localization artifacts from two consuming repos, plus the
@@ -26,14 +26,14 @@ authority and drift).
 ## Provenance
 
 - Two consuming repos produced real S1 localization artifacts: **VH-Solara**
-  (on-disk, read directly in this slice) and **TrueAI** (relayed inline; their
-  repo commit `938ccb0` superseded their earlier overlay-pilot
+  (on-disk, read directly in this slice) and **another consumer repo** (relayed inline; their
+  repo commit (a prior commit) superseded their earlier overlay-pilot
   `tdd/seam-map.md` + `diagnosing-bugs/recipes.md`).
 - Both consumers' localization files target the same two core skills
   (`tdd-loop`, `debugging-loop`) and carry the S1 absence-contract pointer back
   to the core skill.
-  - **Confidence: HIGH** — VH-Solara files read directly; TrueAI content relayed
-    with provenance (commit `938ccb0`).
+  - **Confidence: HIGH** — VH-Solara files read directly; consumer content relayed
+    with provenance (a prior commit).
 
 ## Finding 1 — VH-Solara localization artifacts (first consumer; 6-lane Go/Vitest/Playwright repo)
 
@@ -93,38 +93,34 @@ authority and drift).
   testing section and keeps the two in sync — this is the `P2-SKILLS-004`
   dogfood finding (inherited harness testing boilerplate) made concrete.
 
-## Finding 2 — TrueAI localization artifacts (second consumer; Python/TS web-platform repo)
+## Finding 2 — Consumer localization artifacts (second consumer; Python/TS web-platform repo)
 
 - **Provenance:** relayed inline (no on-disk path in this repo). Both files carry
   HTML header comments documenting placement + provenance. Their repo commit
-  `938ccb0` superseded the earlier overlay-pilot `tdd/seam-map.md` +
+  (a prior commit) superseded the earlier overlay-pilot `tdd/seam-map.md` +
   `diagnosing-bugs/recipes.md`.
   - **Confidence: MED** — relayed (single-source); not independently re-verified
-    against the TrueAI repo in this slice.
+    against the consumer repo in this slice.
 
-### trueai-tdd-seams.md
+### the consumer's tdd-seams artifact
 
 - **Structure:** 3 vertical-slice tiers (unit / integration / e2e) with fields
   `implements` / `tested-at` / `runner` / `accepts` / `promises`.
 - **Maintenance rule:** references the consumer's `AGENTS.md` testing rules
   rather than redeclaring them (one source of truth).
-- **Authority-honest packages list:** 18 packages verified via `ls packages/`
-  on 2026-07-14 — `application`, `authz`, `contracts`, `controlplane`,
-  `controlplane_policy`, `datasets`, `detectors`, `domain`, `eval_btl`,
-  `fusion`, `llm`, `media`, `models`, `observability`, `queueing`, `reports`,
-  `review`, `storage`. This is the D3 authority-honesty rule propagated from
+- **Authority-honest packages list:** an 18-package monorepo verified via `ls packages/`
+  on 2026-07-14. This is the D3 authority-honesty rule propagated from
   the prior pilot's `billing` self-inconsistency catch (see Contradiction audit).
 - **Boundary notes:** distinguishes e2e-verification (a checking lane) from
   debugging-loop (a reproduction lane) from test-led-construction (a TDD lane).
 - **Absence-contract pointer:** back to the core `tdd-loop` skill
   (seam absence = step 0/1).
 
-### trueai-debugging-loops.md
+### the consumer's debugging-loops artifact
 
-- **Structure:** 8 recipes covering: failing unit, failing integration, failing
-  e2e, demo API chain (creds sourced from `/workspace/.env.local`, never the
-  command line), contracts→producer→renderer, manifest→registry→adapter,
-  API→worker→detector→fusion, and CLI+snapshot.
+- **Structure:** 8 recipes covering various component chains (using securely
+  sourced credentials, never the command line), system workflows, and
+  CLI+snapshot testing.
 - **Recipe fields:** `Reproduces` / `Command shape` / `Red signal` / `Minimize`
   — each satisfying the 4-property checklist from the core
   `red-signal-recipes.md`.
@@ -144,7 +140,7 @@ authority and drift).
   question: **the consumer's localization file's natural home is an overlay dir
   mirroring the core skill name.** The core keeps the discipline; the overlay
   carries only the repo-specific localization; neither clobbers the other.
-- **Validation.** Probed by TrueAI via `--dry-run` + a real `update` on
+- **Validation.** Probed by the consumer via `--dry-run` + a real `update` on
   2026-07-14: their localization files ship this way and merge cleanly.
 - **Mechanism basis (documented).** Overlay unit files render 1:1 into
   `.opencode/` as `overlay_extension`, and — per the consumer-shipped
@@ -156,13 +152,13 @@ authority and drift).
   in `internal/overlay/merge.go` (package comment: overlay packs "layer
   additively on top of the curated core corpus," contributing unit files
   "mirroring the `.opencode/` subtree").
-  - **Confidence: HIGH** for the mechanism (consumer-shipped doc + TrueAI
+  - **Confidence: HIGH** for the mechanism (consumer-shipped doc + consumer
     dry-run/real-update probe).
 - **Asymmetry (noted for honesty).** VH-Solara's localization files currently
   live under `tmp/agent-runs/` (the validation-artifact location), not yet in an
   overlay. So VH-Solara validates the localization *content* (Finding 1) but has
   not yet exercised the overlay *placement*; the placement model is
-  TrueAI-validated and mechanism-documented.
+  Consumer-validated and mechanism-documented.
 
 ## Cross-cutting observation
 
@@ -173,8 +169,8 @@ localization files:
    (testing rules, env/cred sourcing) rather than redeclaring them, so there is
    one source of truth.
 2. **Authority-honesty** — cite only what `ls` / glob verifies in the current
-   repo state (TrueAI's 18-packages list; VH-Solara's "verified 2026-07-14"
-   note). This discipline was motivated by TrueAI's own F1 `billing`
+   repo state (the consumer's 18-packages list; VH-Solara's "verified 2026-07-14"
+   note). This discipline was motivated by the consumer's own F1 `billing`
    self-inconsistency finding during the prior pilot (a seam-map cited a
    package that did not exist).
 3. **Absence-contract pointer** — point back to the core skill so that seam /
@@ -186,29 +182,29 @@ This is the S1 contract working as designed across two diverse repo shapes
 beyond the core skill skeleton.
 
 - **Confidence: HIGH** — synthesized from Findings 1 and 2 (VH-Solara verified
-  directly, TrueAI relayed with provenance commit `938ccb0`); both consumers
+  directly, the consumer relayed with provenance (a prior commit)); both consumers
   carry the three disciplines explicitly in their localization files.
 
 ## Contradiction audit
 
 1. **F1 `billing` self-inconsistency — resolved (propagated).** The prior
-   pilot-evidence packet recorded that TrueAI's earlier overlay-pilot seam-map
+   pilot-evidence packet recorded that the consumer's earlier overlay-pilot seam-map
    cited a `billing` package that did not exist in their repo state — the
-   incident that produced the D3 authority-honesty rule. The new
-   `trueai-tdd-seams.md` carries an authority-honest 18-packages list verified
+   incident that produced the D3 authority-honesty rule. The consumer's new
+   `tdd-seams` artifact carries an authority-honest 18-packages list verified
    via `ls packages/`, so the D3 rule propagated into the real artifact. No
    active contradiction.
 2. **Placement asymmetry — noted, not a contradiction.** VH-Solara's
-   localization files are in `tmp/` while TrueAI's ship in an overlay. This is a
+   localization files are in `tmp/` while the consumer's ship in an overlay. This is a
    difference in placement maturity, not a factual conflict: both are valid S1
    localization artifacts; the overlay placement (Finding 3) is the recommended
-   durable home, validated by TrueAI and documented at the mechanism level.
+   durable home, validated by the consumer and documented at the mechanism level.
 
 ## Files referenced (verified paths)
 
 - `/home/vhnvn/repo/vh-solara/tmp/agent-runs/validate-debug-tdd-skills/vh-solara-debugging-loops.md` — 128L, read directly this slice (cross-repo).
 - `/home/vhnvn/repo/vh-solara/tmp/agent-runs/validate-debug-tdd-skills/vh-solara-tdd-seams.md` — 119L, read directly this slice (cross-repo).
-- TrueAI localization files (`trueai-tdd-seams.md`, `trueai-debugging-loops.md`) — relayed inline; no on-disk path in this repo. Their repo commit `938ccb0`.
+- Consumer localization files (the consumer's `tdd-seams` and `debugging-loops` artifacts) — relayed inline; no on-disk path in this repo. Their repo commit (a prior commit).
 - `templates/core/.opencode/skills/skill-creator/references/skill-lifecycle.md` — the S1 pattern definition; enriched with the placement note in the same slice.
 - `templates/core/.opencode/commands/harness.md` → "Overlay anatomy" / "Shadowing rule" — the consumer-shipped documentation of the additive overlay-merge model.
 - `internal/overlay/merge.go` — the deeper additive-layering mechanism (package comment).

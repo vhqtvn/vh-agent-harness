@@ -437,7 +437,7 @@ rationale on-repo. Nothing above is deleted or silently rewritten.
 The §4 "Unique upheld catches" table and the §13 bottom-line that consumes it ("**grok
 and glm are the strongest unique contributors → keep one diversity slot from {grok,
 glm}**") were computed **UNSCOPED** — over `directory IN {vh-agent-harness, vh-solara,
-<deep-fake-detection>}` with the sensitive third-party repo included. That repo dominates
+<a sensitive third-party repo>}` with the sensitive third-party repo included. That repo dominates
 the unscoped volume and its leaf/findings mix skewed the unique-catch ranking.
 
 ### The scoped recompute (the inversion)

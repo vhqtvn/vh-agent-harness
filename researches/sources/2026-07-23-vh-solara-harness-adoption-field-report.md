@@ -278,7 +278,7 @@ concurrent build lanes.
   (`ses_07316bd9d`) is blunt:
   **"REVISION 1 — TRUE LAZY FRONTIER … The v1 §5 shipped a self-contained
   placeholder for EVERY known node, so cold load was still O(total sessions)
-  (~1047 nodes for deep-fake-detection; ~1 MB) — it missed the entire motivation
+  (~1047 nodes for a sensitive third-party repo; ~1 MB) — it missed the entire motivation
   of the rewrite."** → revision commit `5995161` *"revise Phase 1 — true lazy
   frontier."*
 - The coordinator did not catch the drop; a downstream reviewer did, one commit

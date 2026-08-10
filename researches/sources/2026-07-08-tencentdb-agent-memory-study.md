@@ -329,10 +329,10 @@ deleted, gitignored at `ad1e5fa`).
   (committed at `ad1e5fa`), so deletion is a filesystem op only — **no git
   change, no commit**. The `file:line` refs above are a frozen snapshot of
   v0.3.6 and cannot be re-walked in tree.
-- **Lineage note:** vh-agent-harness originally forked from TrueAI; the operator
-  later reversed the relationship (TrueAI migrated to vh-agent-harness), so
+- **Lineage note:** vh-agent-harness originally forked from a prior upstream repo; the operator
+  later reversed the relationship (the upstream repo migrated to vh-agent-harness), so
   vh-agent-harness is now upstream. The **flat session/workstream memory model**
-  was ported from TrueAI; the **typed-memory layer** (this study's R1–R3 work) is
+  was ported from the upstream repo; the **typed-memory layer** (this study's R1–R3 work) is
   NEW and TencentDB-inspired, not inherited.
 - **Promotion status:** this packet is a SOURCE study + adoption record, NOT
   active guidance. No `docs/ai/` promotion is warranted — the discipline that

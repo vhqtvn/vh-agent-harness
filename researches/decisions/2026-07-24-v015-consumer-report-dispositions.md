@@ -1,4 +1,4 @@
-# Decision: v0.15.0 Consumer Report Dispositions — Maintainer Disposition (TrueAI skill/doctor surfaces + vh-solara `doctor*` wildcard)
+# Decision: v0.15.0 Consumer Report Dispositions — Maintainer Disposition (Consumer skill/doctor surfaces + vh-solara `doctor*` wildcard)
 
 **Date:** 2026-07-24
 **Status:** Accepted (disposition + record-of-decision + documentation lands in this slice). Both
@@ -24,7 +24,7 @@ the named commits. No claim below depends on un-re-derivable consuming-repo evid
 
 A read-only compare-and-plan pass (solution-brief) selected two dispositions:
 
-- **Report A (TrueAI) → A2:** preserve the skill/doctor product semantics; correct one partial
+- **Report A (Consumer repo) → A2:** preserve the skill/doctor product semantics; correct one partial
   misread; document the supported no-orphan cleanup path; track the *retirement/residue-UX* gap
   separately. No code change.
 - **Report B (vh-solara) → B2:** preserve the `doctor*` read-only family semantics; document the
@@ -37,7 +37,7 @@ written rule ship together.
 
 ---
 
-# Report A — TrueAI: skill list / skill validate / doctor surfaces
+# Report A — Consumer repo: skill list / skill validate / doctor surfaces
 
 ## A.1 Claim verification
 
@@ -212,7 +212,7 @@ Filed as cards in `.local/coordinator/tasks/` (transport, not committed canon):
   missed.
 - **`defer-001-skill-capability-render-gate.json`** (Report A, UPDATED) — the **selection** track is
   **closed by `ae5b30d`** (capability-owned files now respect selection). What remains is the
-  **retirement/residue-UX** remainder, surfaced again by this TrueAI report. Do not present selection
+  **retirement/residue-UX** remainder, surfaced again by this consumer report. Do not present selection
   as open work.
 
 # Rejected

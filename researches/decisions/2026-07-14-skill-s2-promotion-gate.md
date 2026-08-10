@@ -5,7 +5,7 @@
 **Supersedes:** none.
 **See also:**
 [`../sources/2026-07-14-skill-craft-pilot-evidence.md`](../sources/2026-07-14-skill-craft-pilot-evidence.md)
-(evidence trail: the TrueAI retrospective pilots + the VH-Solara forward pilot — D2C escape SATISFIED).
+(evidence trail: the consumer retrospective pilots + the VH-Solara forward pilot — D2C escape SATISFIED).
 [`../../docs/planning/backlog.md`](../../docs/planning/backlog.md)
 (canonical status home: rows `P2-SKILLS-001` done, `P2-SKILLS-002` done).
 
@@ -23,10 +23,10 @@ This is the **same failure shape as a registry-drift gap**: the rule is on the
 books but nothing enforces or records that it was satisfied. Two concrete
 instances surfaced it this cycle:
 
-- **tdd-loop (#4)** — designed, piloted (TrueAI), HIGH-confidence decisions, and
+- **tdd-loop (#4)** — designed, piloted (consumer pilot), HIGH-confidence decisions, and
   already committed (`f56b964`), but with **no canonical record** of *why* it was
   promotable or what the pilot validated.
-- **debugging-loop (#3)** — designed, piloted (TrueAI) for the core discipline,
+- **debugging-loop (#3)** — designed, piloted (consumer pilot) for the core discipline,
   but with **one MEDIUM-confidence design decision** (the D2C escape) that needs a
   forward pilot before it can blanket-commit into core. Built + held untracked,
   tracked only in session memory that contradicts canon.
@@ -78,7 +78,7 @@ contradicts reality (#4 is committed).
   of one round-trip with the willing pilot is much smaller than the cost of a
   wrong-wording design propagating to every consumer.
 - **Never-commit-until-all-HIGH (REJECTED).** Hold tdd-loop too. Rejected because
-  the S2 gate *was* satisfied for tdd-loop (TrueAI pilot returned real evidence,
+  the S2 gate *was* satisfied for tdd-loop (consumer pilot returned real evidence,
   not a speculative yes) and all its design decisions are HIGH-confidence;
   holding it would be process for process's sake.
 
@@ -108,7 +108,7 @@ this cycle:
 - **D1A — refactor placement: in-loop "refactor under green" (HIGH confidence →
   committed in tdd-loop).** Canonical Beck TDD: red → green → **refactor** → next
   slice; the refactor step is *inside* the loop, not deferred to an in-review
-  pass. The TrueAI pilot's "2-vs-1 outlier" framing miscounted: canonical TDD
+  pass. The consumer pilot's "2-vs-1 outlier" framing miscounted: canonical TDD
   literature is in-loop, so the pilot aligned with the majority rather than
   overturning it. **This overturns the packet's previously-adopted
   mattpocock in-review stance** — no committed artifact had locked that stance, so
@@ -144,8 +144,8 @@ this cycle:
 
 - **D3 — localization authority-honesty: YES (HIGH confidence → committed in
   tdd-loop).** A localization file's authority references **must be real and
-  verifiable in the consumer's current repo state**, not aspirational. The TrueAI
-  pilot caught a seam-map citing a `billing` package that did not exist — an
+  verifiable in the consumer's current repo state**, not aspirational. The consumer pilot
+  caught a seam-map citing a `billing` package that did not exist — an
   aspirational authority reference that would mislead the agent. Additionally, the
   consumer's `AGENTS.md` testing-rules section is localized **in the same slice**
   (two-sources-of-truth drift is the failure VH-Solara flagged): the skill's
@@ -201,14 +201,14 @@ this cycle:
 
 - Companion evidence packet:
   [`../sources/2026-07-14-skill-craft-pilot-evidence.md`](../sources/2026-07-14-skill-craft-pilot-evidence.md)
-  — the TrueAI retrospective pilots (tdd-loop S2 SATISFIED; debugging-loop core
+  — the consumer retrospective pilots (tdd-loop S2 SATISFIED; debugging-loop core
   discipline S2 SATISFIED) and the VH-Solara forward pilot (D2C escape SATISFIED).
 - **tdd-loop commit:** `f56b964` (SKILL.md +84, `references/seam-localization.md`
-  +81). S2 gate satisfied via the TrueAI overlay pilot (in-loop refactor + seam
+  +81). S2 gate satisfied via a consumer pilot (in-loop refactor + seam
   discipline validated).
 - **debugging-loop commit:** `c52268a` (SKILL.md +110,
   `references/red-signal-recipes.md` +66, `references/downgrade-protocol.md` +90).
-  S2 gate satisfied: the TrueAI retrospective pilot validated the core discipline
+  S2 gate satisfied: the consumer retrospective pilot validated the core discipline
   (step-0 absence-contract + step-7 post-mortem), and the VH-Solara forward pilot
   validated the D2C escape against the GPU/WebRender heat saga — all five
   guardrails fire; the statistical-sample serial ×50 red correctly stays in-loop
@@ -216,7 +216,7 @@ this cycle:
   `human-observed | non-deterministic | not agent-runnable` triple is the label
   taxonomy those guardrails operate on, not a sixth guardrail.
 - **Pilot provenance:** the pilot contributions came from **two consuming repos**
-  (TrueAI, VH-Solara) responding to an adopt-question; both returned **real pilot
+  (another consumer repo, VH-Solara) responding to an adopt-question; both returned **real pilot
   evidence** rather than a speculative yes. This is what discharges S2's
   "real pilot" requirement — a speculative yes does not.
 - **Precedent:** the decisions/sources pairing follows

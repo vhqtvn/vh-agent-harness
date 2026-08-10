@@ -19,7 +19,7 @@ record, not a recommendation — the decision lives in the memo.
 
 ## Pilot provenance (verified)
 
-- The pilot contributions came from **two consuming repos** — **TrueAI** and
+- The pilot contributions came from **two consuming repos** — **another consumer repo** and
   **VH-Solara** — responding to an adopt-question.
 - **Both returned real pilot evidence** (a retrospective or forward validation
   against a real repo), not a speculative yes. This is what discharges S2's
@@ -29,15 +29,15 @@ record, not a recommendation — the decision lives in the memo.
     `c52268a` artifact (debugging-loop, including the D2C escape the VH-Solara
     forward pilot validated).
 
-## Finding 1 — tdd-loop / TrueAI pilot (SATISFIED)
+## Finding 1 — tdd-loop / consumer pilot (SATISFIED)
 
 - **Skill:** tdd-loop core skill (red→green→refactor in-loop, seam localization,
   S1 absence-contract).
-- **Pilot repo:** TrueAI (retrospective pilot).
+- **Pilot repo:** consumer repo (retrospective pilot).
 - **S2 verdict:** SATISFIED → committed `f56b964`.
 - **What the pilot validated:**
   - **In-loop refactor.** The "refactor under green" step (D1A) held up under the
-    TrueAI repo's real TDD loops; the pilot's "2-vs-1 outlier" framing was
+    consumer repo's real TDD loops; the pilot's "2-vs-1 outlier" framing was
     reinterpreted as alignment with canonical Beck TDD (the majority), not an
     overturn of it.
     - **Confidence: HIGH** — committed in `f56b964`.
@@ -50,11 +50,11 @@ record, not a recommendation — the decision lives in the memo.
     - **Confidence: HIGH** — the `billing` catch is the concrete incident; D3 is
       the encoded rule, committed in `f56b964`.
 
-## Finding 2 — debugging-loop / TrueAI pilot (SATISFIED for the core discipline)
+## Finding 2 — debugging-loop / consumer pilot (SATISFIED for the core discipline)
 
 - **Skill:** debugging-loop core skill (build-red-first +
   reproduce→minimise→hypothesise→instrument→fix→regress + D2C escape).
-- **Pilot repo:** TrueAI (retrospective pilot).
+- **Pilot repo:** consumer repo (retrospective pilot).
 - **S2 verdict:** SATISFIED for the **core discipline** (not for the D2C escape —
   see Finding 3).
 - **What the pilot validated:**
@@ -62,7 +62,7 @@ record, not a recommendation — the decision lives in the memo.
     up as the keystone of the deterministic-red flagship.
     - **Confidence: HIGH** — landed in the held skill's step sequence.
   - **The reproduce→…→regress sequence.** The full agent-iterated loop validated
-    end-to-end against the TrueAI repo.
+    end-to-end against the consumer repo.
     - **Confidence: HIGH** — landed in the held skill.
   - **step-0 absence-contract (S1 contribution).** The pilot contributed the
     step-0 absence-contract framing (state what is *not* present before
@@ -175,7 +175,7 @@ Two contradictions were surfaced during this cycle:
    committed (`f56b964`) with S2 satisfied. Resolved by reconciling the session
    note to point at the backlog rows as canonical and correcting the #4 line to
    "done @ f56b964." Session memory is disposable; the backlog is canon.
-2. **D1A "outlier" vs canonical TDD — resolved SOFT.** The TrueAI pilot framed
+2. **D1A "outlier" vs canonical TDD — resolved SOFT.** The consumer pilot framed
    in-loop refactor as a "2-vs-1 outlier" (implying it was the minority view).
    Re-resolved as **alignment with the majority**: canonical Beck TDD literature
    is in-loop, so the pilot agreed with canon rather than overturning it. Resolved

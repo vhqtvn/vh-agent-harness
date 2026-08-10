@@ -76,7 +76,7 @@ this researcher cannot re-verify consumer repos from here.
   `platform_managed` and wholesale-overwritten on update, so the next update
   silently drops the rule. Captured as defect card
   `defect-vhvm-rule6-port-and-relocate`.
-- **TrueAI** render is stale at harness/0.1.0 (2026-06-26) with real
+- **A consumer's** render is stale at harness/0.1.0 (2026-06-26) with real
   managed-file divergence — a consumer that has not migrated precisely
   because migration is a destructive clobber.
 - Every consumer pays a recurring per-release "adoption migration" session to

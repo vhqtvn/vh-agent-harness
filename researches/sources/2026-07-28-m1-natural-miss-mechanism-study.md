@@ -301,7 +301,7 @@ ordering and solo-upheld share).
 and the §13 bottom-line that consumes it ("**grok and glm are the strongest unique
 contributors → keep one diversity slot from {grok, glm}**"). That canon §4 table was
 computed **UNSCOPED** — over `directory IN {vh-agent-harness, vh-solara,
-<deep-fake-detection>}` with the sensitive third-party repo included. The sensitive repo
+<a sensitive third-party repo>}` with the sensitive third-party repo included. The sensitive repo
 carries ~1594 coordinators / ~4399 leaves (operator anchor) — it dominates the unscoped
 volume and its leaf/findings mix skewed the unique-catch ranking. **Scoped correctly
 (vh-agent-harness + vh-solara only), the ranking INVERTS.** This erratum documents the
