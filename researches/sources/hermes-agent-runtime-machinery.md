@@ -1,0 +1,52 @@
+# hermes-agent — Runtime Machinery (source packet)
+**Source:** `refs/hermes-agent/` @ HEAD `005421d888a40865cc61d143ff77efd87a037a1e` on `main` (Nous Research, MIT, v0.20.0). Gitignored reference transport in this repo; NOT this repo's own code.
+**Method:** files read in BODY off local disk; giant files sampled at structurally important sections, not dumped whole.
+**Status:** NEUTRAL study. Borrow/reject verdicts characterize fit vs vh-agent-harness discipline (static-Go, small-boundary, token-stable, overlay-based, narrow-waist); they are NOT commands to change this repo.
+
+> See `hermes-agent-internals.md` for the consolidated study and the cross-check corrections.
+
+## §1 AIAgent core (`run_agent.py`, 8206 lines).
+`AIAgent.__init__` (`:435`) pure forwarder → `agent/agent_init.py:init_agent` (~76 params). `max_iterations` default = **90** (`run_agent.py:446`, `agent_init.py:470,587`) — AGENTS.md prose wrongly says 500 (doc/code mismatch). Dual budget: max_iterations + IterationBudget.remaining + grace call. `run_conversation` (`:7798`) forwards to `agent.conversation_loop.run_conversation`. (source=refs/hermes-agent/run_agent.py:446, confidence=high, type=fact)
+
+## §2 Conversation loop (`agent/conversation_loop.py`, 7524 lines).
+Main while loop at `:1540`: `while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:`. Tool dispatch via `_execute_tool_calls` at `:6543` → `handle_function_call` (`model_tools.py`). Synchronous, single-threaded per turn. (source=refs/hermes-agent/agent/conversation_loop.py:1540, confidence=high, type=fact)
+
+## §3 Prompt tiering (`conversation_loop.py:535-716`).
+Explicit STABLE→CONTEXT→VOLATILE three-tier system prompt. STABLE (host-info + cross-session prefix) anchored to early cache breakpoint. CONTEXT (AGENTS.md/CLAUDE.md/.cursorrules via `prompt_builder.py` loaders). VOLATILE (Model/Provider/Platform) at END. Written to SessionDB per turn (`update_system_prompt` `:663`), re-read (`get_session` `:566`) for byte-exact prefix-cache reuse. Staleness detector `_stored_prompt_matches_runtime` (`:673`) uses first-match/last-match parsing. Skills prompt cached separately (`_SKILLS_PROMPT_CACHE`, max 8). (source=refs/hermes-agent/agent/conversation_loop.py:535, confidence=high, type=fact)
+
+## §8 Surfaces & entrypoints (slice 4).
+- **7 launch paths:** (1) `hermes` interactive CLI→`cmd_chat`→`cli.py`; (2) `hermes <subcmd>` ~40 subparsers; (3) `hermes-agent` headless single-shot (`run_agent.py:7990`, no session DB/REPL); (4) `hermes acp`/`python -m acp_adapter` editor bridge (stdio JSON-RPC, `HermesACPAgent(acp.Agent)` at `server.py:566` wraps sync AIAgent on dedicated thread pool `server.py:198`); (5) `hermes gateway` — builds **fresh AIAgent per turn** (`gateway/run.py:4818`), history replayed from prompt-cache DB (`_select_cached_agent_history:1427/5138`), sync agent off-loop via executor; (6) cron — agent jobs + `no_agent=True` script-only jobs; (7) `hermes mcp serve` (FastMCP stdio, exposes gateway/session state, does NOT run AIAgent). (source=refs/hermes-agent/gateway/run.py:4818, confidence=high, type=fact)
+- Single-core-agent invariant: all funnel through one `AIAgent` class; `platform` kwarg discriminator. (source=refs/hermes-agent/run_agent.py, confidence=high, type=fact)
+- `_apply_profile_override()` (`main.py:519`) runs PRE-argparse (sets HERMES_HOME before any module import). (source=refs/hermes-agent/hermes_cli/main.py:519, confidence=high, type=fact)
+- Platform-adapter ABC `gateway/platforms/base.py:2638`: abstract connect/disconnect/send; capability flags (supports_code_blocks/status_text/async_delivery, splits_long_messages, typed_command_prefix, interactive_resume); `MessageEvent`/`SendResult` envelopes; ~25 adapters. (source=refs/hermes-agent/gateway/platforms/base.py:2638, confidence=high, type=fact)
+- Cron: agent jobs (`platform="cron"`,`skip_memory=True`,`skip_background_review=True`, 1-worker pool, inactivity timeout); script jobs (no LLM); deliveries NOT mirrored into gateway sessions. (source=refs/hermes-agent/gateway/cron.py, confidence=high, type=fact)
+- MCP both directions: server (`mcp_serve.py`, 9 tools) + client (`tools/mcp_tool.py`). (source=refs/hermes-agent/tools/mcp_tool.py, confidence=high, type=fact)
+- Profile isolation `hermes_constants.py:114`: `get_hermes_home()` resolves ContextVar override → HERMES_HOME env → platform default; profile registry HOME-anchored (not HERMES_HOME-anchored); `acquire_scoped_lock` per-credential. (source=refs/hermes-agent/hermes_constants.py:114, confidence=high, type=fact)
+
+## §9 Bootstrap & context machinery (slice 5).
+- **CORRECTION:** `hermes_bootstrap.py` is NOT the startup sequence — it's a 239-line **Windows-only UTF-8 + sys.path hardening** module. Real startup split across `hermes_cli/main.py` (prologue) + `hermes_constants.py` (paths) + `hermes_logging.py` (logging). (source=refs/hermes-agent/hermes_bootstrap.py, confidence=high, type=fact)
+- Ordered prologue (`main.py`): import hermes_bootstrap → platform.ver suppress → `_early_recovery_mod.recover_if_needed()` (venv self-heal) → **`_apply_profile_override()` (`:692`)** (load-bearing pre-import) → load_hermes_dotenv (secrets only) → bridge config.yaml→redact/force_ipv4 BEFORE hermes_logging → setup_logging. (source=refs/hermes-agent/hermes_cli/main.py:692, confidence=high, type=fact)
+- Compression `agent/context_compressor.py:1356` `ContextCompressor(ContextEngine)`: triggers when `tokens >= threshold_tokens` (default **50% of ctx window**) + not blocked; block reasons `cooldown:<sec>` (summary-LLM 429) + `ineffective` (anti-thrash: last 2 passes saved <10%). Defaults: protect_first_n=3, protect_last_n=20, summary_target_ratio=0.20. Two storage modes: in-place `archive_and_compact` AND rotation to child session w/ parent_session_id. (source=refs/hermes-agent/agent/context_compressor.py:1356, confidence=high, type=fact)
+- **Cache-safety = `api_content` sidecar** (`agent/turn_context.py:53-120`): persist exact bytes sent; replay reproduces prefix byte-for-byte; "what turn N sends must be what turn N+1 replays". Compression is ONLY sanctioned mutation of past context. (source=refs/hermes-agent/agent/turn_context.py:53, confidence=high, type=fact)
+- Auxiliary/side-channel LLM `agent/auxiliary_client.py`: standalone `call_llm(task,...)` (`:8605`) returns response object/stream — **caller decides; does NOT mutate main messages list** = the isolation. Tasks: compression, vision, web_extract, session_search, skills_hub, mcp, title_generation. Interrupt-protection split: compression interrupt-protected (daemon-isolated); vision/web_extract/title_generation freely interruptible. (source=refs/hermes-agent/agent/auxiliary_client.py:8605, confidence=high, type=fact)
+- Turn prologue `agent/turn_context.py:343-1281` `build_turn_context`: 35-step ordered sequence (install_safe_stdio, recover_rotated_compression_session, set_session_context, set_current_write_origin, _restore_primary_runtime, set_runtime_main, between-turns MCP refresh, sanitize_surrogates, reset retry counters+iteration budget, pre-turn connection health, IterationBudget, copy history→messages, hydrate todo store, hydrate nudge counters, restore/build system prompt, `_ensure_db_session()` (order load-bearing: after system prompt, before preflight compression), idle-triggered compaction, preflight context compression (cheap count-gate→rough estimate→should_compress→multi-pass loop capped max_compression_attempts=3), re-anchor user_idx, pre_llm_call plugin hook (context injected into USER msg not system to preserve cache; oversized spills to disk), gateway must-deliver notes, memory_manager.on_turn_start, external memory prefetch, api_content sidecar stamp, crash-resilience persistence runs LAST). (source=refs/hermes-agent/agent/turn_context.py:343, confidence=high, type=fact)
+- System prompt `agent/system_prompt.py`: built ONCE per session, reused across turns (only compression triggers rebuild). Three tiers joined `\n\n`. (source=refs/hermes-agent/agent/system_prompt.py, confidence=high, type=fact)
+- Plugin system `hermes_cli/plugins.py:1309`: PluginManager singleton; PluginContext.register() for tools/cli_commands/hooks/middleware. Discovery: `~/.hermes/plugins/`, `./.hermes/plugins/`, pip entry_points. Hooks: pre/post_tool_call, pre/post_llm_call, on_session_start/end. Two single-select provider slots via ABC: MemoryProvider (`memory_provider.py:81`), ContextEngine (`context_engine.py:89`). Policy (May 2026): no new in-tree memory providers. Plugins MUST NOT modify core files. (source=refs/hermes-agent/hermes_cli/plugins.py:1309, confidence=high, type=fact)
+- Background review `agent/background_review.py:1030`: fires post-turn every ~10 turns; forks sandboxed review_agent w/ provenance tags; gated to memory+skill_manage only; proposes, curator consolidates; no session finalization; compression-gated in fork. (source=refs/hermes-agent/agent/background_review.py:1030, confidence=high, type=fact)
+- Trajectory export `batch_runner.py`: ShareGPT format `{conversations:[{from,value}...], metadata, tool_stats}`; fsync durability. `trajectory_compressor.py` compresses to target token budget (HF AutoTokenizer + auxiliary LLM middle-turn summary; protect first/last; never split tool turn). `mini_swe_runner.py` is NOT full SWE-bench — lightweight task→trajectory runner. (source=refs/hermes-agent/batch_runner.py, confidence=high, type=fact)
+
+## Verification
+| Claim | Verifying command/read | Verified |
+|-------|------------------------|----------|
+| AIAgent max_iterations is 90 | Structural code read pass | yes |
+| Prompt caching is three-tier | Structural code read pass | yes |
+| 7 launch paths | Structural code read pass | yes |
+| hermes_bootstrap is Windows-only | Structural code read pass | yes |
+| Context compression triggers at 50% tokens | Structural code read pass | yes |
+
+## Contradictions
+1. AGENTS.md `max_iterations=500` vs code 90; "~60 params" vs ~76 (stale doc; no functional impact).
+2. `hermes_bootstrap.py` is NOT startup (Windows UTF-8 only) — scope premise refuted.
+
+## Could-not-verify flags
+- Giant files such as `conversation_loop.py` (7524 lines) and `run_agent.py` (8206 lines) were structurally sampled; exhaustive line-by-line verification of all edge-case conditionals was not performed. (confidence=medium, type=inference)
