@@ -10,6 +10,7 @@ import {
     extractAllRewriteParityBlocks,
     validateRewriteParityCompletion,
 } from "./rewrite-parity-validate.js";
+import { readPauseState, formatRefusal } from "./pause-new-work.js";
 
 const SCHEMA_VERSION = 1;
 const LOCK_TIMEOUT_MS = 5000;
@@ -6136,6 +6137,27 @@ function deleteSkillProposal(sessionID, proposalIDRaw, options = {}) {
 function activateCoordinationTask(sessionID, taskIDRaw, options = {}) {
     const actor = coordinationActorContext(sessionID, options);
     const loaded = loadCoordinationTask(taskIDRaw);
+    // Pause-on-new-work gate (memo-4). This is the coord-task dispatch seam.
+    // Gate ONLY the ready -> working transition (NEW dispatch): that is the
+    // moment a prepared task begins executing. A working -> working resume /
+    // reclaim / takeover is CONTINUATION of in-flight work and MUST remain
+    // available under an engaged pause — the contract is "in-flight work is
+    // never touched", and re-entering an already-active task is not new work.
+    // The gate fires after load (so the status is known) but BEFORE
+    // error-collection and before any mutation, so a ready-task refusal is
+    // surfaced cleanly. In-flight child sessions already spawned are NOT
+    // signalled or cancelled — see the plugin (pause-new-work.js) for the
+    // TaskTool seam.
+    if (loaded.payload.status === "ready") {
+        const pauseState = readPauseState();
+        if (pauseState.engaged) {
+            throw new StateError(
+                formatRefusal(
+                    `coordination task activation (ready -> working for task ${loaded.payload.task_id}).`,
+                ),
+            );
+        }
+    }
     const errors = [];
     const missingResearchFields = missingResearchContractFields(loaded.payload);
     if (missingResearchFields.length) {

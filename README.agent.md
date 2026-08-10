@@ -1041,6 +1041,40 @@ export default function transform({ context }) {
   by the unchanged S2 → overlay pilot → external evidence → core promotion path.
   `/skill-propose delete <id>` retires an unpromoted card (like `/task-delete`,
   destructive hard removal of gitignored transport, NOT a lifecycle status).
+- **Repo-scoped pause on NEW work (`pause-new-work`).** `vh-agent-harness
+  pause-new-work {engage|status|disengage}` writes/removes a sentinel file at
+  `.opencode/state/pause-new-work.json` that covered **dispatch** seams read to
+  REFUSE new-work admissions with a clear message. **Naming is load-bearing: this
+  is NOT a global pause, NOT an abort/kill switch, and NOT an agent-loop
+  interlock** — it pauses only NEW work across the enumerated dispatch
+  entrypoints. Covered seams (refused when engaged): coordination task
+  activation (`ready`->`working`), bgshell **launch + resume** (NEW spawn only;
+  the stop/SIGTERM path is deliberately untouched), OpenCode TaskTool dispatch
+  (  `@subagent` / new child task), and the dispatch commands `/implement`
+  `/implement-goal` `/research` `/solution-brief` (the "begin new delegated
+  work" class). **In-flight work is NEVER affected:** engaging sends no signal
+  and cancels no running process or OpenCode response; existing child work may
+  complete and report; and `working`->`working` task resume/reclaim/takeover
+  (continuation, not new dispatch) stays available — only the `ready`->`working`
+  activation is gated. Deliberately NOT blocked (so
+  status/closeout/recovery/drafting/continuation stay reachable while engaged):
+  ordinary chat, diagnostic tools, ordinary non-dispatch tool calls by an
+  in-flight root turn (the plugin blocks ONLY `tool:"task"`, never a blanket
+  `tool.execute.before`), `/resume-task` (it is BOTH a new-dispatch AND a
+  continuation entry point — the precise `ready`->`working` gate in
+  `activateCoordinationTask` is the seam, so blanket-blocking the command would
+  forbid in-flight continuation), and all state/utility/diagnosis/review/
+  planning commands (including `/write-task`, which creates candidate transport
+  and does not begin execution). The sentinel contract is ONE shared state table
+  (absent=disengaged; present=engaged; malformed/unreadable=engaged fail-safe;
+  indeterminate FS failure=engaged+degraded) implemented identically by the JS
+  contract module (`.opencode/scripts/pause-new-work.js`), the OpenCode plugin
+  (`.opencode/plugins/pause-new-work.js`), and the Python bgshell port. There is
+  **NO auto-engagement in this slice** — a watchdog/auto-detection layer is
+  explicitly deferred; engage/disengage are operator-driven only. The slash
+  command `/pause-new-work {engage|status|disengage}` is the OpenCode-side UX
+  (it shells to the CLI verb). The sentinel lives under the drift-exempt
+  `.opencode/state/` subtree, so creating/removing it never trips managed-drift.
 
 ### Refresh & migration
 
