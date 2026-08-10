@@ -108,6 +108,18 @@ func init() {
 		"preview which path(s) would be accepted (and why) without writing anything")
 }
 
+// persistAcceptOriginStore is the SEAM over the batch origin-store persist in
+// runAcceptPlatform. Production calls store.Write(target); unit tests override
+// it to inject a DETERMINISTIC persist failure — proving the partial-state
+// branch (live bytes landed, origin did NOT advance) returns a non-zero exit
+// and reports the qualified self-heal warning, without requiring a real
+// filesystem fault. It is package-scoped (not exported) so ONLY the
+// accept-platform batch persist goes through it. Tests that override it MUST
+// restore the default on cleanup.
+var persistAcceptOriginStore = func(s *originhash.Store, target string) error {
+	return s.Write(target)
+}
+
 func runAcceptPlatform(cmd *cobra.Command, args []string) (err error) {
 	// A rejected acceptance is surfaced to stderr exactly once (SilenceErrors
 	// suppresses Cobra's duplicate "Error:" line), matching update's convention.
@@ -184,7 +196,7 @@ func runAcceptPlatform(cmd *cobra.Command, args []string) (err error) {
 	// empty-store write on an all-rejected run).
 	var persistErr error
 	if !acceptPlatformDryRun && len(accepted) > 0 {
-		if werr := store.Write(abs); werr != nil {
+		if werr := persistAcceptOriginStore(store, abs); werr != nil {
 			persistErr = werr
 			// The live bytes landed but the origin did NOT advance. This is the
 			// benign-but-INCOMPLETE partial: the two-object operation (live file
@@ -303,6 +315,18 @@ func acceptOnePath(ps *seamStaging, store *originhash.Store, target, rel string,
 	return acceptResult{rel: rel, reason: string(reason), ok: true}
 }
 
+// acceptReadLiveFile is the SEAM over the live-tree read used by
+// buildAcceptLiveState, mirroring substrate.readLiveFile. Production uses
+// os.ReadFile; unit tests override it to inject a DETERMINISTIC read failure
+// (the Unreadable preserved-reason acceptance path) without relying on OS
+// permission bits, which skip under root / permissive filesystems (a chmod-000
+// probe is root-dependent and flaky in such CI). It is package-scoped (not
+// exported) so ONLY buildAcceptLiveState's live read goes through it; staged
+// reads (acceptOnePath's hashSHA256 of the staged copy) keep using os.ReadFile
+// directly, matching substrate's seam boundary. Tests that override it MUST
+// restore the default (acceptReadLiveFile = os.ReadFile) on cleanup.
+var acceptReadLiveFile = os.ReadFile
+
 // buildAcceptLiveState observes the live file at target/<rel> and returns the
 // managedfile.LiveState the shared classifier consumes. It mirrors substrate's
 // internal buildLiveState exactly (stat -> Absent/regular/dir; read+hash ->
@@ -324,7 +348,7 @@ func buildAcceptLiveState(target, rel string) managedfile.LiveState {
 	if !info.Mode().IsRegular() {
 		return managedfile.LiveState{}
 	}
-	data, rerr := os.ReadFile(livePath)
+	data, rerr := acceptReadLiveFile(livePath)
 	if rerr != nil {
 		// Regular file but unreadable — the Unreadable preserved reason.
 		return managedfile.LiveState{IsRegular: true, Readable: false}

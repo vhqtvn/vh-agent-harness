@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -475,4 +476,133 @@ func storeJSON(t *testing.T, root string) string {
 		t.Fatalf("read origin store: %v", err)
 	}
 	return string(b)
+}
+
+// TestAcceptPlatform_UnreadableLiveFile_Deterministic is the DETERMINISTIC
+// behavioral-closure crux for the accept-platform Unreadable preserved-reason
+// path. It injects a KNOWN read failure through the acceptReadLiveFile seam —
+// NO reliance on OS permission bits (which a chmod-000 probe cannot enforce
+// under root / permissive CI filesystems). It proves, in every CI environment:
+//
+//  1. read-failure ≠ absent ≠ unedited: a live file that EXISTS (stat ok,
+//     regular, with a recorded origin from install) but whose read FAILS routes
+//     to the TYPED PreservedReason == managedfile.Unreadable via the shared
+//     classifier (ClassifyPreserved: hadOrigin + IsRegular + !Readable) —
+//     distinct from ConsumerDelete (absent) and from the unedited disposition
+//     that falls through to overwrite/noop.
+//  2. accept-platform RECOVERS the unreadable stall: it writes the platform
+//     bytes and advances the origin (the operator's explicit acceptance is
+//     honored — accept-platform is a focused recovery tool that adopts the
+//     platform bytes even though the read could not inspect the live bytes).
+//
+// The seam (package-scoped acceptReadLiveFile) is restored to os.ReadFile on
+// cleanup so no other test is affected.
+func TestAcceptPlatform_UnreadableLiveFile_Deterministic(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	p := findLiveAuthoredPlatformManagedPath(t, root)
+	livePath := filepath.Join(root, filepath.FromSlash(p))
+	platformBytes, err := os.ReadFile(livePath)
+	if err != nil {
+		t.Fatalf("read platform bytes %s: %v", p, err)
+	}
+
+	// --- Inject a DETERMINISTIC read failure via the acceptReadLiveFile seam.
+	// The live file genuinely EXISTS on disk (stat succeeds, regular file) and
+	// has a recorded origin (install wrote it) — only the read is forced to
+	// fail, exactly the write-permitted-but-not-readable condition that
+	// ClassifyPreserved must classify as Unreadable. ---
+	prev := acceptReadLiveFile
+	acceptReadLiveFile = func(path string) ([]byte, error) {
+		return nil, errors.New("injected deterministic read failure (accept-platform seam)")
+	}
+	t.Cleanup(func() { acceptReadLiveFile = prev })
+
+	// accept-platform recovers the Unreadable stall: adopts platform bytes +
+	// advances the origin.
+	ap, aerr := seamAcceptPlatformOut(t, root, p)
+	if aerr != nil {
+		t.Fatalf("accept-platform %s: %v (out=%q)", p, aerr, ap)
+	}
+	if !strings.Contains(ap, "accepted") || !strings.Contains(ap, p) || !strings.Contains(ap, "unreadable") {
+		t.Errorf("accept-platform must report the unreadable resolution (accepted + path + reason); got:\n%s", ap)
+	}
+
+	// The live bytes are now the platform bytes (the operator's explicit
+	// acceptance wrote them, overriding the unreadable file).
+	got, gerr := os.ReadFile(livePath)
+	if gerr != nil || string(got) != string(platformBytes) {
+		t.Fatalf("accept-platform must write platform bytes for the unreadable stall;\n want=%q\n got=%q err=%v", string(platformBytes), got, gerr)
+	}
+
+	// The origin entry advanced to the platform hash (read from disk with the
+	// REAL os.ReadFile — the seam only affected the in-run classify).
+	store2, _ := originhash.Read(root)
+	h, ok := store2.Lookup(p)
+	if !ok || h == "" {
+		t.Errorf("accept-platform must advance the origin entry for the unreadable stall %s", p)
+	}
+}
+
+// TestAcceptPlatform_StorePersistFailure_PartialStateNonZero is the
+// behavioral-closure crux for the batch store-persist-failure branch in
+// runAcceptPlatform. It injects a DETERMINISTIC persist failure through the
+// persistAcceptOriginStore seam — proving the partial-state contract holds
+// without requiring a real filesystem fault:
+//
+//  1. the live bytes DID land (acceptOnePath writes live-first, before the
+//     batch persist);
+//  2. the origin store did NOT advance (the persist failed; the on-disk store
+//     is byte-identical to the pre-accept state);
+//  3. the command returns a NON-ZERO exit (RunE error) so automation cannot
+//     mistake the partial for complete success;
+//  4. the partial-state warning naming the self-heal path is reported.
+//
+// The seam (package-scoped persistAcceptOriginStore) is restored on cleanup so
+// no other test is affected.
+func TestAcceptPlatform_StorePersistFailure_PartialStateNonZero(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	p := findLiveAuthoredPlatformManagedPath(t, root)
+	livePath := filepath.Join(root, filepath.FromSlash(p))
+	platformBytes, _ := os.ReadFile(livePath)
+
+	// Consumer-edit so the path is a real stall accept-platform will recover.
+	const consumerEdit = "// CONSUMER EDIT — persist-failure partial-state test\n"
+	if err := os.WriteFile(livePath, []byte(consumerEdit), 0o644); err != nil {
+		t.Fatalf("consumer-edit %s: %v", p, err)
+	}
+	storeBeforeJSON := storeJSON(t, root)
+
+	// Inject a DETERMINISTIC persist failure via the persistAcceptOriginStore
+	// seam. The seam replaces the entire store.Write call, so NO temp file or
+	// rename occurs — the on-disk store is left completely untouched.
+	prev := persistAcceptOriginStore
+	persistAcceptOriginStore = func(s *originhash.Store, target string) error {
+		return errors.New("injected deterministic persist failure (accept-platform seam)")
+	}
+	t.Cleanup(func() { persistAcceptOriginStore = prev })
+
+	// accept-platform writes the live bytes (live-first) then fails the batch persist.
+	ap, aerr := seamAcceptPlatformOut(t, root, p)
+	// (3) NON-ZERO exit.
+	if aerr == nil {
+		t.Fatalf("accept-platform must return a non-zero error when the origin persist fails; got nil. out=%q", ap)
+	}
+	// (4) the partial-state warning is reported.
+	if !strings.Contains(ap, "did NOT advance") {
+		t.Errorf("accept-platform must warn that the origin store did NOT advance; got:\n%s", ap)
+	}
+
+	// (1) the live bytes DID land (platform bytes written live-first).
+	got, gerr := os.ReadFile(livePath)
+	if gerr != nil || string(got) != string(platformBytes) {
+		t.Errorf("accept-platform must still write the live bytes when the persist fails (live-first); want=%q got=%q err=%v", string(platformBytes), got, gerr)
+	}
+	// (2) the on-disk origin store did NOT advance (byte-identical to before).
+	if storeJSON(t, root) != storeBeforeJSON {
+		t.Errorf("accept-platform must NOT advance the on-disk origin store when the persist fails")
+	}
 }
