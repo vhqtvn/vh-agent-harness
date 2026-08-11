@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "commit_sha": "ffcdf6ccdf240608e1ba624d7d98655122eb4701",
+  "commit_sha": "76da4a8e7454164fedf35fef73dd2b3e0fc391ff",
   "model_gates": {
     "G1_coverage": "ready",
     "G2_significance": "ready",
