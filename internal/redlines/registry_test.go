@@ -417,6 +417,105 @@ subjects:
 	}
 }
 
+func TestLoad_EmptyOrWhitespaceGlobsRejected(t *testing.T) {
+	// A glob slice (repos / ambient_repos) that is non-empty by LENGTH but
+	// contains an empty or whitespace-only element loads as a seemingly-valid
+	// subject whose binding scope NEVER MATCHES: matchGlob("", name) returns
+	// false, so the subject silently protects zero repos (repos) or never
+	// applies the ambient scoping (ambient_repos). This is the same
+	// honesty-contract failure mode the feature already rejects for unit:
+	// diff, source_repos, and empty terms in labels/side_a/side_b. The
+	// registry MUST fail-closed at load time here too. Mirrors
+	// TestLoad_EmptyOrWhitespaceTermsRejected.
+	setXDG(t)
+	cases := []struct {
+		name    string
+		content string
+		field   string // the field name the error must name (repos/ambient_repos)
+		id      string // the opaque id the error must name
+	}{
+		{
+			name: "repos single empty on scrub-project",
+			content: `version: 1
+subjects:
+  - id: subj-test-empty-repos
+    kind: scrub-project
+    labels: [synthetic-alpha]
+    repos: [""]
+`,
+			field: "repos",
+			id:    "subj-test-empty-repos",
+		},
+		{
+			name: "repos whitespace-only on scrub-project",
+			content: `version: 1
+subjects:
+  - id: subj-test-ws-repos
+    kind: scrub-project
+    labels: [synthetic-alpha]
+    repos: ["   "]
+`,
+			field: "repos",
+			id:    "subj-test-ws-repos",
+		},
+		{
+			name: "repos single empty on forbidden-relation",
+			content: `version: 1
+subjects:
+  - id: subj-test-empty-repos-rel
+    kind: forbidden-relation
+    side_a: [synthetic-alpha]
+    side_b: [synthetic-beta]
+    repos: [""]
+`,
+			field: "repos",
+			id:    "subj-test-empty-repos-rel",
+		},
+		{
+			name: "ambient_repos single empty on forbidden-relation",
+			content: `version: 1
+subjects:
+  - id: subj-test-empty-ambient
+    kind: forbidden-relation
+    side_a: [synthetic-alpha]
+    side_b: [synthetic-beta]
+    ambient_repos: [""]
+`,
+			field: "ambient_repos",
+			id:    "subj-test-empty-ambient",
+		},
+		{
+			name: "ambient_repos whitespace-only on forbidden-relation",
+			content: `version: 1
+subjects:
+  - id: subj-test-ws-ambient
+    kind: forbidden-relation
+    side_a: [synthetic-alpha]
+    side_b: [synthetic-beta]
+    ambient_repos: ["  "]
+`,
+			field: "ambient_repos",
+			id:    "subj-test-ws-ambient",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			writeUserReg(t, c.content)
+			_, err := Load(t.TempDir())
+			if err == nil {
+				t.Fatalf("expected error for %s (v1 fail-closed on empty/whitespace glob), got nil", c.name)
+			}
+			if !strings.Contains(err.Error(), c.field) {
+				t.Errorf("error should name the rejected field %q; got: %v", c.field, err)
+			}
+			if !strings.Contains(err.Error(), c.id) {
+				t.Errorf("error should name the opaque subject id %q; got: %v", c.id, err)
+			}
+		})
+	}
+}
+
 func TestLoad_MalformedSchema_FailsClosed(t *testing.T) {
 	setXDG(t)
 	cases := []struct {

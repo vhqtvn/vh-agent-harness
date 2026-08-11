@@ -194,19 +194,14 @@ func Load(repoRoot string) (*Registry, error) {
 	if repoPresent {
 		// Additive/tightening-only: reject any id collision with the user
 		// level. A colliding id would be an attempt to redefine/weaken a
-		// user-level entry.
+		// user-level entry. Intra-file uniqueness within the repo-local file
+		// is already enforced by validateRegistry's own seen map inside
+		// loadFileAt; this loop guards the CROSS-file case only.
 		existing := map[string]struct{}{}
 		for _, s := range effective.Subjects {
 			existing[s.ID] = struct{}{}
 		}
-		// Also enforce uniqueness WITHIN the repo-local file (loadFileAt already
-		// checks intra-file uniqueness; this guards the cross-file case).
-		seenLocal := map[string]struct{}{}
 		for _, s := range repoReg.Subjects {
-			if _, dup := seenLocal[s.ID]; dup {
-				return nil, fmt.Errorf("redlines: repo-local registry %q: duplicate subject id %q", repoReg.SourcePath, s.ID)
-			}
-			seenLocal[s.ID] = struct{}{}
 			if _, clash := existing[s.ID]; clash {
 				return nil, fmt.Errorf("redlines: repo-local registry %q: subject id %q collides with user-level entry (repo-local is additive/tightening-only: cannot redefine a user-level subject)", repoReg.SourcePath, s.ID)
 			}
@@ -362,6 +357,25 @@ func validateSubject(rs rawSubject) (Subject, error) {
 		if containsEmptyOrWhitespaceTerm(s.SideB) {
 			return Subject{}, fmt.Errorf("id %q: side_b contains an empty or whitespace-only term (terms must be non-empty)", rs.ID)
 		}
+		// ambient_repos empty/whitespace glob check. ambient_repos is the
+		// forbidden-relation-only field naming where side A is ambient; an
+		// empty glob element matchGlob("", name) returns false, so the
+		// subject's ambient scoping silently never applies. Same honesty-
+		// contract failure mode rejected above for side_a/side_b terms.
+		if containsEmptyOrWhitespaceTerm(s.AmbientRepos) {
+			return Subject{}, fmt.Errorf("id %q: ambient_repos contains an empty or whitespace-only glob (globs must be non-empty)", rs.ID)
+		}
+	}
+	// repos empty/whitespace glob check. Repos is a SHARED field (both
+	// scrub-project and forbidden-relation use it for enforcement-scope
+	// binding), so it is checked for ALL subjects after the kind switch
+	// (kind-agnostic, like Unit above). An empty glob element
+	// matchGlob("", name) returns false, so repos: [""] makes the subject
+	// bind NOTHING — a silent false-negative where the operator thinks they
+	// scoped a redline but it protects zero repos. Same honesty-contract
+	// failure mode rejected above for labels/side_a/side_b terms.
+	if containsEmptyOrWhitespaceTerm(s.Repos) {
+		return Subject{}, fmt.Errorf("id %q: repos contains an empty or whitespace-only glob (globs must be non-empty)", rs.ID)
 	}
 	return s, nil
 }
@@ -374,8 +388,14 @@ func validateSubject(rs rawSubject) (Subject, error) {
 // empty/whitespace element would load as a seemingly-valid subject that NEVER
 // FIRES. That is a silent false-negative: it lets otherwise-blocked material
 // into the acquired tree with no warning, the same honesty-contract failure
-// mode the registry rejects for source_repos and unit: diff. Used to fail
-// closed at load time for labels, side_a, and side_b.
+// mode the registry rejects for source_repos and unit: diff.
+//
+// The same helper is reused for the glob slices repos and ambient_repos: an
+// empty glob element matchGlob("", name) returns false, so a glob slice
+// containing such an element silently binds zero repos (repos) or never
+// applies the ambient scoping (ambient_repos) — the identical honesty-contract
+// failure mode. Used to fail closed at load time for labels, side_a, side_b,
+// repos, and ambient_repos.
 func containsEmptyOrWhitespaceTerm(terms []string) bool {
 	for _, t := range terms {
 		if strings.TrimSpace(t) == "" {
