@@ -874,20 +874,26 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 	// --- isGateWrapperInDevShExec over-block narrowing matrix --------------
 	//
 	// Pins the narrowing of isGateWrapperInDevShExec: the broad
-	// `includes("commit-gate.sh")` deny now has ONE closed, fail-closed
-	// exception for syntactically inert static inspection (`bash -n` / `cmp`
-	// of the gate script). Neither form can execute or mutate anything.
+	// `includes("commit-gate.sh")` deny has ONE closed, fail-closed carve-out
+	// function (isStaticGateInspectionInDevShExec) covering three inert form
+	// families: `bash -n` / `cmp` (static inspection — neither executes nor
+	// mutates), and `accept-platform` / `diff` (NON-exec native subcommands
+	// that take path operands but never execute them; accept-platform writes
+	// platform bytes as sanctioned recovery, diff is read-only). None EXECUTES
+	// the gate, which is the shell-guard threat this deny guards against.
 	//
 	// Load-bearing invariants pinned here:
-	//   - the two ALLOW forms (bash -n / cmp of commit-gate.sh) now pass the
-	//     gate end-to-end through Go -> node -> WASM -> evaluate();
+	//   - the ALLOW forms (bash -n / cmp / accept-platform / diff of
+	//     commit-gate.sh) now pass the gate end-to-end through Go -> node ->
+	//     WASM -> evaluate();
 	//   - real wrapper execution of commit-gate.sh through exec is STILL
 	//     denied (the exception is narrow, not a blanket allow);
 	//   - git-mutation-bypass is intact: wrapped git mutations still DENY
 	//     regardless of this exception (scan #1 runs before the harness
 	//     branch);
 	//   - negative-grammar shapes fail closed: any shell-control syntax,
-	//     quoting, `bash -c`, or a smuggled `;`-leg keeps the DENY.
+	//     quoting, `bash -c`, a smuggled `;`-leg, or a smuggled flag (any
+	//     operand starting with `-`) keeps the DENY.
 	//
 	// Each command is passed as a single-element argv so eval.js's
 	// argv.join(" ") yields exactly the intended command string.
@@ -939,6 +945,43 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			// `cmp -- <a> <b>`: optional POSIX terminator accepted.
 			name: "vh-agent-harness exec cmp -- commit-gate.sh other allowed (-- terminator)",
 			cmd:  `vh-agent-harness exec cmp -- .opencode/scripts/commit-gate.sh tmp/scratch/other.sh`,
+			want: Allow,
+		},
+
+		// --- MUST ALLOW: accept-platform / diff of the gate (Form 3, NON-exec) -
+		//
+		// Native vh-agent-harness subcommands (NOT exec subcommands) that take
+		// path operands but never EXECUTE them. The carve-out sits BEFORE the
+		// `exec` gate in isStaticGateInspectionInDevShExec because these verbs
+		// are top-level (`vh-agent-harness accept-platform ...`, not
+		// `vh-agent-harness exec accept-platform ...`). The shell-guard threat
+		// is EXECUTING commit-gate.sh to bypass the gated-commit protocol;
+		// treating the gate as path DATA is not that threat.
+		//   - accept-platform (cobra.MinimumNArgs(1)): reads embedded-corpus
+		//     bytes and writes them to the named path — the sanctioned recovery
+		//     for a stalled platform-managed file. It does NOT execute the path.
+		//   - diff (cobra.NoArgs): pure read + report. A stray positional is
+		//     rejected by cobra before RunE, so it can only error.
+		// Both were over-blocked by the broad includes("commit-gate.sh") deny.
+		{
+			// Canonical recovery: re-baseline a stalled commit-gate.sh by
+			// adopting the platform's bytes. Writes the path but never runs it.
+			name: "vh-agent-harness accept-platform commit-gate.sh allowed (sanctioned recovery, does not execute)",
+			cmd:  `vh-agent-harness accept-platform .opencode/scripts/commit-gate.sh`,
+			want: Allow,
+		},
+		{
+			// Optional POSIX `--` terminator accepted by the closed grammar.
+			name: "vh-agent-harness accept-platform -- commit-gate.sh allowed (-- terminator)",
+			cmd:  `vh-agent-harness accept-platform -- .opencode/scripts/commit-gate.sh`,
+			want: Allow,
+		},
+		{
+			// diff is read + report. Although real diff is cobra.NoArgs (a stray
+			// positional is rejected by cobra before RunE), the verb is inert
+			// w.r.t. the shell-guard threat (it never executes the path).
+			name: "vh-agent-harness diff commit-gate.sh allowed (inert read+report verb)",
+			cmd:  `vh-agent-harness diff .opencode/scripts/commit-gate.sh`,
 			want: Allow,
 		},
 
@@ -1067,6 +1110,18 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			// a single option-like operand containing the gate substring).
 			name: "vh-agent-harness exec bash -n -commit-gate.sh denied (bash -n option-like operand, startsWith guard)",
 			cmd:  `vh-agent-harness exec bash -n -commit-gate.sh`,
+			want: Deny,
+		},
+		{
+			// Form 3 (NON-exec) flag smuggling. accept-platform with a trailing
+			// -f after the gate path. The closed grammar rejects ANY operand
+			// starting with `-` (this also blocks accept-platform's --target/-o,
+			// which could redirect the write to an arbitrary location, and any
+			// flag-like token after `--`). The path mentions commit-gate.sh but
+			// the trailing -f fails the startsWith guard → exception does not
+			// fire → broad includes("commit-gate.sh") deny preserved.
+			name: "vh-agent-harness accept-platform commit-gate.sh -f denied (flag smuggling, startsWith guard)",
+			cmd:  `vh-agent-harness accept-platform .opencode/scripts/commit-gate.sh -f`,
 			want: Deny,
 		},
 	}
