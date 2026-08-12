@@ -4,12 +4,12 @@
     "kind": "tag",
     "value": "v0.22.1"
   },
-  "evaluated_commit": "e552cbd91a6219b41fa1ada586ee7c30ad3b739e",
-  "evaluated_tree": "d2f9068e156ddac8aa109a783a7a77da32a30b7c",
-  "manifest_parent_commit": "e552cbd91a6219b41fa1ada586ee7c30ad3b739e",
+  "evaluated_commit": "601e37ee3c0a129a74c45cd39561f32f436ec279",
+  "evaluated_tree": "9499a6d7545fc264cb38072e6aa5e76427ad1b36",
+  "manifest_parent_commit": "601e37ee3c0a129a74c45cd39561f32f436ec279",
   "reconciliation": {
     "status": "release-prep",
-    "scope": "Release arc: v0.23.0 (the prior tag; evaluator-derived release_base) through evaluated_commit (the release-prep evaluation point = the readiness-artifact commit R = e552cbd91a6219b41fa1ada586ee7c30ad3b739e; intended release v0.24.0). The v0.23.0..R arc carries 17 feat commits (MINOR-class signals: private redlines, origin-hash adoption migration, rewrite-parity contract gate, repo-scoped pause-on-new-work, accept-platform recovery, chunk-timeout-backstop, F2 transient-locator reject gate, land-gate completed-card retirement, G6 S2-hold gate, RF-B shell-guard deny, doctor closeout-reach reconciliation #24, permission hardening, exec sanctioned-alternative footer, contained defer-triggers wrapper, three-way origin-hash update sync) plus 20 fix commits and 55 other commits; zero breaking changes. MINOR bump v0.23.0->v0.24.0. All carried-forward records retain disposition=disclose; the release-diff enumerator re-checks each card's trigger against the actual v0.23.0..R arc at evaluation time.",
+    "scope": "Release arc: v0.24.0 (the prior tag; evaluator-derived release_base) through evaluated_commit (the release-prep evaluation point = the readiness-artifact commit R = 601e37ee3c0a129a74c45cd39561f32f436ec279; intended release v0.25.0). The v0.24.0..R arc carries 2 feat commits (MINOR-class signals: F8 accept-platform --all/--stale-only batch migration unblocker, F2-narrow agents-composition WARN-only doctor check) plus 3 fix commits (F1 shell-guard over-match carve-out for accept-platform/diff on commit-gate.sh paths, F3 commit-gate GC stat-fallback retain-protected-scratch, F7 drifted-vs-render display wording), 1 docs commit (F6+F5-narrow scoped dangling test refs + refreshed Slice-2 prose), 1 chore commit (render-sync .opencode/), and 6 bookkeeping commits (backlog normalization, archive companions, adopter-findings checkpoint); zero breaking changes. MINOR bump v0.24.0->v0.25.0. All carried-forward records retain disposition=disclose; the release-diff enumerator re-checks each card's trigger against the actual v0.24.0..R arc at evaluation time.",
     "zero_records_confirmed": false
   },
   "records": [
