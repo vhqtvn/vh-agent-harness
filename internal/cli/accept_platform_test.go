@@ -427,6 +427,220 @@ func TestAcceptPlatform_ConsumerDeletedSh_RestoredWithExecMode(t *testing.T) {
 	}
 }
 
+// seamAcceptPlatformBatchOut runs the accept-platform command in batch mode
+// (--all and optionally --stale-only) against root, with optional extra
+// positional paths unioned into the candidate set. It restores all four flag
+// globals on cleanup so no other test is affected. Returns captured stdout +
+// the RunE error so tests can assert the batch summary and the exit code.
+func seamAcceptPlatformBatchOut(t *testing.T, root string, all, staleOnly bool, rels ...string) (string, error) {
+	t.Helper()
+	var out string
+	var err error
+	runWithCwd(t, root, func() {
+		acceptPlatformTarget = root
+		acceptPlatformDryRun = false
+		acceptPlatformAll = all
+		acceptPlatformStaleOnly = staleOnly
+		defer func() {
+			acceptPlatformTarget = ""
+			acceptPlatformDryRun = false
+			acceptPlatformAll = false
+			acceptPlatformStaleOnly = false
+		}()
+		cmd, buf := newOutCmd()
+		err = runAcceptPlatform(cmd, rels)
+		out = buf.String()
+	})
+	return out, err
+}
+
+// TestAcceptPlatform_All_RecoversStallAndSkipsConverged is the F8 batch-mode
+// crux: --all accepts every stalled platform-managed path in one invocation,
+// routes already-converged paths to a benign "skipped" bucket (NEVER failing the
+// exit code), and prints the N accepted / M skipped / K failed summary. This is
+// the outcome the operator gets from `accept-platform --all` after a partial
+// disruption: every stall recovered, convergence confirmed, zero noise from the
+// healthy majority.
+func TestAcceptPlatform_All_RecoversStallAndSkipsConverged(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	// Consumer-edit exactly one managed path so it becomes a real stall; the
+	// rest of the managed set stays converged.
+	p := findLiveAuthoredPlatformManagedPath(t, root)
+	livePath := filepath.Join(root, filepath.FromSlash(p))
+	platformBytes, _ := os.ReadFile(livePath)
+	const consumerEdit = "// CONSUMER EDIT — --all batch test\n"
+	if err := os.WriteFile(livePath, []byte(consumerEdit), 0o644); err != nil {
+		t.Fatalf("consumer-edit %s: %v", p, err)
+	}
+
+	ap, aerr := seamAcceptPlatformBatchOut(t, root, true, false)
+	// --all must NOT fail the exit code just because the converged majority was
+	// skipped — that is the expected batch outcome.
+	if aerr != nil {
+		t.Fatalf("accept-platform --all must succeed when the only non-accepted paths are benign skips; got err=%v (out=%q)", aerr, ap)
+	}
+	// The stalled path was accepted (resolved consumer-edit).
+	if !strings.Contains(ap, "accepted") || !strings.Contains(ap, p) || !strings.Contains(ap, "consumer-edit") {
+		t.Errorf("--all must accept the stalled path %q with its reason; got:\n%s", p, ap)
+	}
+	// The converged majority was routed to the benign skip bucket (NOT failed).
+	if !strings.Contains(ap, "skipped") {
+		t.Errorf("--all must report the skipped (already converged) paths; got:\n%s", ap)
+	}
+	if strings.Contains(ap, "NOT accepted") {
+		t.Errorf("--all must not report benign skips as NOT accepted (failed); got:\n%s", ap)
+	}
+	// Explicit residue-exclusion crux: CoreOwnershipDefaults includes paths from
+	// deselected capabilities (e.g. media-perception, worker-read-only) that the
+	// EFFECTIVE classifier (ps.cls) does NOT know. --all must filter them out via
+	// ps.cls rather than enumerate + fail them as "unknown path". A fresh
+	// seamInstallInto tree carries those defaults, so asserting the
+	// media-perception residue path never appears in the output (neither accepted
+	// nor failed) proves the exclusion fires end-to-end.
+	if strings.Contains(ap, "media-perception") || strings.Contains(ap, "worker-read-only") {
+		t.Errorf("--all must exclude inactive-capability residue (media-perception/worker-read-only) via the effective classifier; got:\n%s", ap)
+	}
+	// The one-line batch summary is present.
+	if !strings.Contains(ap, "accept-platform summary:") {
+		t.Errorf("--all must print the batch summary line; got:\n%s", ap)
+	}
+	// The stalled path now carries the platform bytes (recovered).
+	got, err := os.ReadFile(livePath)
+	if err != nil || string(got) != string(platformBytes) {
+		t.Errorf("--all did not recover %s to platform bytes;\n want=%q\n got=%q", p, string(platformBytes), got)
+	}
+}
+
+// TestAcceptPlatform_StaleOnly_RestrictsToDriftedMissing proves --stale-only
+// narrows --all to the drifted+missing set `vh-agent-harness diff` reports. The
+// distinguishing case is an UnknownBaseline-but-in-sync path (F6): its live
+// bytes equal the render (so diff reports it OK), but it has NO recorded origin
+// (so it is migration-stalled). Plain --all ACCEPTS it (acceptOnePath sees
+// UnknownBaseline); --all --stale-only does NOT (computeSeamDrift reports it
+// OK, so it never enters the candidate set). This is the precise behavioral
+// difference the flag buys.
+func TestAcceptPlatform_StaleOnly_RestrictsToDriftedMissing(t *testing.T) {
+	// --- Plain --all: an UnknownBaseline-but-in-sync path IS accepted. ---
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	p := findLiveAuthoredPlatformManagedPath(t, root)
+
+	// Simulate the adoption-migration state for p: delete its origin entry while
+	// its live bytes still equal the platform render (live==staged). ClassifyPreserved
+	// then returns UnknownBaseline; computeSeamDrift reports it OK.
+	store, err := originhash.Read(root)
+	if err != nil {
+		t.Fatalf("read store: %v", err)
+	}
+	delete(store.OriginHashes, p)
+	if err := store.Write(root); err != nil {
+		t.Fatalf("write store: %v", err)
+	}
+
+	apAll, aerrAll := seamAcceptPlatformBatchOut(t, root, true, false)
+	if aerrAll != nil {
+		t.Fatalf("--all must succeed (the migration-stalled path is recoverable); got err=%v (out=%q)", aerrAll, apAll)
+	}
+	if !strings.Contains(apAll, "accepted") || !strings.Contains(apAll, p) || !strings.Contains(apAll, "unknown-baseline") {
+		t.Errorf("--all must accept the UnknownBaseline-but-in-sync path %q; got:\n%s", p, apAll)
+	}
+
+	// Reset the same stall condition on a FRESH tree, then run --all --stale-only.
+	// The path is OK to computeSeamDrift (live==staged), so --stale-only must NOT
+	// candidate it → 0 accepted.
+	root2 := t.TempDir()
+	seamInstallInto(t, root2)
+	livePath2 := filepath.Join(root2, filepath.FromSlash(p))
+	store2, err := originhash.Read(root2)
+	if err != nil {
+		t.Fatalf("read store2: %v", err)
+	}
+	delete(store2.OriginHashes, p)
+	if err := store2.Write(root2); err != nil {
+		t.Fatalf("write store2: %v", err)
+	}
+
+	apStale, aerrStale := seamAcceptPlatformBatchOut(t, root2, true, true)
+	if aerrStale != nil {
+		t.Fatalf("--all --stale-only must succeed when no candidate fails; got err=%v (out=%q)", aerrStale, apStale)
+	}
+	if strings.Contains(apStale, p) && strings.Contains(apStale, "accepted") {
+		t.Errorf("--stale-only must NOT accept the OK-to-render UnknownBaseline path %q (it is not in drifted+missing); got:\n%s", p, apStale)
+	}
+	// The path's live bytes are unchanged (still the platform bytes install wrote
+	// — nothing was accepted, so nothing was written).
+	if got, _ := os.ReadFile(livePath2); len(got) == 0 {
+		t.Errorf("precondition: %s should still exist on the fresh tree", p)
+	}
+}
+
+// TestAcceptPlatform_StaleOnly_AcceptsConsumerEditByRenderBytes locks the
+// resolved --stale-only semantics that the commit-reviewer BLOCK flagged:
+// --stale-only selects candidates by RENDER-BYTES (computeSeamDrift's drifted
+// set), NOT by origin. So a consumer-preserved edit — whose live bytes differ
+// from the render AND carries a valid origin (ClassifyPreserved returns
+// ConsumerEdit) — IS in the drifted set and IS accepted by --stale-only, exactly
+// as it would be by plain --all or the per-path form. accept-platform is
+// destructive-by-intent (it adopts the platform bytes); the operator chose the
+// sweep. This test exists so the behavior is documented and a future change that
+// silently alters it is caught.
+func TestAcceptPlatform_StaleOnly_AcceptsConsumerEditByRenderBytes(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	// Consumer-edit one managed path: live diverges from the render and the
+	// origin still records the platform hash install wrote → ConsumerEdit stall,
+	// and computeSeamDrift classifies it drifted (live != staged).
+	p := findLiveAuthoredPlatformManagedPath(t, root)
+	livePath := filepath.Join(root, filepath.FromSlash(p))
+	platformBytes, _ := os.ReadFile(livePath)
+	const consumerEdit = "// CONSUMER EDIT — --stale-only render-bytes test\n"
+	if err := os.WriteFile(livePath, []byte(consumerEdit), 0o644); err != nil {
+		t.Fatalf("consumer-edit %s: %v", p, err)
+	}
+
+	ap, aerr := seamAcceptPlatformBatchOut(t, root, true, true)
+	if aerr != nil {
+		t.Fatalf("--all --stale-only must succeed (the consumer-edit stall is recoverable); got err=%v (out=%q)", aerr, ap)
+	}
+	// THE KEY ASSERTION: the consumer-edit path IS accepted by --stale-only
+	// (selection is by render-bytes; a valid origin does NOT exclude it).
+	if !strings.Contains(ap, "accepted") || !strings.Contains(ap, p) || !strings.Contains(ap, "consumer-edit") {
+		t.Errorf("--stale-only must accept the consumer-edit path %q (render-bytes selection); got:\n%s", p, ap)
+	}
+	// The path now carries the platform bytes (the consumer edit was discarded —
+	// accept-platform is destructive-by-intent; the operator chose the sweep).
+	got, err := os.ReadFile(livePath)
+	if err != nil || string(got) != string(platformBytes) {
+		t.Errorf("--stale-only did not recover %s to platform bytes;\n want=%q\n got=%q", p, string(platformBytes), got)
+	}
+}
+
+// TestAcceptPlatform_All_BackwardCompatPerPath proves the per-path form (no
+// --all) is unchanged: a benign not-currently-preserved path is still a FAILURE
+// (non-zero exit) when named explicitly, even though in batch mode it would be a
+// benign skip. This locks the backward-compat contract: --all changes only the
+// batch routing, never the explicit positional behavior.
+func TestAcceptPlatform_All_BackwardCompatPerPath(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	// A fresh, unedited platform_managed path (already at platform bytes).
+	p := findLiveAuthoredPlatformManagedPath(t, root)
+
+	// Explicit positional form (no --all): still FAILS on a converged path.
+	ap, aerr := seamAcceptPlatformOut(t, root, p)
+	if aerr == nil {
+		t.Fatalf("positional form must still error on a not-currently-preserved path; got nil err. out=%q", ap)
+	}
+	if !strings.Contains(ap, "not currently preserved") {
+		t.Errorf("positional form must still report 'not currently preserved'; got:\n%s", ap)
+	}
+}
+
 // findLivePlatformManagedPaths returns every repo-relative slash path that is
 // platform_managed in the corpus defaults AND exists on disk under root. It is
 // the plural form of findLivePlatformManagedPath (doctor_drift_test.go), used by

@@ -6,10 +6,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	corpus "github.com/vhqtvn/vh-agent-harness"
 	"github.com/vhqtvn/vh-agent-harness/internal/managedfile"
 	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
@@ -67,8 +69,10 @@ import (
 // transaction) is not achievable without a transaction manager; the live-first
 // order guarantees the failure mode is recoverable and never silently partial.
 var (
-	acceptPlatformTarget string
-	acceptPlatformDryRun bool
+	acceptPlatformTarget    string
+	acceptPlatformDryRun    bool
+	acceptPlatformAll       bool
+	acceptPlatformStaleOnly bool
 )
 
 var acceptPlatformCmd = &cobra.Command{
@@ -96,8 +100,30 @@ To make a consumer edit canonical ACROSS updates instead of discarding it,
 promote the edit into an overlay pack source at
 .vh-agent-harness/overlays/<pack>/ rather than accepting the platform version.
 
+Batch mode: --all accepts every drifted/stalled platform-managed path in one
+invocation (no positional paths needed). It enumerates the full platform-managed
+ownership map and accepts every path currently in a preserved state; already-
+converged paths are skipped (not failed). Add --stale-only to restrict --all to
+the drifted+missing set ` + "`vh-agent-harness diff`" + ` reports (the VISIBLY stale paths).
+--stale-only is the narrower sweep: unlike --all it does NOT candidate the
+migration-stalled-but-in-sync paths (F6 UnknownBaseline whose live bytes happen
+to match the render — diff reports them OK, not drifted/missing). NOTE:
+--stale-only selects by render-bytes, not by origin; a consumer-preserved edit
+whose live bytes differ from the render IS in the drifted set and WILL be
+accepted (accept-platform is destructive-by-intent — it adopts the platform
+bytes). Positional paths are still honored alongside --all (the union is
+accepted). The per-path form (no --all) is unchanged and backward-compatible.
+
 Re-run ` + "`vh-agent-harness update`" + ` or ` + "`doctor`" + ` after accepting to confirm convergence.`,
-	Args: cobra.MinimumNArgs(1),
+	Args: func(cmd *cobra.Command, args []string) error {
+		if acceptPlatformAll {
+			return nil // --all: positional paths optional (batch enumeration)
+		}
+		if len(args) < 1 {
+			return errors.New("accept-platform requires at least one path (or use --all to accept every drifted/stalled path)")
+		}
+		return nil
+	},
 	RunE: runAcceptPlatform,
 }
 
@@ -106,6 +132,10 @@ func init() {
 		"target directory (default: current directory)")
 	acceptPlatformCmd.Flags().BoolVar(&acceptPlatformDryRun, "dry-run", false,
 		"preview which path(s) would be accepted (and why) without writing anything")
+	acceptPlatformCmd.Flags().BoolVar(&acceptPlatformAll, "all", false,
+		"accept every drifted/stalled platform-managed path in one invocation (no positional paths needed)")
+	acceptPlatformCmd.Flags().BoolVar(&acceptPlatformStaleOnly, "stale-only", false,
+		"with --all, restrict to the drifted+missing set `vh-agent-harness diff` reports (the visibly stale paths; does NOT candidate the migration-stalled-but-in-sync F6 paths). Selects by render-bytes: a consumer-preserved edit IS included if its live bytes differ from the render; ignored without --all")
 }
 
 // persistAcceptOriginStore is the SEAM over the batch origin-store persist in
@@ -140,15 +170,15 @@ func runAcceptPlatform(cmd *cobra.Command, args []string) (err error) {
 		return fmt.Errorf("resolve target: %w", aerr)
 	}
 
-	// Normalize each requested path up front so a bad arg never reaches the
-	// staging read or the live write.
-	rels := make([]string, 0, len(args))
-	for _, a := range args {
-		rel, rerr := normalizeAcceptPath(a)
-		if rerr != nil {
-			return fmt.Errorf("accept-platform: %w", rerr)
-		}
-		rels = append(rels, rel)
+	// Build the candidate path set. Positional paths are always honored; --all
+	// expands the set to every drifted/stalled platform-managed path (--stale-only
+	// narrows --all to the drifted+missing set `diff` reports). A bad positional
+	// arg fails fast before any staging read or live write. The --all expansion
+	// needs the EFFECTIVE ownership classifier (to exclude inactive-capability
+	// residue and respect override-raised classes), so it runs AFTER staging.
+	rels, cerr := normalizeAcceptCandidates(args)
+	if cerr != nil {
+		return fmt.Errorf("accept-platform: %w", cerr)
 	}
 
 	// Reuse the seam staging front-half so the bytes we apply are byte-identical
@@ -176,15 +206,39 @@ func runAcceptPlatform(cmd *cobra.Command, args []string) (err error) {
 		store = originhash.New()
 	}
 
+	// Expand the candidate set for batch mode (--all / --stale-only). Done AFTER
+	// staging so the expansion can filter through the EFFECTIVE classifier
+	// (ps.cls) — this excludes inactive-capability residue (deselected pilots'
+	// paths are absent from the active ownership map) and respects override-
+	// raised classes, so --all never produces spurious "unknown path" failures
+	// for paths the current selection does not manage.
+	if acceptPlatformAll {
+		expanded, eerr := expandAcceptAllCandidates(abs, ps, rels)
+		if eerr != nil {
+			return fmt.Errorf("accept-platform: %w", eerr)
+		}
+		rels = expanded
+	}
+
 	// Each path is an INDEPENDENT acceptance: a validation/live-write failure on
 	// one does not roll back another. Already-succeeded paths stay accepted; the
-	// command returns a non-zero exit if any path failed.
-	var accepted, failed []acceptResult
+	// command returns a non-zero exit if any path failed. In batch mode (--all /
+	// --stale-only) a path that is already converged (benignSkip) is routed to a
+	// separate "skipped" bucket instead of "failed" — the whole point of --all is
+	// "accept the stalled, skip the rest", so skipping a converged path is the
+	// expected outcome and must not flip the exit code. In the explicit positional
+	// form benignSkip stays a failure for backward compatibility (you named a path
+	// that did not need accepting).
+	batchMode := acceptPlatformAll
+	var accepted, failed, skipped []acceptResult
 	for _, rel := range rels {
 		res := acceptOnePath(ps, store, abs, rel, acceptPlatformDryRun)
-		if res.ok {
+		switch {
+		case res.ok:
 			accepted = append(accepted, res)
-		} else {
+		case batchMode && res.benignSkip:
+			skipped = append(skipped, res)
+		default:
 			failed = append(failed, res)
 		}
 	}
@@ -228,11 +282,22 @@ func runAcceptPlatform(cmd *cobra.Command, args []string) (err error) {
 			fmt.Fprintf(out, "  %s  [%s resolved]\n", r.rel, r.reason)
 		}
 	}
+	if batchMode && len(skipped) > 0 {
+		fmt.Fprintf(out, "accept-platform: %d path(s) skipped (already converged):\n", len(skipped))
+		for _, r := range skipped {
+			fmt.Fprintf(out, "  %s  — %s\n", r.rel, r.reason)
+		}
+	}
 	if len(failed) > 0 {
 		fmt.Fprintf(out, "accept-platform: %d path(s) NOT accepted:\n", len(failed))
 		for _, r := range failed {
 			fmt.Fprintf(out, "  %s  — %s\n", r.rel, r.reason)
 		}
+	}
+	// Batch summary: a one-line N accepted / M skipped / K failed so an operator
+	// (or automation) can confirm the batch outcome at a glance.
+	if batchMode {
+		fmt.Fprintf(out, "accept-platform summary: %d accepted, %d skipped, %d failed\n", len(accepted), len(skipped), len(failed))
 	}
 	if !acceptPlatformDryRun && len(accepted) > 0 {
 		fmt.Fprintln(out, "Re-run `vh-agent-harness update` or `doctor` to confirm convergence.")
@@ -246,13 +311,105 @@ func runAcceptPlatform(cmd *cobra.Command, args []string) (err error) {
 	return nil
 }
 
+// normalizeAcceptCandidates normalizes the positional path args up front so a
+// bad arg fails fast (before any staging read or live write). It returns exactly
+// the positional set; the --all expansion is handled separately by
+// expandAcceptAllCandidates after staging.
+func normalizeAcceptCandidates(args []string) ([]string, error) {
+	rels := make([]string, 0, len(args))
+	for _, a := range args {
+		rel, rerr := normalizeAcceptPath(a)
+		if rerr != nil {
+			return nil, rerr
+		}
+		rels = append(rels, rel)
+	}
+	return rels, nil
+}
+
+// expandAcceptAllCandidates expands the candidate set for batch mode (--all, and
+// --stale-only which narrows --all). Positional paths are always honored and
+// unioned with the expansion (deduped, then sorted for deterministic ordering).
+//
+// The expansion source is filtered through the EFFECTIVE ownership classifier so
+// only ACTIVE platform-managed paths are candidated:
+//
+//   - --all (no --stale-only): every platform-managed path on the core ownership
+//     map whose effective class is STILL platform-managed. This is the full
+//     stalled/preserved universe — acceptOnePath's preservation check routes the
+//     already-converged ones to the benign-skip bucket. It catches not only
+//     visibly-drifted paths but also migration-stalled paths whose live bytes
+//     happen to match the render yet carry no recorded origin (F6). Inactive-
+//     capability residue (deselected pilots) is excluded: the classifier returns
+//     !ok for those, so --all never produces spurious "unknown path" failures.
+//   - --all --stale-only: restrict the expansion to the drifted+missing set
+//     `vh-agent-harness diff` reports, filtered to platform-managed. This is the
+//     NARROWER sweep: it does NOT candidate the migration-stalled-but-in-sync F6
+//     UnknownBaseline paths (computeSeamDrift reports those OK, not drifted/
+//     missing). The selection is by render-bytes, NOT by origin: a consumer-
+//     preserved edit whose live bytes differ from the render IS in the drifted
+//     set and is candidated (accept-platform is destructive-by-intent — it adopts
+//     the platform bytes; the operator chose to run the sweep).
+//
+// --stale-only is meaningless without --all and is not consulted here otherwise.
+func expandAcceptAllCandidates(target string, ps *seamStaging, positional []string) ([]string, error) {
+	seen := make(map[string]bool, len(positional))
+	for _, r := range positional {
+		seen[r] = true
+	}
+	var extra []string
+	if acceptPlatformStaleOnly {
+		rep, derr := computeSeamDrift(target)
+		if derr != nil {
+			return nil, fmt.Errorf("--stale-only enumerate drifted/missing: %w", derr)
+		}
+		extra = append(extra, rep.drifted...)
+		extra = append(extra, rep.missing...)
+	} else {
+		defaults, derr := corpus.CoreOwnershipDefaults()
+		if derr != nil {
+			return nil, fmt.Errorf("--all enumerate platform-managed: %w", derr)
+		}
+		defPaths := make([]string, 0, len(defaults))
+		for path := range defaults {
+			defPaths = append(defPaths, path)
+		}
+		sort.Strings(defPaths)
+		extra = defPaths
+	}
+	out := append([]string(nil), positional...)
+	for _, e := range extra {
+		if seen[e] {
+			continue
+		}
+		// Filter through the EFFECTIVE classifier so inactive-capability residue
+		// (!ok) and override-raised / non-platform-managed classes are excluded
+		// from the candidate set rather than producing noisy failures.
+		co, ok := ps.cls.Classify(e)
+		if !ok || co.Class != ownership.ClassPlatformManaged {
+			continue
+		}
+		seen[e] = true
+		out = append(out, e)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // acceptResult is the per-path outcome of one accept attempt. On success,
 // reason is the PreservedReason string that was resolved (e.g. "consumer-edit");
-// on failure, reason is a human explanation.
+// on failure, reason is a human explanation. benignSkip is true for the
+// not-currently-preserved outcome (the path is already converged or platform-
+// regenerated). In batch mode (--all / --stale-only) a benign skip is routed to
+// the summary's "skipped" bucket and does NOT cause a non-zero exit (the whole
+// point of --all is "accept the stalled, skip the rest"); in the explicit
+// positional form a benign skip stays a failure for backward compatibility (you
+// named a path that did not need accepting).
 type acceptResult struct {
-	rel    string
-	reason string
-	ok     bool
+	rel        string
+	reason     string
+	ok         bool
+	benignSkip bool
 }
 
 // acceptOnePath validates one path, then (live) writes its platform bytes and
@@ -293,7 +450,7 @@ func acceptOnePath(ps *seamStaging, store *originhash.Store, target, rel string,
 	stagedHash := originhash.Digest(stagedBytes)
 	reason := managedfile.ClassifyPreserved(regenerated, hadOrigin, origin, live, stagedHash)
 	if reason == "" {
-		return acceptResult{rel: rel, reason: "not currently preserved (already converged or platform-regenerated); run `update` to reconcile", ok: false}
+		return acceptResult{rel: rel, reason: "not currently preserved (already converged or platform-regenerated); run `update` to reconcile", ok: false, benignSkip: true}
 	}
 
 	if dryRun {
