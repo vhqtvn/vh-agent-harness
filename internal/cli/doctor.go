@@ -1184,7 +1184,7 @@ func checkManagedDrift(target string) checkResult {
 	case drifted > 0:
 		return checkResult{name: "managed-drift", tier: tierFail,
 			detail: formatManagedDriftFail(
-				fmt.Sprintf("%d drifted, %d missing of %d managed", drifted, missing, checked),
+				fmt.Sprintf("%d drifted-vs-render, %d missing of %d managed", drifted, missing, checked),
 				driftedPaths, missingPaths)}
 	case missing > 0:
 		return checkResult{name: "managed-drift", tier: tierFail,
@@ -1285,7 +1285,7 @@ func capPathList(label string, paths []string) string {
 func formatManagedDriftFail(summary string, driftedPaths, missingPaths []string) string {
 	var b strings.Builder
 	b.WriteString(summary)
-	if seg := capPathList("drifted", driftedPaths); seg != "" {
+	if seg := capPathList("drifted-vs-render", driftedPaths); seg != "" {
 		b.WriteString(" — ")
 		b.WriteString(seg)
 	}

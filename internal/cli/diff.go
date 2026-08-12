@@ -81,9 +81,9 @@ func runDiff(cmd *cobra.Command, _ []string) error {
 		if e.Category == drift.OK {
 			continue
 		}
-		fmt.Fprintf(out, "%-11s %s\n", e.Category, e.Path)
+		fmt.Fprintf(out, "%-17s %s\n", diffCategoryLabel(e.Category), e.Path)
 	}
-	fmt.Fprintf(out, "summary: %d ok, %d drifted, %d missing, %d unexpected\n",
+	fmt.Fprintf(out, "summary: %d ok, %d drifted-vs-render, %d missing, %d unexpected\n",
 		report.Counts[drift.OK], report.Counts[drift.Drifted],
 		report.Counts[drift.Missing], report.Counts[drift.Unexpected])
 
@@ -107,21 +107,36 @@ func runSeamDiff(cmd *cobra.Command, target string) error {
 		return err
 	}
 	for _, p := range rep.drifted {
-		fmt.Fprintf(out, "%-11s %s\n", "drifted", p)
+		fmt.Fprintf(out, "%-17s %s\n", "drifted-vs-render", p)
 	}
 	for _, p := range rep.missing {
-		fmt.Fprintf(out, "%-11s %s\n", "missing", p)
+		fmt.Fprintf(out, "%-17s %s\n", "missing", p)
 	}
 	for _, p := range rep.unexpected {
-		fmt.Fprintf(out, "%-11s %s\n", "unexpected", p)
+		fmt.Fprintf(out, "%-17s %s\n", "unexpected", p)
 	}
-	fmt.Fprintf(out, "summary: %d ok, %d drifted, %d missing, %d unexpected\n",
+	fmt.Fprintf(out, "summary: %d ok, %d drifted-vs-render, %d missing, %d unexpected\n",
 		len(rep.ok), len(rep.drifted), len(rep.missing), len(rep.unexpected))
 
 	if rep.hasProblems() {
 		return errSilent{}
 	}
 	return nil
+}
+
+// diffCategoryLabel maps a drift.Category to the user-facing label diff prints.
+// Only the Drifted category is qualified ("drifted-vs-render") so a reader can
+// distinguish genuine render-drift (the bytes on disk differ from what the
+// corpus re-renders — `update` overwrites) from the separate non-failing
+// "consumer-preserved" signals doctor reports for origin-hash-managed edits.
+// The other categories (ok/missing/unexpected) pass through their canonical
+// lower-case label unchanged. The internal drift.Category enum and its String()
+// are NOT changed — only the display token diff emits.
+func diffCategoryLabel(c drift.Category) string {
+	if c == drift.Drifted {
+		return "drifted-vs-render"
+	}
+	return c.String()
 }
 
 // errSilent is a no-message error used to force a non-zero process exit without

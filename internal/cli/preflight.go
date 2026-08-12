@@ -295,7 +295,7 @@ func checkDrift(lm *loadedManifest) checkResult {
 		}
 		return checkResult{name: "drift", tier: tierFail,
 			detail: formatManagedDriftFail(
-				fmt.Sprintf("%d drifted, %d missing, %d unexpected",
+				fmt.Sprintf("%d drifted-vs-render, %d missing, %d unexpected",
 					report.Counts[drift.Drifted], report.Counts[drift.Missing], report.Counts[drift.Unexpected]),
 				driftedPaths, missingPaths)}
 	}

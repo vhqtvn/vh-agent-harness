@@ -94,8 +94,8 @@ func TestPreflight_CheckDrift_NamesPathAndBothRemedies(t *testing.T) {
 		t.Errorf("FAIL detail should name the missing path %q; got %q", missingRel, r.detail)
 	}
 	// The drifted/missing path-segment labels are present. Use the colon form
-	// ("drifted:"/"missing:") so the count header ("1 drifted,") is not a match.
-	if !strings.Contains(r.detail, "drifted:") {
+	// ("drifted-vs-render:"/"missing:") so the count header is not a match.
+	if !strings.Contains(r.detail, "drifted-vs-render:") {
 		t.Errorf("FAIL detail should carry a drifted path segment; got %q", r.detail)
 	}
 	if !strings.Contains(r.detail, "missing:") {
@@ -150,8 +150,8 @@ func TestPreflight_CheckDrift_OnlyUnexpected_StillAppendsRemedies(t *testing.T) 
 	}
 	// No drifted/missing paths exist, so no path segments must be named (no
 	// false path routing). The colon form distinguishes the segment label from
-	// the count header ("0 drifted," carries no colon after drifted).
-	if strings.Contains(r.detail, "drifted:") {
+	// the count header (which carries no colon after drifted-vs-render).
+	if strings.Contains(r.detail, "drifted-vs-render:") {
 		t.Errorf("FAIL detail should not carry a drifted path segment (none exist); got %q", r.detail)
 	}
 	if strings.Contains(r.detail, "missing:") {

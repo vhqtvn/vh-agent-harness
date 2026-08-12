@@ -616,7 +616,7 @@ func TestFormatManagedDriftFail(t *testing.T) {
 		t.Errorf("summary header should lead; got %q", got)
 	}
 	// Drifted paths named.
-	if !strings.Contains(got, "drifted: .opencode/a.md, .opencode/b.md") {
+	if !strings.Contains(got, "drifted-vs-render: .opencode/a.md, .opencode/b.md") {
 		t.Errorf("drifted paths should be named; got %q", got)
 	}
 	// Missing segment omitted when empty.

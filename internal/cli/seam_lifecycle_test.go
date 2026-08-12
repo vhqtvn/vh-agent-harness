@@ -28,7 +28,7 @@ func TestSeamDiff_CleanThenDrift(t *testing.T) {
 		if err := runDiff(cmd, nil); err != nil {
 			t.Fatalf("clean seam diff: want nil, got %v (out=%q)", err, buf.String())
 		}
-		if out := buf.String(); !strings.Contains(out, "0 drifted, 0 missing, 0 unexpected") {
+		if out := buf.String(); !strings.Contains(out, "0 drifted-vs-render, 0 missing, 0 unexpected") {
 			t.Errorf("clean diff summary unexpected: %q", out)
 		}
 	})
