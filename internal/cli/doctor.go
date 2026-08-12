@@ -55,6 +55,7 @@ var doctorCmd = &cobra.Command{
   lineage         .vh-agent-harness/lineage.yml present + parseable     FAIL if leaked/unparseable
   armed-schema    every platform_armed file schema-conformant           FAIL if schema-invalid
   managed-drift   every platform_managed file matches re-rendered bytes  FAIL if drifted/missing
+  agents-composition root AGENTS.md matches composed core+mission body  WARN if drifted/absent (SKIP when no mission source)
   overlay-perm    active overlay permission-packs resolved in opencode.jsonc FAIL if resolver not run
   environment     node on PATH + shell-guard eval.js present             FAIL if missing
   config-refs     {file:...} refs resolve; empty agent-model files       FAIL if missing ref / WARN if empty
@@ -151,6 +152,22 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	dr = qualifyManagedDriftOnDevStale(dr, freshness)
 	fmt.Fprintln(out, "    "+dr.String())
 	applyTier(dr.tier, &problems, &warns)
+
+	// 3b. agents-composition (WARN-only observability over the unified AGENTS.md).
+	//     When a project has adopted the core/mission split (a
+	//     .vh-agent-harness/AGENTS.mission.md source is present), the root
+	//     AGENTS.md is a generated artifact and should track the composed
+	//     (AGENTS.core.md + AGENTS.mission.md) body. This check recomposes that
+	//     body via the SAME helper the seam write path uses and WARNs (NEVER
+	//     FAILs) when the live root AGENTS.md differs — read-only observability
+	//     over a project_owned file, so it carries zero disruption risk. A legacy
+	//     consumer with no mission source SKIPs (the unified AGENTS.md is
+	//     legitimately hand-edited there). This does NOT change root AGENTS.md
+	//     ownership; it only observes.
+	fmt.Fprintln(out, "  agents-composition:")
+	acr := checkAgentsComposition(abs)
+	fmt.Fprintln(out, "    "+acr.String())
+	applyTier(acr.tier, &problems, &warns)
 
 	// 4. Overlay-perm (detection-only honesty check): an active overlay with a
 	//    permission-pack.jsonc needs the operator-run node resolver to populate

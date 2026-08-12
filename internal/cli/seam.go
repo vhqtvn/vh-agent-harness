@@ -543,20 +543,46 @@ func seedAgentModelDefaults(target string) error {
 // generic half always tracks the platform while the mission half stays
 // project-owned.
 func composeAgentsMd(target string) error {
+	body, present, err := composeAgentsMdBytes(target)
+	if err != nil {
+		return err
+	}
+	if !present {
+		return nil // opt-in: no mission source → leave AGENTS.md alone
+	}
+	if err := os.WriteFile(filepath.Join(target, "AGENTS.md"), body, 0o644); err != nil {
+		return fmt.Errorf("write composed AGENTS.md: %w", err)
+	}
+	return nil
+}
+
+// composeAgentsMdBytes computes the composed AGENTS.md body the seam WOULD write
+// for target: feature-gated AGENTS.core.md + "\n\n" + AGENTS.mission.md (the
+// exact bytes composeAgentsMd writes). It is the shared composition core reused
+// by the write path (seam install/update) and the read-only agents-composition
+// doctor check, so the two can NEVER disagree on what "composed" means.
+//
+// It returns (nil, false, nil) when the mission source is absent (opt-in: the
+// project has not adopted the core/mission split) OR the core source is absent,
+// matching composeAgentsMd's no-op conditions exactly. A read/template error is
+// returned as the error value. The returned bytes are NOT written to disk; the
+// caller decides (composeAgentsMd writes them, checkAgentsComposition compares
+// them against the live root AGENTS.md).
+func composeAgentsMdBytes(target string) ([]byte, bool, error) {
 	srcDir := filepath.Join(target, runshape.DirName)
 	mission, err := os.ReadFile(filepath.Join(srcDir, "AGENTS.mission.md"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // opt-in: no mission source → leave AGENTS.md alone
+			return nil, false, nil // opt-in: no mission source → not composed
 		}
-		return fmt.Errorf("read .vh-agent-harness/AGENTS.mission.md: %w", err)
+		return nil, false, fmt.Errorf("read .vh-agent-harness/AGENTS.mission.md: %w", err)
 	}
 	core, err := os.ReadFile(filepath.Join(srcDir, "AGENTS.core.md"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // no generic core to compose with
+			return nil, false, nil // no generic core to compose with
 		}
-		return fmt.Errorf("read .vh-agent-harness/AGENTS.core.md: %w", err)
+		return nil, false, fmt.Errorf("read .vh-agent-harness/AGENTS.core.md: %w", err)
 	}
 
 	// Feature-gate the core half before composition. AGENTS.core.md carries Go
@@ -570,17 +596,14 @@ func composeAgentsMd(target string) error {
 	// templated. See flag-gated-composition-fix.md.
 	coreRendered, err := renderAgentsCoreTemplate(core, target)
 	if err != nil {
-		return fmt.Errorf("compose AGENTS.core.md feature conditionals: %w", err)
+		return nil, false, fmt.Errorf("compose AGENTS.core.md feature conditionals: %w", err)
 	}
 
 	var buf bytes.Buffer
 	buf.Write(bytes.TrimRight(coreRendered, "\n"))
 	buf.WriteString("\n\n")
 	buf.Write(mission)
-	if err := os.WriteFile(filepath.Join(target, "AGENTS.md"), buf.Bytes(), 0o644); err != nil {
-		return fmt.Errorf("write composed AGENTS.md: %w", err)
-	}
-	return nil
+	return buf.Bytes(), true, nil
 }
 
 // renderAgentsCoreTemplate evaluates the Go text/template conditionals embedded
