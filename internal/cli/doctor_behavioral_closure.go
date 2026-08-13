@@ -19,15 +19,20 @@ package cli
 // repo-specific live verification (the test suite, the demo run, etc.). State
 // this honestly wherever the token is documented.
 //
-// WHY DOCTOR (and not release_gate.go / the task-closeout command): the
-// validator must be mechanical, unbypassable, and cover closeouts that NEVER
-// reach a release. doctor is the seam health surface that already scans
-// `.local/coordinator/` and durable markdown artifacts; release_gate.go owns
-// RELEASE properties (defer-liveness against shipped migration notes), and the
-// task-closeout command is prompt wording (advisory). Behavioral-completion
-// truth belongs to doctor so it gates every closeout, not just pre-release
-// ones. This file is INDEPENDENT of release_gate.go and the claims kernel: it
-// reads closeout markdown directly.
+// WHY DOCTOR (and not release_gate.go / the task-closeout command): doctor is
+// the seam health surface that already scans `.local/coordinator/` and durable
+// markdown artifacts, including closeouts that NEVER reach a release. It
+// AUDITS behavioral-closure declarations across saved artifacts and FAILs
+// UNHEALTHY on inconsistent ones (FAIL → non-zero exit → blocks release G0c).
+// It does NOT gate every closeout transition itself:
+// saveCoordinationTaskCloseout parses rewrite-parity only, never
+// behavioral-closure, so routing an inconclusive crux to defer is an honesty
+// requirement of the authoring workflow (author + reviewer); doctor is the
+// later consistency audit that blocks release. release_gate.go owns RELEASE
+// properties (defer-liveness against shipped migration notes), and the
+// task-closeout command is prompt wording (advisory). This file is
+// INDEPENDENT of release_gate.go and the claims kernel: it reads closeout
+// markdown directly.
 //
 // THE GATE (narrow pilot):
 //   - Absent token entirely            => PASS  (the pilot does NOT require every
@@ -44,6 +49,25 @@ package cli
 //   - unknown verdict/result enum      => FAIL  (fail-closed on garbage,
 //                                                mirroring defer-liveness)
 //   - declaration with no verdict field => FAIL  (malformed declaration)
+//
+// INTERACTION-REACHABILITY RECEIPT (M-x — the runtime-blindspot gate). When the
+// author declares interaction_touching: true, the gate additionally enforces
+// the interaction-reachability receipt is PRESENT and structurally CONSISTENT.
+// This is the accepted F3/M-x enforcement (NOT advisory — it FAILs doctor):
+//   - interaction_touching absent/false => no receipt checks (backward-compatible)
+//   - interaction_touching: true + all six receipt fields + interaction_evidence
+//     + consistent result                         => PASS (structural completeness)
+//   - interaction_touching: true + missing receipt field(s) => FAIL (incomplete)
+//   - interaction_touching: true + missing interaction_evidence => FAIL
+//   - interaction_touching: true + interaction_evidence: mechanism +
+//     result: proven                              => FAIL (mechanism cannot be
+//                                                    proven; downgrade to skipped)
+//   - unknown interaction_touching/interaction_evidence value => FAIL (garbage)
+//
+// The receipt is presence-/consistency-verified ONLY, never truth-verified —
+// the SAME honesty ceiling every crux receipt already carries (author +
+// reviewer, not the gate). The gate does NOT verify that the real user event
+// reached the handler in the real runtime (condition 3).
 //
 // SCAN SURFACES (durable closeout artifacts):
 //   - .local/coordinator/reports/**/*.md  (local closeout reports; transport)
@@ -90,6 +114,28 @@ var bcValidResults = map[string]bool{
 	"proven":           true,
 	"skipped":          true,
 	"not-demonstrable": true,
+}
+
+// bcInteractionReceiptFields are the six receipt fields required when the author
+// declares interaction_touching: true (condition 1 of the M-x receipt). Each
+// must be present and non-empty. The names use an interaction_ prefix to avoid
+// collision with existing behavioral-closure fields (verifier, command, result)
+// and to be self-documenting inside the block.
+var bcInteractionReceiptFields = []string{
+	"interaction_action",      // the literal real user gesture/input (not a programmatic stand-in)
+	"interaction_target",      // the target behavior the action is meant to trigger
+	"interaction_environment", // the actual runtime (real browser/device — NOT jsdom/headless)
+	"interaction_verifier",    // the verifier command exercising the REAL event path
+	"interaction_tree",        // the tree/revision binding (git sha)
+	"interaction_outcome",     // the observed user-visible outcome (what a human would see)
+}
+
+// bcValidInteractionEvidence is the enum for the interaction_evidence field
+// (condition 2 — the outcome-vs-mechanism distinction the gate enforces
+// structurally via the author's own honest classification).
+var bcValidInteractionEvidence = map[string]bool{
+	"outcome":   true,
+	"mechanism": true,
 }
 
 // checkBehavioralClosure is the 14th doctor check. See the file-level comment
@@ -151,7 +197,7 @@ func checkBehavioralClosure(target string) checkResult {
 	for _, f := range findings {
 		fmt.Fprintf(&b, "\n  - %s: %s", f.source, f.reason)
 	}
-	b.WriteString("\nA behavioral-closure declaration is a fenced ```behavioral-closure block. verdict: proven REQUIRES result: proven (the crux / load-bearing path exercised end-to-end); any other verdict may pair with any result. Fix the declaration, or remove the block if it does not apply. (The token declares consistency; it does not prove the path executed.)")
+	b.WriteString("\nA behavioral-closure declaration is a fenced ```behavioral-closure block. verdict: proven REQUIRES result: proven (the crux / load-bearing path exercised end-to-end); any other verdict may pair with any result. When interaction_touching: true is declared, the interaction-reachability receipt (interaction_action, interaction_target, interaction_environment, interaction_verifier, interaction_tree, interaction_outcome, interaction_evidence) MUST be present and consistent; interaction_evidence: mechanism cannot pair with result: proven (downgrade to skipped). Fix the declaration, or remove the block if it does not apply. (The token declares consistency; it does not prove the path executed.)")
 	return checkResult{name: name, tier: tierFail, detail: b.String()}
 }
 
@@ -189,7 +235,84 @@ func analyzeBehavioralClosureBlocks(body string) []string {
 			}
 			reasons = append(reasons, fmt.Sprintf("verdict: proven but crux result is %q — a proven verdict requires result: proven (the load-bearing path must be exercised end-to-end)", what))
 		}
+		// Interaction-reachability receipt (M-x — the runtime-blindspot gate).
+		// When the author declares interaction_touching: true, the gate enforces
+		// the receipt is present and structurally consistent. Presence-/
+		// consistency-based ONLY — never truth-verified (condition 3).
+		reasons = append(reasons, analyzeInteractionReachability(kv, result)...)
 	}
+	return reasons
+}
+
+// analyzeInteractionReachability validates the interaction-reachability receipt
+// when the author declares interaction_touching: true. Returns reason strings
+// for any structural inconsistency; returns nil when interaction_touching is
+// absent or false (backward-compatible — non-interaction cruxes are unaffected).
+//
+// This is the M-x enforcement surface: the behavioral-closure crux gate
+// extended for interaction-touching changes. It is presence-/consistency-based
+// ONLY — it checks that the six receipt fields are present (condition 1), the
+// evidence classification is declared and valid (condition 2), and
+// mechanism-asserting evidence is not paired with result: proven (condition 2
+// downgrade). It NEVER truth-verifies whether the real user event reached the
+// handler in the real runtime (condition 3 — the same honesty ceiling every
+// crux receipt already carries: author + reviewer, not the gate).
+func analyzeInteractionReachability(kv map[string]string, result string) []string {
+	touching, hasTouching := kv["interaction_touching"]
+	if !hasTouching {
+		// Not declared → no interaction checks (backward-compatible).
+		return nil
+	}
+	switch touching {
+	case "true":
+		// Interaction-touching → enforce receipt below.
+	case "false":
+		// Explicitly not interaction-touching → no receipt required.
+		return nil
+	default:
+		return []string{fmt.Sprintf(
+			"unknown interaction_touching value %q (expected true or false)", touching)}
+	}
+
+	var reasons []string
+
+	// Condition 1: all six receipt fields must be present and non-empty.
+	var missing []string
+	for _, f := range bcInteractionReceiptFields {
+		if v, ok := kv[f]; !ok || strings.TrimSpace(v) == "" {
+			missing = append(missing, f)
+		}
+	}
+	if len(missing) > 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"interaction_touching: true declared but interaction-reachability receipt is incomplete — missing field(s): %s "+
+				"(condition 1 requires all six: interaction_action, interaction_target, interaction_environment, interaction_verifier, interaction_tree, interaction_outcome)",
+			strings.Join(missing, ", ")))
+	}
+
+	// Condition 2: evidence classification must be declared and valid.
+	evidence, hasEvidence := kv["interaction_evidence"]
+	if !hasEvidence || strings.TrimSpace(evidence) == "" {
+		reasons = append(reasons,
+			"interaction_touching: true declared but interaction_evidence field is absent — "+
+				"the author MUST classify the receipt evidence as 'outcome' or 'mechanism' (condition 2)")
+	} else if !bcValidInteractionEvidence[evidence] {
+		reasons = append(reasons, fmt.Sprintf(
+			"unknown interaction_evidence value %q (expected 'outcome' or 'mechanism')", evidence))
+	}
+
+	// Condition 2 (downgrade): mechanism-asserting evidence cannot support
+	// result: proven. An API-call-returned / flag-set / code-path-ran receipt
+	// is MECHANISM, not OUTCOME; the author MUST downgrade to skipped (or
+	// not-demonstrable). This is the structural enforcement of the
+	// outcome-vs-mechanism rule for interaction-touching changes.
+	if evidence == "mechanism" && result == "proven" {
+		reasons = append(reasons,
+			"interaction_evidence: mechanism but result: proven — mechanism-asserting evidence "+
+				"(an API call returned / a flag was set / a code path ran) cannot support result: proven; "+
+				"downgrade to skipped (condition 2)")
+	}
+
 	return reasons
 }
 

@@ -1236,7 +1236,18 @@ export default function transform({ context }) {
   `behavioral-closure` declaration that is internally inconsistent —
   specifically a `verdict: proven` claimed WITHOUT a proven crux `result:` —
   and is fail-closed on unknown/malformed declarations; an absent token PASSES
-  (the pilot does not force adoption, so pre-pilot closeouts stay HEALTHY). The
+  (the pilot does not force adoption, so pre-pilot closeouts stay HEALTHY).
+  When the author declares `interaction_touching: true`, the check additionally
+  requires the six `interaction_*` receipt fields (`interaction_action`,
+  `interaction_target`, `interaction_environment`, `interaction_verifier`,
+  `interaction_outcome`, `interaction_tree`) plus an
+  `interaction_evidence: outcome|mechanism` classification, and FAILs when any
+  field is missing or when `interaction_evidence: mechanism` is paired with
+  `result: proven` (a mechanism-asserting receipt cannot be proven — downgrade
+  to `skipped`). Like the base check, this is presence-/consistency-only: it
+  verifies the receipt is present and internally consistent, never that the
+  user event actually reached the handler in the real runtime (that truth
+  belongs to author + reviewer and the repo-specific live verification). The
   token declares consistency; it does NOT prove the cited crux path executed
   (proving that needs the repo-specific live verification). The `rewrite-parity`
   check scans the same closeout surfaces for fenced `rewrite-parity` contract

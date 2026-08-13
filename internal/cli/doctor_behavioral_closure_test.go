@@ -134,6 +134,132 @@ func TestCheckBehavioralClosure(t *testing.T) {
 			},
 			wantTier: tierPass,
 		},
+		// --- M-x interaction-reachability receipt (ship-review four structural tests) ---
+		{
+			// Test 1: a COMPLETE interaction-reachability receipt (declared
+			// interaction-touching + all six fields + outcome evidence) is
+			// ACCEPTED. This is the positive case — the gate enforces the
+			// receipt is present and consistent, and a complete honest receipt
+			// passes (structural completeness).
+			name: "M-x complete interaction-reachability receipt passes",
+			files: map[string]string{
+				"docs/checkpoints/2026-08-13-slice.md": "```behavioral-closure\n" +
+					"verdict: proven\n" +
+					"path: web/src/pane.ts\n" +
+					"verifier: playwright e2e\n" +
+					"command: npx playwright test pane-focus\n" +
+					"result: proven\n" +
+					"interaction_touching: true\n" +
+					"interaction_action: user clicks the pane-0 region\n" +
+					"interaction_target: focus moves to pane-0 handler\n" +
+					"interaction_environment: real Chromium browser (not jsdom)\n" +
+					"interaction_verifier: npx playwright test pane-focus --real-click\n" +
+					"interaction_tree: a1b2c3d\n" +
+					"interaction_outcome: focus moved to pane-0 and the active class applied\n" +
+					"interaction_evidence: outcome\n" +
+					"```\n",
+			},
+			wantTier: tierPass,
+		},
+		{
+			// Test 2: a MISSING receipt is REJECTED when interaction_touching
+			// is declared. The author claims interaction-touching but provides
+			// no receipt fields — the gate FAILs (the receipt is required, not
+			// advisory).
+			name: "M-x missing receipt fails when interaction_touching declared",
+			files: map[string]string{
+				"docs/checkpoints/2026-08-13-slice.md": "```behavioral-closure\n" +
+					"verdict: proven\n" +
+					"path: web/src/pane.ts\n" +
+					"result: proven\n" +
+					"interaction_touching: true\n" +
+					"```\n",
+			},
+			wantTier:  tierFail,
+			wantInDet: "interaction-reachability receipt is incomplete",
+		},
+		{
+			// Test 3: MECHANISM-only evidence (e.g. "called setActive(), it
+			// returned") is classified skipped, NOT proven. The author declares
+			// interaction_evidence: mechanism AND result: proven — the gate
+			// FAILs because mechanism-asserting evidence cannot support proven
+			// (condition 2 downgrade). The receipt fields are all present; the
+			// FAILURE is the mechanism-as-proven inconsistency.
+			name: "M-x mechanism-only evidence cannot be proven (downgrade to skipped)",
+			files: map[string]string{
+				"docs/checkpoints/2026-08-13-slice.md": "```behavioral-closure\n" +
+					"verdict: proven\n" +
+					"path: web/src/pane.ts\n" +
+					"result: proven\n" +
+					"interaction_touching: true\n" +
+					"interaction_action: called handler.setActive()\n" +
+					"interaction_target: focus moves to pane-0\n" +
+					"interaction_environment: jsdom unit test\n" +
+					"interaction_verifier: jest pane.test.ts\n" +
+					"interaction_tree: a1b2c3d\n" +
+					"interaction_outcome: setActive() returned without error\n" +
+					"interaction_evidence: mechanism\n" +
+					"```\n",
+			},
+			wantTier:  tierFail,
+			wantInDet: "mechanism-asserting evidence",
+		},
+		{
+			// Test 4: ORDINARY non-interaction behavioral-closure cruxes
+			// retain existing behavior (no regression). A closeout with NO
+			// interaction_touching field at all behaves exactly as before —
+			// the interaction-reachability checks are additive and do not fire.
+			name: "M-x non-interaction crux has no regression (interaction_touching absent)",
+			files: map[string]string{
+				"docs/checkpoints/2026-08-13-slice.md": "```behavioral-closure\n" +
+					"verdict: proven\n" +
+					"path: internal/cli/doctor_behavioral_closure.go\n" +
+					"verifier: go test ./internal/cli/\n" +
+					"command: go test ./internal/cli/ -run BehavioralClosure\n" +
+					"result: proven\n" +
+					"```\n",
+			},
+			wantTier: tierPass,
+		},
+		{
+			// Supplemental: interaction_touching: false is an explicit
+			// opt-out — no receipt required. A non-interaction closeout that
+			// declares interaction_touching: false passes just like an absent
+			// declaration.
+			name: "M-x interaction_touching false is explicit opt-out (no receipt required)",
+			files: map[string]string{
+				"docs/checkpoints/2026-08-13-slice.md": "```behavioral-closure\n" +
+					"verdict: proven\n" +
+					"path: internal/cli/doctor.go\n" +
+					"result: proven\n" +
+					"interaction_touching: false\n" +
+					"```\n",
+			},
+			wantTier: tierPass,
+		},
+		{
+			// Supplemental: mechanism evidence with result: skipped is
+			// CONSISTENT — the author honestly downgraded. This passes,
+			// confirming the gate accepts an honest mechanism receipt that
+			// does not claim proven.
+			name: "M-x mechanism evidence with result skipped is consistent (passes)",
+			files: map[string]string{
+				"docs/checkpoints/2026-08-13-slice.md": "```behavioral-closure\n" +
+					"verdict: inconclusive\n" +
+					"path: web/src/pane.ts\n" +
+					"result: skipped\n" +
+					"interaction_touching: true\n" +
+					"interaction_action: called handler.setActive()\n" +
+					"interaction_target: focus moves to pane-0\n" +
+					"interaction_environment: jsdom unit test\n" +
+					"interaction_verifier: jest pane.test.ts\n" +
+					"interaction_tree: a1b2c3d\n" +
+					"interaction_outcome: setActive() returned without error\n" +
+					"interaction_evidence: mechanism\n" +
+					"```\n",
+			},
+			wantTier: tierPass,
+		},
 		{
 			name: "good artifact + bad artifact in the same scan fails and names only the bad one",
 			files: map[string]string{
@@ -178,6 +304,16 @@ func TestAnalyzeBehavioralClosureBlocksPure(t *testing.T) {
 		{"result with embedded colons parses", "```behavioral-closure\nverdict: inconclusive\ncommand: a: b: c\nresult: not-demonstrable\n```\n", 0},
 		// Regression: the canonical template example (inline # comments) parses clean.
 		{"canonical template example with inline comments", "```behavioral-closure\nverdict: proven              # proven | inconclusive | failed | abandoned\npath: <load-bearing path>    # the codepath whose execution proves the behavior\nverifier: <test/command>     # the named seam that exercises it\ncommand: <the command>       # the exact command that exercises it\nresult: proven               # proven | skipped | not-demonstrable (the crux outcome)\n```\n", 0},
+		// M-x interaction-reachability receipt — pure parsing pins (ship-review).
+		{"M-x complete receipt (outcome evidence) consistent", "```behavioral-closure\nverdict: proven\nresult: proven\ninteraction_touching: true\ninteraction_action: real click\ninteraction_target: focus\ntarget\ninteraction_environment: real browser\ninteraction_verifier: playwright\ntest\ninteraction_tree: sha123\ninteraction_outcome: focus moved\ninteraction_evidence: outcome\n```\n", 0},
+		{"M-x missing receipt fields fails", "```behavioral-closure\nverdict: proven\nresult: proven\ninteraction_touching: true\n```\n", 2},
+		{"M-x mechanism+proven fails (downgrade)", "```behavioral-closure\nverdict: proven\nresult: proven\ninteraction_touching: true\ninteraction_action: a\ninteraction_target: b\ninteraction_environment: c\ninteraction_verifier: d\ninteraction_tree: e\ninteraction_outcome: f\ninteraction_evidence: mechanism\n```\n", 1},
+		{"M-x mechanism+skipped consistent", "```behavioral-closure\nverdict: inconclusive\nresult: skipped\ninteraction_touching: true\ninteraction_action: a\ninteraction_target: b\ninteraction_environment: c\ninteraction_verifier: d\ninteraction_tree: e\ninteraction_outcome: f\ninteraction_evidence: mechanism\n```\n", 0},
+		{"M-x non-interaction absent touching no regression", "```behavioral-closure\nverdict: proven\nresult: proven\n```\n", 0},
+		{"M-x touching false explicit opt-out", "```behavioral-closure\nverdict: proven\nresult: proven\ninteraction_touching: false\n```\n", 0},
+		{"M-x garbage touching value fails", "```behavioral-closure\nverdict: proven\nresult: proven\ninteraction_touching: maybe\n```\n", 1},
+		{"M-x missing evidence field fails", "```behavioral-closure\nverdict: proven\nresult: proven\ninteraction_touching: true\ninteraction_action: a\ninteraction_target: b\ninteraction_environment: c\ninteraction_verifier: d\ninteraction_tree: e\ninteraction_outcome: f\n```\n", 1},
+		{"M-x garbage evidence value fails", "```behavioral-closure\nverdict: proven\nresult: proven\ninteraction_touching: true\ninteraction_action: a\ninteraction_target: b\ninteraction_environment: c\ninteraction_verifier: d\ninteraction_tree: e\ninteraction_outcome: f\ninteraction_evidence: maybe\n```\n", 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

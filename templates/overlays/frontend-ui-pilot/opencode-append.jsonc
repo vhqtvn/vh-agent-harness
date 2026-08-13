@@ -1,0 +1,23 @@
+// frontend-ui-pilot overlay pack — skills-only pilot for the advisory
+// interaction-reachability capability (S2 overlay pilot, advisory / INFORMS only).
+//
+// This pack contributes a SKILL only (skills/interaction-reachability/) plus its
+// references/. It wires NO agent, NO command, NO permission surface, NO helper,
+// and NO gate. The skill is instruction-first: it (a) helps a builder construct
+// an honest interaction-reachability receipt for the `behavioral-closure` crux
+// gate (the M-x extension in core AGENTS.md) and (b) acts as an ADVISORY
+// falsification surface a reviewer can invoke to challenge a shallow receipt. It
+// has NO BLOCK, approval, or unblock authority of its own (a runtime-only
+// concern cannot ground a diff-verifiable BLOCK). No permission addition is
+// required here. This file is a no-op JSONC shell so the pack is well-formed for
+// discovery; a skills-only pack may legitimately contribute nothing to
+// opencode.jsonc.
+//
+// S2 hold: this is an overlay pilot, NOT a core skill. It carries
+// browser/runtime tracing procedure that is adopter-domain (the generic
+// interaction-reachability LABEL lives in core AGENTS.md; the tracing PROCEDURE
+// lives here). Promotion to `templates/core/` requires pilot evidence from a
+// real frontend repo + human approval (see skill-lifecycle.md S2). It is opt-in:
+// a consumer selects it via `overlays: [frontend-ui-pilot]` in
+// vh-harness-profile.yml.
+{}

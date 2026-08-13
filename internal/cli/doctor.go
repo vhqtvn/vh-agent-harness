@@ -66,7 +66,7 @@ var doctorCmd = &cobra.Command{
   subagent-depth  effective merged subagent_depth >= delegation minimum  WARN if unset/too low
   defer-liveness  open defer/errata cards contradict no released claim     FAIL if open card contradicts a present note
   staged-errata-content staged errata correction present in release note   FAIL if staged card content missing from the about-to-release note
-  behavioral-closure closeout declarations internally consistent  FAIL if verdict:proven claimed without a proven crux result
+  behavioral-closure closeout declarations internally consistent  FAIL if verdict:proven claimed without a proven crux result; FAIL if interaction_touching:true receipt missing/incomplete/mechanism-as-proven
   dev-stale-embed binary's embedded corpus vs checkout's templates/core  WARN if differs (source checkout only; consumers see nothing)
   f1-envelope     committed f1-synthesis-envelope projections structurally consistent  FAIL if unknown enum / missing family / dangling cross-ref / digest mismatch
   f1-f2-consistency F1→F2 emit-boundary digest-binding consistent  FAIL if F2 view drifted / missing binding / foreign field
@@ -295,6 +295,14 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	//     (NOT release_gate.go) so it covers closeouts that never reach a
 	//     release; it is independent of the claims kernel. This is the SAFETY
 	//     LAYER acting (gates act; coordinator informs).
+	//
+	//     M-x interaction-reachability receipt: when the author declares
+	//     interaction_touching: true, the gate additionally FAILs if the
+	//     receipt is missing/incomplete (condition 1) or if
+	//     interaction_evidence: mechanism is paired with result: proven
+	//     (condition 2 downgrade). Presence-/consistency-based ONLY, never
+	//     truth-verified (condition 3). This is the enforcement surface for
+	//     the runtime-blindspot class — NOT advisory.
 	fmt.Fprintln(out, "  behavioral-closure:")
 	bcr := checkBehavioralClosure(abs)
 	fmt.Fprintln(out, "    "+bcr.String())
