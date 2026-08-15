@@ -621,7 +621,18 @@ func writeArmedManaged(opts ApplyOptions, o *FileOutcome) {
 				o.WriteState = WriteFailed
 				return
 			}
-			sch, _ := schema.SchemaForPath(rel)
+			sch, ok := schema.SchemaForPath(rel)
+			if !ok {
+				// The plan side (planArmed) hard-errors on an unregistered
+				// platform_armed path; the write path cannot return an error,
+				// so it fails loudly through the typed signal instead.
+				o.Note = fmt.Sprintf(
+					"ERROR re-deriving merge: platform_armed file %q has no registered schema; "+
+						"a platform_armed path MUST be schema'd (register it in internal/schema/registry.go)", rel)
+				o.Action = ActionArmedProposal
+				o.WriteState = WriteFailed
+				return
+			}
 			res, err := sch.Reconciler.Reconcile(projectInstance, stagedDefault)
 			if err != nil || res.Outcome != schema.OutcomeApply {
 				o.Note = fmt.Sprintf("ERROR re-deriving merge: %v", err)

@@ -301,6 +301,36 @@ func TestWriteState_Failed_StagedReadError(t *testing.T) {
 	}
 }
 
+// TestWriteState_Failed_ArmedMergeUnregisteredSchema is the regression lock for
+// the discarded-ok bug in writeArmedManaged's armed-merge re-derive route:
+// schema.SchemaForPath(rel) for a path with NO registered schema returns a
+// zero-valued Schema (nil Reconciler). The old code discarded the ok bool and
+// called sch.Reconciler.Reconcile(...) on the nil interface -> PANIC. The write
+// path must instead fail loudly through the typed signal — WriteState=WriteFailed
+// plus a human-readable Note, action downgraded to ActionArmedProposal —
+// mirroring the plan-side registration validation in planArmed.
+func TestWriteState_Failed_ArmedMergeUnregisteredSchema(t *testing.T) {
+	live := t.TempDir()
+	staging := t.TempDir()
+	// A genuinely unregistered armed-looking path (no schema registry entry).
+	const rel = ".vh-agent-harness/not-a-registered-armed-file.yml"
+	writeFile(t, staging, rel, "key: staged\n")
+	writeFile(t, live, rel, "key: project\n")
+	// Force the re-derive branch: Applied carries a real merge entry, not the
+	// "absent; seeded" marker that short-circuits to the staged default.
+	o := FileOutcome{Path: rel, Action: ActionArmedMerged, Applied: []string{"merged a value"}}
+	writeArmedManaged(ApplyOptions{ProjectRoot: live, StagingDir: staging}, &o)
+	if o.WriteState != WriteFailed {
+		t.Fatalf("unregistered schema on armed-merge re-derive: WriteState = %q, want %q", o.WriteState, WriteFailed)
+	}
+	if o.Action != ActionArmedProposal {
+		t.Errorf("unregistered schema on armed-merge re-derive: Action = %q, want downgraded %q", o.Action, ActionArmedProposal)
+	}
+	if o.Note == "" {
+		t.Errorf("WriteFailed must set a human-readable Note for diagnostics")
+	}
+}
+
 // TestWriteState_Failed_WriteError is a unit lock on the live-write failure route:
 // a directory at the destination path makes os.WriteFile fail, yielding
 // WriteFailed. (Deterministic, not chmod.)
