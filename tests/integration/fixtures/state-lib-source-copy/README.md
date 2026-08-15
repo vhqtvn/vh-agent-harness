@@ -18,6 +18,14 @@ A byte-identical copy of the harness SOURCE scripts:
   reason as `f3-design-readiness.js` — the sibling must be present so the module
   loads. Only required when the snapshot is refreshed from a state-lib.js that
   carries the rewrite-parity import; the frozen snapshot predates that import.)
+- `package.json` — fixture-local ESM execution context (`{"type": "module"}`),
+  NOT part of the source snapshot. It mirrors the real render context, where the
+  corpus ships `.opencode/package.json` with `"type": "module"` next to
+  state-lib.js. Node >= 22 auto-detects module syntax in `.js` files, but
+  node 18 does not — without this marker the module dies on a SyntaxError
+  before the render-location guard IIFE can fire, and the guard tests fail for
+  the wrong reason (ESM context, not the guard). The RedControl tempdir copies
+  it alongside the rendered state-lib.js for the same reason.
 
 ## Why a frozen copy (not a runtime copy of the live source)
 
@@ -55,3 +63,6 @@ The fixture copy MUST retain the literal `{{COORDINATOR_DIR}}` token (it appears
 in the path-construction line `path.join(repoRoot(), ".local", "{{COORDINATOR_DIR}}")`);
 the guard builds the token-search delimiter at runtime via char codes so the
 renderer never resolves the guard's own condition.
+
+`package.json` is fixture-local scaffolding and is NOT refreshed by the commands
+above — leave it as-is when refreshing the snapshot.

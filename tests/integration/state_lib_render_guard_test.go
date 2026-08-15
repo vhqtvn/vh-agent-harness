@@ -38,6 +38,15 @@ func TestStateLibRenderGuard(t *testing.T) {
 	if _, err := os.Stat(srcCopy); err != nil {
 		t.Fatalf("source-copy fixture missing at %s: %v", srcCopy, err)
 	}
+	// The execution dir must carry an ESM context, mirroring the real render
+	// where .opencode/package.json ("type": "module") ships next to state-lib.js.
+	// Node >= 22 auto-detects module syntax, but node 18 does not — without this
+	// marker the module dies on a SyntaxError before the guard IIFE can fire,
+	// and the test would fail for the wrong reason (ESM context, not the guard).
+	pkgJSON := filepath.Join(repoRoot, sourceCopyFixtureDir, "package.json")
+	if _, err := os.Stat(pkgJSON); err != nil {
+		t.Fatalf("fixture package.json missing at %s (ESM execution context): %v", pkgJSON, err)
+	}
 
 	out, exit := runNodeScript(t, nodeBin, filepath.Dir(srcCopy), srcCopy)
 	if exit == 0 {
@@ -81,7 +90,10 @@ func TestStateLibRenderGuard_RedControl(t *testing.T) {
 	}
 
 	// Write the rendered copy + the sibling f3-design-readiness.js import target
-	// into a fresh temp dir.
+	// + the package.json ESM context into a fresh temp dir (the corpus ships
+	// .opencode/package.json next to state-lib.js; without it node 18 dies on a
+	// SyntaxError before the module loads — see the base test's package.json
+	// note).
 	renderedDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(renderedDir, "state-lib.js"), []byte(rendered), 0o644); err != nil {
 		t.Fatalf("write rendered copy: %v", err)
@@ -91,6 +103,12 @@ func TestStateLibRenderGuard_RedControl(t *testing.T) {
 		filepath.Join(renderedDir, "f3-design-readiness.js"),
 	); err != nil {
 		t.Fatalf("copy f3-design-readiness.js sibling: %v", err)
+	}
+	if err := copyFile(
+		filepath.Join(fixtureDir, "package.json"),
+		filepath.Join(renderedDir, "package.json"),
+	); err != nil {
+		t.Fatalf("copy package.json (ESM execution context): %v", err)
 	}
 
 	out, exit := runNodeScript(t, nodeBin, renderedDir, filepath.Join(renderedDir, "state-lib.js"))
