@@ -107,6 +107,24 @@ func assembleNonGoConsumer(t *testing.T) string {
 		}
 	}
 
+	// ESM execution context: the corpus ships .opencode/package.json
+	// ("type": "module") next to the scripts it renders, and it is the
+	// nearest package.json ancestor of .opencode/scripts/*.js in a real
+	// consumer render. Node >= 22 auto-detects module syntax in .js, but
+	// node 18 does not — without this marker the verifiers die on
+	// "SyntaxError: Cannot use import statement outside a module" before
+	// their logic runs (same class as the state-lib guard fix, 0c89313).
+	// The FULL rendered file is copied verbatim, not a minimal {"type":
+	// "module"} stub: the dependency block is inert for module
+	// classification, and copying the real artifact keeps the consumer
+	// tree byte-faithful to what a render ships.
+	if err := copyFile(
+		renderedOpencode("package.json"),
+		filepath.Join(consumerRoot, ".opencode", "package.json"),
+	); err != nil {
+		t.Fatalf("copy rendered package.json (ESM execution context): %v", err)
+	}
+
 	dstCmds := filepath.Join(consumerRoot, ".opencode", "commands")
 	if err := os.MkdirAll(dstCmds, 0o755); err != nil {
 		t.Fatalf("mkdir consumer commands dir: %v", err)
