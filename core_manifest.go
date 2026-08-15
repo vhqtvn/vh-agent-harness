@@ -28,7 +28,7 @@ const (
 // CoreDir) and emits the platform-authored S2 module-default ownership map:
 // every file path -> platform_managed (provenance "core"), EXCEPT the
 // documented armed/owned exceptions that the platform ships with hand-protection
-// (every exception below is mirrored exactly in the switch + coreExceptionsForDoc):
+// (every exception below is mirrored exactly in the classifyCorePath switch):
 //
 //   - .vh-agent-harness/vh-harness-profile.yml             -> platform_armed     (provenance "core.profile")
 //   - .vh-agent-harness/config-transform.mjs               -> project_owned      (provenance "core.transform.project")
@@ -146,8 +146,8 @@ func CoreOwnershipDefaultsWithExclusion(inactive map[string]bool) (ownership.Mod
 // classifyCorePath maps a LIVE (suffix-stripped, forward-slash, corpus-relative)
 // path to its ownership PathRule. Every embedded corpus file defaults to
 // platform_managed (provenance "core") EXCEPT the documented armed/owned
-// exceptions that the platform ships with hand-protection. Every exception below
-// is mirrored exactly in coreExceptionsForDoc.
+// exceptions that the platform ships with hand-protection (this switch is the
+// single source of the exception surface).
 //
 // This helper is shared by CoreOwnershipDefaults (the all-known walk) and
 // CoreOwnershipDefaultsWithExclusion (the selection-aware walk) so the two never
@@ -243,23 +243,4 @@ func CorePaths() ([]string, error) {
 	}
 	sort.Strings(paths)
 	return paths, nil
-}
-
-// coreExceptionsForDoc is the exhaustive set of non-managed exceptions, kept as a
-// constant for reference and for tests that assert the exception surface.
-var coreExceptionsForDoc = map[string]ownership.Class{
-	".vh-agent-harness/vh-harness-profile.yml":             ownership.ClassPlatformArmed,
-	".vh-agent-harness/complexity-policy.yml":              ownership.ClassPlatformArmed,
-	".vh-agent-harness/config-transform.mjs":               ownership.ClassProjectOwned,
-	".opencode/repo-configs/complexity-dispositions.yml":   ownership.ClassProjectOwned,
-	".opencode/repo-configs/forbidden-patterns.project.js": ownership.ClassProjectOwned,
-	".opencode/repo-configs/repo-recon-data.yml":           ownership.ClassExternalGenerated,
-	// Planning docs: canonical starter seeded once, then project-owned (living backlog).
-	"docs/planning/backlog.md": ownership.ClassProjectOwned,
-	"docs/planning/roadmap.md": ownership.ClassProjectOwned,
-	// Project-identity files: generic scaffold seeded once, then project-owned.
-	".gitignore": ownership.ClassProjectOwned,
-	"README.md":  ownership.ClassProjectOwned,
-	"CLAUDE.md":  ownership.ClassProjectOwned,
-	"Makefile":   ownership.ClassProjectOwned,
 }
