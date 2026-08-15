@@ -596,14 +596,15 @@ func TestSeamReinstall_ReportsManagedUnchangedOnCurrentTree(t *testing.T) {
 
 // --- classifier reads S2 manifest (smoke) ------------------------------
 
-// TestSeamClassifier_ReadsCoreOwnership confirms the seam classifier is built
-// from corpus.CoreOwnershipDefaults and classifies the armed/owned exceptions
-// correctly (the rest being platform_managed). This is the #2 deliverable: the
-// seam's Classifier reads the S2 ownership manifest.
+// TestSeamClassifier_ReadsCoreOwnership confirms the seam's apply-time classifier
+// (seamClassifierWithOverlays, the one install/update actually use) is built
+// from the core ownership defaults and classifies the armed/owned exceptions
+// correctly (the rest being platform_managed). Called with no overlays, no
+// overrides, and no inactive set — the pure core-only view.
 func TestSeamClassifier_ReadsCoreOwnership(t *testing.T) {
-	cls, err := seamClassifierImpl()
+	cls, err := seamClassifierWithOverlays(nil, nil, nil)
 	if err != nil {
-		t.Fatalf("seamClassifierImpl: %v", err)
+		t.Fatalf("seamClassifierWithOverlays: %v", err)
 	}
 	cases := []struct {
 		path string

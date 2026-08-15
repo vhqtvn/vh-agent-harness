@@ -75,34 +75,6 @@ func coreSubFSImpl() (fs.FS, error) {
 	return coreSubFSVal, nil
 }
 
-// seamClassifier builds the seam's read view over S2 ownership for the core
-// corpus: CoreOwnershipDefaults (every path platform_managed except the two
-// documented exceptions) -> ownership.Resolve (raise-only) -> substrate
-// Classifier (exact-path map, fail-closed for anything off-map). The classifier
-// is memoized because the ownership map is a constant of the embedded corpus.
-var (
-	seamClassifierErr error
-	seamClassifierVal *substrate.Classifier
-)
-
-func seamClassifierImpl() (*substrate.Classifier, error) {
-	if seamClassifierVal != nil || seamClassifierErr != nil {
-		return seamClassifierVal, seamClassifierErr
-	}
-	defaults, err := corpus.CoreOwnershipDefaults()
-	if err != nil {
-		seamClassifierErr = fmt.Errorf("seam: core ownership: %w", err)
-		return nil, seamClassifierErr
-	}
-	eff, err := ownership.Resolve(defaults, nil)
-	if err != nil {
-		seamClassifierErr = fmt.Errorf("seam: ownership resolve: %w", err)
-		return nil, seamClassifierErr
-	}
-	seamClassifierVal = substrate.NewClassifier(eff, nil)
-	return seamClassifierVal, nil
-}
-
 // seamApply renders the embedded core corpus into an OUT-OF-TREE staging
 // directory and runs the full seam apply (classify -> plan all outcomes
 // fail-closed before any write -> per-class execute -> write lineage.yml). It is
