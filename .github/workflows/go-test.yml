@@ -1,0 +1,44 @@
+# go-test — full-suite Go gate with REQUIRED LiveBridge.
+#
+# Runs the complete `go test ./...` suite on ubuntu-latest under two exact
+# Node pins (18.17.1 and 24.18.0), the versions the bridge is supported on.
+# `VH_REQUIRE_LIVE_BRIDGE=1` is step-scoped to the test command: if the
+# LiveBridge test cannot genuinely execute (short mode, missing node, missing
+# npm, or failed npm install), it FAILS instead of skipping. No leg uses
+# -short, continue-on-error, or any allowed-failure escape — either leg
+# failing makes the workflow red.
+#
+# The LiveBridge test stages the canonical corpus itself (templates/core/
+# .opencode), installs its npm deps in scratch, and invokes the real node
+# bridge — so a plain `go test` is sufficient; no make target is needed.
+
+name: go-test
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["18.17.1", "24.18.0"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Full Go suite with required LiveBridge
+        env:
+          VH_REQUIRE_LIVE_BRIDGE: "1"
+        run: go test ./... -count=1
