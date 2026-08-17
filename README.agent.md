@@ -292,7 +292,7 @@ not claim it passed from prompt inspection alone.
 
 ### Shipped overlay packs
 
-Besides project packs you author under `.vh-agent-harness/overlays/`, six
+Besides project packs you author under `.vh-agent-harness/overlays/`, seven
 overlay packs ship **embedded in the binary**, selectable by name with no
 vendoring. Run `vh-agent-harness overlay list` to see every pack (embedded +
 project-local) with its source and selected/available status — the discovery
@@ -324,6 +324,14 @@ nonexistent:
   it is selected solely via `overlays: [repo-mail]`, and it depends on
   `auto-classifier-pilot` for the shared `scrubCredentials` helper.
 
+- `frontend-ui-pilot` — a skills-only pilot for the advisory
+  interaction-reachability capability. It ships an INFORMS-only advisory
+  tracer/falsifier skill (`interaction-reachability`) plus references. It wires
+  no agent, no command, no permission surface, and no gate. It is **opt-in**
+  (NOT selected by default), so it is selected solely via
+  `overlays: [frontend-ui-pilot]` in `vh-harness-profile.yml`. Core promotion
+  is S2-held (it is an overlay pilot, not a released core capability).
+
 - `formal-verification-pilot` — a skills-only pilot for agent-authored formal
   proofs (Lean4-core/TLAPS). It ships a SKILL plus references and is strictly
   **INFORMS-only**: it wires no agent, no command, no permission surface, and no
@@ -352,9 +360,10 @@ The three pilots (`formal-verification-pilot`, `resolve-first-pilot`,
 `contract-invariant-audit-pilot`) are **default-on**: a `minimal` profile that
 never names them still renders them because their platform-default feature
 keys are `true`. Disable any pilot by setting its feature key to `false`. The
-other three (`release`, `auto-classifier-pilot`, `repo-mail`) remain opt-in
-(a `minimal` profile that never names them renders nothing of them). A
-project-local pack of the same name still shadows the embed wholly.
+other four (`release`, `auto-classifier-pilot`, `repo-mail`,
+`frontend-ui-pilot`) remain opt-in (a `minimal` profile that never names them
+renders nothing of them). A project-local pack of the same name still shadows
+the embed wholly.
 
 ### Auto-classifier configuration
 
