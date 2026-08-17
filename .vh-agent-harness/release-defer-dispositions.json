@@ -4,9 +4,9 @@
     "kind": "tag",
     "value": "v0.25.0"
   },
-  "evaluated_commit": "7b6fb0c07b22a2f07c6d2ed818f34c2d4829d363",
-  "evaluated_tree": "14132961dc28d20f8f247e14623584cb16fdc022",
-  "manifest_parent_commit": "7b6fb0c07b22a2f07c6d2ed818f34c2d4829d363",
+  "evaluated_commit": "f03b8b4b3322eb46ad53cc18dd568853fc9ae270",
+  "evaluated_tree": "cdeacf89b6593f916f818d4827ac538db1eb594a",
+  "manifest_parent_commit": "f03b8b4b3322eb46ad53cc18dd568853fc9ae270",
   "reconciliation": {
     "status": "release-prep",
     "scope": "Release arc: v0.25.0 (the prior tag; evaluator-derived release_base) through evaluated_commit (the release-prep evaluation point = 1761ece6605700ff79a83e615d594e27caee1fb8, the current pre-ceremony HEAD; intended release v0.26.0). The v0.25.0..1761ece arc carries 1 feat commit (MINOR-class signal: 9b3aee4 feat(doctor) enforce interaction-reachability crux, the F3 runtime-blindspot class) plus 1 fix commit (34d036b fix(substrate) check schema ok in writeArmedMerge re-derive to avoid nil-Reconciler panic), 2 dead-code chore cleanups (c924174 delete seamClassifierImpl, 883b1c2 delete coreExceptionsForDoc map), 2 test-robustness commits (0c89313 state-lib render-guard node-18-robust, af87ece consumer render-verifier node-18-robust), 2 CI commits (0d646d7 full-suite go-test matrix job node 18.17.1 + 24.18.0 with LiveBridge hard-required, 0354a9d also trigger on push to main), 4 backlog/bookkeeping commits (185de19 + a390e39 P2-OPS-001 close + archive companions, ad03d05 + 50cedba P2-CI-001 close + archive companions), and 1 docs commit (1761ece frontend-ui-pilot README row); zero breaking changes. MINOR bump v0.25.0->v0.26.0. Two newly-firing cards this arc (defer-015-l1-behavioral-closure-termination-contract via path_touched(templates/core/.vh-agent-harness/AGENTS.core.md) touched by 9b3aee4, and defer-comment-drift-coremanifest-seam via path_touched(core_manifest.go)+path_touched(internal/cli/seam.go) touched by 883b1c2/c924174) are added as disclose records. The 30 carried-forward records retain disposition=disclose with frozen historical reasons; NONE of them re-fire against this arc (mechanically verified: the v0.25.0..HEAD changed-path set intersects only the two new cards' targets); the release-diff enumerator re-checks each card's trigger against the actual v0.25.0..R arc at evaluation time.",
