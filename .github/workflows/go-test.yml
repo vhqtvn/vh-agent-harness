@@ -11,6 +11,11 @@
 # The LiveBridge test stages the canonical corpus itself (templates/core/
 # .opencode), installs its npm deps in scratch, and invokes the real node
 # bridge — so a plain `go test` is sufficient; no make target is needed.
+#
+# ci-aggregate (below) is the workflow's stable blocking sentinel: branch
+# protection pins ONE stable job name instead of the matrix legs, so matrix
+# churn cannot silently drop a leg out of the required-check set. Its
+# contract is asserted by internal/ci_contract_test.go.
 
 name: go-test
 
@@ -44,3 +49,47 @@ jobs:
         env:
           VH_REQUIRE_LIVE_BRIDGE: "1"
         run: go test ./... -count=1
+
+  # ci-aggregate — stable aggregate blocking status (P1-CI-002 / P2).
+  #
+  # ONE final job that depends on every designated blocking job in this
+  # workflow. Branch protection can require THIS stable name instead of the
+  # individual matrix legs, so adding/renaming legs can never leave the
+  # required-check set stale.
+  #
+  # Semantics — B1 vs B2, deliberately NOT collapsed:
+  #   - This job aggregates HOSTED VERIFICATION OUTCOMES (a B1 signal): did
+  #     each blocking dependency's canonical command set succeed on the
+  #     pushed revision?
+  #   - It says NOTHING about working-tree/transition cleanliness (B2) —
+  #     that is a local property the commit-gate owns. This job must never
+  #     be read or reported as generic "full green".
+  #
+  # It summarizes — never replaces — individual job statuses: each
+  # dependency's result is emitted to the step summary, and any failure,
+  # cancellation, or unexpected skip fails this job. Live-run behavior is
+  # exercised on the first push/PR after this file lands (structural
+  # properties are asserted offline by internal/ci_contract_test.go).
+  ci-aggregate:
+    name: ci-aggregate
+    needs: [go-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Per-dependency result summary
+        run: |
+          echo "## ci-aggregate — blocking CI outcomes for this revision" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Blocking job | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| go-test (full node matrix) | ${{ needs.go-test.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "B1 signal only: hosted verification outcomes. Individual job" >> "$GITHUB_STEP_SUMMARY"
+          echo "pages remain authoritative; this is not a B2 (working-tree" >> "$GITHUB_STEP_SUMMARY"
+          echo "cleanliness) claim." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on any non-success dependency
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        run: |
+          echo "::error::ci-aggregate: a blocking CI dependency did not succeed (failure, cancelled, or unexpectedly skipped). See the per-dependency summary."
+          exit 1
