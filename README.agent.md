@@ -1352,6 +1352,33 @@ export default function transform({ context }) {
   validator's fixtures, so it runs in `go test ./...`. This INFORMs only — it is
   a diagnostic, not a transition authority.
 
+## Experimental: `vh-agentd` headless daemon (native-engine branch)
+
+**Status: EXPERIMENTAL — native-engine program, not yet the default
+runtime.** The `.opencode` lane and every existing `vh-agent-harness`
+subcommand are unchanged. `vh-agentd` is a headless engine daemon that
+speaks the host protocol on stdio (one JSON object per line, NDJSON
+framing; JSON-RPC-shaped requests/responses): OpenAI-compatible and
+Anthropic adapters, durable sessions (JSONL logs), the tool pipeline
+with wire-bridged approvals, async background jobs, and subagents.
+Protocol contract: `docs/native-engine/host-protocol.md` (read it
+before driving the wire). Typical start:
+
+```sh
+vh-agentd --adapter openai|openaicompat|anthropic --model <name> \
+  --base-url <https://...> --api-key-env <ENV_VAR_NAME> \
+  --session-dir <dir> [--max-tokens N] [--cache-breakpoints 0-4] \
+  [--approval-timeout-ms N]   # 0 = wait while connected; disconnect still denies
+```
+
+`--compile-prompt` runs the offline prompt compilation (writes under
+`<session-dir>/compiled-prompts/`, exits; no network, no key value
+needed). Credential discipline: `--api-key-env` takes the **name** of an
+environment variable only — never a literal key — and the daemon fails
+closed when that variable is unset. stdout is protocol; diagnostics go
+to stderr. Client EOF is a disconnect: pending approvals deny
+immediately, in-flight handlers drain, and the daemon exits 0.
+
 ## Private redlines (`redlines guidance`, `redlines scan`)
 
 `vh-agent-harness redlines guidance` is the **agent's local context-loading

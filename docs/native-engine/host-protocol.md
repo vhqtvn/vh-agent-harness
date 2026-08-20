@@ -1,0 +1,263 @@
+# Native Engine — Host Protocol (v1)
+
+Status: implemented (slice 5) · `internal/protocol` · `ProtocolVersion = 1`
+
+The stable communication interface of the headless native engine:
+**versioned JSON-RPC over newline-delimited JSON (NDJSON) on stdio**.
+Frontends are external clients (no first-party UI); vh-solara-class
+consumers are the motivating example. Design refs:
+`researches/sources/deepseek-harness/llm-protocols-tools.md` (dsh SDK
+transport, F-SDK-1/F-PIPE-2, malformed-line skip, close ladder) and
+`solution-brief v3` (operator decisions 2 & 5; Architecture Map
+"Frontend" row; risks R5′/R9).
+
+## 1. Framing
+
+- One JSON object per line, UTF-8, `\n`-terminated. Max line: 16 MiB.
+- Both directions share the grammar. **stdout is protocol**: the server
+  writes nothing else to it (diagnostics go to stderr).
+- Trust boundary: **stdio-local**. The two pipe endpoints are
+  co-trusted (same user, one process tree). No authentication,
+  authorization-on-transport, or multi-tenant isolation is provided or
+  implied — that is a stated non-goal for v1.
+
+## 2. Message grammar
+
+| Shape | Meaning |
+|---|---|
+| `{"jsonrpc":"2.0","id":N,"method":"…","params":{…}}` | request (response expected) |
+| `{"jsonrpc":"2.0","id":N,"result":{…}}` | success response |
+| `{"jsonrpc":"2.0","id":N,"error":{"code":C,"message":"…","data":…}}` | error response |
+| `{"jsonrpc":"2.0","method":"…","params":{…}}` | notification (no response) |
+
+- `id` is an integer ≥ 0, minted by the requester; correlation is by
+  exact id. String/null ids are invalid in v1.
+- `result` and `error` are mutually exclusive; exactly one is present
+  on a response. `data` is optional, reserved for diagnostics.
+- Requests are answered in any order (handlers run concurrently).
+
+**Inbound strictness (fail-closed):** unknown envelope fields, wrong
+`jsonrpc` value, contradictory shapes, and non-integer ids are
+**invalid** — attributable lines (readable id) get `-32600`; the rest
+are skipped with a `protocol/error` notification. Unparseable lines
+are skipped with `protocol/error` `-32700` and the connection **stays
+alive** (dsh malformed-line skip). Unknown `params` fields for a known
+method are `-32602`.
+
+## 3. Version negotiation
+
+`initialize` MUST precede every other request. Params:
+`{"protocolVersion":1}`. Response:
+`{"protocolVersion":1,"serverInfo":{"name":"vh-agent-harness"},"capabilities":{"approval":true,"jobs":true,"eventNotifications":true}}`.
+Mismatch ⇒ `-32002` with `data {"server":S,"client":C}` and **no
+partial state** (retry with the right version is legal). Pre-init
+requests ⇒ `-32001`. `initialize` is idempotent.
+
+## 4. Methods
+
+| Method | Params | Result | Notes |
+|---|---|---|---|
+| `initialize` | `{protocolVersion}` | §3 | handshake |
+| `session/create` | `{path?, sessionId?}` | `{sessionId, path}` | new durable log (file); becomes the single active session; a later create supersedes; `path`/`sessionId` confined per §4a |
+| `session/subscribe` | `{types?}` | `{subscribed:true}` | live-only event stream (see §5); filter = session event types |
+| `session/prompt` | `{text}` | `{content, toolCalls[], results[]}` | ONE synchronous tool turn (RunTurn); retries/multi-turn stay engine-internal |
+| `session/dispatch` | `{kind, payload?}` | `{jobId}` | enqueue receipt, returns **before** execution (see §6) |
+| `session/surface` | `{}` | `{messages[]}` | current DeriveMessages snapshot; emits pending job reports first |
+| `approval/respond` | `{approvalId, allow, reason?}` | `{resolved:true}` | one-shot answer to an approval/request |
+| `jobs/status` | `{}` | `{jobs[]}` | fold-derived, enqueue order; `{jobs:[]}` without a session |
+| `subagent/spawn` | `{role?, prompt, mode, seedFromParent?}` | `{childId}` | enqueue receipt, returns **before** the child's first turn (§7b); `mode` = `oneshot\|continuable`; depth auto-derived (never client-supplied) |
+| `subagent/send` | `{childId, message}` | `{queued:true}` | one follow-up inbox message + one queued child turn; continuable, not-yet-settled children only |
+| `subagent/list` | `{}` | `{children[]}` | fold-derived snapshot (running/waiting/settled + `contentSeq`); `{children:[]}` without a session |
+
+`session/prompt`, `session/dispatch`, `session/surface`, `subagent/spawn`,
+`subagent/send` require an active session (`-32003`). `subagent/spawn`/
+`subagent/send` on an engine built without a subagent executor fail closed
+`-32000`; manager refusals (depth fence, unknown/settled child, one-shot
+send) are `-32602` carrying the manager's descriptive text.
+
+## 4a. Confinement contract (server-side, wire shape unchanged)
+
+Every client-controlled string that can steer a filesystem path is
+validated server-side BEFORE any filesystem or server state changes.
+Rejected inputs surface as `-32602` (`*SessionPathError`) with no
+partial state — no file created or truncated, no session superseded.
+
+- **`sessionId`** — validated as a strict single filename component
+  `^[A-Za-z0-9][A-Za-z0-9._-]*$` (also rejecting `.` / `..` / any path
+  separator) on EVERY `session/create`, regardless of branch: the
+  default-path branch composes `<sessionDir>/<sessionId>.jsonl`, and
+  `filepath.Join` lexically cleans, so an unvalidated id
+  (`"../../victim"`) escapes the session root. The id also names the
+  per-session subagents directory, so it is confined even when an
+  explicit `path` is supplied. The same grammar is re-enforced at the
+  subagents FileStore (defense-in-depth against forged logs: child
+  ids folded from `subagent/spawned` events are validated before
+  `<root>/<parentSessionID>/<childID>.jsonl` is composed, on create
+  AND reopen).
+- **explicit `path`** — confined symlink-safe to the engine's declared
+  session root: lexical containment (no `..` climb, not the root
+  itself, absolute paths only when already inside), then
+  `EvalSymlinks` on the root and the target's parent (a symlinked
+  parent resolving outside is rejected; unresolvable locations reject
+  — an unresolvable location is an unknown location), and a symlink AT
+  the final component is rejected outright (`os.Create` is `O_TRUNC`
+  and would truncate the symlink's target).
+- **engine-minted session ids** — `sess-<16 hex>` from `crypto/rand`,
+  fail-closed: an entropy failure refuses `session/create` (`-32000`)
+  rather than degrading to a guessable time-derived id.
+- **error-after-create hygiene** — any engine failure after the
+  session file is created closes the descriptor and REMOVES the
+  partial file; a refused or failed create never abandons a truncated
+  log.
+- **`run_shell` `workdir`** — the workdir argument steers where the
+  command executes, so it carries the same confinement discipline:
+  empty workdir = the engine working directory (unchanged); relative
+  workdirs must stay lexically inside it (no leading `..`); absolute
+  workdirs are REJECTED unless the daemon configured them under a
+  `WorkdirRoots` entry and they resolve symlink-safe inside one
+  (conservative default: the daemon configures no roots, so absolute
+  workdirs are refused). Job kinds, schedule names (slug-validated),
+  and prompt artifact names (content-hash-derived) never reach
+  filesystem paths.
+
+## 4b. Subagents (B2)
+
+- **spawn** validates params, enforces the depth fence fail-closed (a
+  parent at max delegation depth gets `-32602` before any durable
+  effect), creates the child's OWN session log (header carries
+  `parentSessionID` + `delegationDepth`), records the durable
+  `subagent/spawned` descriptor in the parent log, delivers the initial
+  prompt as the child's first `subagent/message` (inbox), and queues the
+  initial turn. One-shot children auto-settle when their run completes
+  (`result:completed|failed` + the run error text as `reason`);
+  continuable children stay `waiting` — settlement is manager-owned.
+- **seedFromParent `<n>`** (fork turn-prefix seeding, the dsh fork
+  pattern): copies the parent's last-n **COMPLETED** turns' surface
+  messages into the child log as seed events BEFORE the child's first
+  turn. Seed vocabulary is closed and replay-deterministic: exactly the
+  existing message-bearing events `session/prompt`, `llm/response`,
+  `tool/result` — re-appended with verbatim payloads and append
+  surfaceOps; no new event kinds. Turn selection spans
+  `turn/begin…turn/end` brackets whose `turn/end` kind is `""`/`"ok"`
+  (errored/unterminated brackets are NOT seed material). Fewer turns
+  available ⇒ fewer seeded. The `subagent/spawned` payload records the
+  number of TURNS actually seeded as `seedTurns` (additive, omitempty —
+  absent on pre-B2 records).
+- **send** appends one `subagent/message` to the child inbox and queues
+  exactly one turn (FIFO); the child's turn answers the accumulated
+  inbox, not a fresh `session/prompt`.
+- **list** is a pure fold of the parent log (spawn order): state
+  `running` (one-shot, unsettled) > `waiting` (continuable, quiescent)
+  > `settled`; `contentSeq` is the highest child-side origin seq already
+  relayed by a `subagent/report` (0 = nothing reported).
+- **Events**: the child's `subagent/report` and `subagent/settled`
+  records are ordinary parent-log session events and reach subscribers
+  through the existing `session/event` fan-out (§5) — no new
+  notification kind.
+
+## 7b. Async contract (subagents, B2)
+
+Same discipline as §7 jobs: `subagent/spawn` returns its `{childId}`
+receipt immediately — never blocked on the child's turn (dsh async
+contract). Child turns run on the session's subagent dispatch goroutine
+(serial FIFO, one child turn at a time per session), so a long child
+turn cannot block the protocol loop, a concurrent `session/prompt`, or
+spawn/send receipts. Lock order is one-directional (manager lock →
+parent-log write lock; child turns hold no manager lock while
+executing), which keeps spawn-from-protocol concurrent-safe. A FAILING
+child executor settles cleanly: the settle notice lands
+(`result:"failed"`, reason = the executor error) and the protocol loop
+stays responsive — no hang, no lost settlement.
+
+## 5. Event notifications
+
+| Method | Params | Source |
+|---|---|---|
+| `session/event` | one full session `Event` record (`{seq,type,payload,…}`) | every appended session-log event (dsh `session.event` unfiltered stream; `types` filter optional) |
+| `approval/request` | `{approvalId, call:{id,name,args}, reason}` | an ask verdict reaching the approval bridge |
+| `protocol/error` | `{code, message}` | malformed/unattributable inbound line |
+
+The stream is a **projection** of the durable log (the log is the
+source of truth; it never fails because a subscriber is broken). It is
+live-only: events appended before subscribing are not replayed —
+history is read via `session/surface` or log replay. Session event
+types map 1:1 to the log's closed type set (`session/header`,
+`session/prompt`, `llm/request`, `llm/response`, `tool/call`,
+`tool/result`, `turn/begin`, `turn/end`, `compaction/*`, `llm/retry*`,
+`job/*`, `subagent/*`).
+
+## 6. Approval model (fail-closed)
+
+`ask` (pre-execute waterfall) → `approval/request` notification →
+client answers `approval/respond` → decision. Every unanswerable
+direction denies (dsh F-PIPE-2: absent/unanswerable approval = deny):
+
+- no response within the server's approval timeout ⇒ **deny**;
+- connection closed while pending ⇒ **deny all pending**;
+- respond for unknown/expired/answered id ⇒ `-32004` (never re-opens a
+  decided approval — one-shot, `allow-once`/`reject-once` only);
+- no approver configured (engine built without the bridge) ⇒ deny at
+  the pipeline (slice-3 semantics unchanged).
+
+## 7. Async contract (jobs, R9 on the wire)
+
+`session/dispatch` → receipt `{jobId:"<kind>-N"}` immediately →
+`job/enqueued`, `job/started`, `job/settled` events stream to
+subscribers → `jobs/status` reflects the fold (`queued|running|settled`
++ `completed|failed`). Settlement is first-wins; the `reported` guard
+emits the model-facing notice exactly once (at the next
+`session/prompt`/`session/surface`, before the surface is derived).
+**Recovery is visible**: after a crash, the R9 recovery pass re-dispatches
+never-started jobs (at-least-once), synthetically settles torn tails
+(`result:"failed"`, reason `recovered-after-crash`), and emits pending
+reports — all as ordinary appended events on the same stream.
+
+## 8. Extensibility & versioning
+
+- Unknown **method** ⇒ `-32601`. Unknown **notification** ⇒ ignored.
+  Unknown `session/event` payload types ⇒ clients ignore them.
+- Adding fields to existing params/results is a **breaking** change
+  under v1 strictness (unknown fields are rejected) ⇒ bump
+  `ProtocolVersion`.
+- Wire shapes are locked byte-exact by golden fixtures
+  (`internal/protocol/testdata/`, `compat_test.go`): any shape change
+  without regenerating fixtures (a reviewable diff) fails CI; the
+  initialize fixture pins the version constant (R5′ mitigation).
+- **B2 decision (subagent/* family): ProtocolVersion stays 1.** The
+  three methods are NEW method names — additive under the rule above.
+  No field was added to any existing method's params or result, and the
+  `initialize` capabilities object is untouched (a capability field-add
+  would itself be a breaking change ⇒ version bump). The additive log
+  payload field `subagent/spawned.seedTurns` is omitempty, so existing
+  bytes (and pre-B2 logs) are unaffected; old fixtures verified
+  byte-stable.
+
+## 9. Error codes
+
+| Code | Meaning |
+|---|---|
+| `-32700` | parse error (line skipped, `protocol/error` emitted) |
+| `-32600` | invalid request (shape/unknown envelope field/closing) |
+| `-32601` | method not found |
+| `-32602` | invalid params (incl. unknown params fields) |
+| `-32000` | engine error (internal handler failure) |
+| `-32001` | initialize required |
+| `-32002` | protocol version mismatch |
+| `-32003` | no active session |
+| `-32004` | unknown/expired approval id |
+
+## 10. Close semantics
+
+Server: `Close()` (or ctx cancel / EOF) ⇒ new requests rejected with
+`-32600 "server is closing"` ⇒ in-flight request handlers drain ⇒
+transport closed ⇒ pending approvals deny. Background jobs are durable
+and continue per §7 (their lifecycle belongs to the log, not the
+connection). Client close ladder mirrors dsh simplified for stdio:
+close stdin/write side → EOF → done (no signals required).
+
+## Non-goals (v1)
+
+HTTP/WS transport; streaming token deltas (committed events only);
+multi-session muxing beyond create/subscribe (single active session);
+transport auth (stdio-local trust boundary, §1); server→client
+requests (dead capability, like dsh); job cancellation over the wire.
