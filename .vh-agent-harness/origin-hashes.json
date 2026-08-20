@@ -90,7 +90,7 @@
     ".opencode/scripts/approve-plan.js": "sha256:900dcdc03514178945c19acb609e391994a8ec1231ec6ae3c4166f5337491941",
     ".opencode/scripts/check-defer-triggers.mjs": "sha256:9c58acdfd9806cbeae84310f7864f6fd9a69faec709be536ccf324cb9ebe3edf",
     ".opencode/scripts/check-s2-holds.mjs": "sha256:f0ede75ca887e96669bcd78c9894ceaf26c356d7bf1df42fed95bf412e0d78a8",
-    ".opencode/scripts/commit-gate.sh": "sha256:1f369c3cfdffd9b52338dc21b6f89847b80ca2e8ef26b4141352a9bb4413477c",
+    ".opencode/scripts/commit-gate.sh": "sha256:1c08f9aaa7c09bae1d0332037bbaf123770a81560602e3f635b94070453f6a28",
     ".opencode/scripts/complexity-signal-lib.js": "sha256:8a5b125cb66b87f9fb20652302625615e5d4ea1d87bd52680cec516428023643",
     ".opencode/scripts/coordination-hints-lib.js": "sha256:b40eda202a30c508894808bbb4a5fb193b4812e1da309c39ce26767af7847ec7",
     ".opencode/scripts/draft-plan.js": "sha256:7fcc340a29da5fd9bda478653bae8766ad437f087480f57cd2bda49f452d2cbc",
