@@ -27,9 +27,11 @@ import (
 	"github.com/vhqtvn/vh-agent-harness/internal/prompt"
 	"github.com/vhqtvn/vh-agent-harness/internal/protocol"
 	"github.com/vhqtvn/vh-agent-harness/internal/session"
+	"github.com/vhqtvn/vh-agent-harness/internal/subagents"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/shell"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/spillread"
+	"github.com/vhqtvn/vh-agent-harness/internal/tools/subagenttools"
 )
 
 // buildAdapter selects and constructs the real adapter from validated
@@ -84,7 +86,12 @@ func buildAdapter(cfg *Config, apiKey string) adapters.Adapter {
 // scheduler needs the tracker, which needs the engine) and BEFORE
 // Serve, so every session/create stamps it — see sched.go.
 func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.Server, *protocol.FileEngine, *sessionTracker, prompt.ServeResult) {
-	defs := daemonTools(realNow, cfg)
+	// The session→manager registry backs the MODEL-FACING subagent tool
+	// family: the engine binds root managers here (create/supersede),
+	// the child-turn executor binds per-turn child managers, and the
+	// tool bodies resolve the executing session's manager through it.
+	reg := subagents.NewRegistry()
+	defs := daemonTools(realNow, cfg, reg)
 	specs := make([]adapters.ToolSpec, 0, len(defs))
 	for _, d := range defs {
 		specs = append(specs, d.Spec())
@@ -115,11 +122,13 @@ func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.
 	}
 	tracker := &sessionTracker{Engine: engine}
 
-	// B2: arm the subagent surface — the REAL executor (child turns run
-	// through this same pipeline + adapter + retry ladder once the
-	// approval bridge is attached below) and child logs under
-	// <session-dir>/subagents.
-	wireSubagents(engine, cfg.SessionDir)
+	// B2 + child-of-child: arm the subagent surface — the REAL executor
+	// (child turns run through this same pipeline + adapter + retry
+	// ladder once the approval bridge is attached below, and any child
+	// below the depth fence runs with the same model-facing spawn
+	// capability), child logs under <session-dir>/subagents, and the
+	// registry the spawn tools resolve through.
+	wireSubagents(engine, cfg.SessionDir, reg)
 
 	// Serving rule: compiled bytes when a matching artifact exists,
 	// raw assembly otherwise. A fallback is never silent — the
@@ -151,8 +160,10 @@ func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.
 // toolSpecsForPrompt returns the advertised tool specs for the OFFLINE
 // compile path (--compile-prompt): the catalog must describe the same
 // tool set the serving daemon advertises, so the artifact hash matches.
+// The registry is per-call (specs only — the tool BODIES are never
+// executed on this path).
 func toolSpecsForPrompt(cfg *Config) []adapters.ToolSpec {
-	defs := daemonTools(realNow, cfg)
+	defs := daemonTools(realNow, cfg, subagents.NewRegistry())
 	specs := make([]adapters.ToolSpec, 0, len(defs))
 	for _, d := range defs {
 		specs = append(specs, d.Spec())
@@ -162,9 +173,14 @@ func toolSpecsForPrompt(cfg *Config) []adapters.ToolSpec {
 
 // daemonTools returns the daemon's tool set: the read-only dogfood
 // probes (echo, clock), the REAL run_shell tool from
-// internal/tools/shell, and spill_read — the retrieval path for spilled
+// internal/tools/shell, spill_read — the retrieval path for spilled
 // oversize results (rooted at the session dir so it reaches every
-// session's store; see internal/tools/spillread). Config posture
+// session's store; see internal/tools/spillread) — and the MODEL-FACING
+// subagent family (subagent_spawn/subagent_send, resolved through the
+// session registry reg; advertised per-session while below the
+// delegation-depth fence — the ROOT session, at depth 0, always is;
+// see internal/tools/subagenttools and cmd/vh-agentd/subagents.go for
+// the depth-conditional advertising on child turns). Config posture
 // (documented defaults):
 //
 //   - policy lists default-EMPTY: AllowedCommands/DeniedCommands are
@@ -193,7 +209,7 @@ func toolSpecsForPrompt(cfg *Config) []adapters.ToolSpec {
 //     a deployment that wants absolute workdirs wires them in Config.
 //
 // now is injected for the deterministic clock tool.
-func daemonTools(now func() time.Time, cfg *Config) []tools.ToolDefinition {
+func daemonTools(now func() time.Time, cfg *Config, reg *subagents.Registry) []tools.ToolDefinition {
 	shellCfg := shell.Config{}
 	if cfg != nil && cfg.SandboxMode != shell.SandboxOff {
 		fn, err := shell.NewSandboxFunc(shell.SandboxOptions{
@@ -220,10 +236,9 @@ func daemonTools(now func() time.Time, cfg *Config) []tools.ToolDefinition {
 		spillRoot = cfg.SessionDir
 		spillInline = cfg.SpillMaxInline
 	}
-	return []tools.ToolDefinition{
+	defs := []tools.ToolDefinition{
 		{
-			Name:              "echo",
-			Description:       "Echoes the given text back as the tool result (read-only dogfood probe).",
+			Name: "echo", Description: "Echoes the given text back as the tool result (read-only dogfood probe).",
 			Parameters:        json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to echo back"}},"required":["text"],"additionalProperties":false}`),
 			IsConcurrencySafe: true,
 			TimeoutMs:         5000,
@@ -266,6 +281,8 @@ func daemonTools(now func() time.Time, cfg *Config) []tools.ToolDefinition {
 		spillread.Definition(spillRoot, spillInline),
 		shell.Definition(shellCfg),
 	}
+	defs = append(defs, subagenttools.Definitions(reg)...)
+	return defs
 }
 
 // daemonExecutor is the minimal dogfood jobs.Executor: deterministic,

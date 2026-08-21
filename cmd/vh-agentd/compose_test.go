@@ -20,6 +20,7 @@ import (
 	"github.com/vhqtvn/vh-agent-harness/internal/prompt"
 	"github.com/vhqtvn/vh-agent-harness/internal/protocol"
 	"github.com/vhqtvn/vh-agent-harness/internal/session"
+	"github.com/vhqtvn/vh-agent-harness/internal/subagents"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools"
 )
 
@@ -61,8 +62,13 @@ func TestBuildServerBothAdapters(t *testing.T) {
 			if !got["echo"] || !got["clock"] || !got["run_shell"] || !got["spill_read"] {
 				t.Fatalf("daemon tools not registered: %v", got)
 			}
-			if len(eng.TurnOptions().Tools) != 4 {
-				t.Fatalf("turn options do not advertise all four tools: %+v", eng.TurnOptions().Tools)
+			// The model-facing subagent family rides the same set (the
+			// root session, depth 0, is always below the fence).
+			if !got["subagent_spawn"] || !got["subagent_send"] {
+				t.Fatalf("subagent tools not registered: %v", got)
+			}
+			if len(eng.TurnOptions().Tools) != 6 {
+				t.Fatalf("turn options do not advertise all six tools: %+v", eng.TurnOptions().Tools)
 			}
 			if eng.TurnOptions().Retry == nil {
 				t.Fatal("retry ladder not armed on the daemon turn path")
@@ -89,7 +95,7 @@ func TestDogfoodToolsExecute(t *testing.T) {
 		t.Fatalf("validate: %v", err)
 	}
 	p := tools.NewPipeline()
-	for _, d := range daemonTools(func() time.Time { return fixed }, offCfg) {
+	for _, d := range daemonTools(func() time.Time { return fixed }, offCfg, subagents.NewRegistry()) {
 		if err := p.Register(d); err != nil {
 			t.Fatalf("register %s: %v", d.Name, err)
 		}

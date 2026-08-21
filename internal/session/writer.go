@@ -296,6 +296,24 @@ func (l *Log) Events() []Event {
 	return out
 }
 
+// SessionID returns the session id from the log's header record ("" if
+// the log has no parsable header — impossible for a well-formed log,
+// which always opens with session/header). It is the identity the
+// turn-context binding and the session→manager registry key on.
+func (l *Log) SessionID() string {
+	l.mu.RLock()
+	events := l.events
+	l.mu.RUnlock()
+	if len(events) == 0 || events[0].Type != TypeSessionHeader {
+		return ""
+	}
+	var hp HeaderPayload
+	if err := json.Unmarshal(events[0].Payload, &hp); err != nil {
+		return ""
+	}
+	return hp.SessionID
+}
+
 // SetSpillPolicy arms (nil disarms) the oversize tool-result spill for
 // results committed to this log — the per-session commit-time decision
 // (see SpillPolicy). It is engine wiring: the writer itself stays

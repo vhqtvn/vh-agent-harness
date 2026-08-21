@@ -119,6 +119,14 @@ type wireHarness struct {
 
 func newSubagentHarness(t *testing.T, exec subagents.Executor, opts subagents.Options) *wireHarness {
 	t.Helper()
+	return newSubagentHarnessOpts(t, exec, opts, nil)
+}
+
+// newSubagentHarnessOpts is newSubagentHarness with an optional
+// session→manager registry (the model-facing tool seam; nil keeps the
+// engine registry-free).
+func newSubagentHarnessOpts(t *testing.T, exec subagents.Executor, opts subagents.Options, reg *subagents.Registry) *wireHarness {
+	t.Helper()
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "sess-sub.jsonl")
 	eng := &FileEngine{
@@ -129,6 +137,7 @@ func newSubagentHarness(t *testing.T, exec subagents.Executor, opts subagents.Op
 		SubagentExecutor: exec,
 		SubagentStore:    subagents.NewFileStore(filepath.Join(dir, "children")),
 		SubagentOpts:     opts,
+		SubagentRegistry: reg,
 	}
 	svc, cli := net.Pipe()
 	srv := NewServer(eng, NewConn(svc), ServerOptions{})
@@ -150,7 +159,7 @@ func newSubagentHarness(t *testing.T, exec subagents.Executor, opts subagents.Op
 	if err := client.Call("initialize", map[string]any{"protocolVersion": 1}, nil); err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
-	if err := client.Call("session/create", map[string]any{"path": logPath, "sessionId": "sess-sub"}, nil); err != nil {
+	if err := h.client.Call("session/create", map[string]any{"path": logPath, "sessionId": "sess-sub"}, nil); err != nil {
 		t.Fatalf("session/create: %v", err)
 	}
 	if err := client.Call("session/subscribe", nil, nil); err != nil {

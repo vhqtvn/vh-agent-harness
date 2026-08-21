@@ -1397,6 +1397,32 @@ preview + opaque locator; the model pages the bytes back via the
 inside the inline cap by construction (§4d of the protocol doc; replay
 never depends on spill files).
 
+**Model-facing recursive subagents** (child-of-child): besides the
+client-driven `subagent/spawn|send|list` wire methods, the daemon's
+MODEL has the same capability as first-class tools — `subagent_spawn`
+(`mode: oneshot|continuable`) and `subagent_send` — and they work
+recursively: a child session's model can spawn grandchildren, a
+grandchild's great-grandchildren, up to the delegation depth fence
+(default 3 edges from the root; the executing session's persisted
+header depth is authoritative). `oneshot` spawn BLOCKS until the child
+settles and returns the child's report as the tool result (the report
+also lands in the executing session's log as a user-role
+`subagent/report`, provenance-clean); `continuable` returns a
+`childId` immediately for `subagent_send` follow-ups. The family is
+ADVERTISED to a session's model only while that session is below the
+fence (capability absence over refusal — a depth-maxed session is not
+offered the tools; a hallucinated call at the fence still gets a typed
+`isError` depth-fence refusal with zero durable effects). Child-log
+layout composes with the tree: `<session-dir>/subagents/<parent-id>/`
+nests per owning session, so `sess-a → sess-a.1 → sess-a.1.2` each get
+their own durable log. Every subagent tool call flows the normal
+pipeline (guards, approval bridge, timeouts, pre-execution
+`tool/call` logging, replay determinism). Note for prompt operators:
+growing the advertised tool set changes the assembled system-prompt
+bytes, so previously compiled prompt artifacts no longer match and
+serving falls back to raw assembly (reported, never silent) until
+`--compile-prompt` is rerun.
+
 `--compile-prompt` runs the compile-time prompt compilation (writes under
 `<session-dir>/compiled-prompts/`, exits; no protocol session).
 `--optimizer llm` (the default) backs it with the real adapter-backed

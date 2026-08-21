@@ -55,6 +55,14 @@ type FileEngine struct {
 	// SubagentOpts configure each session's manager (0 depth cap ⇒ the
 	// subagents default of 3).
 	SubagentOpts subagents.Options
+	// SubagentRegistry, when non-nil, receives the root-session manager
+	// binding at every NewSession (and loses it at supersede) — the seam
+	// the MODEL-FACING subagent tools (internal/tools/subagenttools)
+	// resolve the executing session's manager through. Nil keeps the
+	// engine registry-free: the wire subagent/* family is unchanged and
+	// model-facing spawn tools (if any were registered) fail closed with
+	// "no subagent manager".
+	SubagentRegistry *subagents.Registry
 	// Schedules, when non-nil, is stamped onto EVERY session as its
 	// schedule seam (the schedule/* wire methods). The engine does NOT
 	// build, start, or stop the scheduler — the composition root owns
@@ -77,8 +85,9 @@ type FileEngine struct {
 	approver tools.Approver
 	pipeline *tools.Pipeline
 
-	subMu  sync.Mutex
-	curSub SubagentSpawner // manager of the ACTIVE session (superseded ⇒ stopped)
+	subMu    sync.Mutex
+	curSub   SubagentSpawner // manager of the ACTIVE session (superseded ⇒ stopped)
+	curSubID string          // its session id (registry unbinding at supersede)
 }
 
 var (
@@ -302,13 +311,22 @@ func (e *FileEngine) NewSession(path, sessionID string, sink io.Writer) (*Engine
 		// drains its queue. Stop does not cancel an executing child turn
 		// (cancellation propagation is the subagents slice's documented
 		// non-goal); its report/settle appends land on that session's
-		// own log.
+		// own log. The registry binding (when armed) follows the same
+		// lifecycle: the superseded session's model loses the
+		// model-facing spawn capability, the new session gains it.
 		e.subMu.Lock()
 		if e.curSub != nil {
+			if e.SubagentRegistry != nil {
+				e.SubagentRegistry.Remove(e.curSubID)
+			}
 			e.curSub.Stop()
 		}
 		e.curSub = sm
+		e.curSubID = sessionID
 		e.subMu.Unlock()
+		if e.SubagentRegistry != nil {
+			e.SubagentRegistry.Put(sessionID, sm)
+		}
 	}
 	return es, nil
 }

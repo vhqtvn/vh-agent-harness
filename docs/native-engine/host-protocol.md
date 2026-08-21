@@ -161,6 +161,21 @@ partial state — no file created or truncated, no session superseded.
   records are ordinary parent-log session events and reach subscribers
   through the existing `session/event` fan-out (§5) — no new
   notification kind.
+- **Model-facing spawn tools (child-of-child)**: the daemon also arms
+  the same capability as MODEL-FACING tools — `subagent_spawn`
+  (`mode: oneshot|continuable`) and `subagent_send` — resolved through
+  a session→manager registry, so ANY session's model can delegate,
+  recursively: a child spawns grandchildren, a grandchild
+  great-grandchildren, up to the same depth fence (the executing
+  session's header depth is authoritative; the daemon strips the
+  family from a depth-maxed session's ADVERTISED tools — capability
+  absence — while a hallucinated call still gets the typed fence
+  refusal as an `isError` tool result, zero durable effects). The
+  one-shot tool blocks until the child settles and returns the report
+  (the report independently lands as a user-role `subagent/report`
+  event, same shape as the wire family); wire surface unchanged
+  (ProtocolVersion stays 1 — these are tool calls inside turns, not
+  new methods).
 
 ## 4c. Schedules (B3)
 

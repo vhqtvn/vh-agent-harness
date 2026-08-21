@@ -163,6 +163,12 @@ func (p *Pipeline) RunTurn(ctx context.Context, lg *session.Log, ad adapters.Ada
 	if _, err := lg.AppendTurnBegin(); err != nil {
 		return nil, fmt.Errorf("tools: append turn/begin: %w", err)
 	}
+	// Bind the executing session for tool bodies: the model-facing
+	// subagent family resolves the executing session's manager through
+	// this (a shared pipeline serves every session; the binding is what
+	// makes a tool session-aware). Applied after turn/begin so the log
+	// is confirmed writable first; tools never see the pre-turn ctx.
+	ctx = WithExecutingSession(ctx, lg.SessionID())
 	if !opts.InboxDriven {
 		if _, err := lg.AppendPrompt(prompt); err != nil {
 			return nil, fmt.Errorf("tools: append prompt: %w", err)

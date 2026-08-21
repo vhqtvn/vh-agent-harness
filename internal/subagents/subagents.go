@@ -190,6 +190,9 @@ type Manager struct {
 type childHandle struct {
 	lg  *session.Log
 	rec childRecord
+	// settleWaiters are the AwaitChild waiters (closed exactly once at
+	// settlement; the one-shot spawn tool blocks on these).
+	settleWaiters []chan struct{}
 }
 
 // childRecord is the fold-level state of one child. reportedOriginSeq is
@@ -226,10 +229,7 @@ func NewManager(parent *session.Log, executor Executor, store Store, opts Option
 	if store == nil {
 		return nil, errors.New("subagents: nil store")
 	}
-	maxDepth := opts.MaxDelegationDepth
-	if maxDepth <= 0 {
-		maxDepth = DefaultMaxDelegationDepth
-	}
+	maxDepth := EffectiveMaxDepth(opts.MaxDelegationDepth)
 
 	events := parent.Events()
 	if len(events) == 0 || events[0].Type != session.TypeSessionHeader {
@@ -463,6 +463,11 @@ func (m *Manager) settleLocked(childID string, runErr error) error {
 	h.rec.settledSeq = ev.Seq
 	h.rec.settleResult = result
 	h.rec.settleReason = reason
+	// Wake every AwaitChild waiter (one-shot spawn tools block here).
+	for _, ch := range h.settleWaiters {
+		close(ch)
+	}
+	h.settleWaiters = nil
 	return nil
 }
 

@@ -16,6 +16,17 @@ import (
 	"github.com/vhqtvn/vh-agent-harness/internal/session"
 )
 
+// EffectiveMaxDepth resolves a configured depth cap the way the Manager
+// does (<= 0 ⇒ DefaultMaxDelegationDepth). Shared by the manager and
+// the depth-conditional tool advertising so both sides fence at the
+// same line.
+func EffectiveMaxDepth(configured int) int {
+	if configured <= 0 {
+		return DefaultMaxDelegationDepth
+	}
+	return configured
+}
+
 // crossCheckChildHeader validates the authoritative child header (first
 // event of the child log) against the parent's spawned record: the child
 // log must carry its own session id, the exact direct parent session id,

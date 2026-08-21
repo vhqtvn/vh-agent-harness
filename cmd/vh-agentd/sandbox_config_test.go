@@ -12,6 +12,7 @@ import (
 
 	"github.com/vhqtvn/vh-agent-harness/internal/execsandbox"
 	"github.com/vhqtvn/vh-agent-harness/internal/session"
+	"github.com/vhqtvn/vh-agent-harness/internal/subagents"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools"
 )
 
@@ -134,7 +135,7 @@ func TestDaemonToolsSandboxWiring(t *testing.T) {
 	}
 
 	// off: byte-identical posture — run_shell outcome says "none".
-	out := execDaemonRunShell(t, daemonTools(realNow, off), "printf off-ok")
+	out := execDaemonRunShell(t, daemonTools(realNow, off, subagents.NewRegistry()), "printf off-ok")
 	if out.Sandbox != "none" || out.Stdout != "off-ok" {
 		t.Fatalf("off outcome = %+v, want pre-slice posture (sandbox none)", out)
 	}
@@ -146,7 +147,7 @@ func TestDaemonToolsSandboxWiring(t *testing.T) {
 	if !execsandbox.Detect().Available() {
 		t.Skipf("landlock+seccomp unavailable; confined wiring exec skipped (fail-closed path covered in internal/tools/shell)")
 	}
-	out = execDaemonRunShell(t, daemonTools(realNow, ro), "printf ro-ok")
+	out = execDaemonRunShell(t, daemonTools(realNow, ro, subagents.NewRegistry()), "printf ro-ok")
 	if out.Sandbox != "read-only" {
 		t.Fatalf("read-only outcome sandbox = %q, want read-only", out.Sandbox)
 	}

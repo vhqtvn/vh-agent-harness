@@ -85,8 +85,11 @@ func TestDaemonToolSetIncludesSpillRead(t *testing.T) {
 	if !got["echo"] || !got["clock"] || !got["run_shell"] || !got[spillread.Name] {
 		t.Fatalf("daemon tools not registered: %v", got)
 	}
-	if len(eng.TurnOptions().Tools) != 4 {
-		t.Fatalf("turn options do not advertise all four tools: %+v", eng.TurnOptions().Tools)
+	if !got["subagent_spawn"] || !got["subagent_send"] {
+		t.Fatalf("model-facing subagent tools not registered: %v", got)
+	}
+	if len(eng.TurnOptions().Tools) != 6 {
+		t.Fatalf("turn options do not advertise all six tools: %+v", eng.TurnOptions().Tools)
 	}
 	// The per-session policy seam is wired: a new session's log carries
 	// an armed policy with a FileSpillStore under <dir>/<id>.spill/.
