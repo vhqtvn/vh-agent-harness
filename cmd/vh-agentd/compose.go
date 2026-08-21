@@ -26,8 +26,10 @@ import (
 	"github.com/vhqtvn/vh-agent-harness/internal/loop"
 	"github.com/vhqtvn/vh-agent-harness/internal/prompt"
 	"github.com/vhqtvn/vh-agent-harness/internal/protocol"
+	"github.com/vhqtvn/vh-agent-harness/internal/session"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/shell"
+	"github.com/vhqtvn/vh-agent-harness/internal/tools/spillread"
 )
 
 // buildAdapter selects and constructs the real adapter from validated
@@ -99,6 +101,18 @@ func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.
 			Retry:     &tools.RetryLadder{Config: loop.RetryConfig{}},
 		},
 	}
+	// Oversize tool-result spill (dsh spill pattern): arm a per-session
+	// policy rooted at <session-dir>/<session-id>.spill/. 0 disables it
+	// (always-inline, the pre-spill behavior); a store construction
+	// cannot fail (the directory is created lazily at first write).
+	if cfg.SpillMaxInline > 0 {
+		engine.SpillPolicyFor = func(sessionID string) *session.SpillPolicy {
+			return &session.SpillPolicy{
+				MaxInlineBytes: cfg.SpillMaxInline,
+				Store:          session.NewFileSpillStore(cfg.SessionDir, sessionID),
+			}
+		}
+	}
 	tracker := &sessionTracker{Engine: engine}
 
 	// B2: arm the subagent surface — the REAL executor (child turns run
@@ -147,8 +161,11 @@ func toolSpecsForPrompt(cfg *Config) []adapters.ToolSpec {
 }
 
 // daemonTools returns the daemon's tool set: the read-only dogfood
-// probes (echo, clock) plus the REAL run_shell tool from
-// internal/tools/shell. Config posture (documented defaults):
+// probes (echo, clock), the REAL run_shell tool from
+// internal/tools/shell, and spill_read — the retrieval path for spilled
+// oversize results (rooted at the session dir so it reaches every
+// session's store; see internal/tools/spillread). Config posture
+// (documented defaults):
 //
 //   - policy lists default-EMPTY: AllowedCommands/DeniedCommands are
 //     unset — in-tool hygiene is opt-in; the Pipeline guards/approval
@@ -190,6 +207,13 @@ func daemonTools(now func() time.Time, cfg *Config) []tools.ToolDefinition {
 		}
 		shellCfg.Sandbox = fn
 		shellCfg.SandboxName = string(cfg.SandboxMode)
+	}
+	// spill_read retrieves from the session dir root (it has no session
+	// context; content addressing + hash validation make the walk
+	// exact). A nil cfg (spec-only callers) gets "" = the process cwd.
+	spillRoot := ""
+	if cfg != nil {
+		spillRoot = cfg.SessionDir
 	}
 	return []tools.ToolDefinition{
 		{
@@ -234,6 +258,7 @@ func daemonTools(now func() time.Time, cfg *Config) []tools.ToolDefinition {
 				return now().UTC().Format(time.RFC3339Nano), nil
 			},
 		},
+		spillread.Definition(spillRoot, 0),
 		shell.Definition(shellCfg),
 	}
 }

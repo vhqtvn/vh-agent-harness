@@ -24,6 +24,9 @@ type Log struct {
 	closer io.Closer
 	seq    int64
 	events []Event
+	// spill is the optional armed oversize tool-result policy (engine
+	// wiring; nil ⇒ inline behavior identical to pre-spill logs).
+	spill *SpillPolicy
 }
 
 // NewLog starts a new session log on w, writing the session/header record
@@ -291,6 +294,26 @@ func (l *Log) Events() []Event {
 	out := make([]Event, len(l.events))
 	copy(out, l.events)
 	return out
+}
+
+// SetSpillPolicy arms (nil disarms) the oversize tool-result spill for
+// results committed to this log — the per-session commit-time decision
+// (see SpillPolicy). It is engine wiring: the writer itself stays
+// policy-free; the pipeline consults the log's policy when committing
+// tool results. Arm before the first turn of a session; replay never
+// reads it (spill files are sidecar state, not replay input).
+func (l *Log) SetSpillPolicy(p *SpillPolicy) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.spill = p
+}
+
+// SpillPolicy returns the armed spill policy, or nil (today's inline
+// behavior, byte-stable).
+func (l *Log) SpillPolicy() *SpillPolicy {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.spill
 }
 
 // Surface derives the LLM-visible message surface from the live event

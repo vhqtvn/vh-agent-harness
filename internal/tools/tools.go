@@ -380,24 +380,38 @@ func (p *Pipeline) ExecuteLogged(ctx context.Context, lg *session.Log, call sess
 		return Result{}, fmt.Errorf("tools: log tool/call (pre-execution): %w", err)
 	}
 	res := p.Execute(ctx, call)
-	if err := logResult(lg, res); err != nil {
+	if err := logResult(lg, &res); err != nil {
 		return res, fmt.Errorf("tools: log tool/result: %w", err)
 	}
 	return res, nil
 }
 
-// logResult appends the frozen canonical result with full metadata.
-func logResult(lg *session.Log, res Result) error {
+// logResult appends the frozen canonical result with full metadata. It
+// is the COMMIT seam: when the log carries an armed spill policy, an
+// oversize content is rewritten IN PLACE (res.Content becomes the
+// bounded preview + notice, so the returned result — the turn report
+// and the wire — sees exactly what was committed) and the payload
+// carries the additive spill fields. With no policy armed the bytes are
+// identical to the pre-spill shape (SpillPolicy.Apply's inline path is
+// byte-stable). A spill failure falls back to inline silently — a
+// sidecar write must never fail the tool result.
+func logResult(lg *session.Log, res *Result) error {
+	var loc *session.SpillLocator
+	if pol := lg.SpillPolicy(); pol != nil {
+		res.Content, loc, _ = pol.Apply("", res.Content) // loc != nil iff spilled
+	}
 	_, err := lg.AppendToolResultMeta(session.ToolResultPayload{
-		CallID:     res.CallID,
-		Name:       res.Name,
-		Content:    res.Content,
-		IsError:    res.IsError,
-		Denied:     res.Denied,
-		DeniedBy:   res.DeniedBy,
-		DenyReason: res.DenyReason,
-		TimedOut:   res.TimedOut,
-		ReplacedBy: res.ReplacedBy,
+		CallID:       res.CallID,
+		Name:         res.Name,
+		Content:      res.Content,
+		IsError:      res.IsError,
+		Denied:       res.Denied,
+		DeniedBy:     res.DeniedBy,
+		DenyReason:   res.DenyReason,
+		TimedOut:     res.TimedOut,
+		ReplacedBy:   res.ReplacedBy,
+		Spilled:      loc != nil,
+		SpillLocator: loc,
 	})
 	return err
 }

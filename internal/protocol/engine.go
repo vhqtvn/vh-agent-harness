@@ -65,6 +65,13 @@ type FileEngine struct {
 	// schedule/remove fail closed -32000, schedule/list is an honest
 	// empty.
 	Schedules ScheduleManager
+	// SpillPolicyFor, when non-nil, arms the oversize tool-result spill
+	// (the commit-time preview+locator rewrite, see internal/session
+	// SpillPolicy) on EVERY NewSession log — the per-session seam, since
+	// the store is rooted at the session's own directory. Nil keeps
+	// sessions spill-free: results stay inline, byte-identical to the
+	// pre-spill behavior (the library default).
+	SpillPolicyFor func(sessionID string) *session.SpillPolicy
 
 	mu       sync.Mutex
 	approver tools.Approver
@@ -266,6 +273,12 @@ func (e *FileEngine) NewSession(path, sessionID string, sink io.Writer) (*Engine
 	lg, err := session.NewLog(io.MultiWriter(f, sink), sessionID, time.Now().UTC())
 	if err != nil {
 		return nil, abandon(err)
+	}
+	// Per-session spill arming (dsh spill seam): the policy rides the
+	// log so the pipeline's commit path can consult it; a nil seam (or
+	// nil policy) keeps results inline.
+	if e.SpillPolicyFor != nil {
+		lg.SetSpillPolicy(e.SpillPolicyFor(sessionID))
 	}
 	m, err := jobs.NewManager(lg, e.Executor, e.JobsOpts)
 	if err != nil {

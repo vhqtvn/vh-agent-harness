@@ -234,6 +234,63 @@ field was added to any existing method's params or result, and the
 `initialize` capabilities object is untouched (a capability field-add
 would itself be a breaking change).
 
+## 4d. Oversize-result spill (dsh session-cognition pattern)
+
+Spill replaces lossy truncation **at commit time**: it is engine
+wiring around the session log, NOT a wire surface. `run_shell`'s
+per-stream capture cap (64 KiB + in-band truncation marker) is
+unchanged and fires FIRST; spill then applies to the serialized tool
+result when the session log is armed with a `SpillPolicy`
+(vh-agentd: `--spill-max-inline`, default 65536; `0` disables —
+library default, no store configured, is byte-identical to the
+pre-spill behavior).
+
+- **Decision point.** When a committed `tool/result` payload's content
+  exceeds `MaxInlineBytes`, the content is written to a
+  content-addressed spill file under
+  `<session-dir>/<session-id>.spill/` (dir 0700, files 0600,
+  `O_CREATE|O_EXCL` anti-symlink, name `<kind>-<sha256[:16]>` —
+  identical output de-duplicates to one file). The logged content
+  becomes a **preview** — first `cap-1-len(notice)` bytes plus a
+  notice line `... [spilled <N> bytes: <locator-JSON> — read via
+  spill/read]` (the notice bytes are reserved INSIDE the inline cap),
+  and the payload carries additive `spilled` + `spillLocator` fields.
+  On spill-write failure the FULL content stays inline — silent but
+  deterministic fallback (a spill failure must never fail the tool
+  result), so the event shape stays identical to today's.
+- **Locator opacity.** `SpillLocator {file, sha256, size}` is an
+  opaque JSON token: the model echoes it verbatim into `spill_read`;
+  nothing about the on-disk layout is part of its contract. `Read`
+  validates basename + size + sha256 and fails closed on mismatch.
+- **Retrieval.** `spill_read` is an ordinary tool in the daemon
+  catalog (guards, logging, and pipeline apply). Input: the locator
+  object. Output: the full content, capped at 1 MiB of CONTENT (a
+  run_shell-style truncation notice rides on top). Oversize retrieval
+  results are themselves spill-eligible — content addressing makes
+  the re-spill resolve to the SAME file, so the round trip is
+  idempotent. When the daemon config is absent the tool still
+  registers (for pipeline tests) and fails closed on unknown files.
+- **Replay independence.** Spill files are durable SIDECAR state, not
+  log inputs: `Replay` and `DeriveMessages` are a pure fold over the
+  log and never touch the filesystem. Log replay is byte-identical
+  regardless of spill-file existence; losing the spill directory
+  degrades retrieval (`spill_read` fails closed), never replay
+  integrity.
+- **Divergences, stated.** Child/subagent session logs are NOT
+  spill-armed (v1 arms only the parent session the daemon composes);
+  `spill_read` locates files by a bounded walk of the session dir
+  (O(session-dir), not a global index); invalid-UTF-8 bytes are
+  lossy through JSON strings — the sha256 is computed over the exact
+  bytes written, so validation still holds.
+
+**Versioning (spill decision, mirroring B2/B3):**
+`ProtocolVersion` stays 1 — no wire method changed. The additive log
+payload fields `tool/result .spilled`/`.spillLocator` are omitempty
+(old logs byte-stable, verified); `tools.Result` on the WIRE is
+untouched (§8's no-new-fields rule on existing method shapes holds);
+`spill_read` travels through the existing `tool/call`/`tool/result`
+events, so no new fixtures were needed.
+
 ## 7b. Async contract (subagents, B2)
 
 Same discipline as §7 jobs: `subagent/spawn` returns its `{childId}`

@@ -171,7 +171,7 @@ func TestUsageDocumentsCredentialHandling(t *testing.T) {
 
 func TestValidateAdapterAliases(t *testing.T) {
 	for in, want := range map[string]string{"openai": "openaicompat", "OpenAICompat": "openaicompat", "anthropic": "anthropic"} {
-		cfg, err := validate(in, "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", 0, defaultApprovalTimeoutMs, 0, "off")
+		cfg, err := validate(in, "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", 0, defaultApprovalTimeoutMs, 0, "off", 65536)
 		if err != nil || cfg.Adapter != want {
 			t.Fatalf("alias %q: cfg=%+v err=%v, want adapter %q", in, cfg, err, want)
 		}
@@ -182,10 +182,10 @@ func TestValidateMaxTokensAndTimeoutBounds(t *testing.T) {
 	// Absolute session dir so the maxTokens<0 branch is actually
 	// reached: the previous relative "d" tripped the absolute-path
 	// check first and the subtest passed VACUOUSLY (deferred F1 fix).
-	if _, err := validate("openai", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", -1, defaultApprovalTimeoutMs, 0, "off"); err == nil || !strings.Contains(err.Error(), "--max-tokens") || !strings.Contains(err.Error(), "must be >= 0") {
+	if _, err := validate("openai", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", -1, defaultApprovalTimeoutMs, 0, "off", 65536); err == nil || !strings.Contains(err.Error(), "--max-tokens") || !strings.Contains(err.Error(), "must be >= 0") {
 		t.Fatalf("negative max-tokens: err = %v, want the --max-tokens >= 0 rejection (not the session-dir error)", err)
 	}
-	if _, err := validate("openai", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", 0, -1, 0, "off"); err == nil {
+	if _, err := validate("openai", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", 0, -1, 0, "off", 65536); err == nil {
 		t.Fatal("negative approval-timeout-ms accepted")
 	}
 }
@@ -195,13 +195,13 @@ func TestValidateMaxTokensAndTimeoutBounds(t *testing.T) {
 // anything else is a clear validation failure.
 func TestValidateOptimizerFlag(t *testing.T) {
 	for in, want := range map[string]string{"": "llm", "llm": "llm", "LLM": "llm", " llm ": "llm", "dedup": "dedup", "Dedup": "dedup"} {
-		cfg, err := validate("openai", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", in, 0, defaultApprovalTimeoutMs, 0, "off")
+		cfg, err := validate("openai", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", in, 0, defaultApprovalTimeoutMs, 0, "off", 65536)
 		if err != nil || cfg.Optimizer != want {
 			t.Fatalf("optimizer %q: cfg=%+v err=%v, want %q", in, cfg, err, want)
 		}
 	}
 	for _, bad := range []string{"bogus", "openai", "dedupe"} {
-		_, err := validate("openai", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", bad, 0, defaultApprovalTimeoutMs, 0, "off")
+		_, err := validate("openai", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", bad, 0, defaultApprovalTimeoutMs, 0, "off", 65536)
 		if err == nil || !strings.Contains(err.Error(), "--optimizer") {
 			t.Fatalf("optimizer %q: err = %v, want a clear --optimizer rejection", bad, err)
 		}
@@ -215,28 +215,28 @@ func TestValidateOptimizerFlag(t *testing.T) {
 func TestValidateCacheBreakpoints(t *testing.T) {
 	// Default off, both adapters.
 	for _, adapter := range []string{"openai", "anthropic"} {
-		cfg, err := validate(adapter, "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", 0, defaultApprovalTimeoutMs, 0, "off")
+		cfg, err := validate(adapter, "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", 0, defaultApprovalTimeoutMs, 0, "off", 65536)
 		if err != nil || cfg.CacheBreakpoints != 0 {
 			t.Fatalf("adapter %s default: cfg=%+v err=%v, want breakpoints 0", adapter, cfg, err)
 		}
 	}
 	// 1..4 accepted for anthropic and carried on the config.
 	for n := 1; n <= 4; n++ {
-		cfg, err := validate("anthropic", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", 0, defaultApprovalTimeoutMs, n, "off")
+		cfg, err := validate("anthropic", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", 0, defaultApprovalTimeoutMs, n, "off", 65536)
 		if err != nil || cfg.CacheBreakpoints != n {
 			t.Fatalf("anthropic n=%d: cfg=%+v err=%v", n, cfg, err)
 		}
 	}
 	// Out of range rejected.
 	for _, n := range []int{-1, 5} {
-		if _, err := validate("anthropic", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", 0, defaultApprovalTimeoutMs, n, "off"); err == nil {
+		if _, err := validate("anthropic", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", 0, defaultApprovalTimeoutMs, n, "off", 65536); err == nil {
 			t.Fatalf("breakpoints %d accepted, want range rejection", n)
 		}
 	}
 	// openai (and its alias) rejects any explicit budget.
 	for _, adapter := range []string{"openai", "openaicompat"} {
 		err := func() error {
-			_, err := validate(adapter, "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", 0, defaultApprovalTimeoutMs, 2, "off")
+			_, err := validate(adapter, "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", "", 0, defaultApprovalTimeoutMs, 2, "off", 65536)
 			return err
 		}()
 		if err == nil {

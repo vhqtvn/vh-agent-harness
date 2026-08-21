@@ -268,6 +268,13 @@ type ToolCallPayload struct {
 //     carries it only when the dispatch deadline fired).
 //   - ReplacedBy — replace provenance: the post-execute observer whose
 //     derived content replaced the raw body output.
+//
+// The spill fields (dsh spill-policy, additive + omitempty so pre-spill
+// logs replay byte-identically) mark that Content is a bounded PREVIEW:
+// the full output was written to the session's spill store and is
+// retrievable via the spill_read tool with SpillLocator. The preview and
+// notice are PART of Content (the model-visible surface), so replay and
+// DeriveMessages never touch the spill files.
 type ToolResultPayload struct {
 	CallID     string `json:"callId"`
 	Name       string `json:"name"`
@@ -278,6 +285,11 @@ type ToolResultPayload struct {
 	DenyReason string `json:"denyReason,omitempty"`
 	TimedOut   bool   `json:"timedOut,omitempty"`
 	ReplacedBy string `json:"replacedBy,omitempty"`
+	// Spilled is true when Content is a preview of a spilled result.
+	Spilled bool `json:"spilled,omitempty"`
+	// SpillLocator is the opaque locator for retrieving the full bytes
+	// via spill_read (set iff Spilled).
+	SpillLocator *SpillLocator `json:"spillLocator,omitempty"`
 }
 
 // TurnEndPayload optionally carries why the turn ended. Kind classifies the

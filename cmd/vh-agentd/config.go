@@ -80,6 +80,14 @@ type Config struct {
 	// the OS temp dir (dsh writableRoots vocabulary: the workspace and
 	// tmp). Empty for off and read-only.
 	SandboxWritableRoots []string
+	// SpillMaxInline is the inline budget for oversize tool results
+	// (--spill-max-inline). Content above it is spilled FULL to a
+	// per-session store (<session-dir>/<session-id>.spill/, 0700/0600,
+	// content-addressed) and the committed event carries a bounded
+	// preview + opaque locator retrievable via the spill_read tool.
+	// Default 65536 (matching run_shell's capture cap); 0 disables the
+	// spill entirely (today's always-inline behavior).
+	SpillMaxInline int64
 }
 
 // usageDoc documents credential handling on the help surface (the key is
@@ -131,6 +139,20 @@ Sandbox (--sandbox MODE):
   running unconfined. There is deliberately no "danger-full-access"
   mode — it is redundant with off.
 
+Spill (--spill-max-inline N):
+  Oversize tool results spill to durable per-session files instead of
+  flooding the log/context: content above N bytes (default 65536,
+  matching the run_shell capture cap) is written FULL to
+  <session-dir>/<session-id>.spill/ (0700 dir, 0600 content-addressed
+  files) and the committed tool/result event carries a bounded preview
+  plus an opaque locator; the spill_read tool retrieves the full bytes
+  (hash-validated, fail-closed, 1 MiB per read). 0 disables the spill
+  (always-inline, the pre-spill behavior). A spill-store write failure
+  silently keeps the content inline — the sidecar never fails the tool
+  result. Spill files are durable sidecar state: replay of a session
+  log never touches them (loss degrades retrieval, not replay
+  integrity).
+
 System prompt (compiled-sysprompt model):
   The daemon serves its system prompt from the compiled artifact under
   <session-dir>/compiled-prompts/ when one matches the current content
@@ -142,6 +164,7 @@ Usage:
             --api-key-env VAR --session-dir DIR [--max-tokens N]
             [--approval-timeout-ms MS] [--cache-breakpoints N]
             [--sandbox off|read-only|workspace-write]
+            [--spill-max-inline N]
             [--optimizer dedup|llm] [--compile-prompt] [--version]
 
   --compile-prompt  run the compile-time prompt compilation with the current
@@ -204,7 +227,7 @@ func normalizeOptimizer(v string) (string, error) {
 
 // validate checks the parsed flags fail-closed and returns the
 // normalized Config.
-func validate(adapter, model, baseURL, apiKeyEnv, sessionDir, optimizer string, maxTokens, approvalTimeoutMs, cacheBreakpoints int, sandboxMode string) (*Config, error) {
+func validate(adapter, model, baseURL, apiKeyEnv, sessionDir, optimizer string, maxTokens, approvalTimeoutMs, cacheBreakpoints int, sandboxMode string, spillMaxInline int64) (*Config, error) {
 	ad, ok := normalizeAdapter(adapter)
 	if !ok {
 		return nil, fmt.Errorf("invalid --adapter %q: must be openai (openaicompat) or anthropic", adapter)
@@ -248,6 +271,10 @@ func validate(adapter, model, baseURL, apiKeyEnv, sessionDir, optimizer string, 
 	if err != nil {
 		return nil, fmt.Errorf("invalid --sandbox %q: %w", sandboxMode, err)
 	}
+	if spillMaxInline < 0 {
+		return nil, fmt.Errorf("invalid --spill-max-inline %d: must be >= 0 (0 disables the oversize-result spill; positive is the inline byte budget)",
+			spillMaxInline)
+	}
 
 	cfg := &Config{
 		Adapter:           ad,
@@ -260,6 +287,7 @@ func validate(adapter, model, baseURL, apiKeyEnv, sessionDir, optimizer string, 
 		CacheBreakpoints:  cacheBreakpoints,
 		Optimizer:         opt,
 		SandboxMode:       mode,
+		SpillMaxInline:    spillMaxInline,
 	}
 	// workspace-write default writable roots: the session dir (every
 	// durable byte the daemon owns) plus the OS temp dir. Deduped when

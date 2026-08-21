@@ -59,6 +59,7 @@ func buildPromptInputs(cfg *Config, specs []adapters.ToolSpec) (*prompt.Assemble
 		tg.WriteString(line + "\n")
 	}
 	tg.WriteString("run_shell output is structured JSON; check its fields instead of guessing.\n")
+	tg.WriteString("Oversize results are spilled to disk and inlined as a preview ending in `... [spilled N bytes: {…} — read via spill/read]`; call spill_read with that locator JSON to retrieve the full bytes.\n")
 
 	asm := prompt.NewAssembler()
 	sections := []prompt.Section{

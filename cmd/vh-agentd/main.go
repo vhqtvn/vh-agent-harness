@@ -98,6 +98,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		approvalTimeoutMs = new(int)
 		cacheBreakpoints  = new(int)
 		sandbox           = new(string)
+		spillMaxInline    = new(int64)
 		compilePrompt     = new(bool)
 		showVersion       = new(bool)
 	)
@@ -114,6 +115,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	fs.IntVar(approvalTimeoutMs, "approval-timeout-ms", defaultApprovalTimeoutMs, "bound on each pending approval (0 = wait while connected)")
 	fs.IntVar(cacheBreakpoints, "cache-breakpoints", 0, "Anthropic prompt-cache breakpoint budget: 0=off (default), 1-4 explicit (anthropic only; openai caching is implicit and rejects this flag)")
 	fs.StringVar(sandbox, "sandbox", "off", "run_shell confinement: off (default: NO confinement, engine privileges), read-only (whole FS readable, no writes, network denied), workspace-write (writes only under the session dir + OS temp; network denied). Kernel-enforced (Landlock+seccomp); if unavailable, sandboxed calls FAIL CLOSED with a typed error")
+	fs.Int64Var(spillMaxInline, "spill-max-inline", 65536, "inline byte budget for tool results: content above it spills FULL to <session-dir>/<session-id>.spill/ and the event carries a bounded preview + opaque locator (retrievable via spill_read, hash-validated); 0 disables the spill (always inline). Default 65536 (matches the run_shell capture cap)")
 	fs.BoolVar(compilePrompt, "compile-prompt", false, "run the prompt compilation with the current config, write the artifact under <session-dir>/compiled-prompts/, and exit — no protocol session; default --optimizer llm makes ONE compile-time LLM call and requires the variable named by --api-key-env to be set (fail-closed exit 2 without it); --optimizer dedup is the offline, keyless alternative")
 	fs.BoolVar(showVersion, "version", false, "print engine and protocol versions and exit")
 
@@ -128,7 +130,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		return 0
 	}
 
-	cfg, err := validate(*adapter, *model, *baseURL, *apiKeyEnv, *sessionDir, *optimizer, *maxTokens, *approvalTimeoutMs, *cacheBreakpoints, *sandbox)
+	cfg, err := validate(*adapter, *model, *baseURL, *apiKeyEnv, *sessionDir, *optimizer, *maxTokens, *approvalTimeoutMs, *cacheBreakpoints, *sandbox, *spillMaxInline)
 	if err != nil {
 		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
 		return 2
@@ -181,8 +183,8 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		return 2
 	}
 
-	log.Printf("starting: adapter=%s model=%s base-url=%s session-dir=%s api-key-env=%s approval-timeout-ms=%d cache-breakpoints=%d sandbox=%s optimizer=%s",
-		cfg.Adapter, cfg.Model, cfg.BaseURL, cfg.SessionDir, cfg.APIKeyEnv, cfg.ApprovalTimeoutMs, cfg.CacheBreakpoints, cfg.SandboxMode, cfg.Optimizer)
+	log.Printf("starting: adapter=%s model=%s base-url=%s session-dir=%s api-key-env=%s approval-timeout-ms=%d cache-breakpoints=%d sandbox=%s optimizer=%s spill-max-inline=%d",
+		cfg.Adapter, cfg.Model, cfg.BaseURL, cfg.SessionDir, cfg.APIKeyEnv, cfg.ApprovalTimeoutMs, cfg.CacheBreakpoints, cfg.SandboxMode, cfg.Optimizer, cfg.SpillMaxInline)
 
 	srv, engine, tracker, served := buildServer(cfg, apiKey, rwc)
 	if served.Reason != "" {

@@ -110,10 +110,12 @@ func (p *Pipeline) executeBatch(ctx context.Context, lg *session.Log, calls []se
 
 	// Phase 3: model-ordered commits — result i is appended only after
 	// results 0..i-1 have appended, so a fast body behind a slow sibling
-	// waits its turn and the log stays timing-independent.
+	// waits its turn and the log stays timing-independent. logResult is
+	// the commit seam: an armed spill policy rewrites oversize content
+	// to a bounded preview in place (results[i] carries the preview).
 	for i := range calls {
 		<-done[i]
-		if err := logResult(lg, results[i]); err != nil {
+		if err := logResult(lg, &results[i]); err != nil {
 			return nil, fmt.Errorf("tools: log tool/result (batch): %w", err)
 		}
 	}

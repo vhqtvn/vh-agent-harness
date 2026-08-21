@@ -50,8 +50,9 @@ type Config struct {
 
 	// MaxCapturedBytes caps captured output per stream; <=0 ⇒
 	// DefaultMaxCapturedBytes (64 KiB). Oversize output is truncated
-	// with an in-band marker; spilling to a session-adjacent file is a
-	// recorded NON-GOAL / follow-up.
+	// with an in-band marker. This is the CAPTURE limit only — the
+	// serialized result is additionally spill-eligible at commit time
+	// via the session SpillPolicy (see internal/session/spill.go).
 	MaxCapturedBytes int64
 
 	// MaxTimeoutMs is the hard per-call ceiling; <=0 ⇒ 600000. Also
