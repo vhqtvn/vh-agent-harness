@@ -3,10 +3,12 @@
 // armed per session) + the REAL run_shell tool. One logged turn whose
 // tool result exceeds --spill-max-inline commits a spilled event
 // (bounded preview + notice + locator), the persisted log replays
-// byte-identically, and a second turn retrieves the FULL content
-// through the real pipeline via spill_read, hash-validated against the
-// locator. Also pins the flag contract (default 65536; 0 = disabled;
-// negative = fail-closed) and the four-tool daemon set.
+// byte-identically, and follow-up turns page the spilled content back
+// through the real pipeline via WINDOWED spill_read (page 1 default,
+// page 2 explicit offset — different bytes, the no-op kill test — and
+// an overlong length clamped to the cap), every retrieval result
+// staying inline. Also pins the flag contract (default 65536;
+// 0 = disabled; negative = fail-closed) and the four-tool daemon set.
 package main
 
 import (
@@ -101,8 +103,14 @@ func TestDaemonToolSetIncludesSpillRead(t *testing.T) {
 // TestSpillCruxEndToEnd is the load-bearing behavioral closure for this
 // slice: threshold-crossing run_shell result → spilled event with
 // preview + locator → byte-identical replay (regardless of spill-file
-// existence) → full-content retrieval through spill_read over the real
-// pipeline → hash-validated.
+// existence) → WINDOWED retrieval through spill_read over the real
+// pipeline: page 1 (default window) and page 2 (explicit offset from
+// page 1's notice) return DIFFERENT bytes — the no-op kill test (the
+// pre-windowing tool returned the full content, which the commit-time
+// policy re-spilled to a byte-identical preview, so no page of spilled
+// bytes ever reached the model) — a length above the cap is clamped, and
+// every retrieval result stays INLINE (never re-spilled) because it is
+// <= cap by construction.
 func TestSpillCruxEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	cfg := spillTestConfig(t, dir, 65536)
@@ -124,8 +132,18 @@ func TestSpillCruxEndToEnd(t *testing.T) {
 	const bigCmd = `head -c 40000 /dev/zero | tr '\0' A; head -c 40000 /dev/zero | tr '\0' B >&2`
 
 	var loc *session.SpillLocator
+	var page1 string // the first retrieval window, for page 2's offset
+	readArgs := func(extra map[string]any) json.RawMessage {
+		m := map[string]any{"locator": *loc}
+		for k, v := range extra {
+			m[k] = v
+		}
+		args, _ := json.Marshal(m)
+		return args
+	}
 	ad := &scriptedAdapter{next: func(calls int) *adapters.Response {
-		if calls == 0 {
+		switch calls {
+		case 0:
 			return &adapters.Response{
 				Model: "fake-model", FinishReason: "tool_calls",
 				ToolCalls: []session.ToolCall{{
@@ -133,14 +151,28 @@ func TestSpillCruxEndToEnd(t *testing.T) {
 					Args: json.RawMessage(fmt.Sprintf(`{"command":%q}`, bigCmd)),
 				}},
 			}
-		}
-		// Turn 2: retrieve the spilled bytes with the locator from turn 1.
-		args, _ := json.Marshal(map[string]any{"locator": *loc})
-		return &adapters.Response{
-			Model: "fake-model", FinishReason: "tool_calls",
-			ToolCalls: []session.ToolCall{{
-				ID: "call_read", Name: spillread.Name, Args: args,
-			}},
+		case 1:
+			// Page 1: the default window.
+			return &adapters.Response{
+				Model: "fake-model", FinishReason: "tool_calls",
+				ToolCalls: []session.ToolCall{{ID: "call_read1", Name: spillread.Name, Args: readArgs(nil)}},
+			}
+		case 2:
+			// Page 2: follow page 1's notice (next offset =
+			// offset+length) — what a model paging through the spilled
+			// bytes does.
+			off1, len1, _ := parseWindowNotice(t, page1)
+			return &adapters.Response{
+				Model: "fake-model", FinishReason: "tool_calls",
+				ToolCalls: []session.ToolCall{{ID: "call_read2", Name: spillread.Name, Args: readArgs(map[string]any{"offset": off1 + len1})}},
+			}
+		default:
+			// Page 3: an absurd explicit length (1 MiB) — must clamp to
+			// the cap and stay inline.
+			return &adapters.Response{
+				Model: "fake-model", FinishReason: "tool_calls",
+				ToolCalls: []session.ToolCall{{ID: "call_read3", Name: spillread.Name, Args: readArgs(map[string]any{"length": 1 << 20})}},
+			}
 		}
 	}}
 
@@ -156,7 +188,7 @@ func TestSpillCruxEndToEnd(t *testing.T) {
 	if len(preview) > 65536 {
 		t.Fatalf("committed preview = %d bytes, must stay <= 65536", len(preview))
 	}
-	if !strings.Contains(preview, "[spilled ") || !strings.Contains(preview, "read via spill/read") {
+	if !strings.Contains(preview, "[spilled ") || !strings.Contains(preview, "read via spill_read") {
 		t.Fatalf("preview missing the spill notice: %q...", preview[:120])
 	}
 
@@ -201,12 +233,8 @@ func TestSpillCruxEndToEnd(t *testing.T) {
 			outcome.Cause, outcome.Truncated, len(outcome.Stdout), len(outcome.Stderr))
 	}
 
-	// Turn 2: spill_read through the real pipeline retrieves the FULL
-	// content. The retrieval (80213 bytes) itself crosses the threshold,
-	// so its OWN result re-spills at commit — and because the store is
-	// content-addressed, the re-spill's locator MUST equal the original
-	// locator: byte-identical retrieval proven by dedup, plus the
-	// hash check on the store read above.
+	// Turn 2 — page 1 (default window): the FIRST bytes of the spilled
+	// content, inline (never re-spilled — the no-op fix).
 	report2, err := eng.TurnRunner().RunTurn(ctx, es.Log, ad, eng.TurnOptions(), "read the spilled bytes back")
 	if err != nil {
 		t.Fatalf("RunTurn 2: %v", err)
@@ -214,31 +242,64 @@ func TestSpillCruxEndToEnd(t *testing.T) {
 	if len(report2.Results) != 1 || report2.Results[0].IsError {
 		t.Fatalf("turn-2 results = %+v", report2.Results)
 	}
-	if !strings.Contains(report2.Results[0].Content, "[spilled 80213 bytes:") {
-		t.Fatalf("spill_read result should itself be a spilled preview of the full retrieval: %q...", report2.Results[0].Content[:120])
+	page1 = report2.Results[0].Content
+	if len(page1) > 65536 {
+		t.Fatalf("page 1 = %d bytes, must stay <= the 65536 inline cap", len(page1))
 	}
+	off1, len1, size1 := parseWindowNotice(t, page1)
+	if off1 != 0 || size1 != loc.Size {
+		t.Fatalf("page-1 notice = offset %d of %d, want 0 of %d", off1, size1, loc.Size)
+	}
+	if !strings.HasPrefix(page1, string(full[:len1])) {
+		t.Fatalf("page 1 does not start with the spilled content's first %d bytes", len1)
+	}
+	assertResultInline(t, es.Log, "call_read1")
+
+	// Turn 3 — page 2 (explicit offset from page 1's notice): DIFFERENT
+	// bytes. This is the red-green crux: under the pre-fix behavior
+	// every retrieval returned the same byte-identical re-spilled
+	// preview, so no page of spilled bytes ever reached the model.
+	report3, err := eng.TurnRunner().RunTurn(ctx, es.Log, ad, eng.TurnOptions(), "read the next window")
+	if err != nil {
+		t.Fatalf("RunTurn 3: %v", err)
+	}
+	if len(report3.Results) != 1 || report3.Results[0].IsError {
+		t.Fatalf("turn-3 results = %+v", report3.Results)
+	}
+	page2 := report3.Results[0].Content
+	if page2 == page1 {
+		t.Fatal("page 2 returned the SAME bytes as page 1 — retrieval is a no-op (the pre-fix re-spill bug)")
+	}
+	off2, _, _ := parseWindowNotice(t, page2)
+	if off2 != off1+len1 {
+		t.Fatalf("page-2 offset = %d, want %d (following page 1's notice)", off2, off1+len1)
+	}
+	if len(page2) > 65536 {
+		t.Fatalf("page 2 = %d bytes, must stay <= the 65536 inline cap", len(page2))
+	}
+	if !strings.HasPrefix(page2, string(full[off2:off2+32])) {
+		t.Fatalf("page 2 does not start with the spilled content's bytes at offset %d", off2)
+	}
+	assertResultInline(t, es.Log, "call_read2")
+
+	// Turn 4 — length > cap clamps: the result is the default first
+	// window again (offset 0, length clamped to the cap) and inline.
+	report4, err := eng.TurnRunner().RunTurn(ctx, es.Log, ad, eng.TurnOptions(), "overlong window must clamp")
+	if err != nil {
+		t.Fatalf("RunTurn 4: %v", err)
+	}
+	if len(report4.Results) != 1 || report4.Results[0].IsError {
+		t.Fatalf("turn-4 results = %+v", report4.Results)
+	}
+	if got := report4.Results[0].Content; got != page1 {
+		t.Fatalf("clamped read must equal the default first window (%d bytes), got %d bytes", len(page1), len(got))
+	}
+	assertResultInline(t, es.Log, "call_read3")
+
+	// Hash validation still holds end-to-end.
 	sum := sha256.Sum256(full)
 	if hex.EncodeToString(sum[:]) != loc.SHA256 {
 		t.Fatal("retrieved content hash does not match the locator")
-	}
-	var readLoc *session.SpillLocator
-	for _, ev := range es.Log.Events() {
-		if ev.Type != session.TypeToolResult {
-			continue
-		}
-		var p session.ToolResultPayload
-		if err := json.Unmarshal(ev.Payload, &p); err != nil {
-			t.Fatalf("payload: %v", err)
-		}
-		if p.Spilled && p.CallID == "call_read" {
-			readLoc = p.SpillLocator
-		}
-	}
-	if readLoc == nil {
-		t.Fatal("spill_read result was not itself spilled (payload missing)")
-	}
-	if *readLoc != *loc {
-		t.Fatalf("retrieval re-spill locator %v != original %v: retrieval was not byte-identical", *readLoc, *loc)
 	}
 
 	// Replay: the persisted log file folds byte-identically — and the
@@ -274,18 +335,56 @@ func TestSpillCruxEndToEnd(t *testing.T) {
 		t.Fatal("replayed surface is not byte-identical to the live surface")
 	}
 	// The spilled preview (with its locator) is model-visible from the
-	// log alone; the retrieval turn's own preview is visible too (the
-	// full bytes live in the shared, content-addressed sidecar).
-	foundSpilled, foundRead := false, false
+	// log alone; every retrieval WINDOW is visible inline too — real
+	// spilled bytes in context, not a re-spilled preview.
+	foundSpilled, foundWindow := false, false
 	for _, m := range replayMsgs {
 		if strings.Contains(m.Content, "[spilled 80213 bytes:") {
 			foundSpilled = true
 		}
-		if strings.Contains(m.Content, "[spilled ") && m.ToolCallID == "call_read" {
-			foundRead = true
+		if strings.Contains(m.Content, "[window offset=0 ") {
+			foundWindow = true
 		}
 	}
-	if !foundSpilled || !foundRead {
-		t.Fatalf("replayed surface missing spilled preview (%v) or retrieval preview (%v)", foundSpilled, foundRead)
+	if !foundSpilled || !foundWindow {
+		t.Fatalf("replayed surface missing spilled preview (%v) or inline window (%v)", foundSpilled, foundWindow)
 	}
+}
+
+// assertResultInline asserts the committed payload for callID was NOT
+// re-spilled: a windowed retrieval result is <= cap by construction,
+// so the commit-time policy keeps it inline (the pre-fix tool's
+// full-content returns were re-spilled to byte-identical previews).
+func assertResultInline(t *testing.T, lg *session.Log, callID string) {
+	t.Helper()
+	for _, ev := range lg.Events() {
+		if ev.Type != session.TypeToolResult {
+			continue
+		}
+		var p session.ToolResultPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			t.Fatalf("payload: %v", err)
+		}
+		if p.CallID == callID && (p.Spilled || p.SpillLocator != nil) {
+			t.Fatalf("retrieval %s was re-spilled at commit — the no-op bug: %+v", callID, p)
+		}
+	}
+}
+
+// parseWindowNotice extracts (offset, length, size) from a retrieval
+// result's trailing [window …] notice — the arithmetic a model follows
+// to page (next offset = offset+length).
+func parseWindowNotice(t *testing.T, out string) (offset, length, size int64) {
+	t.Helper()
+	i := strings.LastIndex(out, "\n[window ")
+	if i < 0 {
+		t.Fatalf("result lacks the window notice: tail %q", out[min(len(out), 160):])
+	}
+	rest := out[i+1:]
+	rest = strings.TrimSuffix(rest, "]")
+	var o, l, s int64
+	if n, _ := fmt.Sscanf(rest, "[window offset=%d length=%d of %d bytes", &o, &l, &s); n != 3 {
+		t.Fatalf("unparsable window notice: %q", rest)
+	}
+	return o, l, s
 }

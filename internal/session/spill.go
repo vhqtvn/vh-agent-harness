@@ -11,10 +11,19 @@
 //   - files are CONTENT-ADDRESSED (<kind>-<sha256[:16]>, kind default
 //     "sp"), so identical output de-duplicates and concurrent writes of
 //     the same content are idempotent;
-//   - creation is exclusive (O_CREATE|O_EXCL): an existing path — file
-//     OR symlink — is never written through (anti-symlink);
-//   - reads are FAIL-CLOSED: the file's size and sha256 must match the
-//     locator, else the read refuses.
+//   - files materialize by TEMP + ATOMIC RENAME: the full content is
+//     staged in a private temp file (0600, `tmp-<sha16>-<rand>`,
+//     exclusive-create), fsynced, then renamed onto the content-
+//     addressed name. The final name NEVER hosts a partial file (the
+//     concurrent same-content partial-read window — writer B observing
+//     writer A's half-written file — is closed by construction), a
+//     same-content rename is a harmless byte-identical overwrite, and
+//     rename REPLACES a pre-existing path without ever writing through
+//     it (anti-symlink);
+//   - reads are FAIL-CLOSED: the file's size and full-content sha256
+//     must match the locator, else the read refuses. Windowed reads
+//     validate the FULL file (streaming hash) and then serve only the
+//     requested byte range — the whole file is never buffered.
 //
 // Replay contract: spill files are durable SIDECAR state. The session
 // log already carries the preview + locator, so log replay (and
@@ -23,11 +32,11 @@
 package session
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -71,10 +80,13 @@ type SpillStore interface {
 
 // FileSpillStore is the filesystem SpillStore for one session, rooted
 // at <sessionDir>/<sessionID>.spill/. The directory is created lazily
-// (0700) at first write; files are created exclusive (0600). A
-// FileSpillStore is safe for concurrent use: writes are
-// content-addressed (same-content races converge on one file via the
-// exclusive-create + verify dedup path) and reads are stateless.
+// (0700) at first write; files materialize by temp+atomic-rename
+// (0600). A FileSpillStore is safe for concurrent use: each Write
+// stages a private temp file and atomically renames it onto the shared
+// content-addressed name, so same-content races converge on one
+// COMPLETE file (an overwrite with identical bytes is harmless — the
+// name is content-addressed) and a reader can never observe a partial
+// file under the final name. Reads are stateless and hash-validated.
 type FileSpillStore struct {
 	dir string
 }
@@ -89,7 +101,11 @@ func NewFileSpillStore(sessionDir, sessionID string) *FileSpillStore {
 // Dir returns the store's root directory (<...>/<id>.spill).
 func (s *FileSpillStore) Dir() string { return s.dir }
 
-// Write implements SpillStore.
+// Write implements SpillStore. The content is staged in a private temp
+// file, fsynced, then atomically renamed onto the content-addressed
+// name — after any rename the file at the final name is always
+// COMPLETE, so a concurrent same-content writer can never observe (or
+// spuriously reject) a partial file.
 func (s *FileSpillStore) Write(kind string, content []byte) (SpillLocator, error) {
 	sum := sha256.Sum256(content)
 	full := hex.EncodeToString(sum[:])
@@ -99,30 +115,35 @@ func (s *FileSpillStore) Write(kind string, content []byte) (SpillLocator, error
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return SpillLocator{}, fmt.Errorf("session: spill mkdir %s: %w", s.dir, err)
 	}
-	path := filepath.Join(s.dir, name)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// Stage the FULL content in a temp file inside the spill dir
+	// (exclusive-create + random suffix: never a symlink, never
+	// observable at the final content-addressed name), then rename it
+	// ATOMICALLY into place. os.Rename never writes THROUGH an existing
+	// path — it replaces the directory entry — so a pre-planted symlink
+	// at the final name is displaced, its target untouched.
+	tmp, err := os.CreateTemp(s.dir, "tmp-"+full[:16]+"-")
 	if err != nil {
-		if os.IsExist(err) {
-			// Exclusive-create refuses EVERY existing path — file or
-			// symlink (anti-symlink). For the content-addressed name the
-			// common case is a dedup hit; verify the stored bytes before
-			// trusting it, and refuse on any mismatch (a collision or a
-			// pre-planted path is never written through).
-			if existing, rerr := os.ReadFile(path); rerr == nil && bytes.Equal(existing, content) {
-				return loc, nil
-			}
-			return SpillLocator{}, fmt.Errorf("session: spill file %s already exists with different content (refusing to overwrite)", path)
-		}
-		return SpillLocator{}, fmt.Errorf("session: spill create %s: %w", path, err)
+		return SpillLocator{}, fmt.Errorf("session: spill create temp in %s: %w", s.dir, err)
 	}
-	if _, err := f.Write(content); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path) // never leave a partial file under the content's name
-		return SpillLocator{}, fmt.Errorf("session: spill write %s: %w", path, err)
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return SpillLocator{}, fmt.Errorf("session: spill write %s: %w", tmpName, err)
 	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(path)
-		return SpillLocator{}, fmt.Errorf("session: spill close %s: %w", path, err)
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return SpillLocator{}, fmt.Errorf("session: spill fsync %s: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return SpillLocator{}, fmt.Errorf("session: spill close %s: %w", tmpName, err)
+	}
+	final := filepath.Join(s.dir, name)
+	if err := os.Rename(tmpName, final); err != nil {
+		_ = os.Remove(tmpName)
+		return SpillLocator{}, fmt.Errorf("session: spill rename %s -> %s: %w", tmpName, final, err)
 	}
 	return loc, nil
 }
@@ -146,6 +167,56 @@ func ReadSpillUnder(root string, loc SpillLocator) ([]byte, error) {
 	if err := validateSpillName(loc.File); err != nil {
 		return nil, err
 	}
+	candidates, err := walkSpillCandidates(root, loc.File)
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range candidates {
+		if b, err := readSpillValidated(path, loc); err == nil {
+			return b, nil
+		}
+	}
+	return nil, fmt.Errorf("session: spill file %q not found under any %q store beneath %s", loc.File, "*"+spillDirSuffix, root)
+}
+
+// ReadWindow returns the [offset, offset+length) window of the content
+// named by loc, after validating the FULL file against the locator:
+// the file is streamed through sha256 (never buffered whole) and the
+// window is then served by a bounded section read. The window serves
+// min(length, size-offset) bytes; offset == size yields the empty
+// terminal window. Fail-closed: negative offset, offset beyond size,
+// non-positive length, or any size/hash mismatch refuses.
+func (s *FileSpillStore) ReadWindow(loc SpillLocator, offset int64, length int64) ([]byte, error) {
+	if err := validateSpillName(loc.File); err != nil {
+		return nil, err
+	}
+	return readSpillWindowValidated(filepath.Join(s.dir, loc.File), loc, offset, length)
+}
+
+// ReadSpillWindowUnder is ReadWindow over the daemon-wide walk: it
+// retrieves a window of loc's content from ANY per-session store
+// beneath root, full-file hash-validated, serving only the window
+// bytes (the whole file is never buffered).
+func ReadSpillWindowUnder(root string, loc SpillLocator, offset int64, length int64) ([]byte, error) {
+	if err := validateSpillName(loc.File); err != nil {
+		return nil, err
+	}
+	candidates, err := walkSpillCandidates(root, loc.File)
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range candidates {
+		if w, err := readSpillWindowValidated(path, loc, offset, length); err == nil {
+			return w, nil
+		}
+	}
+	return nil, fmt.Errorf("session: spill file %q not found under any %q store beneath %s", loc.File, "*"+spillDirSuffix, root)
+}
+
+// walkSpillCandidates collects the regular files named file inside any
+// `*.spill` directory beneath root (fail-closed: an unreadable subtree
+// aborts the walk).
+func walkSpillCandidates(root, file string) ([]string, error) {
 	var candidates []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -154,7 +225,7 @@ func ReadSpillUnder(root string, loc SpillLocator) ([]byte, error) {
 		if !d.Type().IsRegular() {
 			return nil // directories, symlinks, and specials never match
 		}
-		if d.Name() == loc.File && strings.HasSuffix(filepath.Base(filepath.Dir(path)), spillDirSuffix) {
+		if d.Name() == file && strings.HasSuffix(filepath.Base(filepath.Dir(path)), spillDirSuffix) {
 			candidates = append(candidates, path)
 		}
 		return nil
@@ -162,12 +233,7 @@ func ReadSpillUnder(root string, loc SpillLocator) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("session: spill retrieval walk over %s: %w", root, err)
 	}
-	for _, path := range candidates {
-		if b, err := readSpillValidated(path, loc); err == nil {
-			return b, nil
-		}
-	}
-	return nil, fmt.Errorf("session: spill file %q not found under any %q store beneath %s", loc.File, "*"+spillDirSuffix, root)
+	return candidates, nil
 }
 
 // readSpillValidated reads path and enforces the locator's size and
@@ -185,6 +251,61 @@ func readSpillValidated(path string, loc SpillLocator) ([]byte, error) {
 		return nil, fmt.Errorf("session: spill %s hash mismatch: content does not match the locator (fail-closed)", path)
 	}
 	return b, nil
+}
+
+// readSpillWindowValidated validates the FULL file at path against the
+// locator (stat size + streaming sha256 — the file is never buffered
+// whole), then serves ONLY the [offset, offset+length) window via a
+// bounded section read. A tamper ANYWHERE in the file refuses even a
+// healthy window; a validated file serves its bytes at any offset.
+func readSpillWindowValidated(path string, loc SpillLocator, offset int64, length int64) ([]byte, error) {
+	if offset < 0 {
+		return nil, fmt.Errorf("session: spill window offset %d is negative", offset)
+	}
+	if length <= 0 {
+		return nil, fmt.Errorf("session: spill window length %d must be positive (callers resolve defaults)", length)
+	}
+	if offset > loc.Size {
+		return nil, fmt.Errorf("session: spill window offset %d is beyond the content size %d", offset, loc.Size)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("session: spill read %s: %w", path, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("session: spill stat %s: %w", path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("session: spill %s is not a regular file (fail-closed)", path)
+	}
+	if fi.Size() != loc.Size {
+		return nil, fmt.Errorf("session: spill %s size mismatch: locator says %d, file holds %d", path, loc.Size, fi.Size())
+	}
+	// Validate the full content hash by STREAMING the file through
+	// sha256 (bounded memory; the bytes are never held whole).
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return nil, fmt.Errorf("session: spill read %s: %w", path, err)
+	}
+	if n != loc.Size {
+		return nil, fmt.Errorf("session: spill %s size mismatch: locator says %d, file holds %d", path, loc.Size, n)
+	}
+	if hex.EncodeToString(h.Sum(nil)) != loc.SHA256 {
+		return nil, fmt.Errorf("session: spill %s hash mismatch: content does not match the locator (fail-closed)", path)
+	}
+	// Serve the window: a bounded section read off the still-open file.
+	winLen := length
+	if rem := loc.Size - offset; rem < winLen {
+		winLen = rem
+	}
+	window := make([]byte, winLen)
+	if _, err := io.ReadFull(io.NewSectionReader(f, offset, winLen), window); err != nil {
+		return nil, fmt.Errorf("session: spill window read %s@%d: %w", path, offset, err)
+	}
+	return window, nil
 }
 
 // validateSpillName confines the locator's file component to a strict
@@ -267,7 +388,7 @@ func (p *SpillPolicy) Apply(kind, content string) (string, *SpillLocator, bool) 
 	if merr != nil {
 		return content, nil, false // unreachable for this struct; same fallback
 	}
-	notice := fmt.Sprintf("... [spilled %d bytes: %s — read via spill/read]", len(content), locJSON)
+	notice := fmt.Sprintf("... [spilled %d bytes: %s — read via spill_read]", len(content), locJSON)
 	budget := int(maxInline) - 1 - len(notice) // 1 = the newline before the notice
 	if budget <= 0 {
 		return content, nil, false // the notice alone exceeds the cap: keep inline

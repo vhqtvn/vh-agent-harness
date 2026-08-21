@@ -199,11 +199,21 @@ func TestFileSpillStoreNeverWritesThroughSymlink(t *testing.T) {
 	if err := os.Symlink(victim, filepath.Join(s.Dir(), name)); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	if _, err := s.Write("", content); err == nil {
-		t.Fatal("Write over a pre-existing symlink must fail (O_EXCL), never write through it")
+	loc, err := s.Write("", content)
+	if err != nil {
+		t.Fatalf("Write over a pre-planted symlink must succeed by REPLACING the symlink entry (temp+atomic-rename): %v", err)
 	}
+	// The victim behind the symlink was never written THROUGH.
 	if b, _ := os.ReadFile(victim); string(b) != "victim" {
 		t.Fatalf("symlink target was modified: %q", b)
+	}
+	// The final name is now a REGULAR file holding exactly our content.
+	fi, err := os.Lstat(filepath.Join(s.Dir(), name))
+	if err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("final path must be a regular file after rename, got mode %v err=%v", fi, err)
+	}
+	if back, err := s.Read(loc); err != nil || !bytes.Equal(back, content) {
+		t.Fatalf("readback = %d bytes err=%v, want the written content", len(back), err)
 	}
 }
 
@@ -254,7 +264,7 @@ func TestSpillPolicyApply(t *testing.T) {
 		if len(c) > cap {
 			t.Fatalf("spilled content = %d bytes, must stay <= cap %d", len(c), cap)
 		}
-		wantNotice := fmt.Sprintf("... [spilled %d bytes: %s — read via spill/read]", len(content), locJSON(t, *loc))
+		wantNotice := fmt.Sprintf("... [spilled %d bytes: %s — read via spill_read]", len(content), locJSON(t, *loc))
 		if !strings.HasSuffix(c, "\n"+wantNotice) {
 			t.Fatalf("content must end with the notice line, got tail %q", c[len(c)-min(len(c), len(wantNotice)+40):])
 		}
@@ -306,10 +316,98 @@ func TestSpillPolicyApply(t *testing.T) {
 	})
 }
 
+// TestFileSpillStoreWindowedRead — windowed retrieval (the storage half
+// of the spill_read no-op fix): the seam serves ONLY the
+// [offset, offset+length) window, but validates the FULL file against
+// the locator (streaming sha256 — the whole file is never buffered),
+// so a tamper ANYWHERE in the file refuses even a healthy window.
+func TestFileSpillStoreWindowedRead(t *testing.T) {
+	dir := t.TempDir()
+	s := NewFileSpillStore(dir, "sess-win")
+	content := []byte(strings.Repeat("W", 100000))
+	loc, err := s.Write("", content)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// First window.
+	w, err := s.ReadWindow(loc, 0, 4096)
+	if err != nil {
+		t.Fatalf("ReadWindow head: %v", err)
+	}
+	if !bytes.Equal(w, content[:4096]) {
+		t.Fatalf("head window = %d bytes, want content[:4096]", len(w))
+	}
+	// Mid window.
+	w, err = s.ReadWindow(loc, 65536, 100)
+	if err != nil {
+		t.Fatalf("ReadWindow mid: %v", err)
+	}
+	if !bytes.Equal(w, content[65536:65636]) {
+		t.Fatalf("mid window = %d bytes, want content[65536:65636]", len(w))
+	}
+	// A window running past EOF serves exactly the remainder.
+	w, err = s.ReadWindow(loc, 99990, 4096)
+	if err != nil {
+		t.Fatalf("ReadWindow tail: %v", err)
+	}
+	if !bytes.Equal(w, content[99990:]) {
+		t.Fatalf("tail window = %d bytes, want the %d-byte remainder", len(w), len(content)-99990)
+	}
+	// offset == size: the empty terminal window (a pager landing exactly
+	// at the end), not an error.
+	w, err = s.ReadWindow(loc, int64(len(content)), 4096)
+	if err != nil || len(w) != 0 {
+		t.Fatalf("terminal window = %d bytes err=%v, want empty no-error", len(w), err)
+	}
+
+	// Fail-closed args: offset beyond size, negative offset, and
+	// non-positive length all refuse.
+	if _, err := s.ReadWindow(loc, int64(len(content))+1, 10); err == nil {
+		t.Fatal("offset beyond size must fail closed")
+	}
+	if _, err := s.ReadWindow(loc, -1, 10); err == nil {
+		t.Fatal("negative offset must fail closed")
+	}
+	if _, err := s.ReadWindow(loc, 0, 0); err == nil {
+		t.Fatal("zero length must fail closed (callers resolve defaults)")
+	}
+	if _, err := s.ReadWindow(loc, 0, -5); err == nil {
+		t.Fatal("negative length must fail closed")
+	}
+
+	// The daemon-wide walk serves the same windows (before the tamper
+	// below invalidates the file).
+	w, err = ReadSpillWindowUnder(dir, loc, 65536, 100)
+	if err != nil || !bytes.Equal(w, content[65536:65636]) {
+		t.Fatalf("ReadSpillWindowUnder = %d bytes err=%v, want the mid window", len(w), err)
+	}
+	// ... and keeps the fail-closed posture over the walk.
+	if _, err := ReadSpillWindowUnder(dir, loc, -1, 10); err == nil {
+		t.Fatal("ReadSpillWindowUnder negative offset must fail closed")
+	}
+
+	// Full-file hash validation guards the window: tamper a byte FAR
+	// outside a healthy window — the windowed read must still refuse.
+	path := filepath.Join(s.Dir(), loc.File)
+	tampered := append([]byte(nil), content...)
+	tampered[99999] ^= 0xFF
+	if err := os.WriteFile(path, tampered, 0o600); err != nil {
+		t.Fatalf("tamper: %v", err)
+	}
+	if _, err := s.ReadWindow(loc, 0, 10); err == nil {
+		t.Fatal("windowed read over a tampered file must fail closed (full-file hash)")
+	}
+}
+
 func TestFileSpillStoreConcurrentUse(t *testing.T) {
 	dir := t.TempDir()
 	s := NewFileSpillStore(dir, "sess-conc")
-	const same = "shared oversize output"
+	// 256 KiB of shared content: large enough that a same-content writer
+	// genuinely overlaps another writer's create→complete window (the
+	// partial-read race the temp+atomic-rename Write closes). Distinct
+	// writers stay kilobyte-scale.
+	same := strings.Repeat("S", 256<<10)
 	const goroutines = 16
 	var wg sync.WaitGroup
 	locs := make([]SpillLocator, goroutines)

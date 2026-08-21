@@ -248,12 +248,18 @@ pre-spill behavior).
 - **Decision point.** When a committed `tool/result` payload's content
   exceeds `MaxInlineBytes`, the content is written to a
   content-addressed spill file under
-  `<session-dir>/<session-id>.spill/` (dir 0700, files 0600,
-  `O_CREATE|O_EXCL` anti-symlink, name `<kind>-<sha256[:16]>` —
-  identical output de-duplicates to one file). The logged content
-  becomes a **preview** — first `cap-1-len(notice)` bytes plus a
-  notice line `... [spilled <N> bytes: <locator-JSON> — read via
-  spill/read]` (the notice bytes are reserved INSIDE the inline cap),
+  `<session-dir>/<session-id>.spill/` (dir 0700, files 0600, name
+  `<kind>-<sha256[:16]>` — identical output de-duplicates to one
+  file). Files materialize by **temp + atomic rename**: the full
+  content is staged in a private temp file (`tmp-<sha16>-<rand>`,
+  0600, exclusive-create), fsynced, then renamed onto the
+  content-addressed name — the final name never hosts a partial file,
+  concurrent same-content writers converge by a harmless
+  byte-identical overwrite, and rename replaces (never writes
+  through) a pre-existing path. The logged content becomes a
+  **preview** — first `cap-1-len(notice)` bytes plus a notice line
+  `... [spilled <N> bytes: <locator-JSON> — read via
+  spill_read]` (the notice bytes are reserved INSIDE the inline cap),
   and the payload carries additive `spilled` + `spillLocator` fields.
   On spill-write failure the FULL content stays inline — silent but
   deterministic fallback (a spill failure must never fail the tool
@@ -262,14 +268,31 @@ pre-spill behavior).
   opaque JSON token: the model echoes it verbatim into `spill_read`;
   nothing about the on-disk layout is part of its contract. `Read`
   validates basename + size + sha256 and fails closed on mismatch.
-- **Retrieval.** `spill_read` is an ordinary tool in the daemon
-  catalog (guards, logging, and pipeline apply). Input: the locator
-  object. Output: the full content, capped at 1 MiB of CONTENT (a
-  run_shell-style truncation notice rides on top). Oversize retrieval
-  results are themselves spill-eligible — content addressing makes
-  the re-spill resolve to the SAME file, so the round trip is
-  idempotent. When the daemon config is absent the tool still
-  registers (for pipeline tests) and fails closed on unknown files.
+- **Retrieval (windowed paging).** `spill_read` is an ordinary tool
+  in the daemon catalog (guards, logging, and pipeline apply). Input:
+  the locator object plus optional `offset` (int64, default 0) and
+  `length` (int; 0 = the default window = the ACTIVE policy's
+  `MaxInlineBytes`, resolved server-side; explicit values clamp to
+  the same cap). Output: ONLY the `[offset, offset+length)` window of
+  the stored content — a bounded section read; the full file is
+  streamed through sha256 for validation but never buffered whole.
+  Unless the window covers the whole content, a trailing `[window
+  offset=O length=L of SIZE bytes — adjust offset/length to page]`
+  notice rides in-band, its bytes reserved INSIDE the cap (the same
+  discipline as the spill preview) — so **a retrieval result always
+  fits inline by construction**: it can never be re-spilled by the
+  commit-time policy, and retrieval pages REAL spilled bytes into the
+  model's context. (Default-compat note: with no offset/length the
+  FIRST window comes back — this IS a behavior change from the
+  pre-windowing full-content return, which was a model-visible no-op:
+  an oversize retrieval was re-spilled at commit, content addressing
+  deduped it to the SAME locator, and the model saw a byte-identical
+  preview. Paging arithmetic: the next window is
+  `offset = offset+length`; `offset` past `SIZE` fails closed with
+  the size in the error.) Hash validation stays FULL-FILE: a tampered
+  or truncated store file refuses even a healthy window. When the
+  daemon config is absent the tool still registers (for pipeline
+  tests) and fails closed on unknown files.
 - **Replay independence.** Spill files are durable SIDECAR state, not
   log inputs: `Replay` and `DeriveMessages` are a pure fold over the
   log and never touch the filesystem. Log replay is byte-identical

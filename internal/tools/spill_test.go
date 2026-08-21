@@ -82,7 +82,7 @@ func TestSpillAtCommitExecuteLogged(t *testing.T) {
 	if len(res.Content) > 4096 {
 		t.Fatalf("returned result content = %d bytes, must be the bounded preview", len(res.Content))
 	}
-	if !strings.Contains(res.Content, "[spilled 5000 bytes:") || !strings.Contains(res.Content, "read via spill/read") {
+	if !strings.Contains(res.Content, "[spilled 5000 bytes:") || !strings.Contains(res.Content, "read via spill_read") {
 		t.Fatalf("preview missing the notice: %q", res.Content[:minInt(200, len(res.Content))])
 	}
 

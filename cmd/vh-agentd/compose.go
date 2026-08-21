@@ -210,10 +210,15 @@ func daemonTools(now func() time.Time, cfg *Config) []tools.ToolDefinition {
 	}
 	// spill_read retrieves from the session dir root (it has no session
 	// context; content addressing + hash validation make the walk
-	// exact). A nil cfg (spec-only callers) gets "" = the process cwd.
+	// exact). The ACTIVE policy's inline cap threads through as the
+	// window bound, so every retrieval result fits inline by
+	// construction. A nil cfg (spec-only callers) gets "" = the process
+	// cwd and cap 0 = the default window.
 	spillRoot := ""
+	spillInline := int64(0)
 	if cfg != nil {
 		spillRoot = cfg.SessionDir
+		spillInline = cfg.SpillMaxInline
 	}
 	return []tools.ToolDefinition{
 		{
@@ -258,7 +263,7 @@ func daemonTools(now func() time.Time, cfg *Config) []tools.ToolDefinition {
 				return now().UTC().Format(time.RFC3339Nano), nil
 			},
 		},
-		spillread.Definition(spillRoot, 0),
+		spillread.Definition(spillRoot, spillInline),
 		shell.Definition(shellCfg),
 	}
 }

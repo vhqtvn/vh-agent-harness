@@ -1389,11 +1389,13 @@ silently unconfined run. There is no `danger-full-access` mode (it is
 redundant with `off`).
 
 `--spill-max-inline N` (default 65536, `0` disables) arms oversize
-tool-result spill: results above the cap are written to a
-content-addressed file under `<session-dir>/<session-id>.spill/` and
-the log keeps a preview + opaque locator the model reads back via the
-`spill_read` tool (§4d of the protocol doc; replay never depends on
-spill files).
+tool-result spill: results above the cap are written (temp file +
+atomic rename, so the content-addressed name never holds a partial
+file) under `<session-dir>/<session-id>.spill/` and the log keeps a
+preview + opaque locator; the model pages the bytes back via the
+`spill_read` tool with `offset`/`length` windows that always fit
+inside the inline cap by construction (§4d of the protocol doc; replay
+never depends on spill files).
 
 `--compile-prompt` runs the compile-time prompt compilation (writes under
 `<session-dir>/compiled-prompts/`, exits; no protocol session).
