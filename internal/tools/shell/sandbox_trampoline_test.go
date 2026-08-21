@@ -290,3 +290,102 @@ func TestSandboxDeniesNetwork(t *testing.T) {
 		t.Fatalf("sandbox = %q, want read-only", out.Sandbox)
 	}
 }
+
+// --- ON-mode env non-leak (sandbox F2 proof) ---
+//
+// The OFF-mode counterpart (TestSandboxOffIdenticalToPreSlice) probes
+// `env` directly; the ON-mode proof needs the FLAG-based plumbing: the
+// profile vars ride APPENDED to cmd.Env (after buildEnv's scrub — the
+// scrub cannot strip them), the trampoline child consumes them and must
+// strip them again via envForTarget before exec'ing the target. The
+// confined target is THIS TEST BINARY re-executed (the established
+// helper pattern): it enumerates its own os.Environ() between markers,
+// so a successful probe run is self-evidencing (markers + entries
+// present) instead of passing vacuously as an empty `env | grep -c`
+// would.
+
+// envProbeDump arms TestSandboxEnvProbeHelper when the test binary is
+// re-executed as a confined environment probe.
+var envProbeDump = flag.Bool("env-probe", false, "helper mode: dump the process environment between markers and exit")
+
+// TestSandboxEnvProbeHelper is not a standalone test: it is the body of
+// the confined env probe. When -env-probe is set (only the re-exec'd
+// probe sets it), it prints one ENV-PROBE:ENTRY:<KEY=VALUE> line per
+// environment entry and a final ENV-PROBE:DONE:<n> completion marker.
+// It never fails on its own — the PARENT asserts on the dump.
+func TestSandboxEnvProbeHelper(t *testing.T) {
+	if !*envProbeDump {
+		t.Skip("probe helper: invoked only via -env-probe (see TestSandboxOnStripsProfileEnvFromTarget)")
+	}
+	env := os.Environ()
+	for _, kv := range env {
+		fmt.Printf("ENV-PROBE:ENTRY:%s\n", kv)
+	}
+	fmt.Printf("ENV-PROBE:DONE:%d\n", len(env))
+}
+
+// envProbeLeaks counts VH_EXEC_SANDBOX_* entries in a probe dump.
+func envProbeLeaks(dump string) int {
+	n := 0
+	for _, line := range strings.Split(dump, "\n") {
+		if strings.HasPrefix(line, "ENV-PROBE:ENTRY:VH_EXEC_SANDBOX_") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestSandboxOnStripsProfileEnvFromTarget (real backend, sandbox F2):
+// under a confining mode (read-only) the trampoline consumes the
+// VH_EXEC_SANDBOX_* profile vars and strips them before exec'ing the
+// target — the confined child's environment must NOT leak them. The
+// probe must still enumerate a REAL environment (a PATH= entry must be
+// present, and the DONE marker proves the enumeration completed), so
+// the zero-leak assertion cannot pass vacuously. An unconfined CONTROL
+// run first proves the probe mechanism works at all.
+func TestSandboxOnStripsProfileEnvFromTarget(t *testing.T) {
+	skipWithoutBackend(t)
+
+	probe := fmt.Sprintf("'%s' -test.run=^TestSandboxEnvProbeHelper$ -env-probe", os.Args[0])
+
+	// Control: identical probe, no confinement → the dump is real and
+	// already leak-free (no sandbox was configured, so no profile vars
+	// exist to strip — this proves the probe mechanism, mirroring the
+	// OFF test's expectation).
+	ctl := runQuick(t, Config{}, probe, 30000)
+	if ctl.Cause != CauseExit || ctl.ExitCode != 0 {
+		t.Fatalf("unconfined control probe failed to run: %+v (stderr=%q)", ctl, ctl.Stderr)
+	}
+	if !strings.Contains(ctl.Stdout, "ENV-PROBE:DONE:") {
+		t.Fatalf("unconfined control probe produced no completed dump — the probe mechanism is broken (stdout=%q stderr=%q)", ctl.Stdout, ctl.Stderr)
+	}
+	if !strings.Contains(ctl.Stdout, "ENV-PROBE:ENTRY:PATH=") {
+		t.Fatalf("unconfined control probe dump lacks a PATH= entry — enumeration is not real: %q", ctl.Stdout)
+	}
+	if n := envProbeLeaks(ctl.Stdout); n != 0 {
+		t.Fatalf("unconfined child env leaked %d VH_EXEC_SANDBOX_* entries: %q", n, ctl.Stdout)
+	}
+
+	// Confined: same probe under read-only → the trampoline must have
+	// consumed/stripped the profile vars before exec'ing the target.
+	fn, err := NewSandboxFunc(SandboxOptions{Mode: SandboxReadOnly})
+	if err != nil {
+		t.Fatalf("constructor: %v", err)
+	}
+	out := runQuick(t, Config{Sandbox: fn, SandboxName: "read-only"}, probe, 30000)
+	if out.Cause != CauseExit || out.ExitCode != 0 {
+		t.Fatalf("confined probe failed to run as a normal exit: %+v (stderr=%q)", out, out.Stderr)
+	}
+	if !strings.Contains(out.Stdout, "ENV-PROBE:DONE:") {
+		t.Fatalf("confined probe produced no completed dump: stdout=%q stderr=%q", out.Stdout, out.Stderr)
+	}
+	if !strings.Contains(out.Stdout, "ENV-PROBE:ENTRY:PATH=") {
+		t.Fatalf("confined probe dump lacks a PATH= entry — the child env was not preserved through the trampoline: %q", out.Stdout)
+	}
+	if n := envProbeLeaks(out.Stdout); n != 0 {
+		t.Fatalf("confined child env leaked %d VH_EXEC_SANDBOX_* profile entries past the trampoline: %q", n, out.Stdout)
+	}
+	if out.Sandbox != "read-only" {
+		t.Fatalf("sandbox = %q, want read-only", out.Sandbox)
+	}
+}

@@ -82,6 +82,15 @@ func OpenChildFile(path string, sessionID string, ch ChildHeader) (*Log, error) 
 	lg, err := NewChildLog(f, sessionID, ch, time.Now().UTC())
 	if err != nil {
 		_ = f.Close()
+		// A failed header write produced no durable log: remove the
+		// orphaned 0-byte file instead of leaving it on disk (it would
+		// never be referenced by a parent; reopening it fails
+		// fail-closed — this is hygiene, not a correctness change).
+		// Best-effort: if the removal itself fails, the ORIGINAL error
+		// is returned with a note — never masked.
+		if rmErr := os.Remove(path); rmErr != nil {
+			return nil, fmt.Errorf("%w (session: best-effort removal of orphaned %s after failed header write: %v)", err, path, rmErr)
+		}
 		return nil, err
 	}
 	lg.closer = f
