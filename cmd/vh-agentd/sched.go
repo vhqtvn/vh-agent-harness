@@ -2,11 +2,11 @@
 // Scheduler constructed with REAL seams (the ACTIVE session's
 // jobs.Manager as the dispatch/idle target through a tracking engine
 // decorator), its state file under the session dir, started before
-// Serve, and drained (Stop) at shutdown. B1 adds NO protocol surface
-// for it: nothing registers schedules over the wire yet — the scheduler
-// runs so persisted schedule state is adopted (restart at-least-once)
-// and the lifecycle is exercised, and the Add seam is a future wire
-// method.
+// Serve, and drained (Stop) at shutdown. B3 hands the scheduler to the
+// engine seam (run() sets FileEngine.Schedules after buildScheduler,
+// before Serve — every session/create stamps it), so the schedule/*
+// wire methods reach it; the scheduler stays daemon-owned and the
+// tracker keeps routing dispatches to the ACTIVE session.
 package main
 
 import (

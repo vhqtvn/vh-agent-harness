@@ -56,6 +56,13 @@ type EngineSession struct {
 	// engines built without a subagent executor (spawn/send then fail
 	// closed -32000; subagent/list still works — it is a pure log fold).
 	Subagents SubagentSpawner
+	// Schedules is the per-session scheduler seam (schedule/add,
+	// schedule/remove, schedule/list); nil on engines built without
+	// scheduler wiring (add/remove then fail closed -32000; list is an
+	// honest empty — the jobs/status mirror). The ENGINE WIRING owns
+	// the scheduler (construction, Start, drained Stop) — the protocol
+	// package only registers/reads through this seam.
+	Schedules ScheduleManager
 	// Path is the engine-resolved durable location of the session log.
 	Path string
 }
@@ -136,6 +143,9 @@ var handlers = map[string]handlerFunc{
 	"subagent/spawn":    handleSubagentSpawn,
 	"subagent/send":     handleSubagentSend,
 	"subagent/list":     handleSubagentList,
+	"schedule/add":      handleScheduleAdd,
+	"schedule/list":     handleScheduleList,
+	"schedule/remove":   handleScheduleRemove,
 }
 
 // Serve runs the read-dispatch loop until the transport ends or ctx is

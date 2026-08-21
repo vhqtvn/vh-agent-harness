@@ -2,6 +2,8 @@ package jobs
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -291,6 +293,197 @@ func TestSchedulerOneShotRemovedAfterDispatch(t *testing.T) {
 	}
 	if n := s.Tick(); n != 0 {
 		t.Fatalf("re-tick dispatched %d, want 0", n)
+	}
+}
+
+// --- removal (the wire's schedule/remove seam) ----------------------------------
+
+// TestSchedulerRemovePersistsAndUnknownTyped: Remove unregisters a
+// schedule from BOTH the in-memory snapshot and the durable state file
+// (atomically), removing an UNKNOWN name is the typed
+// ErrScheduleNotFound, and a removed name may be re-registered
+// (remove+re-add is the v1 pause path).
+func TestSchedulerRemovePersistsAndUnknownTyped(t *testing.T) {
+	env := newSchedEnv(t, &quickExec{}, schedBase)
+	s := env.scheduler(t)
+
+	t0 := schedBase
+	if _, err := s.Add(ScheduleSpec{Name: "tick", Every: time.Minute, At: &t0}); err != nil {
+		t.Fatalf("Add tick: %v", err)
+	}
+	past := t0.Add(-time.Second)
+	if _, err := s.Add(ScheduleSpec{Name: "once", At: &past}); err != nil {
+		t.Fatalf("Add once: %v", err)
+	}
+
+	if err := s.Remove("tick"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if snap := s.Snapshot(); len(snap) != 1 || snap[0].Spec.Name != "once" {
+		t.Fatalf("snapshot after remove = %+v, want only once", snap)
+	}
+	st, err := loadSchedulerState(env.statePath)
+	if err != nil {
+		t.Fatalf("loadSchedulerState: %v", err)
+	}
+	if len(st) != 1 || st[0].Spec.Name != "once" {
+		t.Fatalf("state file after remove = %+v, want only once (removal persisted)", st)
+	}
+
+	// Unknown name: the typed error (wire: a clean -32602 with text).
+	err = s.Remove("ghost")
+	if !errors.Is(err, ErrScheduleNotFound) {
+		t.Fatalf("Remove unknown error = %v, want ErrScheduleNotFound", err)
+	}
+
+	// A removed name is re-registerable (the v1 pause path).
+	if _, err := s.Add(ScheduleSpec{Name: "tick", Every: time.Minute, At: &t0}); err != nil {
+		t.Fatalf("re-Add after remove: %v", err)
+	}
+	if len(s.Snapshot()) != 2 {
+		t.Fatalf("snapshot after re-add = %+v, want 2 entries", s.Snapshot())
+	}
+}
+
+// --- removal durability (F1: persist-first-then-swap) ----------------------------
+
+// TestSchedulerRemovePersistFailureIsAtomic (reviewer F1, blocking): a
+// Remove whose persist FAILS must leave BOTH surfaces unchanged — the
+// LIVE snapshot still lists the schedule AND a restarted scheduler over
+// the same state file still adopts it (durable/live agreement: the
+// remove lands in both or neither). The defect it guards: Remove used
+// to mutate the in-memory entries before persisting, so a failed
+// remove made the live snapshot omit a schedule the state file still
+// carried — the schedule returned after restart while schedule/list
+// denied it existed.
+func TestSchedulerRemovePersistFailureIsAtomic(t *testing.T) {
+	env := newSchedEnv(t, &quickExec{}, schedBase)
+	s := env.scheduler(t)
+
+	t0 := schedBase
+	if _, err := s.Add(ScheduleSpec{Name: "tick", Every: time.Minute, At: &t0}); err != nil {
+		t.Fatalf("Add tick: %v", err)
+	}
+	past := t0.Add(-time.Second)
+	if _, err := s.Add(ScheduleSpec{Name: "once", At: &past}); err != nil {
+		t.Fatalf("Add once: %v", err)
+	}
+
+	// Inject the persist failure through the test-only seam (production
+	// default is the real atomic writer). The error mimics the real
+	// writer's shape: an underlying infrastructure failure.
+	injected := fmt.Errorf("scheduler: create temp state %s: %w", env.statePath+".tmp", os.ErrPermission)
+	s.persistFn = func(path string, entries []schedEntry) error { return injected }
+
+	err := s.Remove("tick")
+	if err == nil {
+		t.Fatal("Remove with a failing persist returned nil")
+	}
+
+	// (a) LIVE agreement: the snapshot still lists BOTH schedules — the
+	// failed remove changed nothing in memory.
+	snap := s.Snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("snapshot after failed remove = %+v, want BOTH schedules (in-memory state must be unchanged by a failed persist)", snap)
+	}
+
+	// (b) DURABLE agreement: a restarted scheduler over the same state
+	// file still adopts both — the remove did not half-land on disk.
+	s2 := env.scheduler(t)
+	if got := len(s2.Snapshot()); got != 2 {
+		t.Fatalf("restarted scheduler adopted %d schedules, want 2 (the state file must be unchanged by a failed persist)", got)
+	}
+
+	// The failure is the TYPED engine-fault class (the wire maps it to
+	// -32000, not -32602 — the caller's params were valid).
+	if !errors.Is(err, ErrSchedulePersist) {
+		t.Fatalf("Remove error = %v, want it to wrap ErrSchedulePersist (the typed engine-fault class)", err)
+	}
+
+	// Recovery: with the real writer restored, the SAME remove succeeds,
+	// persists, and the scheduler was not poisoned by the failure.
+	s.persistFn = writeSchedulerState
+	if err := s.Remove("tick"); err != nil {
+		t.Fatalf("Remove after persist recovery: %v", err)
+	}
+	if snap := s.Snapshot(); len(snap) != 1 || snap[0].Spec.Name != "once" {
+		t.Fatalf("snapshot after successful remove = %+v, want only once", snap)
+	}
+	st, err := loadSchedulerState(env.statePath)
+	if err != nil {
+		t.Fatalf("loadSchedulerState: %v", err)
+	}
+	if len(st) != 1 || st[0].Spec.Name != "once" {
+		t.Fatalf("state file after successful remove = %+v, want only once", st)
+	}
+}
+
+// TestSchedulerAddPersistFailureIsAtomic (mirror of the reviewer-F1
+// Remove defect, same class): an Add whose persist FAILS must leave
+// BOTH surfaces unchanged — the LIVE snapshot does NOT list the new
+// schedule AND a restarted scheduler over the same state file does NOT
+// adopt it (durable/live agreement: the schedule lands in both or
+// neither). The defect it guards: Add used to mutate the in-memory
+// entries before persisting, so a failed Add left a phantom schedule in
+// the snapshot that a restart silently dropped — schedule/list advertised
+// a schedule the durable state never carried.
+func TestSchedulerAddPersistFailureIsAtomic(t *testing.T) {
+	env := newSchedEnv(t, &quickExec{}, schedBase)
+	s := env.scheduler(t)
+
+	t0 := schedBase
+	if _, err := s.Add(ScheduleSpec{Name: "tick", Every: time.Minute, At: &t0}); err != nil {
+		t.Fatalf("Add tick: %v", err)
+	}
+
+	// Inject the persist failure through the test-only seam (production
+	// default is the real atomic writer). The error mimics the real
+	// writer's shape: an underlying infrastructure failure.
+	injected := fmt.Errorf("scheduler: create temp state %s: %w", env.statePath+".tmp", os.ErrPermission)
+	s.persistFn = func(path string, entries []schedEntry) error { return injected }
+
+	_, err := s.Add(ScheduleSpec{Name: "once", At: &t0})
+	if err == nil {
+		t.Fatal("Add with a failing persist returned nil")
+	}
+
+	// (a) LIVE agreement: the snapshot does NOT list the new schedule —
+	// the failed Add changed nothing in memory (no phantom).
+	snap := s.Snapshot()
+	if len(snap) != 1 || snap[0].Spec.Name != "tick" {
+		t.Fatalf("snapshot after failed add = %+v, want ONLY tick (in-memory state must be unchanged by a failed persist)", snap)
+	}
+
+	// (b) DURABLE agreement: a restarted scheduler over the same state
+	// file does NOT adopt the new schedule — the add did not half-land
+	// on disk, so live and restarted views agree.
+	s2 := env.scheduler(t)
+	if got := len(s2.Snapshot()); got != 1 {
+		t.Fatalf("restarted scheduler adopted %d schedules, want 1 (the state file must be unchanged by a failed persist)", got)
+	}
+
+	// The failure is the TYPED engine-fault class (the wire maps it to
+	// -32000, not -32602 — the caller's params were valid).
+	if !errors.Is(err, ErrSchedulePersist) {
+		t.Fatalf("Add error = %v, want it to wrap ErrSchedulePersist (the typed engine-fault class)", err)
+	}
+
+	// Recovery: with the real writer restored, the SAME add succeeds,
+	// persists, and the scheduler was not poisoned by the failure (the
+	// failed attempt left no duplicate-name residue).
+	s.persistFn = writeSchedulerState
+	if _, err := s.Add(ScheduleSpec{Name: "once", At: &t0}); err != nil {
+		t.Fatalf("Add after persist recovery: %v", err)
+	}
+	if snap := s.Snapshot(); len(snap) != 2 {
+		t.Fatalf("snapshot after successful add = %+v, want 2 entries", snap)
+	}
+	st, err := loadSchedulerState(env.statePath)
+	if err != nil {
+		t.Fatalf("loadSchedulerState: %v", err)
+	}
+	if len(st) != 2 {
+		t.Fatalf("state file after successful add = %+v, want 2 entries", st)
 	}
 }
 

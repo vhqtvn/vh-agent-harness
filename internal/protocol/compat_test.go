@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/jobs"
 	"github.com/vhqtvn/vh-agent-harness/internal/session"
@@ -182,6 +183,61 @@ func fixtureCases() []fixtureCase {
 				ID      int64              `json:"id"`
 				Result  subagentListResult `json:"result"`
 			}{JSONRPCVersion, 11, subagentListResult{Children: children}})
+		}},
+		{"request-schedule_add", func() ([]byte, error) {
+			return MarshalRequest(12, "schedule/add", json.RawMessage(`{"name":"nightly-digest","kind":"digest","at":"2026-08-21T00:00:00Z","every":3600000000000,"payload":{"job":"digest"}}`))
+		}},
+		{"response-schedule_add", func() ([]byte, error) {
+			at := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+			return json.Marshal(struct {
+				JSONRPC string      `json:"jsonrpc"`
+				ID      int64       `json:"id"`
+				Result  scheduleDTO `json:"result"`
+			}{JSONRPCVersion, 12, scheduleDTO{
+				Name:    "nightly-digest",
+				Kind:    "digest",
+				At:      &at,
+				Every:   int64(time.Hour),
+				Payload: json.RawMessage(`{"job":"digest"}`),
+				NextRun: at,
+			}})
+		}},
+		{"request-schedule_list", func() ([]byte, error) {
+			return MarshalRequest(13, "schedule/list", nil)
+		}},
+		{"response-schedule_list", func() ([]byte, error) {
+			at := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+			next := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+			return json.Marshal(struct {
+				JSONRPC string `json:"jsonrpc"`
+				ID      int64  `json:"id"`
+				Result  struct {
+					Schedules []scheduleDTO `json:"schedules"`
+				} `json:"result"`
+			}{JSONRPCVersion, 13, struct {
+				Schedules []scheduleDTO `json:"schedules"`
+			}{[]scheduleDTO{{
+				Name:    "nightly-digest",
+				Kind:    "digest",
+				At:      &at,
+				Every:   int64(time.Hour),
+				Payload: json.RawMessage(`{"job":"digest"}`),
+				NextRun: next,
+			}}}})
+		}},
+		{"request-schedule_remove", func() ([]byte, error) {
+			return MarshalRequest(14, "schedule/remove", json.RawMessage(`{"name":"nightly-digest"}`))
+		}},
+		{"response-schedule_remove", func() ([]byte, error) {
+			return json.Marshal(struct {
+				JSONRPC string `json:"jsonrpc"`
+				ID      int64  `json:"id"`
+				Result  struct {
+					Removed bool `json:"removed"`
+				} `json:"result"`
+			}{JSONRPCVersion, 14, struct {
+				Removed bool `json:"removed"`
+			}{true}})
 		}},
 		{"notification-session_event", func() ([]byte, error) {
 			payload, _ := json.Marshal(session.JobPayload{

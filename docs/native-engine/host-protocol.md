@@ -68,12 +68,19 @@ requests ⇒ `-32001`. `initialize` is idempotent.
 | `subagent/spawn` | `{role?, prompt, mode, seedFromParent?}` | `{childId}` | enqueue receipt, returns **before** the child's first turn (§7b); `mode` = `oneshot\|continuable`; depth auto-derived (never client-supplied) |
 | `subagent/send` | `{childId, message}` | `{queued:true}` | one follow-up inbox message + one queued child turn; continuable, not-yet-settled children only |
 | `subagent/list` | `{}` | `{children[]}` | fold-derived snapshot (running/waiting/settled + `contentSeq`); `{children:[]}` without a session |
+| `schedule/add` | `{name, kind?, after?\|at?, every?, payload?}` | `{name, kind?, at, every?, payload?, nextRun}` | registers one schedule (§4c); UTC-canonicalized; registration persists immediately |
+| `schedule/list` | `{}` | `{schedules[]}` | dispatch-priority order with UTC `nextRun` cursors; `{schedules:[]}` without a session/seam |
+| `schedule/remove` | `{name}` | `{removed:true}` | unregisters + persists atomically; unknown name ⇒ `-32602` (§4c) |
 
 `session/prompt`, `session/dispatch`, `session/surface`, `subagent/spawn`,
-`subagent/send` require an active session (`-32003`). `subagent/spawn`/
+`subagent/send`, `schedule/add`, `schedule/remove` require an active
+session (`-32003`). `subagent/spawn`/
 `subagent/send` on an engine built without a subagent executor fail closed
 `-32000`; manager refusals (depth fence, unknown/settled child, one-shot
 send) are `-32602` carrying the manager's descriptive text.
+`schedule/add`/`schedule/remove` on an engine built without scheduler
+wiring fail closed `-32000` (spec-validation and refusal texts are
+`-32602` carrying the scheduler's descriptive text).
 
 ## 4a. Confinement contract (server-side, wire shape unchanged)
 
@@ -155,6 +162,78 @@ partial state — no file created or truncated, no session superseded.
   through the existing `session/event` fan-out (§5) — no new
   notification kind.
 
+## 4c. Schedules (B3)
+
+The `schedule/*` family is the wire surface of the session scheduler
+(internal/jobs' Scheduler): registration, snapshot, removal. The
+scheduler itself is **engine wiring** — constructed, started, and
+drained by the composition root (vh-agentd: state file
+`<session-dir>/scheduler-state.json`, tracker-routed to the active
+session's jobs.Manager, started before Serve, drained Stop at
+shutdown) — never owned by the protocol package. The per-session seam
+(`EngineSession.Schedules`) is what the handlers drive.
+
+- **add** `{name, kind?, after?|at?, every?, payload?}` validates
+  fail-closed (the jobs-side table-tested rules: lowercase-slug `name`
+  and `kind`, exactly one start — `after` (relative delay, integer
+  nanoseconds) XOR `at` (RFC3339 instant; a non-UTC zone is
+  canonicalized to UTC, a naive local time is rejected as
+  machine-dependent) — positive `every` for recurring, valid-JSON
+  `payload`) and registers the schedule. The result is the CANONICAL
+  record — `after` resolved into `at`, `at` in UTC — plus `nextRun`,
+  the first due instant (UTC). An omitted `kind` stays omitted in the
+  record: the dispatched job derives it as `sched-<name>` at dispatch
+  time. Durations travel as integer nanoseconds (the persisted state
+  form). A duplicate name is `-32602` (the name is the schedule's
+  identity). Registration persists immediately (atomic
+  temp+fsync+rename) — a schedule survives a crash right after add.
+  A persist/infrastructure failure (state file unwritable) is `-32000`
+  carrying the underlying text: the params were valid, the engine's
+  state layer failed (only validation refusals and unknown names are
+  `-32602`).
+- **list** `{}` returns `{schedules:[…]}` in dispatch-priority order
+  (`nextRun`, then name), each entry the canonical record + `nextRun`
+  (UTC). Without an active session — or on an engine built without the
+  schedule seam — it is an honest empty list (the `jobs/status`
+  mirror: absent wiring means absent schedules).
+- **remove** `{name}` unregisters and persists atomically
+  (`{removed:true}`) — persist-first: a failed persist changes neither
+  the live snapshot nor the state file (the schedule lands in both or
+  neither), returning `-32000`; an unknown name is `-32602` carrying
+  the typed `scheduler: schedule not found` text. Remove+re-add is the
+  v1 pause path (a `schedule/pause` method is a stated non-goal).
+
+**Dispatch semantics (engine-side, never wire params):** the idle
+gate, one-dispatch-per-pass, and catch-up collapse are the scheduler's
+documented contract (internal/jobs). Dispatch waits for executor idle
+(queued|running jobs of the owner); at most ONE dispatch fires per
+pass; fixed-rate catch-up collapses to the LATEST due occurrence (one
+dispatch per due gap — no storm replay after downtime). A due schedule
+dispatches as an ordinary `job/enqueued` (`<kind>-N`, kind defaulting
+to `sched-<name>`) through the active session's jobs.Manager, so
+settlement and reporting ride the EXISTING job/* event stream,
+`jobs/status` fold, and reported-flag discipline — no new notification
+kind, no scheduler-specific event vocabulary. Wire handlers touch only
+the scheduler's non-blocking registration seams; Tick/dispatch stay on
+the scheduler's own goroutine.
+
+**Persistence / at-least-once:** schedule cadence lives in
+`<session-dir>/scheduler-state.json` (v1 schema), NOT in the session
+log — the log stays the source of job truth, the state file is
+scheduler-owned. State survives daemon restart: a fresh scheduler
+adopts the persisted spec list and next-run cursors. The cursor is
+persisted AFTER the dispatch decision (at-least-once): a crash between
+dispatch and persist re-dispatches on restart; duplicate suppression
+is the job layer's first-wins settlement + reported-flag notices, not
+the scheduler's. Idempotency of the underlying work is the dispatched
+job body's concern.
+
+**Versioning (B3 decision, mirroring B2):** `ProtocolVersion` stays
+1 — the three methods are NEW method names (additive under §8); no
+field was added to any existing method's params or result, and the
+`initialize` capabilities object is untouched (a capability field-add
+would itself be a breaking change).
+
 ## 7b. Async contract (subagents, B2)
 
 Same discipline as §7 jobs: `subagent/spawn` returns its `{childId}`
@@ -231,6 +310,9 @@ reports — all as ordinary appended events on the same stream.
   payload field `subagent/spawned.seedTurns` is omitempty, so existing
   bytes (and pre-B2 logs) are unaffected; old fixtures verified
   byte-stable.
+- **B3 decision (schedule/* family): ProtocolVersion stays 1** — same
+  rule, same verification (§4c; old fixtures byte-stable, new methods'
+  shapes locked by their own fixtures).
 
 ## 9. Error codes
 

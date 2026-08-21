@@ -517,3 +517,79 @@ func TestSchedulerTrackerRoutesToActiveSession(t *testing.T) {
 		t.Fatalf("empty-tracker gate = %d, want 0", n)
 	}
 }
+
+// TestSchedulerWireSurfaceDaemonWiring proves the B3 glue exactly as
+// run() performs it: buildServer → buildScheduler →
+// engine.Schedules = sched (before Serve) — so the daemon-composed
+// server answers schedule/add|list|remove over the wire against the
+// REAL daemon scheduler (state file under the session dir, tracker
+// routing). The loop is not started (registration-only; dispatch lives
+// in the protocol crux test).
+func TestSchedulerWireSurfaceDaemonWiring(t *testing.T) {
+	cfg := testConfig(t, "openai", "http://127.0.0.1:1")
+	svc, cli := net.Pipe()
+	srv, engine, tracker, _ := buildServer(cfg, "test-key", svc)
+	sched, err := buildScheduler(cfg, tracker)
+	if err != nil {
+		t.Fatalf("buildScheduler: %v", err)
+	}
+	defer sched.Stop() // drained (no-op when never started)
+	engine.Schedules = sched
+
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(nil) }()
+	client := protocol.NewClient(cli)
+	defer func() { _ = client.Close() }()
+
+	if err := client.Call("initialize", map[string]any{"protocolVersion": 1}, nil); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	if err := client.Call("session/create", map[string]any{
+		"path": filepath.Join(cfg.SessionDir, "sess-wire-sched.jsonl"), "sessionId": "sess-wire-sched",
+	}, nil); err != nil {
+		t.Fatalf("session/create: %v", err)
+	}
+
+	var added struct {
+		Name    string `json:"name"`
+		NextRun string `json:"nextRun"`
+	}
+	if err := client.Call("schedule/add", map[string]any{
+		"name": "tick", "every": int64(time.Minute),
+	}, &added); err != nil {
+		t.Fatalf("schedule/add: %v", err)
+	}
+	if added.Name != "tick" || added.NextRun == "" {
+		t.Fatalf("add result = %+v", added)
+	}
+
+	var list struct {
+		Schedules []struct {
+			Name string `json:"name"`
+		} `json:"schedules"`
+	}
+	if err := client.Call("schedule/list", nil, &list); err != nil {
+		t.Fatalf("schedule/list: %v", err)
+	}
+	if len(list.Schedules) != 1 || list.Schedules[0].Name != "tick" {
+		t.Fatalf("list = %+v, want the registered tick", list.Schedules)
+	}
+
+	var rm struct {
+		Removed bool `json:"removed"`
+	}
+	if err := client.Call("schedule/remove", map[string]any{"name": "tick"}, &rm); err != nil || !rm.Removed {
+		t.Fatalf("schedule/remove = (%v, %+v)", err, rm)
+	}
+	if err := client.Call("schedule/list", nil, &list); err != nil {
+		t.Fatalf("schedule/list after remove: %v", err)
+	}
+	if len(list.Schedules) != 0 {
+		t.Fatalf("list after remove = %+v, want empty", list.Schedules)
+	}
+
+	// The daemon scheduler's state file landed under the session dir.
+	if _, err := os.Stat(filepath.Join(cfg.SessionDir, schedulerStateFilename)); err != nil {
+		t.Fatalf("scheduler state file: %v", err)
+	}
+}

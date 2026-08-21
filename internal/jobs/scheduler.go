@@ -109,6 +109,13 @@ type Scheduler struct {
 	statePath string
 	poll      time.Duration
 
+	// persistFn is how every state-file write goes through: the real
+	// atomic writer (writeSchedulerState) in production, an injectable
+	// failure seam in tests (the ONLY reason it is a field). Injected
+	// failures exercise the durability contracts — a failed Add or
+	// Remove must leave live and durable state in agreement (F1).
+	persistFn func(path string, entries []schedEntry) error
+
 	startOnce sync.Once
 	stopOnce  sync.Once
 	started   bool
@@ -151,6 +158,7 @@ func NewScheduler(opts SchedulerOptions) (*Scheduler, error) {
 		clock:     clock,
 		statePath: opts.StatePath,
 		poll:      poll,
+		persistFn: writeSchedulerState,
 		stopCh:    make(chan struct{}),
 		done:      make(chan struct{}),
 	}, nil
@@ -160,7 +168,13 @@ func NewScheduler(opts SchedulerOptions) (*Scheduler, error) {
 // the clock's now (After resolved into At), inserted in dispatch-priority
 // order, and persisted immediately — a registered schedule survives a
 // crash right after Add. Duplicate names are rejected (the name is the
-// schedule's identity in the state file).
+// schedule's identity in the state file). Like Remove, the registration
+// is PERSIST-FIRST: a candidate entry set (with the new schedule) is
+// written to the state file, and only a SUCCESSFUL write is swapped
+// into the live entries — a failed persist leaves both surfaces
+// unchanged (no phantom schedule in the snapshot that a restart would
+// drop; the schedule lands in both or neither) and returns the typed
+// ErrSchedulePersist.
 func (s *Scheduler) Add(spec ScheduleSpec) (ScheduleRecord, error) {
 	stored, cursor, err := canonicalizeSpec(spec, s.clock.Now())
 	if err != nil {
@@ -173,13 +187,67 @@ func (s *Scheduler) Add(spec ScheduleSpec) (ScheduleRecord, error) {
 			return ScheduleRecord{}, fmt.Errorf("scheduler: schedule %q already exists", stored.Name)
 		}
 	}
-	s.entries = append(s.entries, schedEntry{Spec: stored, NextDue: cursor})
-	sortSchedEntries(s.entries)
-	if err := writeSchedulerState(s.statePath, s.entries); err != nil {
+	// Candidate copy WITH the new schedule: persisted FIRST, swapped
+	// into live state only after the write lands. Appending to a copy
+	// of a (NextDue, Name)-sorted slice and re-sorting keeps it sorted.
+	candidate := make([]schedEntry, 0, len(s.entries)+1)
+	candidate = append(candidate, s.entries...)
+	candidate = append(candidate, schedEntry{Spec: stored, NextDue: cursor})
+	sortSchedEntries(candidate)
+	if err := s.persistFn(s.statePath, candidate); err != nil {
+		err = fmt.Errorf("%w after add: %w", ErrSchedulePersist, err)
 		s.lastErr = err
-		return ScheduleRecord{}, fmt.Errorf("scheduler: persist after add: %w", err)
+		return ScheduleRecord{}, err
 	}
+	s.entries = candidate
 	return ScheduleRecord{Spec: stored, NextDue: cursor}, nil
+}
+
+// ErrScheduleNotFound is the typed error Remove returns for a name that
+// is not registered (the wire maps it to a clean -32602 carrying the
+// descriptive text).
+var ErrScheduleNotFound = errors.New("scheduler: schedule not found")
+
+// ErrSchedulePersist is the typed error class wrapped into every
+// state-persist failure (Add/Remove/after-dispatch): the caller's
+// request was VALID — the infrastructure failed. The wire maps it to
+// -32000 (engine error) instead of -32602; check with errors.Is.
+var ErrSchedulePersist = errors.New("scheduler: persist failed")
+
+// Remove unregisters the named schedule and persists the state file
+// atomically — a removed schedule stays removed across restarts. The
+// removal is PERSIST-FIRST: a candidate entry set (without the removed
+// schedule) is written to the state file, and only a SUCCESSFUL write is
+// swapped into the live entries — a failed persist leaves both surfaces
+// unchanged (the schedule stays in the snapshot AND the state file:
+// durable/live agreement; the schedule lands in both or neither) and
+// returns the typed ErrSchedulePersist. An unknown name is the typed
+// ErrScheduleNotFound (check with errors.Is); a removed name may be
+// re-registered afterwards (remove+re-add is the v1 pause path). Like
+// Add, Remove takes the scheduler's own lock: it serializes with — but
+// never runs — a Tick; the dispatch loop stays on its own goroutine.
+func (s *Scheduler) Remove(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.entries {
+		if s.entries[i].Spec.Name != name {
+			continue
+		}
+		// Candidate copy WITHOUT the removed schedule: persisted FIRST,
+		// swapped into live state only after the write lands. Removing
+		// one entry of a (NextDue, Name)-sorted slice keeps it sorted.
+		candidate := make([]schedEntry, 0, len(s.entries)-1)
+		candidate = append(candidate, s.entries[:i]...)
+		candidate = append(candidate, s.entries[i+1:]...)
+		if err := s.persistFn(s.statePath, candidate); err != nil {
+			err = fmt.Errorf("%w after remove: %w", ErrSchedulePersist, err)
+			s.lastErr = err
+			return err
+		}
+		s.entries = candidate
+		return nil
+	}
+	return fmt.Errorf("%w: %q", ErrScheduleNotFound, name)
 }
 
 // Snapshot returns the registered schedules in dispatch-priority order.
@@ -223,10 +291,10 @@ func (s *Scheduler) Tick() int {
 	} else {
 		s.entries = append(s.entries[:0], s.entries[1:]...) // one-shot done
 	}
-	if err := writeSchedulerState(s.statePath, s.entries); err != nil {
+	if err := s.persistFn(s.statePath, s.entries); err != nil {
 		// In-memory cursor advanced but not durable: a restart will
 		// re-dispatch (the documented at-least-once window).
-		s.lastErr = fmt.Errorf("scheduler: persist after dispatch: %w", err)
+		s.lastErr = fmt.Errorf("%w after dispatch: %w", ErrSchedulePersist, err)
 	} else {
 		s.lastErr = nil
 	}

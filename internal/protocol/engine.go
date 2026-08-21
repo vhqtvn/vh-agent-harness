@@ -55,6 +55,16 @@ type FileEngine struct {
 	// SubagentOpts configure each session's manager (0 depth cap ⇒ the
 	// subagents default of 3).
 	SubagentOpts subagents.Options
+	// Schedules, when non-nil, is stamped onto EVERY session as its
+	// schedule seam (the schedule/* wire methods). The engine does NOT
+	// build, start, or stop the scheduler — the composition root owns
+	// it (vh-agentd hands its tracker-routed scheduler here after
+	// buildScheduler and BEFORE Serve; the single deliberate
+	// post-construction assignment, race-free because no session can
+	// exist yet). Nil keeps sessions schedule-free: schedule/add and
+	// schedule/remove fail closed -32000, schedule/list is an honest
+	// empty.
+	Schedules ScheduleManager
 
 	mu       sync.Mutex
 	approver tools.Approver
@@ -262,7 +272,7 @@ func (e *FileEngine) NewSession(path, sessionID string, sink io.Writer) (*Engine
 		_ = lg.Close()
 		return nil, abandon(err)
 	}
-	es := &EngineSession{Log: lg, Jobs: m, Path: path}
+	es := &EngineSession{Log: lg, Jobs: m, Schedules: e.Schedules, Path: path}
 	if e.SubagentExecutor != nil {
 		store := e.SubagentStore
 		if store == nil {

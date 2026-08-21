@@ -184,7 +184,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	log.Printf("starting: adapter=%s model=%s base-url=%s session-dir=%s api-key-env=%s approval-timeout-ms=%d cache-breakpoints=%d sandbox=%s optimizer=%s",
 		cfg.Adapter, cfg.Model, cfg.BaseURL, cfg.SessionDir, cfg.APIKeyEnv, cfg.ApprovalTimeoutMs, cfg.CacheBreakpoints, cfg.SandboxMode, cfg.Optimizer)
 
-	srv, _, tracker, served := buildServer(cfg, apiKey, rwc)
+	srv, engine, tracker, served := buildServer(cfg, apiKey, rwc)
 	if served.Reason != "" {
 		log.Printf("system prompt: source=%s reason=%s (run with --compile-prompt to populate the artifact)", served.Source, served.Reason)
 	} else {
@@ -193,13 +193,15 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 
 	// Scheduler: real Manager seams through the tracker, state file
 	// under the session dir, STARTED before Serve, DRAINED at shutdown.
-	// No protocol surface registers schedules in B1 — the loop runs so
-	// persisted state is adopted and the lifecycle is live.
+	// B3: the scheduler is handed to the engine seam (BEFORE Serve, so
+	// every session/create stamps it) — schedule/add|list|remove reach
+	// it over the wire; the lifecycle stays daemon-owned.
 	sched, err := buildScheduler(cfg, tracker)
 	if err != nil {
 		log.Printf("scheduler: construct: %v", err)
 		return 1
 	}
+	engine.Schedules = sched
 	if err := sched.Start(); err != nil {
 		log.Printf("scheduler: start: %v", err)
 		return 1

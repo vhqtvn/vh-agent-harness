@@ -76,6 +76,11 @@ func buildAdapter(cfg *Config, apiKey string) adapters.Adapter {
 // the caller so the startup log records the source) and the ARMED
 // retry ladder (loop defaults: 2 retries, 500ms→10s backoff,
 // deterministic mid-band jitter).
+//
+// The schedule/* seam (FileEngine.Schedules) is the ONE deliberate
+// post-build assignment: run() sets it after buildScheduler (the
+// scheduler needs the tracker, which needs the engine) and BEFORE
+// Serve, so every session/create stamps it — see sched.go.
 func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.Server, *protocol.FileEngine, *sessionTracker, prompt.ServeResult) {
 	defs := daemonTools(realNow, cfg)
 	specs := make([]adapters.ToolSpec, 0, len(defs))
