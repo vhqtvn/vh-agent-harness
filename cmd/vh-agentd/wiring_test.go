@@ -36,7 +36,7 @@ import (
 // them into TurnOptions.System.
 func TestPromptServingRawFallbackThenCompiled(t *testing.T) {
 	cfg := testConfig(t, "openai", "http://127.0.0.1:1")
-	specs := toolSpecsForPrompt()
+	specs := toolSpecsForPrompt(cfg)
 
 	// Fresh dir: raw assembly fallback, never silent.
 	got, served, err := resolveSystemPrompt(cfg, specs)
@@ -431,7 +431,7 @@ func TestAnthropicCacheBreakpointsWireRoundTrip(t *testing.T) {
 	llm, bodyCell := anthropicFakeLLM(t)
 	defer llm.Close()
 	dir := t.TempDir()
-	cfg, err := validate("anthropic", "fake-claude", llm.URL, "VH_AGENTD_TEST_KEY", dir, 0, defaultApprovalTimeoutMs, 1)
+	cfg, err := validate("anthropic", "fake-claude", llm.URL, "VH_AGENTD_TEST_KEY", dir, 0, defaultApprovalTimeoutMs, 1, "off")
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}

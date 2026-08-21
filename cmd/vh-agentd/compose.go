@@ -77,7 +77,7 @@ func buildAdapter(cfg *Config, apiKey string) adapters.Adapter {
 // retry ladder (loop defaults: 2 retries, 500ms→10s backoff,
 // deterministic mid-band jitter).
 func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.Server, *protocol.FileEngine, *sessionTracker, prompt.ServeResult) {
-	defs := daemonTools(realNow)
+	defs := daemonTools(realNow, cfg)
 	specs := make([]adapters.ToolSpec, 0, len(defs))
 	for _, d := range defs {
 		specs = append(specs, d.Spec())
@@ -132,8 +132,8 @@ func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.
 // toolSpecsForPrompt returns the advertised tool specs for the OFFLINE
 // compile path (--compile-prompt): the catalog must describe the same
 // tool set the serving daemon advertises, so the artifact hash matches.
-func toolSpecsForPrompt() []adapters.ToolSpec {
-	defs := daemonTools(realNow)
+func toolSpecsForPrompt(cfg *Config) []adapters.ToolSpec {
+	defs := daemonTools(realNow, cfg)
 	specs := make([]adapters.ToolSpec, 0, len(defs))
 	for _, d := range defs {
 		specs = append(specs, d.Spec())
@@ -150,10 +150,18 @@ func toolSpecsForPrompt() []adapters.ToolSpec {
 //     waterfall are the policy layer (typed denial provenance), and
 //     run_shell is IsConcurrencySafe=false so the scheduler drains the
 //     parallel pool around it (exclusive barrier);
-//   - SandboxFunc nil = NO CONFINEMENT — the loud, deliberate default
-//     (see internal/tools/shell doc.go: "none" is recorded in every
-//     Outcome so logs never hide the confinement level; the host's
-//     guard/approval policy is the safety boundary);
+//   - sandbox off (the default): Config.Sandbox nil = NO CONFINEMENT —
+//     the loud, deliberate pre-slice posture (see internal/tools/shell
+//     doc.go: "none" is recorded in every Outcome so logs never hide
+//     the confinement level; the host's guard/approval policy is the
+//     safety boundary);
+//   - sandbox read-only / workspace-write: the kernel confinement
+//     backend (Landlock+seccomp via the execsandbox trampoline) is
+//     armed behind the SandboxFunc seam, labeled with the mode, and
+//     fail-closed per call when the OS primitives are unavailable
+//     (typed sandbox-unavailable error; never a silently unconfined
+//     run). workspace-write writable roots are the validated
+//     Config.SandboxWritableRoots (session dir + OS temp);
 //   - EnvAllowlist empty: the child env is the explicit base set
 //     (PATH/HOME/TERM/LANG) — default-deny, scrubbed;
 //   - WorkdirRoots empty (§4a confinement contract): run_shell
@@ -163,7 +171,21 @@ func toolSpecsForPrompt() []adapters.ToolSpec {
 //     a deployment that wants absolute workdirs wires them in Config.
 //
 // now is injected for the deterministic clock tool.
-func daemonTools(now func() time.Time) []tools.ToolDefinition {
+func daemonTools(now func() time.Time, cfg *Config) []tools.ToolDefinition {
+	shellCfg := shell.Config{}
+	if cfg != nil && cfg.SandboxMode != shell.SandboxOff {
+		fn, err := shell.NewSandboxFunc(shell.SandboxOptions{
+			Mode:          cfg.SandboxMode,
+			WritableRoots: cfg.SandboxWritableRoots,
+		})
+		if err != nil {
+			// A validated mode cannot fail construction; this is a
+			// programming error in the daemon wiring — fail loudly.
+			panic(fmt.Sprintf("vh-agentd: sandbox %s: %v", cfg.SandboxMode, err))
+		}
+		shellCfg.Sandbox = fn
+		shellCfg.SandboxName = string(cfg.SandboxMode)
+	}
 	return []tools.ToolDefinition{
 		{
 			Name:              "echo",
@@ -207,7 +229,7 @@ func daemonTools(now func() time.Time) []tools.ToolDefinition {
 				return now().UTC().Format(time.RFC3339Nano), nil
 			},
 		},
-		shell.Definition(shell.Config{}),
+		shell.Definition(shellCfg),
 	}
 }
 

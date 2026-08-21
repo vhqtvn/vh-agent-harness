@@ -116,6 +116,24 @@ func TestRunInvalidAPIKeyEnvNameExits2(t *testing.T) {
 	}
 }
 
+// TestRunRelativeSessionDirExits2: a relative --session-dir is rejected
+// at validation (fail-loud). It would otherwise be wired into the
+// workspace-write Landlock RWDirs and resolve against the sandboxed
+// child's working directory — not the daemon's startup cwd — denying
+// session writes against an unintended root (confusing
+// fails-toward-denial instead of a clear config error).
+func TestRunRelativeSessionDirExits2(t *testing.T) {
+	for _, rel := range []string{"d", "sessions", "./sessions", "../sessions"} {
+		code, _, stderr := runArgs(t, []string{
+			"--adapter", "openai", "--model", "m", "--base-url", "http://x.test",
+			"--api-key-env", "K", "--session-dir", rel,
+		}, map[string]string{"K": "v"})
+		if code != 2 || !strings.Contains(stderr, "must be an absolute path") {
+			t.Fatalf("relative session-dir %q: exit=%d stderr=%q, want 2 + absolute-path error", rel, code, stderr)
+		}
+	}
+}
+
 func TestRunVersionPrintsEngineAndProtocol(t *testing.T) {
 	code, out, _ := runArgs(t, []string{"--version"}, nil)
 	if code != 0 {
@@ -153,7 +171,7 @@ func TestUsageDocumentsCredentialHandling(t *testing.T) {
 
 func TestValidateAdapterAliases(t *testing.T) {
 	for in, want := range map[string]string{"openai": "openaicompat", "OpenAICompat": "openaicompat", "anthropic": "anthropic"} {
-		cfg, err := validate(in, "m", "http://x.test", "K", "d", 0, defaultApprovalTimeoutMs, 0)
+		cfg, err := validate(in, "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", 0, defaultApprovalTimeoutMs, 0, "off")
 		if err != nil || cfg.Adapter != want {
 			t.Fatalf("alias %q: cfg=%+v err=%v, want adapter %q", in, cfg, err, want)
 		}
@@ -161,10 +179,10 @@ func TestValidateAdapterAliases(t *testing.T) {
 }
 
 func TestValidateMaxTokensAndTimeoutBounds(t *testing.T) {
-	if _, err := validate("openai", "m", "http://x.test", "K", "d", -1, defaultApprovalTimeoutMs, 0); err == nil {
+	if _, err := validate("openai", "m", "http://x.test", "K", "d", -1, defaultApprovalTimeoutMs, 0, "off"); err == nil {
 		t.Fatal("negative max-tokens accepted")
 	}
-	if _, err := validate("openai", "m", "http://x.test", "K", "d", 0, -1, 0); err == nil {
+	if _, err := validate("openai", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", 0, -1, 0, "off"); err == nil {
 		t.Fatal("negative approval-timeout-ms accepted")
 	}
 }
@@ -176,28 +194,28 @@ func TestValidateMaxTokensAndTimeoutBounds(t *testing.T) {
 func TestValidateCacheBreakpoints(t *testing.T) {
 	// Default off, both adapters.
 	for _, adapter := range []string{"openai", "anthropic"} {
-		cfg, err := validate(adapter, "m", "http://x.test", "K", "d", 0, defaultApprovalTimeoutMs, 0)
+		cfg, err := validate(adapter, "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", 0, defaultApprovalTimeoutMs, 0, "off")
 		if err != nil || cfg.CacheBreakpoints != 0 {
 			t.Fatalf("adapter %s default: cfg=%+v err=%v, want breakpoints 0", adapter, cfg, err)
 		}
 	}
 	// 1..4 accepted for anthropic and carried on the config.
 	for n := 1; n <= 4; n++ {
-		cfg, err := validate("anthropic", "m", "http://x.test", "K", "d", 0, defaultApprovalTimeoutMs, n)
+		cfg, err := validate("anthropic", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", 0, defaultApprovalTimeoutMs, n, "off")
 		if err != nil || cfg.CacheBreakpoints != n {
 			t.Fatalf("anthropic n=%d: cfg=%+v err=%v", n, cfg, err)
 		}
 	}
 	// Out of range rejected.
 	for _, n := range []int{-1, 5} {
-		if _, err := validate("anthropic", "m", "http://x.test", "K", "d", 0, defaultApprovalTimeoutMs, n); err == nil {
+		if _, err := validate("anthropic", "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", 0, defaultApprovalTimeoutMs, n, "off"); err == nil {
 			t.Fatalf("breakpoints %d accepted, want range rejection", n)
 		}
 	}
 	// openai (and its alias) rejects any explicit budget.
 	for _, adapter := range []string{"openai", "openaicompat"} {
 		err := func() error {
-			_, err := validate(adapter, "m", "http://x.test", "K", "d", 0, defaultApprovalTimeoutMs, 2)
+			_, err := validate(adapter, "m", "http://x.test", "K", "/tmp/vh-agentd-test-sessions", 0, defaultApprovalTimeoutMs, 2, "off")
 			return err
 		}()
 		if err == nil {

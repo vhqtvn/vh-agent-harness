@@ -249,11 +249,14 @@ reports — all as ordinary appended events on the same stream.
 ## 10. Close semantics
 
 Server: `Close()` (or ctx cancel / EOF) ⇒ new requests rejected with
-`-32600 "server is closing"` ⇒ in-flight request handlers drain ⇒
-transport closed ⇒ pending approvals deny. Background jobs are durable
-and continue per §7 (their lifecycle belongs to the log, not the
-connection). Client close ladder mirrors dsh simplified for stdio:
-close stdin/write side → EOF → done (no signals required).
+`-32600 "server is closing"` and the transport closed IMMEDIATELY
+(close-before-drain) ⇒ pending approvals deny at once (fail-closed;
+this is why `Close` precedes the drain — with approval-timeout 0 a
+drain-first ladder would hang forever) ⇒ in-flight request handlers
+drain. Background jobs are durable and continue per §7 (their
+lifecycle belongs to the log, not the connection). Client close ladder
+mirrors dsh simplified for stdio: close stdin/write side → EOF → done
+(no signals required).
 
 ## Non-goals (v1)
 

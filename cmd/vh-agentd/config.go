@@ -6,8 +6,12 @@ package main
 import (
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/vhqtvn/vh-agent-harness/internal/tools/shell"
 )
 
 // engineVersion is the daemon/engine build identity reported by
@@ -44,6 +48,18 @@ type Config struct {
 	// budget, wired into the anthropic adapter's CacheConfig. It is
 	// REJECTED for openaicompat (see validateCacheBreakpoints).
 	CacheBreakpoints int
+	// SandboxMode is the validated --sandbox value (off | read-only |
+	// workspace-write) wired into run_shell's confinement seam. off
+	// (the default) keeps Config.Sandbox nil — the loud NO-confinement
+	// posture; the confining modes arm the kernel backend
+	// (Landlock+seccomp) and fail closed per call when it is
+	// unavailable.
+	SandboxMode shell.SandboxMode
+	// SandboxWritableRoots are the write-allowed directories under
+	// workspace-write mode. The daemon default is the session dir plus
+	// the OS temp dir (dsh writableRoots vocabulary: the workspace and
+	// tmp). Empty for off and read-only.
+	SandboxWritableRoots []string
 }
 
 // usageDoc documents credential handling on the help surface (the key is
@@ -70,6 +86,19 @@ Prompt cache (--cache-breakpoints N):
   Rejected for --adapter openai: OpenAI-compatible endpoints cache
   IMPLICITLY via prefix matching — there is no breakpoint knob to map.
 
+Sandbox (--sandbox MODE):
+  Confinement for the run_shell tool. off (default) = NO confinement:
+  commands run with the daemon's own privileges — this is the loud,
+  deliberate pre-slice posture. read-only = kernel-enforced (Landlock +
+  seccomp): the whole filesystem stays READABLE but no writes are
+  allowed and network syscalls are denied. workspace-write = read-only
+  plus writes allowed ONLY under the session dir and the OS temp dir.
+  Confinement fail-closes: on a host without the OS primitives (non-
+  Linux, or a kernel without landlock+seccomp) every sandboxed
+  run_shell call returns a typed sandbox-unavailable error instead of
+  running unconfined. There is deliberately no "danger-full-access"
+  mode — it is redundant with off.
+
 System prompt (compiled-sysprompt model):
   The daemon serves its system prompt from the compiled artifact under
   <session-dir>/compiled-prompts/ when one matches the current content
@@ -80,6 +109,7 @@ Usage:
   vh-agentd --adapter openai|anthropic --model M --base-url URL
             --api-key-env VAR --session-dir DIR [--max-tokens N]
             [--approval-timeout-ms MS] [--cache-breakpoints N]
+            [--sandbox off|read-only|workspace-write]
             [--compile-prompt] [--version]
 
   --compile-prompt  run the offline prompt compilation with the current
@@ -125,7 +155,7 @@ func validateCacheBreakpoints(adapter string, n int) error {
 
 // validate checks the parsed flags fail-closed and returns the
 // normalized Config.
-func validate(adapter, model, baseURL, apiKeyEnv, sessionDir string, maxTokens, approvalTimeoutMs, cacheBreakpoints int) (*Config, error) {
+func validate(adapter, model, baseURL, apiKeyEnv, sessionDir string, maxTokens, approvalTimeoutMs, cacheBreakpoints int, sandboxMode string) (*Config, error) {
 	ad, ok := normalizeAdapter(adapter)
 	if !ok {
 		return nil, fmt.Errorf("invalid --adapter %q: must be openai (openaicompat) or anthropic", adapter)
@@ -149,6 +179,9 @@ func validate(adapter, model, baseURL, apiKeyEnv, sessionDir string, maxTokens, 
 	if sessionDir == "" {
 		return nil, fmt.Errorf("--session-dir is required (there is no default: the daemon refuses silent session writes)")
 	}
+	if !filepath.IsAbs(sessionDir) {
+		return nil, fmt.Errorf("--session-dir %q must be an absolute path: under --sandbox workspace-write the session dir becomes a Landlock RWDir, and a relative path resolves against the sandboxed child's working directory — not the daemon's startup cwd — so session writes would be denied against an unintended root. Pass an absolute path (e.g. /var/lib/vh-agentd/sessions)", sessionDir)
+	}
 	if maxTokens < 0 {
 		return nil, fmt.Errorf("invalid --max-tokens %d: must be >= 0", maxTokens)
 	}
@@ -158,7 +191,12 @@ func validate(adapter, model, baseURL, apiKeyEnv, sessionDir string, maxTokens, 
 	if err := validateCacheBreakpoints(ad, cacheBreakpoints); err != nil {
 		return nil, err
 	}
-	return &Config{
+	mode, err := shell.ParseSandboxMode(strings.TrimSpace(sandboxMode))
+	if err != nil {
+		return nil, fmt.Errorf("invalid --sandbox %q: %w", sandboxMode, err)
+	}
+
+	cfg := &Config{
 		Adapter:           ad,
 		Model:             model,
 		BaseURL:           baseURL,
@@ -167,5 +205,16 @@ func validate(adapter, model, baseURL, apiKeyEnv, sessionDir string, maxTokens, 
 		MaxTokens:         maxTokens,
 		ApprovalTimeoutMs: approvalTimeoutMs,
 		CacheBreakpoints:  cacheBreakpoints,
-	}, nil
+		SandboxMode:       mode,
+	}
+	// workspace-write default writable roots: the session dir (every
+	// durable byte the daemon owns) plus the OS temp dir. Deduped when
+	// they coincide.
+	if mode == shell.SandboxWorkspaceWrite {
+		cfg.SandboxWritableRoots = []string{sessionDir, os.TempDir()}
+		if sessionDir == os.TempDir() {
+			cfg.SandboxWritableRoots = []string{sessionDir}
+		}
+	}
+	return cfg, nil
 }

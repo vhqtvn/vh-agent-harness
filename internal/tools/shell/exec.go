@@ -77,6 +77,13 @@ type Outcome struct {
 	// Sandbox names the confinement that wrapped the command ("none"
 	// means NO confinement — see the package doc).
 	Sandbox string `json:"sandbox"`
+
+	// sandboxErr carries the typed *SandboxUnavailableError when the
+	// confinement backend refused the run (fail-closed). Unexported on
+	// purpose: the serialized outcome shape is frozen; the typed error
+	// surfaces through execute()'s error, where callers can errors.As
+	// it. The text twin travels in SpawnError.
+	sandboxErr *SandboxUnavailableError
 }
 
 // TimeoutError is the typed error returned for CauseTimeout. The
@@ -175,6 +182,10 @@ func run(ctx context.Context, cfg *Config, command string, timeoutMs int64, work
 		if err := cfg.Sandbox(cmd); err != nil {
 			out.Cause = CauseError
 			out.SpawnError = fmt.Sprintf("sandbox %q failed: %v", cfg.sandboxLabel(), err)
+			var unavail *SandboxUnavailableError
+			if errors.As(err, &unavail) {
+				out.sandboxErr = unavail // typed fail-closed: execute() rethrows it
+			}
 			finishOutcome(&out, stdout, stderr, cfg, start)
 			return out
 		}

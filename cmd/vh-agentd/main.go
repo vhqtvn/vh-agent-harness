@@ -28,11 +28,32 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vhqtvn/vh-agent-harness/internal/execsandbox"
 	"github.com/vhqtvn/vh-agent-harness/internal/protocol"
+	"github.com/vhqtvn/vh-agent-harness/internal/tools/shell"
 )
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Getenv, stdioConn{}, os.Stdout, os.Stderr))
+}
+
+// trampolineArgs reports whether args is a sandbox trampoline child
+// invocation ([__exec_sandbox_child, --?, target, args...]) and returns
+// the payload argv (verb + -- separator stripped) for
+// execsandbox.RunChild. The check happens BEFORE flag parsing: the
+// trampoline child carries the confined command's argv, not daemon
+// flags. This is the daemon-side twin of the CLI's hidden cobra verb —
+// run_shell confinement re-execs THIS executable as the trampoline
+// host, so a sandboxed daemon can confine its own child commands.
+func trampolineArgs(args []string) (rest []string, handled bool) {
+	if len(args) == 0 || args[0] != execsandbox.TrampolineVerb {
+		return nil, false
+	}
+	rest = args[1:]
+	if len(rest) > 0 && rest[0] == "--" {
+		rest = rest[1:]
+	}
+	return rest, true
 }
 
 // stdioConn adapts the process stdio to the protocol Conn's
@@ -52,6 +73,18 @@ func (stdioConn) Close() error                { return os.Stdout.Close() }
 //	2 — usage / validation failure (message on stderr)
 //	1 — runtime failure (message on stderr)
 func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdout, stderrw io.Writer) (exit int) {
+	// Sandbox trampoline dispatch (BEFORE flag parsing — see
+	// trampolineArgs). RunChild installs NoNewPrivs + seccomp +
+	// landlock and syscall.Execs into the confined target; it returns
+	// only on failure.
+	if rest, handled := trampolineArgs(args); handled {
+		if err := execsandbox.RunChild(rest); err != nil {
+			fmt.Fprintf(stderrw, "vh-agentd: sandbox child: %v\n", err)
+			return 1
+		}
+		return 0 // unreachable on success: the image was replaced
+	}
+
 	log := newLogger(stderrw)
 
 	var (
@@ -63,6 +96,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		maxTokens         = new(int)
 		approvalTimeoutMs = new(int)
 		cacheBreakpoints  = new(int)
+		sandbox           = new(string)
 		compilePrompt     = new(bool)
 		showVersion       = new(bool)
 	)
@@ -77,6 +111,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	fs.IntVar(maxTokens, "max-tokens", 0, "max_tokens override (0 = adapter default; anthropic requires one)")
 	fs.IntVar(approvalTimeoutMs, "approval-timeout-ms", defaultApprovalTimeoutMs, "bound on each pending approval (0 = wait while connected)")
 	fs.IntVar(cacheBreakpoints, "cache-breakpoints", 0, "Anthropic prompt-cache breakpoint budget: 0=off (default), 1-4 explicit (anthropic only; openai caching is implicit and rejects this flag)")
+	fs.StringVar(sandbox, "sandbox", "off", "run_shell confinement: off (default: NO confinement, engine privileges), read-only (whole FS readable, no writes, network denied), workspace-write (writes only under the session dir + OS temp; network denied). Kernel-enforced (Landlock+seccomp); if unavailable, sandboxed calls FAIL CLOSED with a typed error")
 	fs.BoolVar(compilePrompt, "compile-prompt", false, "run the offline prompt compilation with the current config (reference Dedup optimizer), write the artifact under <session-dir>/compiled-prompts/, and exit — no network, no key, no protocol session")
 	fs.BoolVar(showVersion, "version", false, "print engine and protocol versions and exit")
 
@@ -91,10 +126,21 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		return 0
 	}
 
-	cfg, err := validate(*adapter, *model, *baseURL, *apiKeyEnv, *sessionDir, *maxTokens, *approvalTimeoutMs, *cacheBreakpoints)
+	cfg, err := validate(*adapter, *model, *baseURL, *apiKeyEnv, *sessionDir, *maxTokens, *approvalTimeoutMs, *cacheBreakpoints, *sandbox)
 	if err != nil {
 		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
 		return 2
+	}
+
+	// Loud posture note: a requested confinement mode whose OS backend
+	// is unavailable makes every sandboxed run_shell call fail closed
+	// (typed sandbox-unavailable). Say so AT STARTUP, not at first
+	// failure — this is a warning, not a refusal (the fail-closed
+	// refusal is per-call, in the tool).
+	if cfg.SandboxMode != shell.SandboxOff {
+		if features := execsandbox.Detect(); !features.Available() {
+			log.Printf("sandbox: mode %s requested but OS primitives unavailable (landlock=%v seccomp=%v); run_shell calls will FAIL CLOSED with typed sandbox-unavailable errors (start with --sandbox off to explicitly accept no confinement)", cfg.SandboxMode, features.Landlock, features.Seccomp)
+		}
 	}
 
 	if err := os.MkdirAll(cfg.SessionDir, 0o755); err != nil {
@@ -107,7 +153,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	// run makes no network calls and needs no key (--api-key-env must
 	// still NAME a variable; the variable itself may be unset here).
 	if *compilePrompt {
-		if err := compilePromptOffline(context.Background(), cfg, toolSpecsForPrompt(), stderrw); err != nil {
+		if err := compilePromptOffline(context.Background(), cfg, toolSpecsForPrompt(cfg), stderrw); err != nil {
 			log.Printf("%v", err)
 			return 1
 		}
@@ -122,8 +168,8 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		return 2
 	}
 
-	log.Printf("starting: adapter=%s model=%s base-url=%s session-dir=%s api-key-env=%s approval-timeout-ms=%d cache-breakpoints=%d",
-		cfg.Adapter, cfg.Model, cfg.BaseURL, cfg.SessionDir, cfg.APIKeyEnv, cfg.ApprovalTimeoutMs, cfg.CacheBreakpoints)
+	log.Printf("starting: adapter=%s model=%s base-url=%s session-dir=%s api-key-env=%s approval-timeout-ms=%d cache-breakpoints=%d sandbox=%s",
+		cfg.Adapter, cfg.Model, cfg.BaseURL, cfg.SessionDir, cfg.APIKeyEnv, cfg.ApprovalTimeoutMs, cfg.CacheBreakpoints, cfg.SandboxMode)
 
 	srv, _, tracker, served := buildServer(cfg, apiKey, rwc)
 	if served.Reason != "" {

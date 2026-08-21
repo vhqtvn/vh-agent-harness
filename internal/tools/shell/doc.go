@@ -20,24 +20,44 @@
 // means the command runs with the ENGINE PROCESS'S OWN privileges on
 // the host: same uid, same filesystem reach, same network. That is a
 // deliberate, documented default — the policy layer (Pipeline guards,
-// pre-execute waterfall, approval) is the intended safety boundary,
-// and wave B wires real confinement behind the same seam. Every
-// Outcome records which sandbox applied (Config.SandboxName, default
-// "none") so a logged run never hides its confinement level.
+// pre-execute waterfall, approval) is the intended safety boundary —
+// and it is exactly what mode "off" preserves. Every Outcome records
+// which sandbox applied (Config.SandboxName, default "none") so a
+// logged run never hides its confinement level.
 //
-// # Existing runtime seams (integration decision)
+// # Real confinement (sandbox_modes.go)
 //
-// internal/runtime was studied for reuse (runtime.Runner,
-// runtime.Backend, the bare backend). Both are importable without
-// import cycles, but they are CLI-verb-shaped: host-stdio wiring,
-// error-only returns, no Env field, and no SysProcAttr/process-group
-// path — none of the orthogonal outcome facts, env hygiene, or group
-// kill this tool requires can be expressed through them. Adapting them
-// would either silently drop those guarantees or fake them. Decision:
-// slice A2 ships the SandboxFunc seam only; wave B should either
-// extend runtime.RunOpts (Env + SysProcAttr + captured streams) or
-// introduce a model-facing exec surface in internal/runtime and adapt
-// it here behind the unchanged SandboxFunc signature.
+// NewSandboxFunc adapts SandboxOptions{Mode: read-only |
+// workspace-write, WritableRoots} onto the repo's REAL kernel
+// confinement backend (internal/execsandbox: Landlock filesystem
+// integrity + seccomp-BPF network/syscall hardening) by REWRAPPING the
+// constructed command as the backend's re-exec trampoline child:
+// [self, __exec_sandbox_child, --, bash, ...] plus the serialized
+// profile in the child env. The caller-owned invariants (captured
+// streams, scrubbed env, process-group leadership for timeout
+// teardown) are preserved verbatim by the rewrap. The backend
+// fail-closes: when the OS primitives are unavailable a sandboxed call
+// returns a typed *SandboxUnavailableError (an isError tool result;
+// NEVER a silently unconfined run). Runtime denials (a confined write
+// hitting EACCES) classify honestly as ordinary non-zero exits with
+// the kernel diagnostic on stderr — the orthogonal outcome facts stay
+// intact. Confinement is an INTEGRITY + NETWORK boundary (network is
+// denied under either confining mode), not a confidentiality boundary.
+// The trampoline host must dispatch the hidden __exec_sandbox_child
+// verb BEFORE its own argument parsing (the vh-agentd daemon and the
+// test binaries do; execsandbox.TrampolineVerb is the verb constant).
+//
+// # Existing runtime seams (integration decision — LANDED)
+//
+// internal/runtime was originally studied for reuse (runtime.Runner,
+// runtime.Backend). Both proved CLI-verb-shaped — host-stdio wiring,
+// error-only returns, no Env field, no SysProcAttr/process-group path
+// — and carry NO confinement primitives at all; the real backends live
+// in internal/execsandbox. The A2 decision ("seam only; wave B adapts")
+// is settled as sandbox_modes.go: the SandboxFunc signature is
+// unchanged, and the adaptation happens through execsandbox's narrow
+// programmatic surface (WrapCommand/ProfileEnv/TrampolineVerb) rather
+// than runtime.RunOpts.
 //
 // # Non-goals (recorded follow-ups)
 //

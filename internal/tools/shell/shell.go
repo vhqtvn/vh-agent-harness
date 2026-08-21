@@ -172,7 +172,7 @@ const description = "Runs a shell command via bash -c (non-interactive, no profi
 	"Not concurrency-safe: runs as an exclusive barrier. timeout_ms defaults to 30000 and is capped at 600000; on expiry the whole process group is killed. " +
 	"Captured output is capped per stream (64KiB default) with a truncation marker. " +
 	"The child env is explicit: PATH, HOME, TERM=dumb, LANG plus a configured allowlist; names matching KEY/SECRET/TOKEN/PASSWORD (case-insensitive) and engine credential vars are never passed. " +
-	"Sandbox: check the sandbox field — \"none\" means NO confinement (the command runs with the engine's own privileges); the host's guard/approval policy is the safety boundary."
+	"Sandbox: check the sandbox field — \"none\" means NO confinement (the command runs with the engine's own privileges); \"read-only\" or \"workspace-write\" mean kernel-enforced confinement (writes outside the configured contract and network access are denied). "
 
 // sensitiveEnvPattern is the dsh SENSITIVE_ENV_PATTERN
 // (/KEY|PASSWORD|SECRET|TOKEN/i, name-match drop).
@@ -389,6 +389,13 @@ func execute(ctx context.Context, cfg *Config, raw json.RawMessage) (string, err
 			StderrBytes:        len(out.Stderr),
 		}
 	default: // CauseError
+		if out.sandboxErr != nil {
+			// Typed fail-closed sandbox refusal: the command never ran
+			// and the caller can errors.As the specific cause (the
+			// Pipeline normalizes it into an isError result whose text
+			// carries the unavailable fact).
+			return "", out.sandboxErr
+		}
 		return "", fmt.Errorf("run_shell: spawn failed: %s", out.SpawnError)
 	}
 }

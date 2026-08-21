@@ -1365,11 +1365,26 @@ Protocol contract: `docs/native-engine/host-protocol.md` (read it
 before driving the wire). Typical start:
 
 ```sh
+# --approval-timeout-ms 0 = wait while connected; a disconnect still denies
 vh-agentd --adapter openai|openaicompat|anthropic --model <name> \
   --base-url <https://...> --api-key-env <ENV_VAR_NAME> \
   --session-dir <dir> [--max-tokens N] [--cache-breakpoints 0-4] \
-  [--approval-timeout-ms N]   # 0 = wait while connected; disconnect still denies
+  [--approval-timeout-ms N] \
+  [--sandbox off|read-only|workspace-write]
 ```
+
+`--cache-breakpoints` is **Anthropic-only** (explicit `cache_control`
+breakpoints); it is rejected for `openai`/`openaicompat` because
+OpenAI-compatible endpoints cache implicitly via prefix matching —
+there is no breakpoint knob to map. `--sandbox` confines the
+`run_shell` tool: `off` (default) is the loud NO-confinement posture;
+`read-only` and `workspace-write` are kernel-enforced (Landlock +
+seccomp; writes outside the contract and network denied;
+workspace-write allows writes only under the session dir and OS temp).
+Confinement fail-closes: on hosts without the OS primitives, sandboxed
+`run_shell` calls return a typed sandbox-unavailable error — never a
+silently unconfined run. There is no `danger-full-access` mode (it is
+redundant with `off`).
 
 `--compile-prompt` runs the offline prompt compilation (writes under
 `<session-dir>/compiled-prompts/`, exits; no network, no key value
