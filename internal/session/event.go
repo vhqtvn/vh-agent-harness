@@ -287,8 +287,8 @@ type ToolResultPayload struct {
 	ReplacedBy string `json:"replacedBy,omitempty"`
 	// Spilled is true when Content is a preview of a spilled result.
 	Spilled bool `json:"spilled,omitempty"`
-	// SpillLocator is the opaque locator for retrieving the full bytes
-	// via spill_read (set iff Spilled).
+	// SpillLocator is the opaque locator for paging the spilled bytes
+	// back via spill_read windows (set iff Spilled).
 	SpillLocator *SpillLocator `json:"spillLocator,omitempty"`
 }
 

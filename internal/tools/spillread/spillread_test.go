@@ -40,6 +40,10 @@ func execDef(t *testing.T, root string, maxInline int64, args string) (string, e
 // windowNoticeRE parses the in-band paging notice.
 var windowNoticeRE = regexp.MustCompile(`\[window offset=(\d+) length=(\d+) of (\d+) bytes — adjust offset/length to page\]$`)
 
+// completeNoticeRE parses the explicit terminal notice (the clean end
+// at offset == size).
+var completeNoticeRE = regexp.MustCompile(`\[window complete: offset=(\d+) of (\d+) bytes — full content delivered\]$`)
+
 // parseWindowNotice extracts (offset, length, size) from a retrieval
 // result's trailing notice — exactly the arithmetic a model follows to
 // page (next offset = offset+length).
@@ -142,6 +146,80 @@ func TestSpillReadWindowedPagingIsNotANoop(t *testing.T) {
 	}
 	if page3 == page2 || page3 == page1 {
 		t.Fatal("page 3 repeated an earlier page's bytes — paging is not advancing")
+	}
+}
+
+// TestSpillReadLastPageNoticeCompletesTraversal is the DEAD-END KILL
+// TEST for the LAST page: the trailing notice must report the DELIVERED
+// window length (the storage layer serves min(winLen, size-offset)),
+// never the requested/clamped one. With the requested length, the
+// documented arithmetic next_offset = offset+length OVERSHOOTS EOF on a
+// short final page and the follow-up call fails closed — a model
+// following the notice could never complete a traversal. The test walks
+// the WHOLE content purely by notice arithmetic (two full pages plus a
+// short last page), then requires the follow-up call at exactly
+// offset == size to be a clean explicit terminal notice — not a paging
+// notice pointing past EOF, and not an overshoot error.
+func TestSpillReadLastPageNoticeCompletesTraversal(t *testing.T) {
+	root := t.TempDir()
+	s := session.NewFileSpillStore(root, "sess-last")
+	const cap = 4096
+	// Size chosen so the default window splits it into two full pages
+	// plus a SHORT final page (10000 % ~4018 != 0 — the last window
+	// delivers fewer bytes than requested).
+	content := pagedContent(10000)
+	loc, err := s.Write("", []byte(content))
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	var got strings.Builder
+	off := int64(0)
+	for calls := 1; ; calls++ {
+		args, _ := json.Marshal(map[string]any{"locator": loc, "offset": off})
+		out, err := execDef(t, root, cap, string(args))
+		if err != nil {
+			t.Fatalf("call %d at offset %d errored — notice arithmetic dead-ended: %v", calls, off, err)
+		}
+		if m := completeNoticeRE.FindStringSubmatch(out); m != nil {
+			// The clean terminal: offset == size, empty window, explicit
+			// completion notice — never an overshoot error.
+			termOff, _ := strconv.ParseInt(m[1], 10, 64)
+			termSize, _ := strconv.ParseInt(m[2], 10, 64)
+			if termOff != int64(len(content)) || termSize != int64(len(content)) {
+				t.Fatalf("terminal notice = offset %d of %d, want %d of %d", termOff, termSize, len(content), len(content))
+			}
+			if windowNoticeRE.MatchString(out) {
+				t.Fatalf("terminal result must not carry a paging notice: %q", tail(out, 120))
+			}
+			if got.String() != content {
+				t.Fatal("traversal by notice arithmetic did not reassemble the full content")
+			}
+			if calls < 4 {
+				t.Fatalf("traversal took %d calls — expected two full pages + a short last page + the terminal call", calls)
+			}
+			break
+		}
+		o, l, sz := parseWindowNotice(t, out)
+		if o != off || sz != int64(len(content)) {
+			t.Fatalf("call %d notice = offset %d length %d of %d, want offset %d of %d", calls, o, l, sz, off, len(content))
+		}
+		if l <= 0 {
+			t.Fatalf("call %d: non-terminal notice must carry a positive delivered length", calls)
+		}
+		if o+l > sz {
+			t.Fatalf("call %d notice length %d at offset %d exceeds size %d — notice reports the REQUESTED window, not the delivered bytes (last-page dead end)", calls, l, o, sz)
+		}
+		notice := windowNoticeRE.FindString(out)
+		window := strings.TrimSuffix(strings.TrimSuffix(out, notice), "\n")
+		if int64(len(window)) != l {
+			t.Fatalf("call %d notice length %d != delivered window %d bytes", calls, l, len(window))
+		}
+		if window != content[o:o+l] {
+			t.Fatalf("call %d window is not content[%d:%d]", calls, o, o+l)
+		}
+		got.WriteString(window)
+		off = o + l
 	}
 }
 

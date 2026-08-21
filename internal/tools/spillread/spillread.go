@@ -22,9 +22,14 @@
 // is the [offset, offset+length) slice of the stored content, followed
 // (unless the window covers the whole content) by a trailing
 // `[window offset=O length=L of SIZE bytes — adjust offset/length to
-// page]` notice. Reads are full-file hash-validated and fail closed on
-// any mismatch — a tampered or truncated store file never serves
-// bytes, even when the requested window itself is healthy.
+// page]` notice whose L is the DELIVERED length — the storage layer
+// serves min(length, size-offset), so on a short final page the
+// arithmetic next_offset = offset+L lands exactly at EOF, never past
+// it. The terminal call at offset == size returns an empty window with
+// an explicit `[window complete]` notice. Reads are full-file
+// hash-validated and fail closed on any mismatch — a tampered or
+// truncated store file never serves bytes, even when the requested
+// window itself is healthy.
 package spillread
 
 import (
@@ -49,7 +54,8 @@ const parametersSchema = `{"type":"object","properties":{` +
 
 const description = "Retrieves a bounded window of an oversize tool result that was spilled to durable storage. " +
 	"Pass the locator object exactly as it appeared in the spilled result (the {\"file\",\"sha256\",\"size\"} JSON from the notice line or the spillLocator field), plus optional offset/length to page: " +
-	"each call returns the bytes of one window (default: the first inline-cap-sized window) with a trailing [window offset=O length=L of SIZE bytes] notice telling you where you are — advance offset by length to page through the content. " +
+	"each call returns the bytes of one window (default: the first inline-cap-sized window) with a trailing [window offset=O length=L of SIZE bytes] notice telling you where you are — advance offset by length to page through the content " +
+	"(the notice length is the DELIVERED window size, so the final page may be short and offset+length lands at most at the content size; a call at offset == size returns an empty window with a [window complete] terminal notice). " +
 	"Windows are clamped so results always fit inline. Reads are hash-validated against the full content and fail closed on any mismatch (tampered, truncated, or missing content returns an error, never wrong bytes). " +
 	"Read-only and concurrency-safe."
 
@@ -138,7 +144,18 @@ func Definition(root string, maxInline int64) tools.ToolDefinition {
 			if a.Offset == 0 && int64(len(window)) >= size {
 				return string(window), nil
 			}
-			return string(window) + "\n" + windowNotice(a.Offset, winLen, size), nil
+			// The terminal call (offset == size, everything already
+			// delivered) is an explicit clean end: empty window + terminal
+			// notice — never a paging notice whose next_offset arithmetic
+			// would point PAST EOF into the fail-closed guard.
+			if len(window) == 0 {
+				return fmt.Sprintf("[window complete: offset=%d of %d bytes — full content delivered]", a.Offset, size), nil
+			}
+			// The paging notice reports DELIVERED bytes: the storage layer
+			// serves min(winLen, size-offset), so a short final page makes
+			// next_offset = offset + len(window) land exactly at EOF —
+			// never past it.
+			return string(window) + "\n" + windowNotice(a.Offset, int64(len(window)), size), nil
 		},
 	}
 }

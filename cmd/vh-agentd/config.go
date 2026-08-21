@@ -145,13 +145,15 @@ Spill (--spill-max-inline N):
   matching the run_shell capture cap) is written FULL to
   <session-dir>/<session-id>.spill/ (0700 dir, 0600 content-addressed
   files) and the committed tool/result event carries a bounded preview
-  plus an opaque locator; the spill_read tool retrieves the full bytes
-  (hash-validated, fail-closed, 1 MiB per read). 0 disables the spill
-  (always-inline, the pre-spill behavior). A spill-store write failure
-  silently keeps the content inline — the sidecar never fails the tool
-  result. Spill files are durable sidecar state: replay of a session
-  log never touches them (loss degrades retrieval, not replay
-  integrity).
+  plus an opaque locator; the spill_read tool pages the stored bytes
+  back in bounded windows (offset/length per call, lengths clamped to
+  the same inline cap so every page fits inline, hash-validated,
+  fail-closed; a call at offset == size returns an empty terminal
+  window). 0 disables the spill (always-inline, the pre-spill
+  behavior). A spill-store write failure silently keeps the content
+  inline — the sidecar never fails the tool result. Spill files are
+  durable sidecar state: replay of a session log never touches them
+  (loss degrades retrieval, not replay integrity).
 
 System prompt (compiled-sysprompt model):
   The daemon serves its system prompt from the compiled artifact under

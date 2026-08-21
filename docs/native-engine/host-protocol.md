@@ -287,9 +287,12 @@ pre-spill behavior).
   pre-windowing full-content return, which was a model-visible no-op:
   an oversize retrieval was re-spilled at commit, content addressing
   deduped it to the SAME locator, and the model saw a byte-identical
-  preview. Paging arithmetic: the next window is
-  `offset = offset+length`; `offset` past `SIZE` fails closed with
-  the size in the error.) Hash validation stays FULL-FILE: a tampered
+  preview. Paging arithmetic: the notice's `length` is the DELIVERED
+  window size (the final page may be short), so the next window
+  `offset = offset+length` lands at most exactly at `SIZE`; the
+  terminal call at `offset == SIZE` returns an empty window with a
+  `[window complete]` notice, and `offset` past `SIZE` fails closed
+  with the size in the error.) Hash validation stays FULL-FILE: a tampered
   or truncated store file refuses even a healthy window. When the
   daemon config is absent the tool still registers (for pipeline
   tests) and fails closed on unknown files.
