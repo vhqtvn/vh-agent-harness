@@ -93,6 +93,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		baseURL           = new(string)
 		apiKeyEnv         = new(string)
 		sessionDir        = new(string)
+		optimizer         = new(string)
 		maxTokens         = new(int)
 		approvalTimeoutMs = new(int)
 		cacheBreakpoints  = new(int)
@@ -108,11 +109,12 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	fs.StringVar(baseURL, "base-url", "", "absolute http(s) base URL of the provider endpoint (required)")
 	fs.StringVar(apiKeyEnv, "api-key-env", "", "NAME of the environment variable holding the API key (required; never a literal key)")
 	fs.StringVar(sessionDir, "session-dir", "", "directory for durable session logs (required; no default)")
+	fs.StringVar(optimizer, "optimizer", "llm", "--compile-prompt optimizer: llm (default) = real adapter-backed optimizer, ONE compile-time LLM call, output is a candidate checked by the fail-closed compile invariants, needs the key variable SET (exit 2 without it — no silent dedup), NO retries (a failed compile is a rerun of this command); dedup = offline reference fake, no key")
 	fs.IntVar(maxTokens, "max-tokens", 0, "max_tokens override (0 = adapter default; anthropic requires one)")
 	fs.IntVar(approvalTimeoutMs, "approval-timeout-ms", defaultApprovalTimeoutMs, "bound on each pending approval (0 = wait while connected)")
 	fs.IntVar(cacheBreakpoints, "cache-breakpoints", 0, "Anthropic prompt-cache breakpoint budget: 0=off (default), 1-4 explicit (anthropic only; openai caching is implicit and rejects this flag)")
 	fs.StringVar(sandbox, "sandbox", "off", "run_shell confinement: off (default: NO confinement, engine privileges), read-only (whole FS readable, no writes, network denied), workspace-write (writes only under the session dir + OS temp; network denied). Kernel-enforced (Landlock+seccomp); if unavailable, sandboxed calls FAIL CLOSED with a typed error")
-	fs.BoolVar(compilePrompt, "compile-prompt", false, "run the offline prompt compilation with the current config (reference Dedup optimizer), write the artifact under <session-dir>/compiled-prompts/, and exit — no network, no key, no protocol session")
+	fs.BoolVar(compilePrompt, "compile-prompt", false, "run the prompt compilation with the current config, write the artifact under <session-dir>/compiled-prompts/, and exit — no protocol session; default --optimizer llm makes ONE compile-time LLM call and requires the variable named by --api-key-env to be set (fail-closed exit 2 without it); --optimizer dedup is the offline, keyless alternative")
 	fs.BoolVar(showVersion, "version", false, "print engine and protocol versions and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -126,7 +128,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		return 0
 	}
 
-	cfg, err := validate(*adapter, *model, *baseURL, *apiKeyEnv, *sessionDir, *maxTokens, *approvalTimeoutMs, *cacheBreakpoints, *sandbox)
+	cfg, err := validate(*adapter, *model, *baseURL, *apiKeyEnv, *sessionDir, *optimizer, *maxTokens, *approvalTimeoutMs, *cacheBreakpoints, *sandbox)
 	if err != nil {
 		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
 		return 2
@@ -148,12 +150,23 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		return 1
 	}
 
-	// Offline compile mode: assemble + optimize + write the artifact
-	// and exit. Deliberately BEFORE the credential check — a compile
-	// run makes no network calls and needs no key (--api-key-env must
-	// still NAME a variable; the variable itself may be unset here).
+	// Compile mode: assemble + optimize + write the artifact
+	// and exit. Deliberately BEFORE the serving credential check — a
+	// compile run starts no protocol session. With --optimizer dedup it
+	// is fully offline (no key value read). With --optimizer llm (the
+	// default) the compile makes ONE real call through the configured
+	// adapter, so the key variable must be SET: exit 2 naming the
+	// missing piece — fail-closed, never a silent dedup fallback.
 	if *compilePrompt {
-		if err := compilePromptOffline(context.Background(), cfg, toolSpecsForPrompt(cfg), stderrw); err != nil {
+		compileKey := ""
+		if cfg.Optimizer == optimizerLLM {
+			compileKey = getenv(cfg.APIKeyEnv)
+			if compileKey == "" {
+				fmt.Fprintf(stderrw, "vh-agentd: --optimizer llm requires the API key environment variable %s to be set (fail-closed: no silent dedup fallback; use --optimizer dedup for an offline compile)\n\n%s", cfg.APIKeyEnv, usageDoc)
+				return 2
+			}
+		}
+		if err := compilePromptOffline(context.Background(), cfg, compileKey, toolSpecsForPrompt(cfg), stderrw); err != nil {
 			log.Printf("%v", err)
 			return 1
 		}
@@ -164,12 +177,12 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	// when unset. The value never reaches the logs (only its name does).
 	apiKey := getenv(cfg.APIKeyEnv)
 	if apiKey == "" {
-		fmt.Fprintf(stderrw, "vh-agentd: API key environment variable %s is not set (fail-closed: refusing to start without credentials; note --compile-prompt runs offline and needs no key)\n\n%s", cfg.APIKeyEnv, usageDoc)
+		fmt.Fprintf(stderrw, "vh-agentd: API key environment variable %s is not set (fail-closed: refusing to start without credentials; note --compile-prompt with --optimizer dedup runs offline and needs no key; the default llm optimizer requires the key variable set)\n\n%s", cfg.APIKeyEnv, usageDoc)
 		return 2
 	}
 
-	log.Printf("starting: adapter=%s model=%s base-url=%s session-dir=%s api-key-env=%s approval-timeout-ms=%d cache-breakpoints=%d sandbox=%s",
-		cfg.Adapter, cfg.Model, cfg.BaseURL, cfg.SessionDir, cfg.APIKeyEnv, cfg.ApprovalTimeoutMs, cfg.CacheBreakpoints, cfg.SandboxMode)
+	log.Printf("starting: adapter=%s model=%s base-url=%s session-dir=%s api-key-env=%s approval-timeout-ms=%d cache-breakpoints=%d sandbox=%s optimizer=%s",
+		cfg.Adapter, cfg.Model, cfg.BaseURL, cfg.SessionDir, cfg.APIKeyEnv, cfg.ApprovalTimeoutMs, cfg.CacheBreakpoints, cfg.SandboxMode, cfg.Optimizer)
 
 	srv, _, tracker, served := buildServer(cfg, apiKey, rwc)
 	if served.Reason != "" {

@@ -1370,7 +1370,8 @@ vh-agentd --adapter openai|openaicompat|anthropic --model <name> \
   --base-url <https://...> --api-key-env <ENV_VAR_NAME> \
   --session-dir <dir> [--max-tokens N] [--cache-breakpoints 0-4] \
   [--approval-timeout-ms N] \
-  [--sandbox off|read-only|workspace-write]
+  [--sandbox off|read-only|workspace-write] \
+  [--optimizer dedup|llm]
 ```
 
 `--cache-breakpoints` is **Anthropic-only** (explicit `cache_control`
@@ -1386,9 +1387,15 @@ Confinement fail-closes: on hosts without the OS primitives, sandboxed
 silently unconfined run. There is no `danger-full-access` mode (it is
 redundant with `off`).
 
-`--compile-prompt` runs the offline prompt compilation (writes under
-`<session-dir>/compiled-prompts/`, exits; no network, no key value
-needed). Credential discipline: `--api-key-env` takes the **name** of an
+`--compile-prompt` runs the compile-time prompt compilation (writes under
+`<session-dir>/compiled-prompts/`, exits; no protocol session).
+`--optimizer llm` (the default) backs it with the real adapter-backed
+optimizer — ONE compile-time LLM call through the configured adapter,
+output treated as a candidate and checked by the fail-closed compile
+invariants; it needs the key variable SET and exits 2 without it (never
+a silent dedup fallback; no retries — a failed compile is a rerun).
+`--optimizer dedup` selects the offline, keyless reference fake.
+Credential discipline: `--api-key-env` takes the **name** of an
 environment variable only — never a literal key — and the daemon fails
 closed when that variable is unset. stdout is protocol; diagnostics go
 to stderr. Client EOF is a disconnect: pending approvals deny

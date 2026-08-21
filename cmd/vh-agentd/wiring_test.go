@@ -36,6 +36,10 @@ import (
 // them into TurnOptions.System.
 func TestPromptServingRawFallbackThenCompiled(t *testing.T) {
 	cfg := testConfig(t, "openai", "http://127.0.0.1:1")
+	// The serving MECHANICS via the offline reference fake: this test
+	// has no LLM stub. (The llm-optimizer family — compile AND serve —
+	// is covered end-to-end in prompt_optimizer_test.go.)
+	cfg.Optimizer = optimizerDedup
 	specs := toolSpecsForPrompt(cfg)
 
 	// Fresh dir: raw assembly fallback, never silent.
@@ -62,7 +66,7 @@ func TestPromptServingRawFallbackThenCompiled(t *testing.T) {
 	// the Dedup reference fake and no duplicate sections the optimized
 	// bytes may legitimately equal the raw bytes — the assertion that
 	// matters is that the SERVED bytes are the ARTIFACT's bytes.)
-	if err := compilePromptOffline(context.Background(), cfg, specs, io.Discard); err != nil {
+	if err := compilePromptOffline(context.Background(), cfg, "", specs, io.Discard); err != nil {
 		t.Fatalf("compilePromptOffline: %v", err)
 	}
 	compiled, served2, err := resolveSystemPrompt(cfg, specs)
@@ -76,7 +80,7 @@ func TestPromptServingRawFallbackThenCompiled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildPromptInputs: %v", err)
 	}
-	hash, err := prompt.InputHash(asm2, vars2, catalog, prompt.DedupOptimizerVersion, promptContract())
+	hash, err := prompt.InputHash(asm2, vars2, catalog, servingOptimizerVersion(cfg), promptContract())
 	if err != nil {
 		t.Fatalf("InputHash: %v", err)
 	}
@@ -89,7 +93,7 @@ func TestPromptServingRawFallbackThenCompiled(t *testing.T) {
 	}
 	// Determinism: a second compile is a cache hit; the same bytes
 	// re-serve.
-	if err := compilePromptOffline(context.Background(), cfg, specs, io.Discard); err != nil {
+	if err := compilePromptOffline(context.Background(), cfg, "", specs, io.Discard); err != nil {
 		t.Fatalf("second compilePromptOffline: %v", err)
 	}
 	again, _, err := resolveSystemPrompt(cfg, specs)
@@ -107,16 +111,18 @@ func TestPromptServingRawFallbackThenCompiled(t *testing.T) {
 }
 
 // TestCompilePromptFlagRunsOffline drives the --compile-prompt CLI
-// surface end-to-end through run(): NO API key environment value is set
-// (offline mode must not need one), the artifact lands under
-// <session-dir>/compiled-prompts/, and the report goes to stderr.
+// surface end-to-end through run() in its OFFLINE mode (--optimizer
+// dedup): NO API key environment value is set, the artifact lands under
+// <session-dir>/compiled-prompts/, and the report goes to stderr. (The
+// default llm optimizer without a key is the exit-2 fail-closed case in
+// prompt_optimizer_test.go.)
 func TestCompilePromptFlagRunsOffline(t *testing.T) {
 	dir := t.TempDir()
 	var out, errBuf safeBuffer
 	code := run([]string{
 		"--adapter", "openai", "--model", "m", "--base-url", "http://127.0.0.1:1",
 		"--api-key-env", "VH_AGENTD_NO_SUCH_KEY", "--session-dir", dir,
-		"--compile-prompt",
+		"--compile-prompt", "--optimizer", "dedup",
 	}, func(string) string { return "" }, nil, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (stderr: %s)", code, errBuf.String())
@@ -431,7 +437,7 @@ func TestAnthropicCacheBreakpointsWireRoundTrip(t *testing.T) {
 	llm, bodyCell := anthropicFakeLLM(t)
 	defer llm.Close()
 	dir := t.TempDir()
-	cfg, err := validate("anthropic", "fake-claude", llm.URL, "VH_AGENTD_TEST_KEY", dir, 0, defaultApprovalTimeoutMs, 1, "off")
+	cfg, err := validate("anthropic", "fake-claude", llm.URL, "VH_AGENTD_TEST_KEY", dir, "", 0, defaultApprovalTimeoutMs, 1, "off")
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}

@@ -22,6 +22,19 @@ const engineVersion = "0.1.0"
 // F-PIPE-2 fail-closed posture: an unanswerable approval denies).
 const defaultApprovalTimeoutMs = 30000
 
+// Optimizer selections for the offline --compile-prompt step.
+const (
+	// optimizerLLM is the real adapter-backed optimizer: ONE compile-time
+	// LLM call through the configured adapter; the output is a CANDIDATE
+	// checked by the compile-time invariants (the authority). The
+	// DEFAULT. Requires the --api-key-env variable to be SET for a
+	// compile run (fail-closed exit 2 otherwise — never a silent dedup).
+	optimizerLLM = "llm"
+	// optimizerDedup is the reference fake: deterministic, mechanical,
+	// offline, no key — for no-network runs and CI.
+	optimizerDedup = "dedup"
+)
+
 // Config is the validated daemon configuration.
 type Config struct {
 	// Adapter is the normalized provider name ("openaicompat" |
@@ -48,6 +61,13 @@ type Config struct {
 	// budget, wired into the anthropic adapter's CacheConfig. It is
 	// REJECTED for openaicompat (see validateCacheBreakpoints).
 	CacheBreakpoints int
+	// Optimizer is the validated --optimizer value (llm | dedup) for
+	// the offline --compile-prompt step. It selects BOTH the compile
+	// path AND the artifact family the serving rule hashes for: the
+	// llm version string is derived deterministically from the model
+	// (prompt.LLMOptimizerVersion), so serving needs no key or network
+	// to find an llm-compiled artifact. Default llm.
+	Optimizer string
 	// SandboxMode is the validated --sandbox value (off | read-only |
 	// workspace-write) wired into run_shell's confinement seam. off
 	// (the default) keeps Config.Sandbox nil — the loud NO-confinement
@@ -75,9 +95,21 @@ Credentials:
   --api-key-env (there is intentionally no literal --api-key flag). It is
   held in adapter memory only, sent to the configured --base-url, and
   never written to session logs or diagnostics (refs-not-stored).
-  Exception: --compile-prompt runs OFFLINE and never touches the network
-  or the key — --api-key-env must still NAME a variable, but the
-  variable does not need to be set for a compile run.
+  --api-key-env must always NAME a variable. For --compile-prompt the
+  variable only needs to be SET when --optimizer llm is active (the
+  default): the llm optimizer makes one real call through the
+  configured adapter. With --optimizer dedup the compile is fully
+  offline and the key value is never read.
+
+Optimizer (--optimizer dedup|llm, for --compile-prompt):
+  llm (default) — the real adapter-backed optimizer: ONE compile-time
+  LLM call (no retries; a failed compile is a rerun of the command),
+  output treated as a CANDIDATE and checked by the fail-closed compile
+  invariants. Needs --api-key-env's variable set; without it the
+  compile exits 2 (fail-closed — no silent dedup fallback).
+  dedup — the reference fake: deterministic, mechanical, offline, no
+  key. Artifacts of the two optimizers are separate content-hash
+  families; serve with the same --optimizer value you compiled with.
 
 Prompt cache (--cache-breakpoints N):
   Anthropic only. 0 (default) keeps explicit caching off; 1-4 sets the
@@ -103,21 +135,23 @@ System prompt (compiled-sysprompt model):
   The daemon serves its system prompt from the compiled artifact under
   <session-dir>/compiled-prompts/ when one matches the current content
   hash, and falls back to raw assembly otherwise (the fallback is logged,
-  never silent). Populate the artifact offline with --compile-prompt.
+  never silent). Populate the artifact with --compile-prompt.
 
 Usage:
   vh-agentd --adapter openai|anthropic --model M --base-url URL
             --api-key-env VAR --session-dir DIR [--max-tokens N]
             [--approval-timeout-ms MS] [--cache-breakpoints N]
             [--sandbox off|read-only|workspace-write]
-            [--compile-prompt] [--version]
+            [--optimizer dedup|llm] [--compile-prompt] [--version]
 
-  --compile-prompt  run the offline prompt compilation with the current
-                    config (reference Dedup optimizer; the real
-                    adapter-backed optimizer stays a seam), write the
-                    content-hashed artifact under
+  --compile-prompt  run the compile-time prompt compilation with the current
+                    config, write the content-hashed artifact under
                     <session-dir>/compiled-prompts/, report to stderr,
-                    and exit. No network, no key, no protocol session.
+                    and exit. With --optimizer llm (the default) this
+                    makes ONE real LLM call through the configured
+                    adapter and needs the key variable SET; with
+                    --optimizer dedup it is offline and keyless. No
+                    protocol session either way.
 `
 
 var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -153,9 +187,24 @@ func validateCacheBreakpoints(adapter string, n int) error {
 	return nil
 }
 
+// normalizeOptimizer maps the --optimizer flag onto its validated
+// selection; empty means the default (llm).
+func normalizeOptimizer(v string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "":
+		return optimizerLLM, nil
+	case optimizerLLM:
+		return optimizerLLM, nil
+	case optimizerDedup:
+		return optimizerDedup, nil
+	default:
+		return "", fmt.Errorf("invalid --optimizer %q: must be llm (real adapter-backed compile; default) or dedup (offline reference fake)", v)
+	}
+}
+
 // validate checks the parsed flags fail-closed and returns the
 // normalized Config.
-func validate(adapter, model, baseURL, apiKeyEnv, sessionDir string, maxTokens, approvalTimeoutMs, cacheBreakpoints int, sandboxMode string) (*Config, error) {
+func validate(adapter, model, baseURL, apiKeyEnv, sessionDir, optimizer string, maxTokens, approvalTimeoutMs, cacheBreakpoints int, sandboxMode string) (*Config, error) {
 	ad, ok := normalizeAdapter(adapter)
 	if !ok {
 		return nil, fmt.Errorf("invalid --adapter %q: must be openai (openaicompat) or anthropic", adapter)
@@ -191,6 +240,10 @@ func validate(adapter, model, baseURL, apiKeyEnv, sessionDir string, maxTokens, 
 	if err := validateCacheBreakpoints(ad, cacheBreakpoints); err != nil {
 		return nil, err
 	}
+	opt, err := normalizeOptimizer(optimizer)
+	if err != nil {
+		return nil, err
+	}
 	mode, err := shell.ParseSandboxMode(strings.TrimSpace(sandboxMode))
 	if err != nil {
 		return nil, fmt.Errorf("invalid --sandbox %q: %w", sandboxMode, err)
@@ -205,6 +258,7 @@ func validate(adapter, model, baseURL, apiKeyEnv, sessionDir string, maxTokens, 
 		MaxTokens:         maxTokens,
 		ApprovalTimeoutMs: approvalTimeoutMs,
 		CacheBreakpoints:  cacheBreakpoints,
+		Optimizer:         opt,
 		SandboxMode:       mode,
 	}
 	// workspace-write default writable roots: the session dir (every

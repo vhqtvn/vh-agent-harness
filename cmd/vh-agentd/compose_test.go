@@ -25,7 +25,7 @@ import (
 
 func testConfig(t *testing.T, adapter, baseURL string) *Config {
 	t.Helper()
-	cfg, err := validate(adapter, "fake-model", baseURL, "VH_AGENTD_TEST_KEY", t.TempDir(), 0, defaultApprovalTimeoutMs, 0, "off")
+	cfg, err := validate(adapter, "fake-model", baseURL, "VH_AGENTD_TEST_KEY", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "off")
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestBuildServerBothAdapters(t *testing.T) {
 // an injected clock for determinism.
 func TestDogfoodToolsExecute(t *testing.T) {
 	fixed := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
-	offCfg, err := validate("openai", "fake-model", "http://x.test", "VH_AGENTD_TEST_KEY", t.TempDir(), 0, defaultApprovalTimeoutMs, 0, "off")
+	offCfg, err := validate("openai", "fake-model", "http://x.test", "VH_AGENTD_TEST_KEY", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "off")
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}

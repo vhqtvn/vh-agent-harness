@@ -95,18 +95,56 @@ func promptContract() prompt.InvariantsContract {
 	return prompt.InvariantsContract{MaxGrowthRatio: 1.0}
 }
 
+// servingOptimizerVersion derives the optimizer version the SERVING
+// rule hashes for: the same selection --optimizer made at compile time.
+// For llm this is purely deterministic (model name + instructions
+// schema — prompt.LLMOptimizerVersion), so the daemon can find an
+// llm-compiled artifact with NO key and NO network on the request path.
+func servingOptimizerVersion(cfg *Config) string {
+	if cfg.Optimizer == optimizerDedup {
+		return prompt.DedupOptimizerVersion
+	}
+	return prompt.LLMOptimizerVersion(cfg.Model)
+}
+
+// selectCompileOptimizer builds the VersionedOptimizer for the offline
+// compile step. dedup = the reference fake (offline, keyless). llm =
+// the REAL adapter-backed optimizer over the daemon's own adapter
+// selection, requiring the key; a missing key is a typed error (the
+// fail-closed posture — run() turns it into exit 2 before any compile
+// work, and this guard keeps direct callers honest too).
+func selectCompileOptimizer(cfg *Config, apiKey string) (prompt.VersionedOptimizer, error) {
+	if cfg.Optimizer == optimizerDedup {
+		return prompt.Dedup, nil
+	}
+	if apiKey == "" {
+		return prompt.VersionedOptimizer{}, fmt.Errorf("vh-agentd: --optimizer llm requires the API key environment variable %s to be set (fail-closed: no silent dedup fallback; use --optimizer dedup for an offline compile)", cfg.APIKeyEnv)
+	}
+	opt, err := prompt.NewLLMOptimizer(cfg.Model, buildAdapter(cfg, apiKey).Call)
+	if err != nil {
+		return prompt.VersionedOptimizer{}, fmt.Errorf("vh-agentd: llm optimizer: %w", err)
+	}
+	return opt.Versioned(), nil
+}
+
 // compilePromptOffline runs the explicit offline optimization step with
-// the current config: assemble, optimize via the reference Dedup fake
-// (the real adapter-backed optimizer stays a seam — same signature,
-// future wiring), check every mechanical invariant, and atomically write
-// the content-hashed artifact. It reports to w (stderr — stdout is
-// protocol) and touches no network and no credentials.
-func compilePromptOffline(ctx context.Context, cfg *Config, specs []adapters.ToolSpec, w io.Writer) error {
+// the current config: assemble, optimize via the --optimizer selection
+// (llm = the real adapter-backed optimizer making ONE compile-time call
+// through the configured adapter; dedup = the offline reference fake),
+// check every mechanical invariant (they stay the authority — the LLM
+// output is a candidate), and atomically write the content-hashed
+// artifact. It reports to w (stderr — stdout is protocol). No retries:
+// a failed compile is a rerun of the command.
+func compilePromptOffline(ctx context.Context, cfg *Config, apiKey string, specs []adapters.ToolSpec, w io.Writer) error {
 	asm, vars, catalog, err := buildPromptInputs(cfg, specs)
 	if err != nil {
 		return err
 	}
-	art, err := prompt.Compile(ctx, asm, vars, catalog, prompt.Dedup, promptContract(), promptArtifactDir(cfg))
+	opt, err := selectCompileOptimizer(cfg, apiKey)
+	if err != nil {
+		return err
+	}
+	art, err := prompt.Compile(ctx, asm, vars, catalog, opt, promptContract(), promptArtifactDir(cfg))
 	if err != nil {
 		return fmt.Errorf("vh-agentd: --compile-prompt: %w", err)
 	}
@@ -126,7 +164,7 @@ func resolveSystemPrompt(cfg *Config, specs []adapters.ToolSpec) (string, prompt
 	if err != nil {
 		return "", prompt.ServeResult{}, err
 	}
-	hash, err := prompt.InputHash(asm, vars, catalog, prompt.DedupOptimizerVersion, promptContract())
+	hash, err := prompt.InputHash(asm, vars, catalog, servingOptimizerVersion(cfg), promptContract())
 	if err != nil {
 		return "", prompt.ServeResult{}, fmt.Errorf("vh-agentd: prompt input hash: %w", err)
 	}
