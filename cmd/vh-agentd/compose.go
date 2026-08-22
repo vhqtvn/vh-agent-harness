@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/adapters"
@@ -29,6 +30,7 @@ import (
 	"github.com/vhqtvn/vh-agent-harness/internal/session"
 	"github.com/vhqtvn/vh-agent-harness/internal/subagents"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools"
+	"github.com/vhqtvn/vh-agent-harness/internal/tools/filetools"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/shell"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/spillread"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/subagenttools"
@@ -175,12 +177,17 @@ func toolSpecsForPrompt(cfg *Config) []adapters.ToolSpec {
 // probes (echo, clock), the REAL run_shell tool from
 // internal/tools/shell, spill_read — the retrieval path for spilled
 // oversize results (rooted at the session dir so it reaches every
-// session's store; see internal/tools/spillread) — and the MODEL-FACING
+// session's store; see internal/tools/spillread) — the MODEL-FACING
 // subagent family (subagent_spawn/subagent_send, resolved through the
 // session registry reg; advertised per-session while below the
 // delegation-depth fence — the ROOT session, at depth 0, always is;
 // see internal/tools/subagenttools and cmd/vh-agentd/subagents.go for
-// the depth-conditional advertising on child turns). Config posture
+// the depth-conditional advertising on child turns) — and the
+// MODEL-FACING FILE FAMILY (read/write/edit/glob/search from
+// internal/tools/filetools), confined to the same WorkdirRoots that
+// run_shell's absolute-workdir policy consults (--workdir-roots;
+// default = the daemon's working directory resolved absolute — one
+// root set for every path-taking surface). Config posture
 // (documented defaults):
 //
 //   - policy lists default-EMPTY: AllowedCommands/DeniedCommands are
@@ -202,15 +209,30 @@ func toolSpecsForPrompt(cfg *Config) []adapters.ToolSpec {
 //     Config.SandboxWritableRoots (session dir + OS temp);
 //   - EnvAllowlist empty: the child env is the explicit base set
 //     (PATH/HOME/TERM/LANG) — default-deny, scrubbed;
-//   - WorkdirRoots empty (§4a confinement contract): run_shell
-//     workdirs are confined conservatively — relative paths must stay
-//     inside the engine working directory and ABSOLUTE workdirs are
-//     rejected outright. No daemon flag exposes a workdir root in v1;
-//     a deployment that wants absolute workdirs wires them in Config.
+//   - WorkdirRoots = Config.WorkdirRoots (--workdir-roots, default
+//     the daemon cwd): run_shell's ABSOLUTE workdirs are admitted
+//     exactly under these roots (symlink-safe; the pre-file-family
+//     default of rejecting every absolute workdir was the
+//     empty-roots posture — a daemon configuring roots EXTENDS what
+//     is allowed). Relative run_shell workdirs keep their
+//     inside-the-engine-cwd behavior unchanged.
 //
 // now is injected for the deterministic clock tool.
 func daemonTools(now func() time.Time, cfg *Config, reg *subagents.Registry) []tools.ToolDefinition {
 	shellCfg := shell.Config{}
+	// File-family roots: cfg is nil only for spec-only callers (the
+	// offline --compile-prompt catalog); the tool BODIES never run
+	// there, so the process cwd is a harmless stand-in that keeps the
+	// descriptions/schemas identical.
+	fileRoots := []string{}
+	if cfg != nil {
+		shellCfg.WorkdirRoots = cfg.WorkdirRoots
+		fileRoots = cfg.WorkdirRoots
+	} else {
+		if cwd, err := os.Getwd(); err == nil {
+			fileRoots = []string{cwd}
+		}
+	}
 	if cfg != nil && cfg.SandboxMode != shell.SandboxOff {
 		fn, err := shell.NewSandboxFunc(shell.SandboxOptions{
 			Mode:          cfg.SandboxMode,
@@ -281,6 +303,7 @@ func daemonTools(now func() time.Time, cfg *Config, reg *subagents.Registry) []t
 		spillread.Definition(spillRoot, spillInline),
 		shell.Definition(shellCfg),
 	}
+	defs = append(defs, filetools.Definitions(filetools.Config{Roots: fileRoots})...)
 	defs = append(defs, subagenttools.Definitions(reg)...)
 	return defs
 }

@@ -66,12 +66,18 @@ func buildPromptInputs(cfg *Config, specs []adapters.ToolSpec) (*prompt.Assemble
 	// per session — see internal/tools/subagenttools).
 	//
 	// COMPILED-PROMPT HASH IMPLICATION: this section's bytes are part
-	// of the assembled prompt, so growing the advertised set (this
-	// slice added subagent_spawn/subagent_send) changes the content
-	// hash — previously compiled artifacts no longer match and serving
-	// falls back to RAW assembly (explicitly reported, never silent)
-	// until --compile-prompt is rerun. Known mechanism, by design.
+	// of the assembled prompt, so growing the advertised set (the
+	// subagent slice added subagent_spawn/subagent_send; the file-
+	// family slice added read/write/edit/glob/search) changes the
+	// content hash — previously compiled artifacts no longer match and
+	// serving falls back to RAW assembly (explicitly reported, never
+	// silent) until --compile-prompt is rerun. Known mechanism, by
+	// design (existing tested behavior; no code change needed).
 	tg.WriteString("subagent_spawn delegates a task to a fresh child agent session: mode oneshot (the default) blocks until the child settles and returns its report; mode continuable returns a childId for follow-ups via subagent_send. Children can spawn children the same way, up to the delegation depth fence — a session at the fence is not offered these tools.\n")
+	// File family: generic guidance only — the tool descriptions carry
+	// the semantics (confinement, caps, markers). One line keeps the
+	// section honest without duplicating the catalog.
+	tg.WriteString("The file tools (read, write, edit, glob, search) share one workdir-root confinement: every path you pass is checked symlink-safe against the configured roots, and a rejected path is a typed error naming the rule — never a retry with a different escape. read returns numbered lines with a resume cursor when truncated; edit replaces EXACT text and refuses ambiguous matches unless replaceAll is set.\n")
 	// Accurate by construction: spill guidance only when the policy is
 	// actually armed (--spill-max-inline=0 disables spill outright —
 	// no preview/locator is ever produced, so claiming one would

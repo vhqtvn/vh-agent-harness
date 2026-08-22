@@ -477,7 +477,7 @@ func TestAnthropicCacheBreakpointsWireRoundTrip(t *testing.T) {
 	llm, bodyCell := anthropicFakeLLM(t)
 	defer llm.Close()
 	dir := t.TempDir()
-	cfg, err := validate("anthropic", "fake-claude", llm.URL, "VH_AGENTD_TEST_KEY", dir, "", 0, defaultApprovalTimeoutMs, 1, "off", 65536)
+	cfg, err := validate("anthropic", "fake-claude", llm.URL, "VH_AGENTD_TEST_KEY", dir, "", 0, defaultApprovalTimeoutMs, 1, "off", 65536, "")
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}

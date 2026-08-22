@@ -26,7 +26,7 @@ import (
 
 func testConfig(t *testing.T, adapter, baseURL string) *Config {
 	t.Helper()
-	cfg, err := validate(adapter, "fake-model", baseURL, "VH_AGENTD_TEST_KEY", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "off", 65536)
+	cfg, err := validate(adapter, "fake-model", baseURL, "VH_AGENTD_TEST_KEY", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "off", 65536, "")
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -35,8 +35,8 @@ func testConfig(t *testing.T, adapter, baseURL string) *Config {
 
 // TestBuildServerBothAdapters proves the assembly returns a non-nil
 // server with both adapter selections and the daemon tool set (echo,
-// clock, spill_read, run_shell) registered on the engine's pipeline
-// (post-bridge).
+// clock, spill_read, run_shell, the file family, the subagent family)
+// registered on the engine's pipeline (post-bridge).
 func TestBuildServerBothAdapters(t *testing.T) {
 	for _, adapter := range []string{"openai", "anthropic"} {
 		t.Run(adapter, func(t *testing.T) {
@@ -62,13 +62,18 @@ func TestBuildServerBothAdapters(t *testing.T) {
 			if !got["echo"] || !got["clock"] || !got["run_shell"] || !got["spill_read"] {
 				t.Fatalf("daemon tools not registered: %v", got)
 			}
+			// The model-facing file family rides the same set
+			// (confined to the configured workdir roots).
+			if !got["read"] || !got["write"] || !got["edit"] || !got["glob"] || !got["search"] {
+				t.Fatalf("file tools not registered: %v", got)
+			}
 			// The model-facing subagent family rides the same set (the
 			// root session, depth 0, is always below the fence).
 			if !got["subagent_spawn"] || !got["subagent_send"] {
 				t.Fatalf("subagent tools not registered: %v", got)
 			}
-			if len(eng.TurnOptions().Tools) != 6 {
-				t.Fatalf("turn options do not advertise all six tools: %+v", eng.TurnOptions().Tools)
+			if len(eng.TurnOptions().Tools) != 11 {
+				t.Fatalf("turn options do not advertise all eleven tools: %+v", eng.TurnOptions().Tools)
 			}
 			if eng.TurnOptions().Retry == nil {
 				t.Fatal("retry ladder not armed on the daemon turn path")
@@ -90,7 +95,7 @@ func TestBuildServerBothAdapters(t *testing.T) {
 // an injected clock for determinism.
 func TestDogfoodToolsExecute(t *testing.T) {
 	fixed := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
-	offCfg, err := validate("openai", "fake-model", "http://x.test", "VH_AGENTD_TEST_KEY", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "off", 65536)
+	offCfg, err := validate("openai", "fake-model", "http://x.test", "VH_AGENTD_TEST_KEY", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "off", 65536, "")
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}

@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -99,6 +100,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		cacheBreakpoints  = new(int)
 		sandbox           = new(string)
 		spillMaxInline    = new(int64)
+		workdirRoots      = new(string)
 		compilePrompt     = new(bool)
 		showVersion       = new(bool)
 	)
@@ -116,6 +118,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	fs.IntVar(cacheBreakpoints, "cache-breakpoints", 0, "Anthropic prompt-cache breakpoint budget: 0=off (default), 1-4 explicit (anthropic only; openai caching is implicit and rejects this flag)")
 	fs.StringVar(sandbox, "sandbox", "off", "run_shell confinement: off (default: NO confinement, engine privileges), read-only (whole FS readable, no writes, network denied), workspace-write (writes only under the session dir + OS temp; network denied). Kernel-enforced (Landlock+seccomp); if unavailable, sandboxed calls FAIL CLOSED with a typed error")
 	fs.Int64Var(spillMaxInline, "spill-max-inline", 65536, "inline byte budget for tool results: content above it spills FULL to <session-dir>/<session-id>.spill/ and the event carries a bounded preview + opaque locator (retrievable via spill_read, hash-validated); 0 disables the spill (always inline). Default 65536 (matches the run_shell capture cap)")
+	fs.StringVar(workdirRoots, "workdir-roots", "", "comma-separated ABSOLUTE paths to existing DIRECTORIES confining the file tools (read/write/edit/glob/search) and run_shell absolute workdirs: relative file paths resolve against the FIRST root, absolute paths must sit under a root, escapes and symlink crossings reject fail-closed with zero filesystem effects, and entries resolving to a non-directory (a file, even via symlink) refuse at startup; default = the daemon's working directory resolved absolute")
 	fs.BoolVar(compilePrompt, "compile-prompt", false, "run the prompt compilation with the current config, write the artifact under <session-dir>/compiled-prompts/, and exit — no protocol session; default --optimizer llm makes ONE compile-time LLM call and requires the variable named by --api-key-env to be set (fail-closed exit 2 without it); --optimizer dedup is the offline, keyless alternative")
 	fs.BoolVar(showVersion, "version", false, "print engine and protocol versions and exit")
 
@@ -130,7 +133,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		return 0
 	}
 
-	cfg, err := validate(*adapter, *model, *baseURL, *apiKeyEnv, *sessionDir, *optimizer, *maxTokens, *approvalTimeoutMs, *cacheBreakpoints, *sandbox, *spillMaxInline)
+	cfg, err := validate(*adapter, *model, *baseURL, *apiKeyEnv, *sessionDir, *optimizer, *maxTokens, *approvalTimeoutMs, *cacheBreakpoints, *sandbox, *spillMaxInline, *workdirRoots)
 	if err != nil {
 		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
 		return 2
@@ -183,8 +186,8 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		return 2
 	}
 
-	log.Printf("starting: adapter=%s model=%s base-url=%s session-dir=%s api-key-env=%s approval-timeout-ms=%d cache-breakpoints=%d sandbox=%s optimizer=%s spill-max-inline=%d",
-		cfg.Adapter, cfg.Model, cfg.BaseURL, cfg.SessionDir, cfg.APIKeyEnv, cfg.ApprovalTimeoutMs, cfg.CacheBreakpoints, cfg.SandboxMode, cfg.Optimizer, cfg.SpillMaxInline)
+	log.Printf("starting: adapter=%s model=%s base-url=%s session-dir=%s api-key-env=%s approval-timeout-ms=%d cache-breakpoints=%d sandbox=%s optimizer=%s spill-max-inline=%d workdir-roots=%s",
+		cfg.Adapter, cfg.Model, cfg.BaseURL, cfg.SessionDir, cfg.APIKeyEnv, cfg.ApprovalTimeoutMs, cfg.CacheBreakpoints, cfg.SandboxMode, cfg.Optimizer, cfg.SpillMaxInline, strings.Join(cfg.WorkdirRoots, ","))
 
 	srv, engine, tracker, served := buildServer(cfg, apiKey, rwc)
 	if served.Reason != "" {

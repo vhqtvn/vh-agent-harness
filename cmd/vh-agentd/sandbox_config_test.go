@@ -38,7 +38,7 @@ func TestMain(m *testing.M) {
 func TestValidateSandboxMode(t *testing.T) {
 	base := func(sandbox string) *Config {
 		t.Helper()
-		cfg, err := validate("openai", "m", "https://x.example", "KEY_VAR", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, sandbox, 65536)
+		cfg, err := validate("openai", "m", "https://x.example", "KEY_VAR", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, sandbox, 65536, "")
 		if err != nil {
 			t.Fatalf("validate(%q): %v", sandbox, err)
 		}
@@ -52,7 +52,7 @@ func TestValidateSandboxMode(t *testing.T) {
 	// An explicitly EMPTY --sandbox is a config bug, not the default:
 	// fail closed like every other invalid value (the flag default is
 	// the literal "off").
-	if _, err := validate("openai", "m", "https://x.example", "KEY_VAR", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "", 65536); err == nil {
+	if _, err := validate("openai", "m", "https://x.example", "KEY_VAR", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "", 65536, ""); err == nil {
 		t.Fatalf("validate(\"\") must fail (explicit emptiness is not the off default)")
 	}
 	cfg = base("read-only")
@@ -61,7 +61,7 @@ func TestValidateSandboxMode(t *testing.T) {
 	}
 
 	tmp := t.TempDir()
-	cfg, err := validate("openai", "m", "https://x.example", "KEY_VAR", tmp, "", 0, defaultApprovalTimeoutMs, 0, "workspace-write", 65536)
+	cfg, err := validate("openai", "m", "https://x.example", "KEY_VAR", tmp, "", 0, defaultApprovalTimeoutMs, 0, "workspace-write", 65536, "")
 	if err != nil {
 		t.Fatalf("validate(workspace-write): %v", err)
 	}
@@ -76,11 +76,11 @@ func TestValidateSandboxMode(t *testing.T) {
 	// Refusals: the empty value, the redundant dsh mode and the CLI
 	// verb vocabulary.
 	for _, bad := range []string{"", "danger-full-access", "best-effort", "strict", "bogus"} {
-		if _, err := validate("openai", "m", "https://x.example", "KEY_VAR", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, bad, 65536); err == nil {
+		if _, err := validate("openai", "m", "https://x.example", "KEY_VAR", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, bad, 65536, ""); err == nil {
 			t.Fatalf("validate(%q) must fail", bad)
 		}
 	}
-	_, err = validate("openai", "m", "https://x.example", "KEY_VAR", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "danger-full-access", 65536)
+	_, err = validate("openai", "m", "https://x.example", "KEY_VAR", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "danger-full-access", 65536, "")
 	if err == nil || !strings.Contains(err.Error(), "redundant with off") {
 		t.Fatalf("danger-full-access must be refused as redundant with off: %v", err)
 	}
@@ -125,11 +125,11 @@ func TestRunTrampolineVerbRouting(t *testing.T) {
 // read-only yields a confining SandboxFunc whose outcomes carry the
 // mode label.
 func TestDaemonToolsSandboxWiring(t *testing.T) {
-	off, err := validate("openai", "m", "https://x.example", "KEY_VAR", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "off", 65536)
+	off, err := validate("openai", "m", "https://x.example", "KEY_VAR", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "off", 65536, "")
 	if err != nil {
 		t.Fatalf("validate off: %v", err)
 	}
-	ro, err := validate("openai", "m", "https://x.example", "KEY_VAR", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "read-only", 65536)
+	ro, err := validate("openai", "m", "https://x.example", "KEY_VAR", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "read-only", 65536, "")
 	if err != nil {
 		t.Fatalf("validate read-only: %v", err)
 	}

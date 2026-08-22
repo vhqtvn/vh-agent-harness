@@ -72,7 +72,7 @@ func TestCompilePromptOptimizerDedupByteIdentical(t *testing.T) {
 	}
 
 	// Ground truth: the same compile through the library seam.
-	cfg, err := validate("openai", "m", "http://127.0.0.1:1", "VH_AGENTD_LLMOPT_KEY", dir, "dedup", 0, defaultApprovalTimeoutMs, 0, "off", 65536)
+	cfg, err := validate("openai", "m", "http://127.0.0.1:1", "VH_AGENTD_LLMOPT_KEY", dir, "dedup", 0, defaultApprovalTimeoutMs, 0, "off", 65536, "")
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestCompilePromptOptimizerLLMEndToEndStubAdapter(t *testing.T) {
 	}
 
 	// Artifact: llmopt version, all invariants passed.
-	cfg, err := validate("openai", "stub-model", stub.URL, "VH_AGENTD_LLMOPT_KEY", dir, "", 0, defaultApprovalTimeoutMs, 0, "off", 65536)
+	cfg, err := validate("openai", "stub-model", stub.URL, "VH_AGENTD_LLMOPT_KEY", dir, "", 0, defaultApprovalTimeoutMs, 0, "off", 65536, "")
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestServeCrossFamilyFallbackDedupArtifactLLMServe(t *testing.T) {
 	// serving hash is llmopt/v1/<model>, which mismatches the dedup
 	// artifact → RAW assembly fallback with the explicit reason, and
 	// the dedup artifact is left intact (a mismatch is not a deletion).
-	cfg, err := validate("openai", model, "http://127.0.0.1:1", "VH_AGENTD_LLMOPT_KEY", dir, "", 0, defaultApprovalTimeoutMs, 0, "off", 65536)
+	cfg, err := validate("openai", model, "http://127.0.0.1:1", "VH_AGENTD_LLMOPT_KEY", dir, "", 0, defaultApprovalTimeoutMs, 0, "off", 65536, "")
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}

@@ -1372,6 +1372,7 @@ vh-agentd --adapter openai|openaicompat|anthropic --model <name> \
   [--approval-timeout-ms N] \
   [--sandbox off|read-only|workspace-write] \
   [--spill-max-inline N] \
+  [--workdir-roots DIR[,DIR...]] \
   [--optimizer dedup|llm]
 ```
 
@@ -1412,7 +1413,7 @@ to the LATEST due occurrence (no storm replay after downtime); a due
 schedule lands as an ordinary `job/enqueued` on the active session, so
 settlement and reporting ride the existing job/* event stream.
 
-**Model-facing tool surface (six tools).** The daemon's model is
+**Model-facing tool surface (eleven tools).** The daemon's model is
 offered exactly these tools (child sessions below the delegation fence
 get the same set minus the subagent family at the fence):
 
@@ -1424,10 +1425,40 @@ get the same set minus the subagent family at the fence):
 - `spill_read` — pages back spilled oversize tool results by opaque
   locator (content-addressed, sha256-validated, windowed so every page
   fits inline);
+- `read` — returns a file as 1-based numbered lines (`LN: content`)
+  with optional line offset/limit, byte-capped with an explicit
+  resume-cursor truncation marker;
+- `write` — atomically creates/truncates a file (temp + fsync +
+  rename) and creates missing parent directories inside the roots;
+  returns the absolute path + bytes written;
+- `edit` — EXACT old→new string replacement (`replaceAll` bool for
+  ambiguous matches; no-match and non-unique are typed errors, never
+  partial writes) with a unified-diff-style result snippet;
+- `glob` — lists paths matching a pattern under the roots (stdlib
+  `filepath.Match` semantics: `*`/`?` never cross `/`, no `**`
+  recursion — documented honestly), sorted, bounded with an overflow
+  marker;
+- `search` — regex content search (Go RE2) with `path:LN: line`
+  matches, optional basename glob filter, bounded with an overflow
+  marker; malformed regex is a typed error;
 - `subagent_spawn` — spawn a child session (`mode: oneshot|continuable`);
   oneshot blocks until the child settles and returns its report;
 - `subagent_send` — deliver a follow-up message to a continuable child
   (queues exactly one child turn).
+
+The file family (`read`/`write`/`edit`/`glob`/`search`) is confined
+symlink-safe to the `--workdir-roots` set (comma-separated absolute
+paths to existing directories — a non-directory entry, even via
+symlink, refuses at startup; default = the daemon's working directory
+resolved absolute — the same roots `run_shell`'s absolute-workdir
+policy consults): every
+user-supplied path is checked before any filesystem effect, rejections
+are typed `isError` results naming the rule, a rejected write leaves
+no trace (no file, no created parent directories), and the glob/search
+walks never follow symlinked directories. Oversize results are NOT
+special-cased: the commit-time spill seam applies to them exactly as
+to any other tool result, and each tool keeps its default output under
+a sane size via its own cap/bound with explicit markers.
 
 **Model-facing recursive subagents** (child-of-child): besides the
 client-driven `subagent/spawn|send|list` wire methods, the daemon's

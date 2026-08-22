@@ -169,11 +169,34 @@ partial state — no file created or truncated, no session superseded.
   empty workdir = the engine working directory (unchanged); relative
   workdirs must stay lexically inside it (no leading `..`); absolute
   workdirs are REJECTED unless the daemon configured them under a
-  `WorkdirRoots` entry and they resolve symlink-safe inside one
-  (conservative default: the daemon configures no roots, so absolute
-  workdirs are refused). Job kinds, schedule names (slug-validated),
-  and prompt artifact names (content-hash-derived) never reach
-  filesystem paths.
+  `WorkdirRoots` entry and they resolve symlink-safe inside one. The
+  daemon's `--workdir-roots DIR[,DIR...]` flag (comma-separated
+  absolute paths to existing directories — a non-directory entry,
+  even via symlink, refuses at startup — canonicalized at startup;
+  default = the daemon's working directory resolved absolute)
+  configures exactly that set.
+  Job kinds, schedule names (slug-validated), and prompt artifact
+  names (content-hash-derived) never reach filesystem paths.
+- **file tool family (`read`/`write`/`edit`/`glob`/`search`)** — the
+  model-facing file tools (gap-table rows 1-4 of the parity program)
+  confine every user-supplied path against the SAME `--workdir-roots`
+  set, re-using the proven session-path discipline (lexical
+  Rel-containment; `EvalSymlinks` on the resolved root and the
+  candidate's parent; a symlink AT the final component rejected
+  outright — an in-root symlink target is indistinguishable from an
+  escape at check time): relative paths resolve against the FIRST
+  root, absolute paths must sit under some root, and every rejection
+  is a typed `isError` tool result naming the rule (`[escape]`,
+  `[outside-roots]`, `[symlink-escape]`, `[symlink-final]`, …) with
+  ZERO filesystem effects — a rejected `write` leaves no file and
+  creates no parent directories, and the glob/search walks never
+  follow symlinked directories. `write` lands content atomically
+  (temp file in the target directory + fsync + rename) and creates
+  missing parents only when the resolved parent is inside a root.
+  These ride the existing `tool/call`/`tool/result` choreography
+  inside turns (ProtocolVersion stays 1 — no new wire methods); the
+  confinement lives in `internal/tools/filetools` (a dedup candidate
+  against the engine's `confineSessionPath` is noted there).
 
 ## 4b. Subagents (B2)
 

@@ -88,6 +88,16 @@ type Config struct {
 	// Default 65536 (matching run_shell's capture cap); 0 disables the
 	// spill entirely (today's always-inline behavior).
 	SpillMaxInline int64
+	// WorkdirRoots is the symlink-safe confinement root set for the
+	// model-facing file tools (read/write/edit/glob/search) AND the
+	// run_shell workdir policy (--workdir-roots): every user-supplied
+	// file path resolves against these roots — relative paths against
+	// the FIRST root, absolute paths must sit under some root, and
+	// escapes (lexical or via symlink) reject fail-closed with typed
+	// errors and zero filesystem effects. Default: the daemon's
+	// working directory resolved absolute. Entries are canonicalized
+	// (symlinks resolved) at validation time.
+	WorkdirRoots []string
 }
 
 // usageDoc documents credential handling on the help surface (the key is
@@ -155,6 +165,21 @@ Spill (--spill-max-inline N):
   durable sidecar state: replay of a session log never touches them
   (loss degrades retrieval, not replay integrity).
 
+Workdir roots (--workdir-roots DIR[,DIR...]):
+  The confinement set for the model-facing file tools
+  (read/write/edit/glob/search) and run_shell's absolute-workdir
+  admission. Relative file-tool paths resolve against the FIRST root;
+  absolute paths must sit under some root; lexical escapes (..) and
+  symlink crossings reject fail-closed with typed errors and ZERO
+  filesystem effects (a rejected write leaves no file and creates no
+  parent directories). The walk never follows symlinks. Default: the
+  daemon's working directory, resolved absolute — so a daemon started
+  in its project tree gets the tree as its workspace. Entries must be
+  absolute paths to existing directories; they are canonicalized
+  (symlinks resolved) at startup. run_shell's relative-workdir
+  behavior (inside the engine working directory) is unchanged; the
+  roots EXTEND what absolute workdirs are allowed.
+
 System prompt (compiled-sysprompt model):
   The daemon serves its system prompt from the compiled artifact under
   <session-dir>/compiled-prompts/ when one matches the current content
@@ -166,7 +191,7 @@ Usage:
             --api-key-env VAR --session-dir DIR [--max-tokens N]
             [--approval-timeout-ms MS] [--cache-breakpoints N]
             [--sandbox off|read-only|workspace-write]
-            [--spill-max-inline N]
+            [--spill-max-inline N] [--workdir-roots DIR[,DIR...]]
             [--optimizer dedup|llm] [--compile-prompt] [--version]
 
   --compile-prompt  run the compile-time prompt compilation with the current
@@ -227,9 +252,67 @@ func normalizeOptimizer(v string) (string, error) {
 	}
 }
 
+// parseWorkdirRoots resolves the --workdir-roots flag value: comma-
+// separated ABSOLUTE paths to existing DIRECTORIES, canonicalized
+// through symlinks and deduped. An empty value defaults to the
+// daemon's working directory resolved absolute (the daemon started
+// somewhere deliberate; that tree is the natural workspace). Relative
+// entries, nonexistent entries, and entries that resolve to a
+// non-directory (a regular file, directly or through a symlink —
+// EvalSymlinks alone cannot tell) reject fail-closed — a silently
+// dropped root would narrow the workspace without notice, and a
+// guessed root or a file root would break every relative resolution.
+func parseWorkdirRoots(v string) ([]string, error) {
+	if strings.TrimSpace(v) == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve the default workdir root (the working directory): %w", err)
+		}
+		real, err := filepath.EvalSymlinks(filepath.Clean(cwd))
+		if err != nil {
+			return nil, fmt.Errorf("cannot canonicalize the working directory %s: %w", cwd, err)
+		}
+		if fi, err := os.Stat(real); err != nil {
+			return nil, fmt.Errorf("cannot inspect the default workdir root %s: %w", real, err)
+		} else if !fi.IsDir() {
+			return nil, fmt.Errorf("default workdir root %s is not a directory", real)
+		}
+		return []string{real}, nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, entry := range strings.Split(v, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			return nil, fmt.Errorf("--workdir-roots contains an empty entry")
+		}
+		if !filepath.IsAbs(entry) {
+			return nil, fmt.Errorf("--workdir-roots entry %q must be an absolute path", entry)
+		}
+		real, err := filepath.EvalSymlinks(filepath.Clean(entry))
+		if err != nil {
+			return nil, fmt.Errorf("--workdir-roots entry %q cannot be resolved (it must exist): %w", entry, err)
+		}
+		if fi, err := os.Stat(real); err != nil {
+			return nil, fmt.Errorf("--workdir-roots entry %q cannot be inspected: %w", entry, err)
+		} else if !fi.IsDir() {
+			return nil, fmt.Errorf("--workdir-roots entry %q resolves to %s, which is not a directory (roots must be existing directories)", entry, real)
+		}
+		if seen[real] {
+			continue
+		}
+		seen[real] = true
+		out = append(out, real)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("--workdir-roots resolved to no usable roots")
+	}
+	return out, nil
+}
+
 // validate checks the parsed flags fail-closed and returns the
 // normalized Config.
-func validate(adapter, model, baseURL, apiKeyEnv, sessionDir, optimizer string, maxTokens, approvalTimeoutMs, cacheBreakpoints int, sandboxMode string, spillMaxInline int64) (*Config, error) {
+func validate(adapter, model, baseURL, apiKeyEnv, sessionDir, optimizer string, maxTokens, approvalTimeoutMs, cacheBreakpoints int, sandboxMode string, spillMaxInline int64, workdirRoots string) (*Config, error) {
 	ad, ok := normalizeAdapter(adapter)
 	if !ok {
 		return nil, fmt.Errorf("invalid --adapter %q: must be openai (openaicompat) or anthropic", adapter)
@@ -277,6 +360,10 @@ func validate(adapter, model, baseURL, apiKeyEnv, sessionDir, optimizer string, 
 		return nil, fmt.Errorf("invalid --spill-max-inline %d: must be >= 0 (0 disables the oversize-result spill; positive is the inline byte budget)",
 			spillMaxInline)
 	}
+	roots, err := parseWorkdirRoots(workdirRoots)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := &Config{
 		Adapter:           ad,
@@ -290,6 +377,7 @@ func validate(adapter, model, baseURL, apiKeyEnv, sessionDir, optimizer string, 
 		Optimizer:         opt,
 		SandboxMode:       mode,
 		SpillMaxInline:    spillMaxInline,
+		WorkdirRoots:      roots,
 	}
 	// workspace-write default writable roots: the session dir (every
 	// durable byte the daemon owns) plus the OS temp dir. Deduped when

@@ -48,7 +48,7 @@ func (a *scriptedAdapter) Call(_ context.Context, _ *adapters.Request) (*adapter
 // spillTestConfig validates a config with the spill flag threaded.
 func spillTestConfig(t *testing.T, dir string, spillMaxInline int64) *Config {
 	t.Helper()
-	cfg, err := validate("openai", "fake-model", "http://x.test", "VH_AGENTD_TEST_KEY", dir, "", 0, defaultApprovalTimeoutMs, 0, "off", spillMaxInline)
+	cfg, err := validate("openai", "fake-model", "http://x.test", "VH_AGENTD_TEST_KEY", dir, "", 0, defaultApprovalTimeoutMs, 0, "off", spillMaxInline, "")
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -65,14 +65,14 @@ func TestValidateSpillMaxInline(t *testing.T) {
 		t.Fatalf("SpillMaxInline = %d, want 0 (disabled)", cfg.SpillMaxInline)
 	}
 	// Negative: fail closed.
-	if _, err := validate("openai", "m", "http://x.test", "K", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "off", -1); err == nil || !strings.Contains(err.Error(), "--spill-max-inline") {
+	if _, err := validate("openai", "m", "http://x.test", "K", t.TempDir(), "", 0, defaultApprovalTimeoutMs, 0, "off", -1, ""); err == nil || !strings.Contains(err.Error(), "--spill-max-inline") {
 		t.Fatalf("negative spill cap must fail closed, got %v", err)
 	}
 }
 
-// TestDaemonToolSetIncludesSpillRead: the daemon tool set grows to four
-// (echo, clock, run_shell, spill_read) and the engine wires the
-// per-session spill policy.
+// TestDaemonToolSetIncludesSpillRead: the daemon tool set covers the
+// dogfood probes, run_shell, spill_read, the file family, and the
+// subagent family, and the engine wires the per-session spill policy.
 func TestDaemonToolSetIncludesSpillRead(t *testing.T) {
 	cfg := spillTestConfig(t, t.TempDir(), 65536)
 	svc, cli := net.Pipe()
@@ -88,8 +88,11 @@ func TestDaemonToolSetIncludesSpillRead(t *testing.T) {
 	if !got["subagent_spawn"] || !got["subagent_send"] {
 		t.Fatalf("model-facing subagent tools not registered: %v", got)
 	}
-	if len(eng.TurnOptions().Tools) != 6 {
-		t.Fatalf("turn options do not advertise all six tools: %+v", eng.TurnOptions().Tools)
+	if !got["read"] || !got["write"] || !got["edit"] || !got["glob"] || !got["search"] {
+		t.Fatalf("model-facing file tools not registered: %v", got)
+	}
+	if len(eng.TurnOptions().Tools) != 11 {
+		t.Fatalf("turn options do not advertise all eleven tools: %+v", eng.TurnOptions().Tools)
 	}
 	// The per-session policy seam is wired: a new session's log carries
 	// an armed policy with a FileSpillStore under <dir>/<id>.spill/.
