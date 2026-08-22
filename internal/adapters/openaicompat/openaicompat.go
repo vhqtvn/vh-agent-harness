@@ -184,7 +184,13 @@ func (a *Adapter) Call(ctx context.Context, req *adapters.Request) (*adapters.Re
 		return nil, adapters.TransportError(a.Name(), err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, adapters.HTTPStatusError(a.Name(), resp.StatusCode, retryAfterMs(resp.Header.Get("retry-after")), truncate(respBody, 512))
+		// Redact BEFORE truncating: a provider can ECHO the API key in
+		// an error body, and an occurrence straddling the 512-byte
+		// excerpt boundary must not survive as a partial fragment.
+		// Excerpt length behavior is unchanged (still capped at 512) —
+		// only the key value is substituted (adapters.RedactSecret).
+		return nil, adapters.HTTPStatusError(a.Name(), resp.StatusCode, retryAfterMs(resp.Header.Get("retry-after")),
+			truncate([]byte(adapters.RedactSecret(string(respBody), a.cfg.APIKey)), 512))
 	}
 
 	var wire wireResponse

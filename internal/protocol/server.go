@@ -65,7 +65,28 @@ type EngineSession struct {
 	Schedules ScheduleManager
 	// Path is the engine-resolved durable location of the session log.
 	Path string
+
+	// turnMu is the PER-SESSION TURN GATE (ship-review finding 1): it
+	// serializes turn-executing requests (session/prompt) so at most
+	// ONE turn/begin…turn/end bracket is ever in flight on this
+	// session's log — concurrent prompts QUEUE instead of interleaving
+	// (the log's own mutex guarantees valid JSONL and contiguous seq,
+	// not atomic turn semantics; without the gate, two concurrent turns
+	// interleave brackets and each surface derivation can observe the
+	// other turn's half-committed events). Read-only seams — surface,
+	// jobs status, event subscription, job/subagent dispatch — never
+	// take it and stay fully concurrent. Zero-value ready; never copied
+	// after construction.
+	turnMu sync.Mutex
 }
+
+// beginTurn acquires the per-session turn gate: admission to execute a
+// RunTurn-driven turn against this session's log. Callers MUST pair it
+// with endTurn (usually via defer) on the same goroutine.
+func (es *EngineSession) beginTurn() { es.turnMu.Lock() }
+
+// endTurn releases the per-session turn gate.
+func (es *EngineSession) endTurn() { es.turnMu.Unlock() }
 
 // TurnRunner is the RunTurn seam (satisfied by *tools.Pipeline).
 type TurnRunner interface {
@@ -88,6 +109,29 @@ type ServerOptions struct {
 }
 
 // Server serves the host protocol on one Conn.
+//
+// Concurrency contract (ship-review finding 1; mirrored in
+// docs/native-engine/host-protocol.md §4): every request is handled in
+// its own goroutine and responses may arrive in any order. On top of
+// that fan-out:
+//
+//   - session/prompt SERIALIZES PER SESSION (the EngineSession turn
+//     gate): one in-flight turn bracket per session log; concurrent
+//     prompts queue. Prompt ADMISSION — resolving which session a
+//     prompt runs against — is a single atomic decision under mu.
+//   - session/create SERIALIZES against every other create END-TO-END
+//     (createMu): engine construction (including any engine-decorator
+//     active tracking, which happens synchronously inside NewSession),
+//     and this server's active-pointer swap land as one non-interleaved
+//     stage sequence, so engine/tracker/server can never durably
+//     disagree about the active session. A create does NOT wait behind
+//     an in-flight prompt: a prompt admitted before supersession
+//     completes on its own session, and the new session becomes active
+//     immediately.
+//   - read-only seams (session/subscribe, session/surface, jobs/status,
+//     subagent/list, schedule/list) and the async receipts
+//     (session/dispatch, subagent/spawn, subagent/send,
+//     approval/respond) stay fully concurrent.
 type Server struct {
 	engine   Engine
 	conn     *Conn
@@ -99,6 +143,12 @@ type Server struct {
 	initialized bool
 	closing     bool
 	active      *EngineSession
+
+	// createMu serializes session/create (supersede) end-to-end — see
+	// the concurrency contract above. It is deliberately SEPARATE from
+	// mu: a create holds it across engine/file work while active-session
+	// reads stay O(1) pointer loads under mu.
+	createMu sync.Mutex
 
 	wg sync.WaitGroup // in-flight request handlers
 }

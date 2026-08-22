@@ -6,6 +6,7 @@ package adapters
 
 import (
 	"fmt"
+	"strings"
 )
 
 // ErrorKind is the closed classification of a failed adapter call. The
@@ -86,6 +87,36 @@ func ClassifyHTTPStatus(status int) ErrorKind {
 // the provider's Retry-After hint when supplied (milliseconds).
 func HTTPStatusError(adapter string, status int, retryAfterMs int64, body string) *AdapterError {
 	return NewAdapterError(adapter, ClassifyHTTPStatus(status), status, retryAfterMs, fmt.Errorf("%s: HTTP %d: %s", adapter, status, body))
+}
+
+// MinRedactSecretLength is the minimum secret length RedactSecret will
+// act on. Credentials are ≥ 8 bytes in practice; below that, an exact
+// value match is more likely to mangle a common substring of provider
+// prose ("error", "request"...) than to protect a real key, so short
+// values pass through untouched. The threshold is a documented contract:
+// callers cannot lower it per-site.
+const MinRedactSecretLength = 8
+
+// RedactSecret replaces every occurrence of secret in s with the literal
+// "[REDACTED]". It is the source-side guard for provider error bodies:
+// a hostile or broken provider can ECHO the credential it received in a
+// non-2xx response body, and that body flows into AdapterError text —
+// which reaches session logs (llm/retry errorMessage, turn/end reason)
+// and wire errors. Redacting at the CAPTURE SITE (before truncation, so
+// an occurrence straddling the excerpt boundary cannot survive as a
+// partial fragment) keeps every downstream consumer safe without each
+// of them knowing about credentials.
+//
+// Matching is exact byte-sequence (every occurrence of the exact value,
+// case-sensitive — credential schemes are; no word boundaries: a key
+// embedded in a longer provider string still redacts). An empty or
+// under-length secret (< MinRedactSecretLength) is ignored and s
+// returns unchanged.
+func RedactSecret(s, secret string) string {
+	if len(secret) < MinRedactSecretLength {
+		return s
+	}
+	return strings.ReplaceAll(s, secret, "[REDACTED]")
 }
 
 // Retryable reports whether the retry layer may retry this class.

@@ -1,6 +1,7 @@
 # Native Engine — Host Protocol (v1)
 
-Status: implemented (slice 5) · `internal/protocol` · `ProtocolVersion = 1`
+Status: implemented (surface: session, approval, jobs, subagent, and
+schedule families) · `internal/protocol` · `ProtocolVersion = 1`
 
 The stable communication interface of the headless native engine:
 **versioned JSON-RPC over newline-delimited JSON (NDJSON) on stdio**.
@@ -81,6 +82,53 @@ send) are `-32602` carrying the manager's descriptive text.
 `schedule/add`/`schedule/remove` on an engine built without scheduler
 wiring fail closed `-32000` (spec-validation and refusal texts are
 `-32602` carrying the scheduler's descriptive text).
+
+### Concurrency & session replacement (v1 contract)
+
+Handlers run concurrently (§2: responses may arrive in any order) — the
+read loop never blocks behind a slow request. On top of that fan-out,
+the server guarantees the following per-session semantics (the log's own
+lock yields valid JSONL and contiguous seq for ANY concurrent appends;
+these rules are what make a TURN atomic, not just its records):
+
+- **Concurrent (no ordering guarantees, safe to overlap):** every
+  read-only or receipt-shaped method — `initialize`,
+  `session/subscribe`, `session/surface`, `session/dispatch`,
+  `jobs/status`, `subagent/spawn`, `subagent/send`, `subagent/list`,
+  `schedule/add`, `schedule/list`, `schedule/remove`,
+  `approval/respond` — plus all background job and child-turn event
+  appends. Background job events may interleave WITHIN an open turn
+  bracket (that is the §7 async contract, unchanged).
+- **Serialized per session:** `session/prompt`. At most ONE
+  `turn/begin…turn/end` bracket is in flight per session log
+  (a per-session turn gate in the engine layer); concurrent prompts
+  against the same session QUEUE and execute one bracket at a time, so
+  a replayed log never shows interleaved turn brackets; surface
+  derivations may run concurrently with an in-flight turn and observe
+  its already-committed events (whole-record granularity, never
+  interleaved brackets). Different sessions' turns run concurrently
+  with each other.
+- **Serialized against each other:** `session/create`. The whole
+  create critical section — engine session construction (including the
+  daemon tracker's active-session bookkeeping, which happens
+  synchronously inside `engine.NewSession`) and the server's
+  active-pointer swap — runs as one non-interleaved stage. Concurrent
+  creates therefore cannot leave the engine, tracker, and server
+  disagreeing about which session is active; every created session is
+  complete on disk (valid header, no partial log) when its create
+  returns.
+- **Replacement semantics (create while a prompt is in flight).** A
+  prompt's ADMISSION — which session it runs against — is one atomic
+  active-session resolution. A create that supersedes after admission
+  does NOT cancel or wait for the admitted prompt: the prompt's turn
+  completes atomically on ITS session (its bracket lands wholly in that
+  session's log), and the new session becomes active as soon as the
+  create's critical section ends (creates do not queue behind turn
+  gates). The superseded session's subagent manager stops accepting
+  spawns (§7b); its in-flight turn is unaffected.
+- **Child sessions** (subagents) serialize per child through the
+  manager's serial dispatch loop (§7b — one child turn at a time per
+  session), so child logs never interleave brackets either.
 
 ## 4a. Confinement contract (server-side, wire shape unchanged)
 

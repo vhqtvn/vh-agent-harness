@@ -381,6 +381,33 @@ func TestCallHTTP400IsNonRetryable(t *testing.T) {
 	}
 }
 
+// TestCallHTTPErrorBodyRedactsAPIKey is the finding-2 adversarial crux
+// at the adapter seam: a hostile/broken provider that ECHOES the API-key
+// value (sent via x-api-key) in a non-2xx error body must never get that
+// value into the AdapterError text — every occurrence is replaced by
+// [REDACTED] at the source (the excerpt-capture site), while the rest of
+// the body excerpt survives unchanged.
+func TestCallHTTPErrorBodyRedactsAPIKey(t *testing.T) {
+	const key = "sk-ant-live-0123456789abcdef"
+	body := `{"type":"error","error":{"type":"authentication_error","message":"key sk-ant-live-0123456789abcdef rejected for tenant-8821 (decoy, not a credential); echo #2: sk-ant-live-0123456789abcdef"}}`
+	srv := newScriptedResponses(t, scriptedResponse{Status: 500, Body: body})
+	ad := New(Config{BaseURL: srv.URL, Model: "m", APIKey: key})
+	_, err := ad.Call(context.Background(), &adapters.Request{Model: "m"})
+	if err == nil {
+		t.Fatal("expected an error on HTTP 500")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, key) {
+		t.Fatalf("API-key value leaked through the adapter error: %s", msg)
+	}
+	if !strings.Contains(msg, "[REDACTED]") {
+		t.Fatalf("error text should carry the redaction marker: %s", msg)
+	}
+	if !strings.Contains(msg, "tenant-8821") {
+		t.Fatalf("non-key body excerpt should survive redaction: %s", msg)
+	}
+}
+
 func TestCallRateLimited429CarriesRetryAfter(t *testing.T) {
 	srv := newScriptedResponses(t, scriptedResponse{Status: 429, Headers: map[string]string{"retry-after": "2"}, Body: `{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`})
 	ad := New(Config{BaseURL: srv.URL, Model: "m", APIKey: "k"})

@@ -85,6 +85,58 @@ func TestEmptyResponseErrorIsRetryable(t *testing.T) {
 	}
 }
 
+func TestRedactSecret(t *testing.T) {
+	const key = "sk-live-0123456789abcdef"
+	cases := []struct {
+		name   string
+		s      string
+		secret string
+		want   string
+	}{
+		{
+			name:   "every occurrence redacted",
+			s:      `unauthorized: key sk-live-0123456789abcdef echoed twice: sk-live-0123456789abcdef`,
+			secret: key,
+			want:   "unauthorized: key [REDACTED] echoed twice: [REDACTED]",
+		},
+		{
+			name:   "absent secret unchanged",
+			s:      "plain provider error, no credential here",
+			secret: key,
+			want:   "plain provider error, no credential here",
+		},
+		{
+			name:   "short secret left alone (threshold guard)",
+			s:      "bad token abc1234 end",
+			secret: "abc1234",
+			want:   "bad token abc1234 end",
+		},
+		{
+			name:   "exactly-at-threshold secret redacted",
+			s:      "bad token abc12345 end",
+			secret: "abc12345",
+			want:   "bad token [REDACTED] end",
+		},
+		{
+			name:   "empty secret unchanged",
+			s:      "nothing to redact",
+			secret: "",
+			want:   "nothing to redact",
+		},
+		{
+			name:   "substring matches redacted; near-miss prefix alone is not",
+			s:      "sk-live-0123456789abcdefPLUS and sk-live-0123456789abcde",
+			secret: key,
+			want:   "[REDACTED]PLUS and sk-live-0123456789abcde",
+		},
+	}
+	for _, tc := range cases {
+		if got := RedactSecret(tc.s, tc.secret); got != tc.want {
+			t.Fatalf("%s: RedactSecret = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // compile-time: the fake adapter from adapter_test.go still satisfies the
 // boundary after the errors file lands.
 var _ Adapter = fakeAdapter{name: "fake"}

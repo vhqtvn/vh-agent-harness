@@ -139,6 +139,46 @@ func TestCompilePromptFlagRunsOffline(t *testing.T) {
 	}
 }
 
+// TestCompilePromptLLMFailureStderrRedactsKey closes the finding-2 flow
+// at the last named surface: a --compile-prompt run whose LLM optimizer
+// call fails against a provider ECHOING the API-key value in a 500 body
+// must exit 1 with the failure text on stderr — redacted, key value
+// never present (stdout stays protocol-empty).
+func TestCompilePromptLLMFailureStderrRedactsKey(t *testing.T) {
+	const key = "sk-live-0123456789abcdef"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"compile refused; bearer sk-live-0123456789abcdef for tenant-3319"}`))
+	}))
+	t.Cleanup(ts.Close)
+
+	dir := t.TempDir()
+	var out, errBuf safeBuffer
+	code := run([]string{
+		"--adapter", "openai", "--model", "m", "--base-url", ts.URL,
+		"--api-key-env", "VH_AGENTD_TEST_KEY", "--session-dir", dir,
+		"--compile-prompt",
+	}, func(name string) string {
+		if name == "VH_AGENTD_TEST_KEY" {
+			return key
+		}
+		return ""
+	}, nil, &out, &errBuf)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stderr: %s)", code, errBuf.String())
+	}
+	if out.String() != "" {
+		t.Fatalf("stdout = %q, want empty (stdout is protocol)", out.String())
+	}
+	stderr := errBuf.String()
+	if strings.Contains(stderr, key) {
+		t.Fatalf("API-key value leaked into daemon stderr: %s", stderr)
+	}
+	if !strings.Contains(stderr, "[REDACTED]") {
+		t.Fatalf("stderr failure text should carry the redaction marker: %s", stderr)
+	}
+}
+
 // --- retry ladder (crux) ------------------------------------------------------
 
 // flakyLLM scripts HTTP outcomes per call: two 500s, then success. It

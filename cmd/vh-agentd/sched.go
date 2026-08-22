@@ -37,15 +37,22 @@ type sessionTracker struct {
 }
 
 // NewSession delegates to the wrapped engine and records the new active
-// session.
+// session. The wrapped construction AND the tracker's own assignment
+// run as ONE serialized stage (t.mu held across both): concurrent
+// creates cannot interleave this tracker's assignment between another
+// create's engine supersede and its own assignment, so tracker.active
+// and the engine's supersede seam never durably disagree
+// (ship-review finding 1; the protocol server additionally serializes
+// the whole session/create handler end-to-end — this lock keeps the
+// daemon layer safe even when driven without the server).
 func (t *sessionTracker) NewSession(path, sessionID string, sink io.Writer) (*protocol.EngineSession, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	es, err := t.Engine.NewSession(path, sessionID, sink)
 	if err != nil {
 		return nil, err
 	}
-	t.mu.Lock()
 	t.active = es
-	t.mu.Unlock()
 	return es, nil
 }
 

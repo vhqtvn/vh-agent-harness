@@ -1397,6 +1397,38 @@ preview + opaque locator; the model pages the bytes back via the
 inside the inline cap by construction (§4d of the protocol doc; replay
 never depends on spill files).
 
+**Schedule wire surface** (`schedule/add|list|remove`, protocol doc
+§4c): time-based job triggers alongside the manual `session/dispatch`.
+`schedule/add {name, kind?, after?|at?, every?, payload?}` registers a
+schedule (UTC-canonicalized, slug-validated names, exactly one start —
+`after` XOR `at` — optional positive `every` for recurring); `list`
+returns the dispatch-priority snapshot with `nextRun` cursors;
+`remove {name}` unregisters. Cadence persists immediately in
+`<session-dir>/scheduler-state.json` (atomic temp+fsync+rename) and
+survives daemon restarts. Dispatch is at-least-once: the scheduler
+waits for executor idle (queued|running jobs of the active session),
+fires at most ONE dispatch per pass, and collapses fixed-rate catch-up
+to the LATEST due occurrence (no storm replay after downtime); a due
+schedule lands as an ordinary `job/enqueued` on the active session, so
+settlement and reporting ride the existing job/* event stream.
+
+**Model-facing tool surface (six tools).** The daemon's model is
+offered exactly these tools (child sessions below the delegation fence
+get the same set minus the subagent family at the fence):
+
+- `echo` — echoes the given text back (read-only dogfood probe);
+- `clock` — the daemon's current UTC time, RFC 3339 (read-only probe);
+- `run_shell` — executes a shell command (guards → wire-bridged
+  approval → capture caps; `--sandbox` confinement; exclusive barrier
+  around it in the tool scheduler);
+- `spill_read` — pages back spilled oversize tool results by opaque
+  locator (content-addressed, sha256-validated, windowed so every page
+  fits inline);
+- `subagent_spawn` — spawn a child session (`mode: oneshot|continuable`);
+  oneshot blocks until the child settles and returns its report;
+- `subagent_send` — deliver a follow-up message to a continuable child
+  (queues exactly one child turn).
+
 **Model-facing recursive subagents** (child-of-child): besides the
 client-driven `subagent/spawn|send|list` wire methods, the daemon's
 MODEL has the same capability as first-class tools — `subagent_spawn`
@@ -1433,9 +1465,14 @@ a silent dedup fallback; no retries — a failed compile is a rerun).
 `--optimizer dedup` selects the offline, keyless reference fake.
 Credential discipline: `--api-key-env` takes the **name** of an
 environment variable only — never a literal key — and the daemon fails
-closed when that variable is unset. stdout is protocol; diagnostics go
-to stderr. Client EOF is a disconnect: pending approvals deny
-immediately, in-flight handlers drain, and the daemon exits 0.
+closed when that variable is unset. Provider error bodies are
+key-redacted at the source: if a provider echoes the API-key value in a
+non-2xx body, every occurrence is replaced with `[REDACTED]` before the
+text can reach session logs (`llm/retry` messages, `turn/end` reasons),
+wire error responses, or daemon stderr (values shorter than 8 bytes are
+left alone — see `adapters.RedactSecret`). stdout is protocol;
+diagnostics go to stderr. Client EOF is a disconnect: pending approvals
+deny immediately, in-flight handlers drain, and the daemon exits 0.
 
 ## Private redlines (`redlines guidance`, `redlines scan`)
 

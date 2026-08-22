@@ -97,6 +97,15 @@ type createResult struct {
 // handleSessionCreate opens a new durable session and makes it active.
 // Creating a new session supersedes the previous one (v1 is
 // single-active-session; multi-session muxing is a stated non-goal).
+//
+// The create critical section runs under s.createMu END-TO-END (engine
+// construction + every synchronous active-tracking update inside
+// engine.NewSession + this server's active swap), so concurrent creates
+// cannot interleave their stages and leave engine/tracker/server
+// disagreeing about the active session (ship-review finding 1). It does
+// NOT wait behind in-flight prompts: a prompt admitted before the
+// supersession completes on its own session; the new session becomes
+// active as soon as this critical section ends.
 func handleSessionCreate(ctx context.Context, s *Server, req *Request) (json.RawMessage, *Error) {
 	var p createParams
 	if perr := decodeParams(req, &p, true); perr != nil {
@@ -111,7 +120,14 @@ func handleSessionCreate(ctx context.Context, s *Server, req *Request) (json.Raw
 		}
 		p.SessionID = minted
 	}
+	s.createMu.Lock()
 	es, err := s.engine.NewSession(p.Path, p.SessionID, s.fanout)
+	if err == nil {
+		s.mu.Lock()
+		s.active = es
+		s.mu.Unlock()
+	}
+	s.createMu.Unlock()
 	if err != nil {
 		var spe *SessionPathError
 		if errors.As(err, &spe) {
@@ -122,9 +138,6 @@ func handleSessionCreate(ctx context.Context, s *Server, req *Request) (json.Raw
 		}
 		return nil, &Error{Code: ErrEngine, Message: err.Error()}
 	}
-	s.mu.Lock()
-	s.active = es
-	s.mu.Unlock()
 	result, merr := json.Marshal(createResult{SessionID: p.SessionID, Path: es.Path})
 	if merr != nil {
 		return nil, &Error{Code: ErrEngine, Message: merr.Error()}
@@ -252,6 +265,15 @@ type promptToolResult struct {
 // wire). Settled-but-unreported jobs are surfaced first so the model
 // sees each settlement exactly once before the surface is derived
 // (dsh reported-flag discipline).
+//
+// Per-session serialization (ship-review finding 1): admission resolves
+// the active session in ONE atomic decision (requireSession's single
+// mu acquisition), then the session's turn gate is held for the WHOLE
+// turn — concurrent prompts against the same session queue behind the
+// gate, so brackets never interleave in one log. A create that
+// supersedes mid-wait does not invalidate the admission: the prompt
+// completes on the session it was admitted against (documented
+// replacement semantics).
 func handleSessionPrompt(ctx context.Context, s *Server, req *Request) (json.RawMessage, *Error) {
 	es, perr := s.requireSession()
 	if perr != nil {
@@ -261,6 +283,8 @@ func handleSessionPrompt(ctx context.Context, s *Server, req *Request) (json.Raw
 	if perr := decodeParams(req, &p, false); perr != nil {
 		return nil, perr
 	}
+	es.beginTurn()
+	defer es.endTurn()
 	if _, err := es.Jobs.EmitReports(); err != nil {
 		return nil, &Error{Code: ErrEngine, Message: err.Error()}
 	}
