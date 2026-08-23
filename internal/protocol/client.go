@@ -150,6 +150,13 @@ func (c *Client) OnNotification(method string, fn func(params json.RawMessage)) 
 	c.handlers[method] = append(c.handlers[method], fn)
 }
 
+// Done is closed exactly once when the transport terminates (peer exit,
+// explicit Close, or a failed write). Frontends that idle on user input
+// (e.g. a REPL between turns) select on it to notice daemon death
+// without a pending Call — the additive client-half companion of the
+// server's close ladder.
+func (c *Client) Done() <-chan struct{} { return c.conn.Done() }
+
 // Close terminates the client.
 func (c *Client) Close() error {
 	var err error

@@ -10,7 +10,9 @@ consumers are the motivating example. Design refs:
 `researches/sources/deepseek-harness/llm-protocols-tools.md` (dsh SDK
 transport, F-SDK-1/F-PIPE-2, malformed-line skip, close ladder) and
 `solution-brief v3` (operator decisions 2 & 5; Architecture Map
-"Frontend" row; risks R5′/R9).
+"Frontend" row; risks R5′/R9). The reference CLI client
+(`cmd/vh-agent-client`) is the canonical protocol-consumer example for
+this wire.
 
 ## 1. Framing
 

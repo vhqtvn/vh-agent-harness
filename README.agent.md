@@ -1505,6 +1505,76 @@ left alone — see `adapters.RedactSecret`). stdout is protocol;
 diagnostics go to stderr. Client EOF is a disconnect: pending approvals
 deny immediately, in-flight handlers drain, and the daemon exits 0.
 
+### `vh-agent-client` — reference CLI client (experimental)
+
+`vh-agent-client` (same experimental branch) is the minimal reference
+CLI client that drives a `vh-agentd` daemon end-to-end over the real
+host protocol: live event rendering, interactive approvals, and a
+machine mode. It is the canonical protocol-consumer example — when in
+doubt about how to talk to the daemon, read its wiring
+(`cmd/vh-agent-client`, built on the `internal/protocol` reference
+Client library).
+
+```sh
+# client flags BEFORE --exec: everything after the daemon command (or a
+# leading --) passes through to the daemon verbatim.
+vh-agent-client [--session-dir DIR] [--json] [--prompt TEXT] [--repl] \
+  [--exec vh-agentd --adapter openai --model <name> \
+          --base-url <https://...> --api-key-env <ENV_VAR_NAME> ...]
+```
+
+- `--exec <argv...>` — daemon launch spec, rest-of-line (default:
+  `vh-agentd` from PATH with just the forwarded `--session-dir`; the
+  daemon's own fail-closed validation supplies the loud missing-flag
+  messages). The daemon's stderr is inherited (its diagnostics flow to
+  the client's stderr); its stdout is the protocol pipe.
+- `--session-dir DIR` (default `.vh-agent-sessions`) — resolved by the
+  client to an absolute, cleaned path from its own cwd (the daemon
+  hard-rejects relative session dirs: under `--sandbox
+  workspace-write` the dir becomes a Landlock RWDir resolved against
+  the sandboxed child's cwd, not the daemon's startup cwd), then
+  forwarded to a spawned daemon when the exec spec lacks its own; it
+  also holds the client's last-session pointer file
+  (`.vh-agent-client-last-session`). Creating the dir stays the
+  daemon's job.
+- `--prompt TEXT` — one-shot: send, stream the turn(s), print the final
+  assistant text on stdout, exit. The client drives the host-side
+  multi-turn loop (`session/prompt` is ONE synchronous tool turn; while
+  the model requests tools, a minimal continuation prompt re-submits
+  the surface, capped at 32 turns).
+- `--repl` / a TTY — interactive REPL: a line is one user message;
+  `exit`/`quit`/Ctrl-D end cleanly; Ctrl-C sends nothing and closes the
+  connection — the daemon denies any pending approvals (fail-closed)
+  and exits, and the client reports that honestly (exit 0).
+- `--json` — machine mode: NDJSON events verbatim on stdout (no
+  rendering), the final prompt result as the last line, and approval
+  answers as JSON lines (`{"id":"<approvalId>","approve":bool}`) on
+  stdin.
+
+**Output discipline** mirrors the daemon's stdout-is-protocol purity:
+rendered events and prompts (including the approval `[y/N]` prompt) go
+to **stderr**; stdout carries machine-readable final content only (the
+one-shot final assistant text; NDJSON in `--json`). Exit codes: `0`
+clean · `1` protocol/engine error · `2` usage/validation (including a
+refused `--resume`).
+
+**Approvals** surface as a blocking `[y/N] approve tool <name>?` prompt
+(interactive mode) or as the NDJSON request + stdin answer (`--json`).
+ENTER alone, EOF, malformed input, or a non-affirmative answer DENIES —
+fail-closed, mirroring the daemon's bridge. There is deliberately NO
+auto-approve policy yet: the responder sits behind an `ApproverFunc`
+seam in the client wiring, which is exactly where the P3 policy engine
+attaches (a policy replaces the interactive/JSON responder without
+touching the driver).
+
+**Resume posture (documented partial):** the wire has no
+`session/resume` method yet (planned P4), and `session/create` with an
+existing session id would truncate the old log, so a client-side fake
+resume is worse than none. The client tracks its last session in the
+pointer file, notes the prior session honestly on every fresh run, and
+REFUSES `--resume` with exit 2 pointing at P4. True daemon-side resume
+arrives with the `session/resume` wire method.
+
 ## Private redlines (`redlines guidance`, `redlines scan`)
 
 `vh-agent-harness redlines guidance` is the **agent's local context-loading
