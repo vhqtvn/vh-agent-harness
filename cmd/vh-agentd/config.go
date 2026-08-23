@@ -193,6 +193,7 @@ Usage:
             [--sandbox off|read-only|workspace-write]
             [--spill-max-inline N] [--workdir-roots DIR[,DIR...]]
             [--optimizer dedup|llm] [--compile-prompt] [--version]
+  vh-agentd --verify-log PATH
 
   --compile-prompt  run the compile-time prompt compilation with the current
                     config, write the content-hashed artifact under
@@ -202,6 +203,15 @@ Usage:
                     adapter and needs the key variable SET; with
                     --optimizer dedup it is offline and keyless. No
                     protocol session either way.
+
+  --verify-log PATH read-only mode: replay the session log at PATH and
+                    print ONE JSON line {events, format_version,
+                    surface_sha256, messages} (sha256 over the canonical
+                    derived-surface JSON) to stdout; exit 1 with the
+                    reason on stderr on any replay error. No protocol
+                    session, no other flags required. Two runs on the
+                    same log print identical bytes — the
+                    replay-determinism prover for real produced logs.
 `
 
 var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)

@@ -1376,6 +1376,18 @@ vh-agentd --adapter openai|openaicompat|anthropic --model <name> \
   [--optimizer dedup|llm]
 ```
 
+`--verify-log PATH` is a READ-ONLY operator mode (parsed before the
+required flags — no adapter/model/session-dir needed, no protocol
+session started): it replays the session log at PATH through the same
+fail-closed replay + surface-derivation surfaces the engine uses and
+prints exactly ONE JSON line to stdout —
+`{"events":N,"format_version":V,"surface_sha256":"<sha256-of-canonical-surface-JSON>","messages":M}`
+— exiting 0 on success and 1 with the reason on stderr on any replay
+error (malformed record, non-contiguous seq, unknown event, or a
+headerless/empty log). Two runs on the same log print byte-identical
+lines: it is the replay-determinism prover for real produced logs (the
+docker self-test battery uses it after every scenario).
+
 `--cache-breakpoints` is **Anthropic-only** (explicit `cache_control`
 breakpoints); it is rejected for `openai`/`openaicompat` because
 OpenAI-compatible endpoints cache implicitly via prefix matching —
@@ -1760,6 +1772,74 @@ resume is worse than none. The client tracks its last session in the
 pointer file, notes the prior session honestly on every fresh run, and
 REFUSES `--resume` with exit 2 pointing at P4. True daemon-side resume
 arrives with the `session/resume` wire method.
+
+### `vh-mockllm` — scriptable mock LLM server (experimental)
+
+`vh-mockllm` (same experimental branch) is a standalone mock LLM
+endpoint for testing the engine END-TO-END without a real provider:
+one deterministic, file-scripted scenario serves BOTH wire dialects
+the adapters speak. It inherits the proven mock-server patterns
+(healthz readiness, per-path counters, reset) engine-grade in Go:
+
+```sh
+vh-mockllm [--addr 127.0.0.1:8099] --script scenarios/X.json \
+           [--journal requests.jsonl]     # --script REQUIRED; bad script = exit 2
+```
+
+- **Script**: JSON array of steps consumed FIFO globally (ordering is
+  the test author's contract). Step classes: `{"text":"..."}` success
+  text; `{"tool_calls":[{"id","name","args":{...}}]}` tool calls
+  (args object; OpenAI wire gets string-encoded `arguments`, Anthropic
+  wire gets `tool_use` blocks with `input` objects — both dialects
+  correct from one script); `{"fault":{"status":500,"body":"...",
+  "retry_after_ms":2000}}` error status + `Retry-After` (seconds
+  form); `{"empty":true}` 200-with-no-content (the retryable
+  empty-response class). Malformed/ambiguous scripts fail closed at
+  startup (exit 2). **Script exhausted → 500 naming the scenario file
+  and step count** (a test bug, never a silent loop). Response ids are
+  deterministic (`mock-chatcmpl-N` / `mock-msg-N`).
+- **Endpoints**: `POST /v1/chat/completions` (Authorization presence
+  required), `POST /v1/messages` (x-api-key presence required; 401
+  before any step is consumed), `GET /healthz`, `GET /count`
+  (LLM-path → POST count), `GET|POST /reset` (clears counters — NOT
+  the script cursor, NOT the journal), `GET /journal?since=N`
+  (method, path, auth-header PRESENCE ONLY, full request body JSON).
+- **Redaction discipline**: the auth-header VALUE is never recorded —
+  not in `/journal`, not in the `--journal` disk mirror.
+
+### Docker self-test battery (`docker/selftest/`)
+
+The engine's self-test battery runs the REAL daemon + client + mock
+end-to-end INSIDE docker — never on the host:
+
+```sh
+./docker/selftest/run.sh    # operator form
+vh-agent-harness exec bash docker/selftest/run.sh    # agent form
+# equivalent: vh-agent-harness exec docker build -f docker/selftest/Dockerfile -t vh-selftest .
+#             vh-agent-harness exec docker run --rm --security-opt seccomp=unconfined vh-selftest
+```
+
+`run.sh` builds the image (multi-stage `golang:1.25-bookworm` →
+`debian:bookworm-slim`; the worktree-root `.dockerignore` keeps the
+context to go.mod/go.sum/cmd/internal + the battery itself) and runs
+`battery.sh`, which drives 11 scenarios — greeting, tool round-trip,
+policy parse/load, empty-response retry, sandbox denial, retry ladder,
+subagent recursion, spill paging, Anthropic dialect, verify
+determinism — asserting on client output, `--verify-log` on every
+produced log, and the mock's `/count` + `/journal`. The final line is
+`SELFTEST: N/M scenarios passed` (exit 1 on any failure).
+
+`--security-opt seccomp=unconfined` is required because Docker's
+DEFAULT seccomp profile blocks the landlock syscalls; the flag lifts
+only Docker's profile — the engine's own trampoline (Landlock +
+seccomp) then enforces confinement, which is exactly what the
+sandbox_denial scenario proves (a read-only `run_shell` write is
+kernel-denied inside the container). Approval grant/deny are
+deliberately NOT battery scenarios: the shipped daemon emits no asks,
+so those paths are covered at the client's library seam
+(`cmd/vh-agent-client/policy_seam_test.go`); the battery proves the
+fail-closed policy parse (exit 2 before daemon spawn) and the
+loaded-but-unconsulted posture instead.
 
 ## Private redlines (`redlines guidance`, `redlines scan`)
 

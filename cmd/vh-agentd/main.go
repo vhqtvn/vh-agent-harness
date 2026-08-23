@@ -18,6 +18,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -31,6 +34,7 @@ import (
 
 	"github.com/vhqtvn/vh-agent-harness/internal/execsandbox"
 	"github.com/vhqtvn/vh-agent-harness/internal/protocol"
+	"github.com/vhqtvn/vh-agent-harness/internal/session"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/shell"
 )
 
@@ -102,6 +106,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		spillMaxInline    = new(int64)
 		workdirRoots      = new(string)
 		compilePrompt     = new(bool)
+		verifyLog         = new(string)
 		showVersion       = new(bool)
 	)
 	fs := flag.NewFlagSet("vh-agentd", flag.ContinueOnError)
@@ -120,6 +125,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	fs.Int64Var(spillMaxInline, "spill-max-inline", 65536, "inline byte budget for tool results: content above it spills FULL to <session-dir>/<session-id>.spill/ and the event carries a bounded preview + opaque locator (retrievable via spill_read, hash-validated); 0 disables the spill (always inline). Default 65536 (matches the run_shell capture cap)")
 	fs.StringVar(workdirRoots, "workdir-roots", "", "comma-separated ABSOLUTE paths to existing DIRECTORIES confining the file tools (read/write/edit/glob/search) and run_shell absolute workdirs: relative file paths resolve against the FIRST root, absolute paths must sit under a root, escapes and symlink crossings reject fail-closed with zero filesystem effects, and entries resolving to a non-directory (a file, even via symlink) refuse at startup; default = the daemon's working directory resolved absolute")
 	fs.BoolVar(compilePrompt, "compile-prompt", false, "run the prompt compilation with the current config, write the artifact under <session-dir>/compiled-prompts/, and exit — no protocol session; default --optimizer llm makes ONE compile-time LLM call and requires the variable named by --api-key-env to be set (fail-closed exit 2 without it); --optimizer dedup is the offline, keyless alternative")
+	fs.StringVar(verifyLog, "verify-log", "", "read-only mode: replay the session log at PATH, print ONE JSON line {events, format_version, surface_sha256, messages} (sha256 over the canonical derived-surface JSON) to stdout, and exit — no protocol session, no engine flags required; exit 1 with the reason on stderr on any replay error (fail-closed). Two runs on the same log print identical bytes (replay-determinism prover)")
 	fs.BoolVar(showVersion, "version", false, "print engine and protocol versions and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -131,6 +137,14 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	if *showVersion {
 		fmt.Fprintf(stdout, "vh-agentd engine %s, protocol %d\n", engineVersion, protocol.ProtocolVersion)
 		return 0
+	}
+
+	// --verify-log is a READ-ONLY operator mode, handled BEFORE the
+	// required-flag validation (it needs no adapter/model/session-dir
+	// and starts no protocol session). It is the replay-determinism
+	// prover for real produced logs: same log in, same line out.
+	if *verifyLog != "" {
+		return runVerifyLog(*verifyLog, stdout, stderrw)
 	}
 
 	cfg, err := validate(*adapter, *model, *baseURL, *apiKeyEnv, *sessionDir, *optimizer, *maxTokens, *approvalTimeoutMs, *cacheBreakpoints, *sandbox, *spillMaxInline, *workdirRoots)
@@ -234,3 +248,62 @@ func newLogger(w io.Writer) *log.Logger {
 
 // realNow is the default clock source for the clock tool.
 func realNow() time.Time { return time.Now() }
+
+// runVerifyLog is the --verify-log mode: replay the log at path through
+// session.ReplayFile + DeriveMessages (existing exported surfaces only)
+// and print ONE JSON line — {"events":N,"format_version":V,
+// "surface_sha256":"<sha256 of the canonical surface JSON>","messages":M}
+// — to stdout. Exit 0 on success; exit 1 with the reason on stderr on
+// ANY replay error (fail-closed). The canonical surface JSON is
+// json.Marshal of the derived []session.Message (deterministic field
+// order, nil normalized to []), so two runs on the same file print
+// byte-identical lines: this is the replay-determinism prover for real
+// produced logs.
+func runVerifyLog(path string, stdout, stderrw io.Writer) int {
+	events, err := session.ReplayFile(path)
+	if err != nil {
+		fmt.Fprintf(stderrw, "vh-agentd: --verify-log %s: replay failed: %v\n", path, err)
+		return 1
+	}
+	if len(events) == 0 {
+		fmt.Fprintf(stderrw, "vh-agentd: --verify-log %s: log has no session/header record (empty log?); refusing to verify a headerless session\n", path)
+		return 1
+	}
+	msgs, err := session.DeriveMessages(events)
+	if err != nil {
+		fmt.Fprintf(stderrw, "vh-agentd: --verify-log %s: surface derivation failed: %v\n", path, err)
+		return 1
+	}
+	if msgs == nil {
+		msgs = []session.Message{}
+	}
+	surfaceJSON, err := json.Marshal(msgs)
+	if err != nil {
+		fmt.Fprintf(stderrw, "vh-agentd: --verify-log %s: canonical surface marshal failed: %v\n", path, err)
+		return 1
+	}
+	sum := sha256.Sum256(surfaceJSON)
+	var header session.HeaderPayload
+	if err := json.Unmarshal(events[0].Payload, &header); err != nil {
+		fmt.Fprintf(stderrw, "vh-agentd: --verify-log %s: malformed header payload: %v\n", path, err)
+		return 1
+	}
+	out := struct {
+		Events        int    `json:"events"`
+		FormatVersion int    `json:"format_version"`
+		SurfaceSHA256 string `json:"surface_sha256"`
+		Messages      int    `json:"messages"`
+	}{
+		Events:        len(events),
+		FormatVersion: header.FormatVersion,
+		SurfaceSHA256: hex.EncodeToString(sum[:]),
+		Messages:      len(msgs),
+	}
+	line, err := json.Marshal(out)
+	if err != nil {
+		fmt.Fprintf(stderrw, "vh-agentd: --verify-log %s: output marshal failed: %v\n", path, err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s\n", line)
+	return 0
+}
