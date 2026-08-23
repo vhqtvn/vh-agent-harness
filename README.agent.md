@@ -1519,6 +1519,7 @@ Client library).
 # client flags BEFORE --exec: everything after the daemon command (or a
 # leading --) passes through to the daemon verbatim.
 vh-agent-client [--session-dir DIR] [--json] [--prompt TEXT] [--repl] \
+  [--policy FILE] \
   [--exec vh-agentd --adapter openai --model <name> \
           --base-url <https://...> --api-key-env <ENV_VAR_NAME> ...]
 ```
@@ -1550,6 +1551,14 @@ vh-agent-client [--session-dir DIR] [--json] [--prompt TEXT] [--repl] \
   rendering), the final prompt result as the last line, and approval
   answers as JSON lines (`{"id":"<approvalId>","approve":bool}`) on
   stdin.
+- `--policy FILE` — attach the client-side auto-approver policy engine
+  at the `ApproverFunc` seam (see "Auto-approver policy (`--policy`)"
+  below). Composition, not replacement: calls the policy does not
+  allow still ask the interactive/`--json` responder, so
+  `--json --policy` works and humans still see real asks. Absent flag
+  = unchanged behavior (no engine). A present-but-broken file is a
+  usage error (exit 2) naming the exact offending line BEFORE the
+  daemon spawns.
 
 **Output discipline** mirrors the daemon's stdout-is-protocol purity:
 rendered events and prompts (including the approval `[y/N]` prompt) go
@@ -1561,11 +1570,188 @@ refused `--resume`).
 **Approvals** surface as a blocking `[y/N] approve tool <name>?` prompt
 (interactive mode) or as the NDJSON request + stdin answer (`--json`).
 ENTER alone, EOF, malformed input, or a non-affirmative answer DENIES —
-fail-closed, mirroring the daemon's bridge. There is deliberately NO
-auto-approve policy yet: the responder sits behind an `ApproverFunc`
-seam in the client wiring, which is exactly where the P3 policy engine
-attaches (a policy replaces the interactive/JSON responder without
-touching the driver).
+fail-closed, mirroring the daemon's bridge. The responders sit behind
+an `ApproverFunc` seam in the client wiring; `--policy` composes the
+P3 auto-approver engine in front of them (below) without touching the
+driver.
+
+**Auto-approver policy (`--policy`, P3).** `--policy FILE` attaches a
+client-side rule engine at the approval seam so scripted runs can
+proceed without a human at the terminal — without weakening the
+fail-closed posture. Every policy decision renders one stderr line
+(`policy: allow run_shell(command=git status)` /
+`policy: HARD-DENY edit(path=x) (…reason…)` / `policy: ask → human`).
+The engine never reads stdin: allow/hard-deny answer synchronously, and
+only the ask path can block (that block belongs to the responder).
+
+*Rule file syntax* (line-oriented TOML-ish subset; `cmd/vh-agent-client/policy`):
+
+```toml
+# whole-line comments and blank lines are the only ignored shapes
+
+[[allow]]
+tool = "read"          # exact tool name, or a single-segment glob "edit:*"
+path = "docs/"         # optional rooted-path prefix (read/write/edit only)
+
+[[allow]]
+tool = "run_shell"
+argv0 = "git"          # optional exact argv[0] (run_shell only): every
+                       # command segment's argv[0] must equal it
+
+[[allow]]
+tool = "echo"          # a bare rule allows the tool pattern broadly,
+                       # still behind the hard-deny classes
+```
+
+The parse is FAIL-CLOSED: unknown keys or sections, malformed lines,
+duplicate keys, unquoted values, inline comments, unreadable files, and
+semantically inexpressible rules (a bare `*`, wildcards outside
+`prefix:*`, a `path` on a non-file tool, a `path`/`argv0` on the wrong
+tool, `..`/`.`/empty path segments in a rule) exit 2 at startup with
+the exact offending file:line (and byte offset). Nothing is silently
+ignored. An EMPTY file is valid and means "everything asks" — exactly
+the no-`--policy` posture.
+
+*Decision order (fixed; no rule file can change it):*
+
+1. **HARD-DENY classes** — enforced before allow-rules are even
+   consulted; an allow rule that tries to cover one never gets the
+   chance (the tests prove this adversarially):
+   - **secret env writes** — any `NAME=value` assignment shape in a
+     `run_shell` command (or an `env` arg on any tool) whose NAME
+     matches the engine's env-scrub pattern `(?i)KEY|PASSWORD|SECRET|TOKEN`
+     or carries the `VH_AGENT_HARNESS_` prefix (mirrored from
+     `internal/tools/shell`);
+    - **git mutation** — `run_shell` argv[0] `git` (path forms and
+      `env`-prefixed forms included; compound commands split on
+      `&&`/`&`/`||`/`;`/`|`/newline with every segment checked — the
+      single `&` matters because `bash -c` executes BOTH sides of an
+      asynchronous list, so `git status & git push` is a mutation
+      segment) with a subcommand in the closed mutation set (push,
+      reset, clean, checkout, branch, merge, rebase, cherry-pick,
+      revert, restore, worktree, commit, tag, stash, apply, am, clone,
+      fetch, pull, add, rm, mv, switch, config, sparse-checkout,
+      submodule, update-ref, symbolic-ref, gc, prune). Read-only git
+      (`status`, `log`, `diff`, `show`, `grep`, …) stays rule-eligible.
+      `git` with no subcommand, flags before the subcommand, or a
+      quoting-evaded shape denies (cannot identify ⇒ deny), and a
+      git-headed segment denies if ANY word carries a substitution
+      metacharacter (`$`, backtick, `(`, `)`) — `git log $(git push)`
+      executes the substitution, so the words are not provably
+      read-only. Wrapper shapes whose argv[0] is not `git` (`sudo git
+      push`, `nohup git push`, `sh -c "git push …"`) are covered by a
+      word-level git-adjacency scan: a segment containing BOTH the
+      word `git` and a mutation-subcommand word hard-denies. *Honest
+      false-positive direction (accepted):* the adjacency scan is
+      deliberately over-approximating — prose like `echo about git
+      push` denies too, and the `&` split is lexical (a quoted or
+      redirection `&` shape can over-split into extra segments, which
+      can only lose an allow, never gain one);
+    - **exec-intermediary tripwires (closed class)** — the exec
+      bridges that assemble a child argv the segment scans cannot
+      follow. The words `xargs`, `parallel` (GNU parallel), `-exec`,
+      `-execdir`, `-ok`, `-okdir` deny wherever they appear as
+      standalone words in any segment (path-qualified forms included,
+      basename) — position-independent, so no displacement wrapper
+      (`nohup xargs git`, `command`/`nice`/`time`/`stdbuf`/`setsid
+      xargs …`, `env -i xargs …`, `env env xargs …`, `sh -c 'xargs
+      git'`) can move the bridge out of scanning position: `echo
+      push | xargs git` splits the mutation word and the word `git`
+      across pipe segments — no single-segment adjacency — and bash
+      lets xargs assemble the child `git push`; `-ok`/`-okdir` are
+      find's prompt-exec variants of the `-exec`/`-execdir` bridges.
+      The class also denies any single word matching
+      `^git-[a-z][a-z0-9-]*$` (dashed-form git dispatch — `git-push
+      origin main` puts the subcommand inside argv[0]; a PATH-form
+      argv[0] basename-trips too; the regex is LOWERCASE-only, a
+      case-sensitivity boundary: `git-Push` does not trip it and
+      falls to the git-adjacency scan or the disclosed residual
+      below). This class runs first among the `run_shell` command
+      classes, so an exec-bridge word always trips even when the git
+      scans would co-fire. *Honest over-approximation (accepted, deny
+      direction):* the closed word set and `git-*` words deny even as
+      benign whole-word mentions (`man git-push`, `git log --grep
+      git-push`, `echo about xargs`/`parallel` prose — though an
+      embedded substring like `--grep=git-push` and the words
+      `xargus`/`parallels` do NOT trip: the word match is exact or
+      basename, never substring). Encoded, translated, or
+      undisplaced-vocabulary forms beyond this closed set fall to the
+      disclosed arbitrary-intermediary residual below: the policy is
+      tripwires, not proofs; the sandbox is the boundary;
+    - **env-option fail-closed (env prefix boundary)** — after the
+      leading `NAME=value` assignments and at most one literal `env`
+      are stripped from a segment, an env OPTION word (`-i`,
+      `-u NAME`, `--`) leaves the child environment/argv
+      unidentifiable to the lexical scan (`echo push | env -i xargs
+      git` would make `-i` the argv[0] and hide the bridge) — the
+      segment denies: uncertainty denies. Boundary: `env FOO=bar git
+      status` (assignments then a plain argv[0]) strips cleanly and
+      stays identifiable through the normal classes;
+    - **plain-word provability gate (anti-evasion)** — a
+      `run_shell` segment is allow-eligible only if EVERY word is
+      *plain*: after edge-quote trimming, matching the conservative
+      identifier grammar `^[A-Za-z0-9_./:@+=-]+$` (no interior quotes,
+      no `$`, no backtick, no parens, no other shell metacharacters).
+      Any non-plain word anywhere in any segment is lexically
+      UNIDENTIFIABLE and hard-denies; no allow rule can rescue it.
+      This one rule closes the quote-fragmentation genus (`sh -c
+      'gi''t pu''sh'` — interior-quote fragments match neither `git`
+      nor the mutation set) and the substitution-wrapped genus (`echo
+      $(git push)`, ``echo `git push` `` — argv[0] plain and non-git,
+      invisible to the adjacency scan) at any encoding, any position.
+      *Honest consequence (accepted):* the deny-direction
+      over-approximation WIDENS — `echo $(date)`, `ls $(pwd)`, `git
+      diff HEAD~1` (`~` is outside the grammar) now hard-deny under
+      ANY policy: v1 has NO policy path for command substitution or
+      non-grammar words in `run_shell`. Unidentifiable DENIES rather
+      than asks (the established uncertainty posture): the human can
+      still run such a command themselves outside the client, or the
+      operator drops `--policy` for interactive use. Plain-word false
+      positives remain (`echo about git push` denies via adjacency);
+    - **confinement-escape shapes provable from args alone** — `..`
+     segments in file-tool `path` args and `run_shell` `workdir`, and
+     traversal-shaped words (`..`, `../x`, `a/../b`) in a `run_shell`
+     command. *Honest boundary:* absolute paths are NOT hard-denied —
+     the daemon's configured roots are not knowable client-side, so
+     they fall to rule matching (a relative-rooted rule prefix never
+     matches them ⇒ ask); regex `..` in search/glob patterns is not
+     scanned (it is grammar, not a path);
+   - **sandbox-mode escalation** — the closed vocabulary:
+     `danger-full-access` as a literal substring of any arg value,
+     `sandbox`/`sandbox_mode`/`sandboxPermissions` override KEYS at any
+     nesting depth, and `--sandbox…`-shaped flags or a `sandbox=`
+     prefix in a `run_shell` command. Per-call sandbox override does
+     not exist on the tool surface; requesting it is an escape attempt.
+   - **fail-closed args rule** — for the known-risky tools
+     (`run_shell`, `read`, `write`, `edit`) an args object that does
+     not parse into the tool's known shape (missing/ mistyped required
+     key, unknown key) DENIES: uncertainty denies, never allows.
+2. **allow-rules** — first matching `[[allow]]` entry wins.
+3. **default ASK** — anything unmatched falls through to the
+   interactive/`--json` responder exactly as with no `--policy`. The
+   engine never auto-approves something unmatched.
+*Honest limits (documented in `policy/decide.go`):* the hard-deny
+classes are **closed-class lexical tripwires, not proofs**. The
+policy engine denies a closed vocabulary of shapes it can identify;
+it cannot prove a command string will not invoke git (or anything
+else) through arbitrary intermediaries — `make`, scripts, compiled
+helpers. All command-text analysis is LEXICAL (whitespace fields, no
+quoting/expansion semantics), conservative in the DENY direction —
+e.g. `echo "a && b"` splits lexically and its quoted tail denies
+(uncertainty ⇒ deny), and the plain-word provability gate widens
+that direction further (any word carrying
+quotes/substitution/metacharacters — even a benign `$(date)` —
+denies the whole call). That is the accepted cost of a
+lexically-provable boundary: provable words get exact-match scans;
+everything else denies. **The daemon's sandbox
+(`--sandbox read-only|workspace-write`) is the actual security
+boundary** for filesystem/network effects; the approval policy is
+defense-in-depth in front of it, and the classes are client-side
+tripwires in front of the daemon's own guards — not the enforced
+boundary. Running `--policy` with `--sandbox off` means auto-approve
+of whatever the model writes — an explicit operator risk decision.
+No per-project policy discovery: the flag is explicit by design
+(auto-discovery is a footgun).
 
 **Resume posture (documented partial):** the wire has no
 `session/resume` method yet (planned P4), and `session/create` with an

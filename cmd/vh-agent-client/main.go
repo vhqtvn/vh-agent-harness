@@ -24,6 +24,7 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/vhqtvn/vh-agent-harness/cmd/vh-agent-client/policy"
 	"github.com/vhqtvn/vh-agent-harness/internal/protocol"
 )
 
@@ -75,6 +76,21 @@ func run(args []string, stdin io.Reader, stdout, stderrw io.Writer) (exit int) {
 		return exitCodeFor(err)
 	}
 
+	// P3 policy engine: load and parse BEFORE the daemon spawns — a
+	// broken policy file is a usage error (exit 2) naming the exact
+	// offending line, never a silently-absent policy and never a run
+	// that already started a daemon.
+	var pol *policy.Policy
+	if cfg.PolicyPath != "" {
+		p, perr := policy.LoadFile(cfg.PolicyPath)
+		if perr != nil {
+			fmt.Fprintf(stderrw, "vh-agent-client: %v\n\n%s", perr, usageDoc)
+			return 2
+		}
+		pol = p
+		fmt.Fprintf(stderrw, "vh-agent-client: policy loaded (%d rules) from %s\n", len(pol.Rules()), cfg.PolicyPath)
+	}
+
 	// Spawn the daemon.
 	argv := cfg.daemonArgv()
 	cmd := exec.Command(argv[0], argv[1:]...)
@@ -115,6 +131,12 @@ func run(args []string, stdin io.Reader, stdout, stderrw io.Writer) (exit int) {
 	} else {
 		renderer = newHumanRenderer(stderrw)
 		approver = interactiveApprover(hub, stderrw)
+	}
+	// P3: compose the policy engine IN FRONT of the responder —
+	// delegation, not replacement (unmatched asks still reach the
+	// interactive/--json approver; --json --policy composes).
+	if pol != nil {
+		approver = policyApprover(pol, approver, stderrw)
 	}
 
 	var selfStdin io.Closer

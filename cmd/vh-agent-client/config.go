@@ -67,6 +67,11 @@ type Config struct {
 	// New forces a fresh session even when a prior pointer exists (the
 	// default posture; the flag exists to make the choice explicit).
 	New bool
+	// PolicyPath is the P3 auto-approver policy file (--policy). Empty
+	// = no policy engine: the interactive/--json responder answers
+	// exactly as before. A present-but-broken file is a usage error
+	// (exit 2) at startup — never a silently-absent policy.
+	PolicyPath string
 	// Mode is the resolved input mode.
 	Mode Mode
 }
@@ -100,9 +105,15 @@ flags:
                      final assistant text on stdout, exit
   --repl             force interactive REPL even when stdin is not a TTY
   --resume           resume the prior session (REFUSED for now: the
-                     session/resume wire method arrives in P4)
+                      session/resume wire method arrives in P4)
   --new              force a fresh session even when a prior one exists
-                     (the default posture; explicit form)
+                      (the default posture; explicit form)
+  --policy FILE      auto-approver policy: [[allow]] rules evaluated
+                      AFTER fixed hard-deny classes (secret env, git
+                      mutation, path traversal, sandbox escalation);
+                      unmatched calls still ask the human/--json
+                      responder. Bad file = exit 2. Absent = unchanged
+                      behavior (no policy engine)
 
 output discipline (mirrors the daemon): rendered events and prompts go
 to STDERR; stdout carries machine-readable content only (the final
@@ -122,6 +133,7 @@ func parseArgs(args []string, isTTY func() bool, stderrw io.Writer) (*Config, er
 		repl       = new(bool)
 		resume     = new(bool)
 		forceNew   = new(bool)
+		policyPath = new(string)
 	)
 	fs := flag.NewFlagSet("vh-agent-client", flag.ContinueOnError)
 	fs.SetOutput(stderrw)
@@ -133,6 +145,7 @@ func parseArgs(args []string, isTTY func() bool, stderrw io.Writer) (*Config, er
 	fs.BoolVar(repl, "repl", false, "force interactive REPL")
 	fs.BoolVar(resume, "resume", false, "resume the prior session (refused until P4)")
 	fs.BoolVar(forceNew, "new", false, "force a fresh session (the default posture)")
+	fs.StringVar(policyPath, "policy", "", "auto-approver policy file (fail-closed parse; absent = no policy engine)")
 
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -151,6 +164,7 @@ func parseArgs(args []string, isTTY func() bool, stderrw io.Writer) (*Config, er
 		Repl:       *repl,
 		Resume:     *resume,
 		New:        *forceNew,
+		PolicyPath: *policyPath,
 	}
 	if *execFlag {
 		rest := fs.Args()
@@ -182,6 +196,17 @@ func parseArgs(args []string, isTTY func() bool, stderrw io.Writer) (*Config, er
 	}
 	if cfg.SessionDir == "" {
 		return nil, usagef("--session-dir must not be empty")
+	}
+	// --policy distinguishes "absent" (no engine, unchanged behavior)
+	// from "explicitly empty" (a usage error): the flag VALUE is "" in
+	// both cases, so the raw args decide.
+	for i, a := range args {
+		if (a == "--policy" || a == "-policy") && i+1 < len(args) && args[i+1] == "" {
+			return nil, usagef("--policy must not be empty (omit the flag to run without a policy engine)")
+		}
+		if a == "--policy=" || a == "-policy=" {
+			return nil, usagef("--policy must not be empty (omit the flag to run without a policy engine)")
+		}
 	}
 	// Hotfix b-F2: resolve the session dir to an ABSOLUTE, cleaned
 	// path BEFORE daemon argv assembly — both the documented default

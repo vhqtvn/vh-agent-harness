@@ -1,15 +1,14 @@
 // approval.go — the client's approval answering: the ApproverFunc seam
-// (the P3 policy-engine attachment point) and the two shipped
-// responders (interactive y/N and --json line reader), both backed by
-// the stdinHub (input.go — the single stdin owner; hotfix b-F1: the
-// responders used to read the shared bufio.Reader directly, racing
-// under concurrent approvals).
+// and the two shipped responders (interactive y/N and --json line
+// reader), both backed by the stdinHub (input.go — the single stdin
+// owner; hotfix b-F1: the responders used to read the shared
+// bufio.Reader directly, racing under concurrent approvals).
 //
 // Fail-closed in every unanswerable direction, mirroring the daemon's
 // approval bridge: EOF, ENTER alone, malformed input, or anything that
-// is not an explicit y/yes DENIES. There is deliberately NO
-// auto-approve policy in this slice — P3 plugs a policy engine in
-// exactly here (ApproverFunc) without touching the driver.
+// is not an explicit y/yes DENIES. The P3 policy engine (policy.go)
+// COMPOSES at this seam — in front of whichever responder the mode
+// chose — delegating unmatched asks to it; the driver is untouched.
 package main
 
 import (
@@ -25,10 +24,11 @@ type ApprovalAnswer struct {
 	Reason string
 }
 
-// ApproverFunc answers one approval/request. It is the P3 policy seam:
-// this slice ships exactly two implementations (interactiveApprover for
-// human mode, jsonApprover for --json); a P3 policy engine replaces the
-// default in the wiring without changing the driver.
+// ApproverFunc answers one approval/request. It is the policy seam:
+// the shipped implementations are interactiveApprover (human mode) and
+// jsonApprover (--json); the P3 policy engine (policy.go) wraps the
+// chosen one via policyApprover when --policy is given, without
+// changing the driver.
 type ApproverFunc func(approvalID string, call session.ToolCall, reason string) ApprovalAnswer
 
 // denyAll is the fail-closed responder used when no responder applies
