@@ -27,6 +27,17 @@ func requireDevFull(t *testing.T) {
 	}
 }
 
+// requireNonRoot skips the test when running as root (euid 0): root's
+// DAC_OVERRIDE ignores directory permission bits, so the chmod-0500
+// unlink-failure injection cannot produce the EACCES this test depends
+// on (the cleanup succeeds and the cleanup-failure note never fires).
+func requireNonRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: DAC_OVERRIDE bypasses permission bits; cannot inject cleanup-failure EACCES")
+	}
+}
+
 // TestOpenChildFileHeaderWriteFailureRemovesOrphan: when the header
 // write fails after a successful create, OpenChildFile must close AND
 // REMOVE the file — no 0-byte orphan may remain on disk. The original
@@ -61,6 +72,7 @@ func TestOpenChildFileHeaderWriteFailureRemovesOrphan(t *testing.T) {
 // note naming the failed cleanup.
 func TestOpenChildFileCleanupFailureKeepsOriginalError(t *testing.T) {
 	requireDevFull(t)
+	requireNonRoot(t)
 	dir := t.TempDir()
 	defer os.Chmod(dir, 0o700) // restore for t.TempDir cleanup
 	path := filepath.Join(dir, "child.jsonl")
