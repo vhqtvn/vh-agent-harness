@@ -342,10 +342,16 @@ func TestSpillCruxEndToEnd(t *testing.T) {
 	}
 	// The spilled preview (with its locator) is model-visible from the
 	// log alone; every retrieval WINDOW is visible inline too — real
-	// spilled bytes in context, not a re-spilled preview.
+	// spilled bytes in context, not a re-spilled preview. The expected
+	// byte count is derived from THIS run's locator: the serialized
+	// run_shell outcome embeds durationMs, so its exact length (and the
+	// notice's count) is machine-speed-dependent — a hardcoded total
+	// only holds on a machine fast enough to keep durationMs under the
+	// next digit boundary.
+	wantNotice := fmt.Sprintf("[spilled %d bytes:", loc.Size)
 	foundSpilled, foundWindow := false, false
 	for _, m := range replayMsgs {
-		if strings.Contains(m.Content, "[spilled 80213 bytes:") {
+		if strings.Contains(m.Content, wantNotice) {
 			foundSpilled = true
 		}
 		if strings.Contains(m.Content, "[window offset=0 ") {
