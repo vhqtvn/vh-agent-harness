@@ -30,6 +30,12 @@ type fixtureCase struct {
 	line func() ([]byte, error)
 }
 
+// listResultLock is the session/list result envelope (the handler's
+// anonymous shape, named once for the fixture builder).
+type listResultLock struct {
+	Sessions []SessionEntry `json:"sessions"`
+}
+
 func fixtureCases() []fixtureCase {
 	return []fixtureCase{
 		{"request-initialize", func() ([]byte, error) {
@@ -62,6 +68,39 @@ func fixtureCases() []fixtureCase {
 				ID      int64        `json:"id"`
 				Result  createResult `json:"result"`
 			}{JSONRPCVersion, 2, createResult{SessionID: "sess-example", Path: "/tmp/sessions/sess-example.jsonl"}})
+		}},
+		{"request-session_resume", func() ([]byte, error) {
+			return MarshalRequest(7, "session/resume", json.RawMessage(`{"sessionId":"sess-example"}`))
+		}},
+		{"response-session_resume", func() ([]byte, error) {
+			return json.Marshal(struct {
+				JSONRPC string        `json:"jsonrpc"`
+				ID      int64         `json:"id"`
+				Result  ResumeSummary `json:"result"`
+			}{JSONRPCVersion, 7, ResumeSummary{
+				SessionID: "sess-example",
+				Path:      "/tmp/sessions/sess-example.jsonl",
+				Events:    4,
+				Messages: []session.Message{
+					{Role: "user", Content: "continue this session"},
+					{Role: "assistant", Content: "resumed"},
+				},
+				Title:         "continue this session",
+				Usage:         session.Usage{PromptTokens: 12, CompletionTokens: 6, TotalTokens: 18},
+				UnsettledJobs: []string{"background-2"},
+			}})
+		}},
+		{"request-session_list", func() ([]byte, error) {
+			return MarshalRequest(8, "session/list", nil)
+		}},
+		{"response-session_list", func() ([]byte, error) {
+			return json.Marshal(struct {
+				JSONRPC string         `json:"jsonrpc"`
+				ID      int64          `json:"id"`
+				Result  listResultLock `json:"result"`
+			}{JSONRPCVersion, 8, listResultLock{Sessions: []SessionEntry{
+				{SessionID: "sess-example", Title: "continue this session", Events: 4, LastActivity: time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)},
+			}}})
 		}},
 		{"request-session_prompt", func() ([]byte, error) {
 			return MarshalRequest(3, "session/prompt", json.RawMessage(`{"text":"summarize the repo"}`))

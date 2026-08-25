@@ -62,6 +62,8 @@ requests ⇒ `-32001`. `initialize` is idempotent.
 |---|---|---|---|
 | `initialize` | `{protocolVersion}` | §3 | handshake |
 | `session/create` | `{path?, sessionId?}` | `{sessionId, path}` | new durable log (file); becomes the single active session; a later create supersedes; `path`/`sessionId` confined per §4a |
+| `session/resume` | `{sessionId}` | `{sessionId, path, events, messages[], title, usage, unsettledJobs?}` | open the EXISTING log (never creates; the only truncation is the torn-tail committed-prefix trim — absent ⇒ typed `-32602` `not-found`), recover a torn tail, replay, derive the surface, make it active with create's supersede semantics for a DIFFERENT id (§4e); the engine's CURRENTLY-ACTIVE id ⇒ typed `-32602` `session-active` (a second live writer on the open log would corrupt the stream); child sessions (header `parentSessionId`) refused naming the parent |
+| `session/list` | `{}` | `{sessions[]}` | resumable top-level sessions under the session dir: `{sessionId, title, events, lastActivity}`, newest-activity first (§4e); no active session required |
 | `session/subscribe` | `{types?}` | `{subscribed:true}` | live-only event stream (see §5); filter = session event types |
 | `session/prompt` | `{text}` | `{content, toolCalls[], results[]}` | ONE synchronous tool turn (RunTurn); retries/multi-turn stay engine-internal |
 | `session/dispatch` | `{kind, payload?}` | `{jobId}` | enqueue receipt, returns **before** execution (see §6) |
@@ -77,7 +79,9 @@ requests ⇒ `-32001`. `initialize` is idempotent.
 
 `session/prompt`, `session/dispatch`, `session/surface`, `subagent/spawn`,
 `subagent/send`, `schedule/add`, `schedule/remove` require an active
-session (`-32003`). `subagent/spawn`/
+session (`-32003`). `session/resume` and `session/list` do NOT — they
+are the discovery/establishment surface (a client lists, then resumes);
+a successful `session/resume` MAKES a session active. `subagent/spawn`/
 `subagent/send` on an engine built without a subagent executor fail closed
 `-32000`; manager refusals (depth fence, unknown/settled child, one-shot
 send) are `-32602` carrying the manager's descriptive text.
@@ -110,15 +114,17 @@ these rules are what make a TURN atomic, not just its records):
   its already-committed events (whole-record granularity, never
   interleaved brackets). Different sessions' turns run concurrently
   with each other.
-- **Serialized against each other:** `session/create`. The whole
-  create critical section — engine session construction (including the
-  daemon tracker's active-session bookkeeping, which happens
-  synchronously inside `engine.NewSession`) and the server's
+- **Serialized against each other:** `session/create` AND
+  `session/resume`. The whole create/resume critical section — engine
+  session construction or recovery (including any engine-decorator
+  active tracking, which happens synchronously inside
+  `engine.NewSession`/`engine.ResumeSession`) and the server's
   active-pointer swap — runs as one non-interleaved stage. Concurrent
-  creates therefore cannot leave the engine, tracker, and server
-  disagreeing about which session is active; every created session is
-  complete on disk (valid header, no partial log) when its create
-  returns.
+  creates/resumes therefore cannot leave the engine, tracker, and
+  server disagreeing about which session is active; every created
+  session is complete on disk (valid header, no partial log) when its
+  create returns, and every resumed session has recovered its torn
+  tail (if any) before it becomes active.
 - **Replacement semantics (create while a prompt is in flight).** A
   prompt's ADMISSION — which session it runs against — is one atomic
   active-session resolution. A create that supersedes after admission
@@ -404,6 +410,102 @@ payload fields `tool/result .spilled`/`.spillLocator` are omitempty
 untouched (§8's no-new-fields rule on existing method shapes holds);
 `spill_read` travels through the existing `tool/call`/`tool/result`
 events, so no new fixtures were needed.
+
+## 4e. Session lifecycle over the wire (P4): resume, list, derived identity
+
+`session/resume` makes sessions survivable across daemon restarts, and
+`session/list` makes them discoverable. Both are additive
+(ProtocolVersion stays 1); the fixtures under `internal/protocol/
+testdata/` lock their shapes.
+
+- **Resume is not fork and not create.** `session/resume {sessionId}`
+  opens the EXISTING log at `<sessionDir>/<sessionId>.jsonl` through
+  the crash-recovery seam (`session.ResumeFileTee`): torn-tail
+  recovery (an uncommitted final fragment is dropped, the file is
+  truncated to the last committed record), replay, and append-mode
+  continuation of the SAME durable stream — same file, same session
+  id, `seq` continues from the recovered tail. Contrast
+  `session/create` with an existing id, which truncates via
+  `os.Create` (the two entrances are deliberately distinct; the
+  reference client never fakes resume through create).
+- **Fail-closed on every branch, before any state changes.** Absent
+  log ⇒ typed refusal `not-found` (`-32602`) — resume never creates a
+  file; the only truncation it can perform is RecoverTail's trim of a
+  TORN uncommitted tail back to the last committed record (the
+  crash-recovery seam create never needs). An EMPTY log (file exists,
+  zero bytes — no header; `session/list` skips it too) is the same
+  typed `not-found` refusal: an empty file is not a session, and the
+  refusal stays client-actionable instead of an untyped `-32000`. The
+  engine's CURRENTLY-ACTIVE session id ⇒ typed refusal
+  `session-active` (`-32602`): a same-id resume would open a second
+  live writer on the open log, and one more append through either
+  writer mints a duplicate `seq` that `validateStructure` rejects on
+  every later replay (unresumable, `--verify-log` fails,
+  `session/list` fails the dir closed). The active session stays
+  servable through its existing seams (`session/surface`,
+  `session/prompt`); resume targets a SUPERSEDED id — the
+  daemon-restart story it exists for. `sessionId` is validated by the
+  same strict filename-component grammar as create (§4a). A log whose
+  header carries `parentSessionId` (a subagent child) ⇒ typed refusal
+  `child-session` naming the parent — v1 resumes TOP-LEVEL sessions
+  only; children resume through their parent's manager. A log whose
+  header `sessionId` disagrees with the requested id ⇒ typed refusal
+  `id-mismatch` (the header is the durable identity). Structurally
+  damaged logs fail closed exactly like `--verify-log`.
+- **Supersede semantics identical to create — for a DIFFERENT id.**
+  The whole resume runs under the same server critical section as
+  create (§4), and the engine additionally serializes its ENTIRE
+  transition (validate → file open → surface derive → subagent
+  supersede → active-id publish) under its own lifecycle lock, so the
+  active-id record is published atomically with the transition and
+  engine-direct callers outside the wire critical section get the same
+  guarantee — a successful resume ALWAYS returns with its id recorded
+  (the session-active refusal above cannot be bypassed by a racing
+  create). The surface is derived BEFORE the supersede: a
+  surface-invalid (but structurally valid) log refuses with the
+  subagent registry/manager state untouched. The previous active
+  session's subagent manager stops accepting spawns and its registry
+  binding moves to the resumed session; an in-flight turn on the
+  superseded session completes atomically on its own log. Same-id
+  resume is NOT a supersede case: when the requested id IS the active
+  session, the request is the `session-active` refusal above (same-id
+  ≠ supersede target). Appended events reach the live notification
+  fan-out from the resume point onward (the stream stays live-only —
+  replayed history is never re-emitted).
+- **Result shape** `{sessionId, path, events, messages[], title,
+  usage, unsettledJobs?}`: the recovered event count, the derived
+  surface snapshot (the same projection `session/surface` serves —
+  multi-turn continuation operates on it unchanged), and the derived
+  identity below. `unsettledJobs` lists fold-visible jobs with no
+  terminal `job/settled` event: they are REPORTED, never silently
+  re-dispatched and never synthetically settled on the interactive
+  path — those are the R9 startup-recovery decisions
+  (`jobs.Recover`), which daemon startup does not currently run
+  (wiring it there is the documented follow-up; resume reports and
+  leaves the durable state untouched).
+- **Titles are DERIVED, never stored.** The session title is the
+  FIRST user prompt (`session/prompt`), whitespace-collapsed to one
+  line, truncated to 60 runes with a trailing ellipsis
+  (`session.DeriveTitle`). No title events, no `session/setTitle`
+  method in v1 (it would be new durable state; noted as future work).
+  A log with no user prompt derives the empty title.
+- **Token status is replay-derived.** `usage` is the SUM of every
+  `llm/response` usage envelope in the log (`session.SumUsage`). The
+  envelope has been logged on every response since slice 1 (the field
+  is non-omitempty), so ALL logs — pre-P4 included — derive real
+  totals; only providers that report no usage honestly sum to zero.
+  No schema change was needed for P4.
+- **`session/list` enumerates the resumable surface:** every `*.jsonl`
+  directly under the session dir (children excluded by header
+  topology even if parked at the top level; non-logs ignored). Each
+  entry carries `{sessionId, title, events, lastActivity}` where
+  `lastActivity` is the log file's mtime — session events carry no
+  timestamps (the slice-1 determinism design), so the filesystem
+  mtime is the only activity signal the engine can state honestly.
+  Ordering: newest activity first, ties broken by `sessionId`
+  ascending (deterministic). A structurally corrupt log fails the
+  whole listing closed naming the file; a TORN final record is
+  tolerated (the crashed session still lists).
 
 ## 7b. Async contract (subagents, B2)
 

@@ -89,12 +89,18 @@ func (askAllObserver) ObservePreExecute(call session.ToolCall) tools.Verdict {
 	return tools.Ask("approval required (test seam)")
 }
 
-// newSeamServer builds the in-process library-seam server: a real
-// FileEngine over a temp dir, a real openaicompat adapter against the
-// fake LLM, and (after NewServer injects the wire approval bridge) an
-// ask_tool whose every call asks. Returns the CLIENT side of the pipe
-// and a stop function.
+// newSeamServer builds the in-process library-seam server over a
+// FRESH temp dir. Returns the CLIENT side of the pipe and a stop
+// function.
 func newSeamServer(t *testing.T, llmURL string) (io.ReadWriteCloser, func()) {
+	t.Helper()
+	return newSeamServerAt(t, llmURL, t.TempDir())
+}
+
+// newSeamServerAt is newSeamServer over an EXPLICIT engine dir — the
+// restart seam: two sequential servers over the same dir are two
+// daemon lifetimes on the same session store.
+func newSeamServerAt(t *testing.T, llmURL, dir string) (io.ReadWriteCloser, func()) {
 	t.Helper()
 	svc, cli := net.Pipe()
 
@@ -107,7 +113,7 @@ func newSeamServer(t *testing.T, llmURL string) (io.ReadWriteCloser, func()) {
 		},
 	}
 	engine := &protocol.FileEngine{
-		Dir:      t.TempDir(),
+		Dir:      dir,
 		Executor: noopExecutor{},
 		Ad:       openaicompat.New(openaicompat.Config{BaseURL: llmURL, Model: "fake-model", APIKey: "test-key"}),
 		TurnOpts: tools.TurnOptions{Model: "fake-model", Tools: []adapters.ToolSpec{askTool.Spec()}},
@@ -205,37 +211,183 @@ func TestDriverWritesLastSessionPointer(t *testing.T) {
 	}
 }
 
-func TestDriverResumeRefusedWithP4Pointer(t *testing.T) {
+// TestDriverResumeContinuesSession is the client-side restart crux:
+// run A (daemon lifetime 1) creates + prompts; daemon "exits"; run B
+// (daemon lifetime 2 over the SAME session dir) resumes the prior
+// session — same log file, surface continuity, and the continuation
+// turn appends to the same durable stream.
+func TestDriverResumeContinuesSession(t *testing.T) {
 	llm := askLLM(t)
 	defer llm.Close()
-	rwc, stop := newSeamServer(t, llm.URL)
-	defer stop()
+	dir := t.TempDir()
 
-	// Establish a prior session first.
-	cfg := seamConfig(t)
-	d, _, _ := seamDriver(t, rwc, cfg, "")
-	if err := d.run(context.Background()); err != nil {
-		t.Fatalf("first run: %v", err)
+	// Run A: fresh session, one prompt (LLM calls 1-2).
+	rwcA, stopA := newSeamServerAt(t, llm.URL, dir)
+	defer stopA()
+	cfgA := &Config{SessionDir: dir, Prompt: "first prompt of the session", Mode: ModeOneShot}
+	dA, outA, errbufA := seamDriver(t, rwcA, cfgA, "")
+	if err := dA.run(context.Background()); err != nil {
+		t.Fatalf("run A: %v (stderr:\n%s)", err, errbufA.String())
+	}
+	if outA.String() != "final answer after approval\n" {
+		t.Fatalf("run A stdout = %q", outA.String())
+	}
+	logs, err := filepath.Glob(filepath.Join(dir, "sess-*.jsonl"))
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("run A must leave exactly one session log: %v (%v)", logs, err)
+	}
+	logPath := logs[0]
+	preCount := countLines(t, logPath)
+	if preCount == 0 {
+		t.Fatal("run A produced no events")
 	}
 
-	// A second run asking to resume must fail with the P4 message,
-	// pointing at the missing session/resume wire method.
-	cfg2 := seamConfig(t)
-	cfg2.Resume = true
-	rwc2, stop2 := newSeamServer(t, llm.URL)
-	defer stop2()
-	d2, _, errbuf2 := seamDriver(t, rwc2, cfg2, "")
-	err := d2.run(context.Background())
-	if err == nil {
-		t.Fatal("resume must be refused")
+	// Run B: a SECOND server lifetime over the same dir; --resume picks
+	// up the pointer and resumes over the wire.
+	rwcB, stopB := newSeamServerAt(t, llm.URL, dir)
+	defer stopB()
+	cfgB := &Config{SessionDir: dir, Prompt: "continue after restart", Mode: ModeOneShot, Resume: true}
+	dB, outB, errbufB := seamDriver(t, rwcB, cfgB, "")
+	if err := dB.run(context.Background()); err != nil {
+		t.Fatalf("run B resume: %v (stderr:\n%s)", err, errbufB.String())
 	}
-	if code := exitCodeFor(err); code != 2 {
-		t.Fatalf("resume refusal exit = %d, want 2 (stderr:\n%s)", code, errbuf2.String())
+	if outB.String() != "final answer after approval\n" {
+		t.Fatalf("run B stdout = %q", outB.String())
 	}
-	if !strings.Contains(err.Error(), "session/resume") || !strings.Contains(err.Error(), "P4") {
-		t.Fatalf("refusal must name session/resume and P4: %v", err)
+	if !strings.Contains(errbufB.String(), "resumed session sess-") {
+		t.Fatalf("run B must announce the resume (stderr:\n%s)", errbufB.String())
+	}
+	if !strings.Contains(errbufB.String(), "first prompt of the session") {
+		t.Fatalf("resume line must carry the derived title (stderr:\n%s)", errbufB.String())
+	}
+
+	// Same durable stream: still exactly one log, and it GREW.
+	logsB, _ := filepath.Glob(filepath.Join(dir, "sess-*.jsonl"))
+	if len(logsB) != 1 || logsB[0] != logPath {
+		t.Fatalf("resume forked or created a session: %v", logsB)
+	}
+	postCount := countLines(t, logPath)
+	if postCount <= preCount {
+		t.Fatalf("log did not grow across resume: %d → %d", preCount, postCount)
+	}
+	// Surface continuity: BOTH user prompts are in the one stream (run
+	// A's prompt, its continuation re-prompt, and run B's prompt).
+	raw2, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := string(raw2)
+	if !strings.Contains(stream, "first prompt of the session") || !strings.Contains(stream, "continue after restart") {
+		t.Fatal("both runs' prompts must live in the ONE resumed stream")
 	}
 }
+
+// TestDriverResumeNoPointerUsageError: --resume with no recorded prior
+// session is a usage error (exit 2) BEFORE any wire traffic.
+func TestDriverResumeNoPointerUsageError(t *testing.T) {
+	cfg := seamConfig(t)
+	cfg.Resume = true
+	d, _, errbuf := seamDriver(t, &deadPipe{}, cfg, "")
+	err := d.establishSession()
+	if err == nil {
+		t.Fatal("resume without a pointer must be refused")
+	}
+	if code := exitCodeFor(err); code != 2 {
+		t.Fatalf("exit = %d, want 2 (err: %v, stderr:\n%s)", code, err, errbuf.String())
+	}
+	if !strings.Contains(err.Error(), "no prior session") {
+		t.Fatalf("refusal must say there is no prior session: %v", err)
+	}
+}
+
+// TestDriverResumeUnknownIDTypedFailure: a recorded pointer whose log
+// is gone (or an explicit unknown id) surfaces the daemon's typed
+// not-found as a run failure (exit 1), not a usage error.
+func TestDriverResumeUnknownIDTypedFailure(t *testing.T) {
+	llm := askLLM(t)
+	defer llm.Close()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, lastSessionFile), []byte("sess-vanished\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rwc, stop := newSeamServerAt(t, llm.URL, dir)
+	defer stop()
+	cfg := &Config{SessionDir: dir, Prompt: "x", Mode: ModeOneShot, Resume: true}
+	d, _, _ := seamDriver(t, rwc, cfg, "")
+	err := d.run(context.Background()) // full drive: initialize → resume → typed refusal
+	if err == nil {
+		t.Fatal("resuming a vanished session must fail")
+	}
+	if code := exitCodeFor(err); code != 1 {
+		t.Fatalf("exit = %d, want 1 (typed daemon refusal): %v", code, err)
+	}
+	if !strings.Contains(err.Error(), "not-found") {
+		t.Fatalf("failure must carry the typed kind: %v", err)
+	}
+}
+
+// TestDriverResumeExplicitID: --resume <id> (ResumeID) targets the id
+// directly, re-pointing the pointer file at it.
+func TestDriverResumeExplicitID(t *testing.T) {
+	llm := askLLM(t)
+	defer llm.Close()
+	dir := t.TempDir()
+	// Run A creates the session (pointer lands on it).
+	rwcA, stopA := newSeamServerAt(t, llm.URL, dir)
+	defer stopA()
+	cfgA := &Config{SessionDir: dir, Prompt: "seed prompt", Mode: ModeOneShot}
+	dA, _, errbufA := seamDriver(t, rwcA, cfgA, "")
+	if err := dA.run(context.Background()); err != nil {
+		t.Fatalf("run A: %v (stderr:\n%s)", err, errbufA.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, lastSessionFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := strings.TrimSpace(string(raw))
+	if id == "" {
+		t.Fatal("pointer missing after run A")
+	}
+
+	// Run B resumes by EXPLICIT id (pointer cleared — the id is the
+	// only source).
+	if err := os.Remove(filepath.Join(dir, lastSessionFile)); err != nil {
+		t.Fatal(err)
+	}
+	rwcB, stopB := newSeamServerAt(t, llm.URL, dir)
+	defer stopB()
+	cfgB := &Config{SessionDir: dir, Prompt: "continue by id", Mode: ModeOneShot, ResumeID: id}
+	dB, _, errbufB := seamDriver(t, rwcB, cfgB, "")
+	if err := dB.run(context.Background()); err != nil {
+		t.Fatalf("run B explicit-id resume: %v (stderr:\n%s)", err, errbufB.String())
+	}
+	if !strings.Contains(errbufB.String(), "resumed session "+id) {
+		t.Fatalf("resume must name the explicit id (stderr:\n%s)", errbufB.String())
+	}
+	// The pointer is re-pointed at the explicitly resumed session.
+	raw2, err := os.ReadFile(filepath.Join(dir, lastSessionFile))
+	if err != nil || strings.TrimSpace(string(raw2)) != id {
+		t.Fatalf("pointer = %q (%v), want the explicit id", strings.TrimSpace(string(raw2)), err)
+	}
+}
+
+// countLines counts non-empty lines in a file.
+func countLines(t *testing.T, path string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(strings.Split(strings.TrimSpace(string(raw)), "\n"))
+}
+
+// deadPipe is an io.ReadWriteCloser that fails every operation — the
+// no-wire-traffic guard for pre-flight usage errors.
+type deadPipe struct{}
+
+func (deadPipe) Read(p []byte) (int, error)  { return 0, io.EOF }
+func (deadPipe) Write(p []byte) (int, error) { return 0, io.ErrClosedPipe }
+func (deadPipe) Close() error                { return nil }
 
 // The approval grant/deny pair at the LIBRARY-SERVER seam: the in-process
 // server (FileEngine + NewServer-injected wire approval bridge + ask-all

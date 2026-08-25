@@ -185,6 +185,8 @@ var handlers = map[string]handlerFunc{
 	},
 	"approval/respond":  handleApprovalRespond,
 	"session/create":    handleSessionCreate,
+	"session/resume":    handleSessionResume,
+	"session/list":      handleSessionList,
 	"session/subscribe": handleSessionSubscribe,
 	"session/dispatch":  handleSessionDispatch,
 	"session/prompt":    handleSessionPrompt,

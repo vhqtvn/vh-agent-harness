@@ -31,6 +31,12 @@
 #     locator, and run B (a second session in the same session dir,
 #     whose daemon-wide spill walk reaches run A's store) pages the
 #     spill through the real spill_read tool.
+#   - resume_restart (P4) is a TWO-DAEMON-LIFETIME scenario: run A
+#     creates the session (one tool turn), its daemon exits; run B is
+#     a fresh daemon on the SAME session dir whose client resumes by
+#     pointer (session/resume over the wire) and continues the SAME
+#     durable log — surface continuity, derived title, event-count
+#     growth, and the deterministic replay prover across the restart.
 #   - Cross-run byte-comparison of DIFFERENT sessions is a NON-GOAL —
 #     session ids are random by design (sess-<random hex>). Determinism
 #     is proven per-log: two --verify-log runs on the SAME log must
@@ -491,6 +497,53 @@ sc_approval_flow() {
     stop_mock
 }
 
+# sc_resume_restart (P4): the restart-and-resume crux over REAL
+# binaries. Run A creates the session and runs one tool turn; the
+# daemon exits (client EOF ladder). Run B is a SECOND daemon lifetime
+# on the SAME session dir: the client resumes by pointer
+# (session/resume on the wire), asserts surface continuity (same log
+# file, resume line carrying the derived title + event count), sends a
+# continuation prompt, and the grown log passes the deterministic
+# replay prover across the restart boundary.
+sc_resume_restart() {
+    local sc=resume_restart
+    fresh_session "$sc"
+    start_mock "$SCEN/resume_restart.json"
+    run_client --session-dir "$SESS" --prompt "run A prompt for the resume test" \
+        --exec "$DAEMON" --adapter openai --model mock-model \
+        --base-url "$MOCK_URL/v1" --api-key-env MOCK_KEY
+    check "$sc" "run A exits 0" [ "$CODE" -eq 0 ]
+    check "$sc" "run A final text" grep -Fxq "run A final: session seeded" "$WORK/client.out"
+    newest_log
+    local logA="$LOG"
+    check "$sc" "run A --verify-log ok" verify_log_ok "$logA"
+    local evA
+    evA=$("$DAEMON" --verify-log "$logA" | jq -r .events)
+    stop_mock
+
+    start_mock "$SCEN/resume_restart_b.json"
+    run_client --session-dir "$SESS" --prompt "run B continues the session" --resume \
+        --exec "$DAEMON" --adapter openai --model mock-model \
+        --base-url "$MOCK_URL/v1" --api-key-env MOCK_KEY
+    check "$sc" "run B (resume) exits 0" [ "$CODE" -eq 0 ]
+    check "$sc" "run B final text" grep -Fxq "run B final: resumed and continued" "$WORK/client.out"
+    check "$sc" "resume announces the session over the wire" grep -q "resumed session sess-" "$WORK/client.err"
+    check "$sc" "resume line carries the derived title (run A's prompt)" \
+        grep -q "title: run A prompt for the resume test" "$WORK/client.err"
+    # Surface continuity: SAME durable log (no fork, no new session).
+    newest_log
+    check "$sc" "resume continued the SAME log (no fork)" [ "$LOG" = "$logA" ]
+    local evB
+    evB=$("$DAEMON" --verify-log "$logA" | jq -r .events)
+    check "$sc" "event count grew across the restart (${evA:-?} → ${evB:-?})" \
+        bash -c "[ '${evB:-0}' -gt '${evA:-1}' ]"
+    check "$sc" "grown log --verify-log deterministic across the restart boundary" verify_log_ok "$logA"
+    local n
+    n=$(chat_count)
+    check "$sc" "run B model called exactly once — got ${n:-none}" [ "${n:-0}" -eq 1 ]
+    stop_mock
+}
+
 # ---- run the battery -------------------------------------------------------
 
 note "=== native-engine docker self-test battery ==="
@@ -506,6 +559,7 @@ run_scenario spill_paging sc_spill_paging
 run_scenario anthropic_dialect sc_anthropic_dialect
 run_scenario verify_determinism sc_verify_determinism
 run_scenario approval_flow sc_approval_flow
+run_scenario resume_restart sc_resume_restart
 
 TOTAL=$((PASS + FAIL))
 echo

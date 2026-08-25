@@ -61,9 +61,13 @@ type Config struct {
 	Prompt string
 	// Repl forced REPL mode even without a TTY.
 	Repl bool
-	// Resume asks to resume the prior session (REFUSED in this slice —
-	// see driver.go; session/resume does not exist on the wire yet).
+	// Resume asks to resume the prior session (the last-session
+	// pointer). Mutually exclusive with ResumeID by construction
+	// (both come from --resume's two forms).
 	Resume bool
+	// ResumeID is an EXPLICIT session id to resume (--resume <id>).
+	// Empty = no explicit id (Resume decides).
+	ResumeID string
 	// New forces a fresh session even when a prior pointer exists (the
 	// default posture; the flag exists to make the choice explicit).
 	New bool
@@ -104,8 +108,13 @@ flags:
   --prompt TEXT      one-shot: send TEXT, stream the turn, print the
                      final assistant text on stdout, exit
   --repl             force interactive REPL even when stdin is not a TTY
-  --resume           resume the prior session (REFUSED for now: the
-                      session/resume wire method arrives in P4)
+  --resume [ID]      resume a prior session over the wire: with an ID
+                      resume that exact session, without it the last
+                      session recorded in the session dir (the pointer
+                      file). The existing log is NEVER truncated —
+                      resume continues the same durable stream. Missing
+                      pointer = exit 2; unknown id = typed engine
+                      error, exit 1
   --new              force a fresh session even when a prior one exists
                       (the default posture; explicit form)
   --policy FILE      auto-approver policy: [[allow]] rules evaluated
@@ -122,16 +131,114 @@ assistant text in one-shot mode; NDJSON events in --json mode).
 exit codes: 0 clean · 1 protocol/engine error · 2 usage/validation
 `
 
+// parseResumeFlag extracts the two --resume forms from the CLIENT-flag
+// region of the raw args BEFORE flag parsing (the stdlib parser cannot
+// express "value optional"): `--resume <id>` (next token, when it does
+// not start with `-`) or `--resume=<id>` set an EXPLICIT id; a bare
+// `--resume` asks to resume the last-session pointer. The consumed
+// tokens are removed from the slice handed to the flag parser. An
+// explicit empty id is a usage error (fail-closed, same posture as
+// --policy), and so are CONFLICTING ids (two explicit --resume forms
+// naming different sessions — hotfix R6: they used to last-win
+// silently; repeating the SAME id is idempotent and stays legal, the
+// same posture as the bare+explicit conflict check below).
+//
+// B-F1: the client-flag region ENDS at the first positional token (the
+// daemon binary name under --exec) or a bare `--` — from there the REST
+// of the command line is the DAEMON's and is copied through VERBATIM,
+// `--resume` included: a daemon taking its own `--resume <id>` must not
+// have the pair stripped and mis-parsed as the client's (the documented
+// UX contract: everything after the binary name passes through). The
+// scanner tracks which client flags consume a value (session-dir,
+// prompt, policy) so a value token is never mistaken for the boundary;
+// the flag parser makes the identical decision downstream.
+func parseResumeFlag(args []string) (asked bool, id string, filtered []string, err error) {
+	filtered = args[:0:0]
+	valuePending := false // next token is a client flag's VALUE, not a boundary
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if valuePending {
+			valuePending = false
+			filtered = append(filtered, a)
+			continue
+		}
+		// Client flags end at a bare `--` or the first non-flag token
+		// (Go's flag parser stops at both); the rest is positional —
+		// the daemon spec under --exec — and passes through verbatim.
+		if a == "--" {
+			filtered = append(filtered, args[i:]...)
+			break
+		}
+		if len(a) < 2 || a[0] != '-' {
+			filtered = append(filtered, args[i:]...)
+			break
+		}
+		body := a[1:]
+		if body[0] == '-' {
+			body = body[1:]
+		}
+		name, val, hasVal := strings.Cut(body, "=")
+		if name == "resume" {
+			if hasVal {
+				if val == "" {
+					return false, "", nil, usagef("--resume must not be empty (omit the value to resume the last session, or pass an id: --resume <sessionId>)")
+				}
+				if id != "" && id != val {
+					return false, "", nil, usagef("conflicting --resume ids (%q and %q) — pass one id", id, val)
+				}
+				id = val
+				continue
+			}
+			// Bare form: the next token is the id iff it exists and does
+			// not look like another flag.
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				next := args[i+1]
+				if id != "" && id != next {
+					return false, "", nil, usagef("conflicting --resume ids (%q and %q) — pass one id", id, next)
+				}
+				id = next
+				i++
+				continue
+			}
+			asked = true
+			continue
+		}
+		filtered = append(filtered, a)
+		if !hasVal && clientFlagTakesValue(name) {
+			valuePending = true
+		}
+	}
+	if id != "" && asked {
+		return false, "", nil, usagef("conflicting --resume forms (bare and explicit id)")
+	}
+	return asked, id, filtered, nil
+}
+
+// clientFlagTakesValue reports whether the named client flag consumes
+// the NEXT token as its value (mirrors the flag set parseArgs builds;
+// --resume is handled inside the scanner itself).
+func clientFlagTakesValue(name string) bool {
+	switch name {
+	case "session-dir", "prompt", "policy":
+		return true
+	default:
+		return false
+	}
+}
+
 // parseArgs parses and validates the client command line. isTTY decides
 // the default REPL posture when neither --prompt nor --repl is given.
 func parseArgs(args []string, isTTY func() bool, stderrw io.Writer) (*Config, error) {
+	resumeAsked, resumeID, args, rerr := parseResumeFlag(args)
+	if rerr != nil {
+		return nil, rerr
+	}
 	var (
 		execFlag   = new(bool)
 		sessionDir = new(string)
 		jsonMode   = new(bool)
 		prompt     = new(string)
 		repl       = new(bool)
-		resume     = new(bool)
 		forceNew   = new(bool)
 		policyPath = new(string)
 	)
@@ -143,7 +250,6 @@ func parseArgs(args []string, isTTY func() bool, stderrw io.Writer) (*Config, er
 	fs.BoolVar(jsonMode, "json", false, "machine mode: NDJSON events on stdout")
 	fs.StringVar(prompt, "prompt", "", "one-shot prompt text")
 	fs.BoolVar(repl, "repl", false, "force interactive REPL")
-	fs.BoolVar(resume, "resume", false, "resume the prior session (refused until P4)")
 	fs.BoolVar(forceNew, "new", false, "force a fresh session (the default posture)")
 	fs.StringVar(policyPath, "policy", "", "auto-approver policy file (fail-closed parse; absent = no policy engine)")
 
@@ -162,7 +268,8 @@ func parseArgs(args []string, isTTY func() bool, stderrw io.Writer) (*Config, er
 		JSON:       *jsonMode,
 		Prompt:     *prompt,
 		Repl:       *repl,
-		Resume:     *resume,
+		Resume:     resumeAsked,
+		ResumeID:   resumeID,
 		New:        *forceNew,
 		PolicyPath: *policyPath,
 	}
@@ -191,7 +298,7 @@ func parseArgs(args []string, isTTY func() bool, stderrw io.Writer) (*Config, er
 	if cfg.Prompt != "" && cfg.Repl {
 		return nil, usagef("--prompt and --repl are mutually exclusive")
 	}
-	if cfg.Resume && cfg.New {
+	if (cfg.Resume || cfg.ResumeID != "") && cfg.New {
 		return nil, usagef("--resume and --new are mutually exclusive")
 	}
 	if cfg.SessionDir == "" {

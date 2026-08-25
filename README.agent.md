@@ -1591,6 +1591,17 @@ vh-agent-client [--session-dir DIR] [--json] [--prompt TEXT] [--repl] \
   `exit`/`quit`/Ctrl-D end cleanly; Ctrl-C sends nothing and closes the
   connection — the daemon denies any pending approvals (fail-closed)
   and exits, and the client reports that honestly (exit 0).
+- `--resume [ID]` (P4) — resume a prior session over the wire: with an
+  ID that exact session, without it the last-session pointer. The
+  existing log is NEVER truncated (see "Resume" below); missing
+  pointer = exit 2, unknown id = typed engine error exit 1, and two
+  explicit `--resume` forms naming DIFFERENT sessions = exit 2
+  (conflicting ids — repeating the same id is idempotent and legal).
+  Mutually exclusive with `--new`. This is a CLIENT flag: it is
+  recognized only before the `--exec` boundary — a daemon-side
+  `--resume ...` in the exec spec passes through to the daemon
+  verbatim, exactly like every other token after the daemon binary
+  name.
 - `--json` — machine mode: NDJSON events verbatim on stdout (no
   rendering), the final prompt result as the last line, and approval
   answers as JSON lines (`{"id":"<approvalId>","approve":bool}`) on
@@ -1608,8 +1619,9 @@ vh-agent-client [--session-dir DIR] [--json] [--prompt TEXT] [--repl] \
 rendered events and prompts (including the approval `[y/N]` prompt) go
 to **stderr**; stdout carries machine-readable final content only (the
 one-shot final assistant text; NDJSON in `--json`). Exit codes: `0`
-clean · `1` protocol/engine error · `2` usage/validation (including a
-refused `--resume`).
+clean · `1` protocol/engine error (including a typed daemon refusal of
+an unknown `--resume <id>`) · `2` usage/validation (including
+`--resume` with no prior session recorded).
 
 **Approvals** surface as a blocking `[y/N] approve tool <name>?` prompt
 (interactive mode) or as the NDJSON request + stdin answer (`--json`).
@@ -1837,13 +1849,29 @@ of whatever the model writes — an explicit operator risk decision.
 No per-project policy discovery: the flag is explicit by design
 (auto-discovery is a footgun).
 
-**Resume posture (documented partial):** the wire has no
-`session/resume` method yet (planned P4), and `session/create` with an
-existing session id would truncate the old log, so a client-side fake
-resume is worse than none. The client tracks its last session in the
-pointer file, notes the prior session honestly on every fresh run, and
-REFUSES `--resume` with exit 2 pointing at P4. True daemon-side resume
-arrives with the `session/resume` wire method.
+**Resume (P4 — real over the wire):** `--resume` resumes the prior
+session through the daemon's `session/resume` method — the EXISTING
+log is opened without truncating (torn tail recovered, `seq`
+continues), so a second daemon lifetime on the same `--session-dir`
+continues the SAME durable stream. Two forms: bare `--resume` uses the
+last-session pointer file under the session dir; `--resume <sessionId>`
+targets an explicit id (and re-points the pointer). The resume is
+announced on stderr with the derived title, recovered event count, and
+replay-derived token totals; any fold-visible unsettled jobs are
+REPORTED (never silently re-dispatched). A missing pointer is a usage
+error (exit 2) before any wire traffic; an unknown id is the daemon's
+typed `not-found` refusal (exit 1). Resuming the id that is the
+daemon's CURRENTLY-ACTIVE session is a typed `session-active` refusal
+(`-32602`) — a second live writer on the open log would corrupt the
+durable stream (it cannot hit this client's flow: every client run
+spawns a fresh daemon lifetime). `session/create` with an existing
+id still truncates — the client never fakes resume through create.
+Discovery: the daemon's `session/list` method enumerates resumable
+top-level sessions (`{sessionId, title, events, lastActivity}`,
+newest first) over the same wire; see
+`docs/native-engine/host-protocol.md` §4e for the full lifecycle
+contract (resume-not-fork, supersede semantics, derivation rules,
+same-id-active / child-session refusals).
 
 ### `vh-mockllm` — scriptable mock LLM server (experimental)
 

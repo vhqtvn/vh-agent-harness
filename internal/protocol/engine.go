@@ -88,6 +88,29 @@ type FileEngine struct {
 	subMu    sync.Mutex
 	curSub   SubagentSpawner // manager of the ACTIVE session (superseded ⇒ stopped)
 	curSubID string          // its session id (registry unbinding at supersede)
+
+	// lifeMu serializes FULL engine-level active-session transitions:
+	// NewSession and ResumeSession each hold it across the ENTIRE
+	// transition — validate → file open → recovery/surface derive →
+	// subagent supersede → activeID publish (hotfix R2). The P4
+	// reserve/rollback guard released activeID during the resume's file
+	// recovery, so a concurrent ENGINE-DIRECT NewSession could complete
+	// and publish its own id over the reservation; the resume then
+	// returned committed with its own id unrecorded, and a LATER
+	// same-id resume sailed past the D-F1 session-active refusal and
+	// opened a SECOND live log on the same durable file — duplicate
+	// seqs, permanently unreplayable (the D-F1 corruption reopened
+	// through a race). One lock across the whole transition makes the
+	// publish atomic with the state change: a successful transition's
+	// id is ALWAYS the recorded active id at the moment it returns, so
+	// the same-id refusal cannot be bypassed. The server's createMu
+	// keeps its own semantics (the wire path stays serialized
+	// end-to-end); lifeMu extends that guarantee to engine-direct
+	// callers. Callbacks consulted inside a transition (SpillPolicyFor,
+	// sinks, executors) must not re-enter NewSession/ResumeSession —
+	// the mutex is not reentrant.
+	lifeMu   sync.Mutex
+	activeID string
 }
 
 var (
@@ -248,7 +271,13 @@ func (e *FileEngine) Pipeline() *tools.Pipeline {
 // log's own Close is NOT sufficient on this seam: session.NewLog wraps
 // an io.MultiWriter, so lg.closer is nil and lg.Close() would leak the
 // file descriptor.
+//
+// The WHOLE transition runs under the engine lifecycle lock (R2): from
+// validation through the activeID publish, so a concurrent engine-direct
+// ResumeSession can neither observe nor publish mid-transition state.
 func (e *FileEngine) NewSession(path, sessionID string, sink io.Writer) (*EngineSession, error) {
+	e.lifeMu.Lock()
+	defer e.lifeMu.Unlock()
 	if sessionID == "" {
 		return nil, fmt.Errorf("protocol: sessionID is required")
 	}
@@ -328,5 +357,11 @@ func (e *FileEngine) NewSession(path, sessionID string, sink io.Writer) (*Engine
 			e.SubagentRegistry.Put(sessionID, sm)
 		}
 	}
+	// The engine's active-session record follows the successful create
+	// (D-F1: this is the id a same-id session/resume must refuse). The
+	// lifecycle lock is held for the whole transition, so the publish
+	// is atomic with every state change above (R2: no concurrent
+	// transition can overwrite it mid-flight).
+	e.activeID = sessionID
 	return es, nil
 }

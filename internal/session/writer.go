@@ -124,7 +124,20 @@ func ResumeLog(w io.Writer, events []Event) (*Log, error) {
 // torn-tail tolerance (RecoverTail), truncates any uncommitted torn
 // fragment, reopens the file in append mode, and returns the resumed
 // log. The recovered process continues the same session stream.
+// Appends reach the FILE only (the crash-recovery shape); the engine's
+// wire resume — which must also tee to the notification fan-out —
+// uses ResumeFileTee.
 func ResumeFile(path string) (*Log, error) {
+	return ResumeFileTee(path, nil)
+}
+
+// ResumeFileTee is ResumeFile with an optional LIVE-ONLY tee: when
+// sink is non-nil, every record appended AFTER the resume point is
+// also written to sink (the same MultiWriter shape NewLog threads at
+// create), while the replayed history is never re-emitted — history
+// belongs to the log; subscribers see the live stream from resume
+// onward. A nil sink is exactly ResumeFile.
+func ResumeFileTee(path string, sink io.Writer) (*Log, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("session: open %s: %w", path, err)
@@ -145,7 +158,11 @@ func ResumeFile(path string) (*Log, error) {
 	if err != nil {
 		return nil, fmt.Errorf("session: reopen %s for append: %w", path, err)
 	}
-	lg, err := ResumeLog(af, events)
+	var w io.Writer = af
+	if sink != nil {
+		w = io.MultiWriter(af, sink)
+	}
+	lg, err := ResumeLog(w, events)
 	if err != nil {
 		_ = af.Close()
 		return nil, err

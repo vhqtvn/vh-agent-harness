@@ -215,8 +215,10 @@ func TestClientBinaryUsageExitTwo(t *testing.T) {
 	}
 }
 
-// TestClientBinaryResumeRefused: --resume exits 2 with the P4 message.
-func TestClientBinaryResumeRefused(t *testing.T) {
+// TestClientBinaryResumeNoPointerExitTwo: --resume with no recorded
+// prior session is still a usage error (exit 2) BEFORE any daemon
+// traffic matters.
+func TestClientBinaryResumeNoPointerExitTwo(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and spawns real binaries")
 	}
@@ -233,9 +235,129 @@ func TestClientBinaryResumeRefused(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2 (stderr:\n%s)", code, errbuf)
 	}
-	if !strings.Contains(errbuf, "session/resume") || !strings.Contains(errbuf, "P4") {
-		t.Fatalf("refusal must name session/resume and P4:\n%s", errbuf)
+	if !strings.Contains(errbuf, "no prior session") {
+		t.Fatalf("refusal must name the missing pointer:\n%s", errbuf)
 	}
+}
+
+// TestClientBinaryResumeOverRestart: the binary-level restart crux.
+// Run A (real client + real daemon, scripted LLM) creates a session;
+// run B (a SECOND daemon lifetime on the same session dir) resumes it
+// with bare --resume, the resume line names the session + derived
+// title, the continued prompt lands in the SAME log, and the
+// deterministic replay prover still passes on the grown log.
+func TestClientBinaryResumeOverRestart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and spawns real binaries")
+	}
+	clientBin, daemonBin := buildBinaries(t)
+
+	var mu sync.Mutex
+	calls := 0
+	llm := startHTTPStub(t, func(w *jsonEncoder) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			w.toolCall("call-res", "echo", `{"text":"restart-round-trip"}`)
+			return
+		}
+		w.content("resumed and continued")
+	})
+	defer llm.Close()
+
+	sessDir := filepath.Join(t.TempDir(), "sessions")
+	daemonArgs := []string{
+		"--exec", daemonBin,
+		"--adapter", "openai", "--model", "fake-model",
+		"--base-url", llm.URL,
+		"--api-key-env", "VH_AGENTD_TEST_KEY",
+	}
+
+	// Run A: fresh session, one tool turn + final.
+	code, out, errbuf := runClient(t, clientBin, append([]string{
+		"--session-dir", sessDir,
+		"--prompt", "restart me please",
+	}, daemonArgs...), "")
+	if code != 0 {
+		t.Fatalf("run A exit = %d (stdout:\n%s\nstderr:\n%s)", code, out, errbuf)
+	}
+	logs, err := filepath.Glob(filepath.Join(sessDir, "sess-*.jsonl"))
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("run A logs = %v (%v)", logs, err)
+	}
+	logPath := logs[0]
+
+	// Run B: second daemon lifetime, resume by pointer, continue.
+	code2, out2, errbuf2 := runClient(t, clientBin, append([]string{
+		"--session-dir", sessDir,
+		"--prompt", "continue after the restart",
+		"--resume",
+	}, daemonArgs...), "")
+	if code2 != 0 {
+		t.Fatalf("run B exit = %d (stdout:\n%s\nstderr:\n%s)", code2, out2, errbuf2)
+	}
+	if out2 != "resumed and continued\n" {
+		t.Fatalf("run B stdout = %q", out2)
+	}
+	if !strings.Contains(errbuf2, "resumed session sess-") {
+		t.Fatalf("run B must announce the resume:\n%s", errbuf2)
+	}
+	if !strings.Contains(errbuf2, "restart me please") {
+		t.Fatalf("resume line must carry the derived title:\n%s", errbuf2)
+	}
+
+	// Same durable stream: one log, grown, both prompts present.
+	logs2, _ := filepath.Glob(filepath.Join(sessDir, "sess-*.jsonl"))
+	if len(logs2) != 1 || logs2[0] != logPath {
+		t.Fatalf("resume forked the session: %v", logs2)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := string(raw)
+	if !strings.Contains(stream, "restart me please") || !strings.Contains(stream, "continue after the restart") {
+		t.Fatal("both runs' prompts must be in the one resumed stream")
+	}
+
+	// The replay-determinism prover over the restart-crossed log: two
+	// runs, byte-identical, exit 0.
+	v1, vo1 := runDaemonVerify(t, daemonBin, logPath)
+	v2, vo2 := runDaemonVerify(t, daemonBin, logPath)
+	if v1 != 0 || v2 != 0 || vo1 != vo2 || vo1 == "" {
+		t.Fatalf("verify-log across restart: codes %d/%d, outputs %q vs %q", v1, v2, vo1, vo2)
+	}
+}
+
+// runDaemonVerify runs the daemon's read-only --verify-log prover on
+// path and returns (exit code, stdout).
+func runDaemonVerify(t *testing.T, daemonBin, path string) (int, string) {
+	t.Helper()
+	cmd := exec.Command(daemonBin, "--verify-log", path)
+	var out, errbuf syncBuf
+	cmd.Stdout = &out
+	cmd.Stderr = &errbuf
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start daemon --verify-log: %v", err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	var werr error
+	select {
+	case werr = <-waitCh:
+	case <-time.After(30 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("verify-log did not exit (stderr:\n%s)", errbuf.String())
+	}
+	code := 0
+	if werr != nil {
+		if ee, ok := werr.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		}
+	}
+	return code, out.String()
 }
 
 // TestClientBinaryREPLImmediateEOF: the REPL on an immediately-closed

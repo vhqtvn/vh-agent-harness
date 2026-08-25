@@ -2,13 +2,14 @@
 // create → subscribe → render/approve loop, plus the one-shot and REPL
 // input modes and the client-side resume posture.
 //
-// Resume posture (honest-cheap, documented): the wire has NO
-// session/resume method yet (planned P4) — and session/create with an
-// existing sessionId would TRUNCATE the old log (os.Create semantics),
-// so a client-side fake resume is worse than none. The client
-// therefore (a) tracks its last session in a pointer file under the
-// session dir, (b) notes the prior session honestly on every fresh
-// run, and (c) REFUSES --resume with a message pointing at P4.
+// Resume posture (P4, real over the wire): --resume (bare or with an
+// explicit id) drives the daemon's session/resume method — the EXISTING
+// log is opened without truncating, so a second daemon lifetime on the
+// same session dir continues the SAME durable stream. The client tracks
+// its last session in a pointer file under the session dir and re-points
+// it at every live session; resume is never faked through
+// session/create (create with an existing id TRUNCATES — os.Create
+// semantics).
 package main
 
 import (
@@ -119,9 +120,11 @@ func (d *driver) run(ctx context.Context) error {
 	}
 }
 
-// establishSession applies the resume posture (pointer file + honest
-// notes + --resume refusal) and creates a FRESH session, echoing the
-// session id + log path at start (stderr).
+// establishSession applies the session posture: --resume (bare or with
+// an explicit id) resumes the EXISTING durable session over the wire
+// (session/resume — the daemon opens the old log without truncating,
+// recovers any torn tail, and makes it active); otherwise a FRESH
+// session is created and the pointer updated.
 func (d *driver) establishSession() error {
 	pointer := filepath.Join(d.cfg.SessionDir, lastSessionFile)
 	var prior string
@@ -129,14 +132,49 @@ func (d *driver) establishSession() error {
 		prior = strings.TrimSpace(string(raw))
 	}
 
-	if d.cfg.Resume {
-		if prior == "" {
-			return usagef("--resume: no prior session recorded in %s (and session/resume does not exist yet — P4); start a fresh session by dropping --resume", pointer)
+	if d.cfg.Resume || d.cfg.ResumeID != "" {
+		id := d.cfg.ResumeID
+		if id == "" {
+			if prior == "" {
+				return usagef("--resume: no prior session recorded in %s (nothing to resume; drop --resume to start fresh, or pass an explicit id: --resume <sessionId>)", pointer)
+			}
+			id = prior
 		}
-		return usagef("--resume: resuming session %s is not possible yet — the session/resume wire method does not exist (planned P4); a client-side fake would create a NEW session and truncate the old log. Start fresh (drop --resume); true daemon-side resume arrives in P4", prior)
+		var sum struct {
+			SessionID string `json:"sessionId"`
+			Path      string `json:"path"`
+			Events    int    `json:"events"`
+			Title     string `json:"title"`
+			Usage     struct {
+				PromptTokens     int `json:"promptTokens"`
+				CompletionTokens int `json:"completionTokens"`
+				TotalTokens      int `json:"totalTokens"`
+			} `json:"usage"`
+			UnsettledJobs []string `json:"unsettledJobs"`
+		}
+		if err := d.client.Call("session/resume", map[string]any{"sessionId": id}, &sum); err != nil {
+			return fmt.Errorf("session/resume %s: %w", id, err)
+		}
+		d.note("resumed session %s (log: %s; events %d; title: %s; tokens %d in / %d out / %d total)",
+			sum.SessionID, sum.Path, sum.Events, sum.Title,
+			sum.Usage.PromptTokens, sum.Usage.CompletionTokens, sum.Usage.TotalTokens)
+		if len(sum.UnsettledJobs) > 0 {
+			d.note("warning: %d unsettled job(s) at resume (reported, not re-dispatched): %s",
+				len(sum.UnsettledJobs), strings.Join(sum.UnsettledJobs, ", "))
+		}
+		// The pointer follows the LIVE session (an explicit-id resume
+		// re-points it).
+		if err := os.MkdirAll(d.cfg.SessionDir, 0o755); err != nil {
+			return fmt.Errorf("session dir: %w", err)
+		}
+		if err := os.WriteFile(pointer, []byte(sum.SessionID+"\n"), 0o644); err != nil {
+			d.note("warning: could not write last-session pointer %s: %v", pointer, err)
+		}
+		return nil
 	}
+
 	if prior != "" {
-		d.note("prior session %s recorded (log untouched); resume is not supported yet (P4) — starting a FRESH session", prior)
+		d.note("prior session %s recorded; resume with --resume (or --resume %s) — starting a FRESH session", prior, prior)
 	}
 
 	var created struct {

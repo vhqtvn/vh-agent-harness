@@ -222,6 +222,145 @@ func TestExitCodeForMapsErrors(t *testing.T) {
 	}
 }
 
+// --- hotfix B-F1: --resume pre-scan vs the --exec boundary -------------------
+//
+// The client's --resume pre-scan must stop at the --exec boundary:
+// everything after the daemon binary name is the DAEMON's command line
+// and passes through VERBATIM (the documented UX contract). Pre-fix,
+// the scan stripped --resume tokens from the ENTIRE raw argv, so
+// `vh-agent-client --exec some-daemon --resume daemon-value` lost the
+// daemon's --resume pair AND the client mis-parsed it as its own.
+
+// TestExecPassesDaemonResumeVerbatim: a daemon carrying its own
+// `--resume <id>` after the --exec boundary keeps it, and the client
+// does NOT adopt it as its resume posture.
+func TestExecPassesDaemonResumeVerbatim(t *testing.T) {
+	cfg, err := parseArgs([]string{"--prompt", "x", "--exec", "some-daemon", "--resume", "daemon-value", "--flag", "v"}, fixedTTY(false), discard())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := []string{"some-daemon", "--resume", "daemon-value", "--flag", "v"}
+	if strings.Join(cfg.Exec, " ") != strings.Join(want, " ") {
+		t.Fatalf("Exec = %v, want %v (daemon argv passes through verbatim)", cfg.Exec, want)
+	}
+	if cfg.Resume || cfg.ResumeID != "" {
+		t.Fatalf("the daemon's --resume must NOT become the client's: Resume=%v ResumeID=%q", cfg.Resume, cfg.ResumeID)
+	}
+	// The assembled daemon argv forwards the daemon's --resume pair
+	// verbatim (the client's --session-dir is injected at the end).
+	argv := cfg.daemonArgv()
+	found := false
+	for i := 0; i+2 < len(argv); i++ {
+		if argv[i] == "--resume" && argv[i+1] == "daemon-value" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("daemonArgv must forward the daemon's --resume daemon-value verbatim: %v", argv)
+	}
+}
+
+// TestExecPassesBareDaemonResumeFlag: a bare post-boundary --resume is
+// the daemon's flag, not the client's pointer-resume request.
+func TestExecPassesBareDaemonResumeFlag(t *testing.T) {
+	cfg, err := parseArgs([]string{"--exec", "myd", "--resume"}, fixedTTY(true), discard())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Resume || cfg.ResumeID != "" {
+		t.Fatalf("post-boundary bare --resume is the daemon's: Resume=%v ResumeID=%q", cfg.Resume, cfg.ResumeID)
+	}
+	want := []string{"myd", "--resume"}
+	if strings.Join(cfg.Exec, " ") != strings.Join(want, " ") {
+		t.Fatalf("Exec = %v, want %v", cfg.Exec, want)
+	}
+}
+
+// TestClientResumeFormsBeforeExecStillParse: the three client-side
+// forms — bare, `--resume=<id>`, `--resume <id>` — still parse when
+// they appear BEFORE the --exec boundary, while the daemon's own
+// --resume usage after the boundary is left alone.
+func TestClientResumeFormsBeforeExecStillParse(t *testing.T) {
+	cfg, err := parseArgs([]string{"--resume", "--exec", "myd", "--resume", "daemon-id"}, fixedTTY(true), discard())
+	if err != nil {
+		t.Fatalf("bare form: parse: %v", err)
+	}
+	if !cfg.Resume || cfg.ResumeID != "" {
+		t.Fatalf("bare client --resume: Resume=%v ResumeID=%q", cfg.Resume, cfg.ResumeID)
+	}
+	if want := "myd --resume daemon-id"; strings.Join(cfg.Exec, " ") != want {
+		t.Fatalf("bare form: Exec = %v, want %v", cfg.Exec, want)
+	}
+
+	cfg, err = parseArgs([]string{"--resume=sess-9", "--exec", "myd"}, fixedTTY(true), discard())
+	if err != nil {
+		t.Fatalf("eq form: parse: %v", err)
+	}
+	if cfg.ResumeID != "sess-9" || cfg.Resume {
+		t.Fatalf("eq form: Resume=%v ResumeID=%q, want explicit sess-9", cfg.Resume, cfg.ResumeID)
+	}
+
+	cfg, err = parseArgs([]string{"--resume", "sess-7", "--exec", "myd"}, fixedTTY(true), discard())
+	if err != nil {
+		t.Fatalf("space form: parse: %v", err)
+	}
+	if cfg.ResumeID != "sess-7" || cfg.Resume {
+		t.Fatalf("space form: Resume=%v ResumeID=%q, want explicit sess-7", cfg.Resume, cfg.ResumeID)
+	}
+	if want := "myd"; strings.Join(cfg.Exec, " ") != want {
+		t.Fatalf("space form: Exec = %v, want [myd]", cfg.Exec)
+	}
+}
+
+// TestResumeEmptyExplicitFormStillUsageError: an explicit EMPTY value
+// stays a fail-closed usage error (exit 2) in the CLIENT region, while
+// a post-boundary `--resume=` is the daemon's empty value and passes
+// through without error.
+func TestResumeEmptyExplicitFormStillUsageError(t *testing.T) {
+	for _, args := range [][]string{
+		{"--prompt", "x", "--resume="},
+		{"--resume=", "--exec", "myd"},
+	} {
+		_, err := parseArgs(args, fixedTTY(false), discard())
+		if err == nil || exitCodeFor(err) != 2 {
+			t.Fatalf("args %v: explicit empty --resume must be a usage error (exit 2), got %v", args, err)
+		}
+	}
+	cfg, err := parseArgs([]string{"--prompt", "x", "--exec", "myd", "--resume="}, fixedTTY(false), discard())
+	if err != nil {
+		t.Fatalf("post-boundary --resume= belongs to the daemon, not a client error: %v", err)
+	}
+	if cfg.Resume || cfg.ResumeID != "" {
+		t.Fatalf("post-boundary --resume= must not touch the client posture: Resume=%v ResumeID=%q", cfg.Resume, cfg.ResumeID)
+	}
+}
+
+// TestResumeConflictingExplicitIDsUsageError (hotfix R6): two explicit
+// --resume forms naming DIFFERENT sessions used to last-win silently;
+// they are now a fail-closed usage error (exit 2), consistent with the
+// bare+explicit conflict. Repeating the SAME id is idempotent and stays
+// legal.
+func TestResumeConflictingExplicitIDsUsageError(t *testing.T) {
+	for _, args := range [][]string{
+		{"--prompt", "x", "--resume", "sess-1", "--resume", "sess-2"},
+		{"--prompt", "x", "--resume=sess-1", "--resume", "sess-2"},
+		{"--prompt", "x", "--resume", "sess-1", "--resume=sess-2"},
+		{"--prompt", "x", "--resume=sess-2", "--resume=sess-1"},
+	} {
+		_, err := parseArgs(args, fixedTTY(false), discard())
+		if err == nil || exitCodeFor(err) != 2 {
+			t.Fatalf("args %v: conflicting --resume ids must be a usage error (exit 2), got %v", args, err)
+		}
+	}
+	cfg, err := parseArgs([]string{"--prompt", "x", "--resume", "sess-1", "--resume=sess-1"}, fixedTTY(false), discard())
+	if err != nil {
+		t.Fatalf("repeating the SAME id must stay legal (idempotent): %v", err)
+	}
+	if cfg.ResumeID != "sess-1" || cfg.Resume {
+		t.Fatalf("same-id repeat: Resume=%v ResumeID=%q, want explicit sess-1", cfg.Resume, cfg.ResumeID)
+	}
+}
+
 func contains(list []string, want string) bool {
 	for _, x := range list {
 		if x == want {

@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/jobs"
@@ -344,6 +345,111 @@ func (s *Server) requireSession() (*EngineSession, *Error) {
 		return nil, &Error{Code: ErrNoSession, Message: "no active session (session/create first)"}
 	}
 	return s.active, nil
+}
+
+// --- session lifecycle: resume + list (P4) -----------------------------------
+
+// SessionResumer is the optional engine seam behind session/resume
+// (satisfied by *FileEngine). Engines without the seam refuse the
+// method fail-closed (-32000) instead of degrading.
+type SessionResumer interface {
+	ResumeSession(sessionID string, sink io.Writer) (*EngineSession, *ResumeSummary, error)
+}
+
+// SessionLister is the optional engine seam behind session/list
+// (satisfied by *FileEngine).
+type SessionLister interface {
+	ListSessions() ([]SessionEntry, error)
+}
+
+// resumeParams is the session/resume request body.
+type resumeParams struct {
+	SessionID string `json:"sessionId"`
+}
+
+// handleSessionResume opens the EXISTING session log and makes it the
+// active session with create's supersede semantics for a DIFFERENT id
+// (the whole resume critical section — engine recovery + the active
+// swap — runs under s.createMu, so concurrent create/resume pairs
+// cannot interleave; an in-flight turn on the superseded session
+// completes atomically on its own log). The engine additionally holds
+// its own lifecycle lock across the ENTIRE transition, so the same
+// guarantee covers engine-direct callers outside createMu (R2: the
+// active-id record is published atomically with the transition — a
+// committed resume's id is always recorded, keeping the same-id
+// refusal below unbypassable). Same-id resume of the session that is
+// ALREADY active is a typed session-active refusal (D-F1): the engine
+// would otherwise hold a second live writer on the open log and any
+// further append corrupts the durable stream permanently. Resume is
+// NOT fork and NOT create: an absent log is a typed -32602 refusal,
+// never a new file (create with an existing id still truncates — the
+// two entrances are distinct).
+func handleSessionResume(ctx context.Context, s *Server, req *Request) (json.RawMessage, *Error) {
+	var p resumeParams
+	if perr := decodeParams(req, &p, false); perr != nil {
+		return nil, perr
+	}
+	if p.SessionID == "" {
+		return nil, &Error{Code: ErrInvalidParams, Message: "sessionId is required"}
+	}
+	rs, ok := s.engine.(SessionResumer)
+	if !ok {
+		return nil, &Error{Code: ErrEngine, Message: errResumeDisabled.Error()}
+	}
+	s.createMu.Lock()
+	es, sum, err := rs.ResumeSession(p.SessionID, s.fanout)
+	if err == nil {
+		s.mu.Lock()
+		s.active = es
+		s.mu.Unlock()
+	}
+	s.createMu.Unlock()
+	if err != nil {
+		var spe *SessionPathError
+		if errors.As(err, &spe) {
+			return nil, &Error{Code: ErrInvalidParams, Message: err.Error()}
+		}
+		var sre *SessionResumeError
+		if errors.As(err, &sre) {
+			// Typed resume refusals (not-found / child-session /
+			// id-mismatch / session-active) are client-input errors:
+			// -32602 carrying the kind in the message text.
+			return nil, &Error{Code: ErrInvalidParams, Message: err.Error()}
+		}
+		return nil, &Error{Code: ErrEngine, Message: err.Error()}
+	}
+	result, merr := json.Marshal(sum)
+	if merr != nil {
+		return nil, &Error{Code: ErrEngine, Message: merr.Error()}
+	}
+	return result, nil
+}
+
+// handleSessionList enumerates the resumable top-level sessions under
+// the engine's session dir. It needs NO active session (the listing is
+// how a client FINDS what to resume) and is read-only.
+func handleSessionList(ctx context.Context, s *Server, req *Request) (json.RawMessage, *Error) {
+	if perr := decodeParams(req, &struct{}{}, true); perr != nil {
+		return nil, perr
+	}
+	ls, ok := s.engine.(SessionLister)
+	if !ok {
+		return nil, &Error{Code: ErrEngine, Message: "protocol: this engine does not implement session/list"}
+	}
+	entries, err := ls.ListSessions()
+	if err != nil {
+		return nil, &Error{Code: ErrEngine, Message: err.Error()}
+	}
+	if entries == nil {
+		entries = []SessionEntry{}
+	}
+	result, merr := json.Marshal(struct {
+		Sessions []SessionEntry `json:"sessions"`
+	}{entries})
+	if merr != nil {
+		return nil, &Error{Code: ErrEngine, Message: merr.Error()}
+	}
+	return result, nil
 }
 
 // randRead is the crypto/rand seam (swappable only in tests).

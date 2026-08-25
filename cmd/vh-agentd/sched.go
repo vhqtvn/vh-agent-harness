@@ -11,6 +11,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -70,6 +71,39 @@ func (t *sessionTracker) NewSession(path, sessionID string, sink io.Writer) (*pr
 	}
 	t.active = es
 	return es, nil
+}
+
+// ResumeSession forwards the P4 session/resume seam with the SAME
+// serialized stage as NewSession: the wrapped recovery and the
+// tracker's active assignment run as one non-interleaved stage under
+// t.mu, so the resumed session's supersede and tracker.active never
+// disagree (the decorator promotes only protocol.Engine's declared
+// methods — without this forward, the server's SessionResumer
+// assertion on the tracker fails and resume refuses -32000; the exact
+// SetApprover trap P3.5 documented, pinned by the resume e2e).
+func (t *sessionTracker) ResumeSession(sessionID string, sink io.Writer) (*protocol.EngineSession, *protocol.ResumeSummary, error) {
+	rs, ok := t.Engine.(protocol.SessionResumer)
+	if !ok {
+		return nil, nil, errors.New("vh-agentd: wrapped engine does not implement session/resume")
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	es, sum, err := rs.ResumeSession(sessionID, sink)
+	if err != nil {
+		return nil, nil, err
+	}
+	t.active = es
+	return es, sum, nil
+}
+
+// ListSessions forwards the P4 session/list seam (read-only; no
+// tracker state involved).
+func (t *sessionTracker) ListSessions() ([]protocol.SessionEntry, error) {
+	ls, ok := t.Engine.(protocol.SessionLister)
+	if !ok {
+		return nil, errors.New("vh-agentd: wrapped engine does not implement session/list")
+	}
+	return ls.ListSessions()
 }
 
 // current returns the active session (nil before the first
