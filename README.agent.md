@@ -1373,8 +1373,19 @@ vh-agentd --adapter openai|openaicompat|anthropic --model <name> \
   [--sandbox off|read-only|workspace-write] \
   [--spill-max-inline N] \
   [--workdir-roots DIR[,DIR...]] \
+  [--ask-tools TOOL[,TOOL...]] \
   [--optimizer dedup|llm]
 ```
+
+`--ask-tools run_shell[,TOOL...]` (P3.5) is the daemon-side ask
+source: calls to the named tools ride the REAL approval waterfall —
+the wire bridge emits `approval/request`, and the CLIENT decides
+(interactive y/N, `--json` approval lines, or the client's `--policy`
+engine). Every unanswerable direction (no answer, approval timeout,
+disconnect) denies fail-closed, and the deny-only guard layer still
+runs after an approval grant. Names are validated against the
+registered tool set at startup — an unknown name exits 2. Default
+(omit the flag): the daemon emits no asks, behavior unchanged.
 
 `--verify-log PATH` is a READ-ONLY operator mode (parsed before the
 required flags — no adapter/model/session-dir needed, no protocol
@@ -1506,6 +1517,27 @@ output treated as a candidate and checked by the fail-closed compile
 invariants; it needs the key variable SET and exits 2 without it (never
 a silent dedup fallback; no retries — a failed compile is a rerun).
 `--optimizer dedup` selects the offline, keyless reference fake.
+
+**Deployment notes (operator findings, P3.5).** Two runtime-image
+requirements that the offline battery image does not surface:
+
+- **`ca-certificates` for real HTTPS providers.** Runtime images need
+  the system CA bundle (`apt-get install ca-certificates` at IMAGE
+  build time — never ad-hoc in a running container) for any real
+  provider call over `https://`; without it every provider call fails
+  TLS verification ("unknown authority"). The docker self-test image
+  deliberately ships without it (it only talks to the local mock over
+  plain HTTP), so a battery-green image is NOT proof that real
+  providers work — bake the CA bundle into production images.
+- **Under Docker, `--security-opt seccomp=unconfined` for the kernel
+  sandbox.** Docker's DEFAULT seccomp profile blocks the Landlock
+  syscalls, so `--sandbox read-only|workspace-write` fail-closes with
+  typed sandbox-unavailable errors inside a default-profile container.
+  Run the daemon container with `--security-opt seccomp=unconfined`
+  (same rationale as `docker/selftest/run.sh`): the flag lifts only
+  Docker's profile — the engine's own trampoline (Landlock + seccomp)
+  then enforces the confinement.
+
 Credential discipline: `--api-key-env` takes the **name** of an
 environment variable only — never a literal key — and the daemon fails
 closed when that variable is unset. Provider error bodies are
@@ -1634,31 +1666,37 @@ the no-`--policy` posture.
      matches the engine's env-scrub pattern `(?i)KEY|PASSWORD|SECRET|TOKEN`
      or carries the `VH_AGENT_HARNESS_` prefix (mirrored from
      `internal/tools/shell`);
-    - **git mutation** — `run_shell` argv[0] `git` (path forms and
-      `env`-prefixed forms included; compound commands split on
-      `&&`/`&`/`||`/`;`/`|`/newline with every segment checked — the
-      single `&` matters because `bash -c` executes BOTH sides of an
-      asynchronous list, so `git status & git push` is a mutation
-      segment) with a subcommand in the closed mutation set (push,
-      reset, clean, checkout, branch, merge, rebase, cherry-pick,
-      revert, restore, worktree, commit, tag, stash, apply, am, clone,
-      fetch, pull, add, rm, mv, switch, config, sparse-checkout,
-      submodule, update-ref, symbolic-ref, gc, prune). Read-only git
-      (`status`, `log`, `diff`, `show`, `grep`, …) stays rule-eligible.
-      `git` with no subcommand, flags before the subcommand, or a
-      quoting-evaded shape denies (cannot identify ⇒ deny), and a
-      git-headed segment denies if ANY word carries a substitution
-      metacharacter (`$`, backtick, `(`, `)`) — `git log $(git push)`
-      executes the substitution, so the words are not provably
-      read-only. Wrapper shapes whose argv[0] is not `git` (`sudo git
-      push`, `nohup git push`, `sh -c "git push …"`) are covered by a
-      word-level git-adjacency scan: a segment containing BOTH the
-      word `git` and a mutation-subcommand word hard-denies. *Honest
-      false-positive direction (accepted):* the adjacency scan is
-      deliberately over-approximating — prose like `echo about git
-      push` denies too, and the `&` split is lexical (a quoted or
-      redirection `&` shape can over-split into extra segments, which
-      can only lose an allow, never gain one);
+     - **git mutation** — `run_shell` argv[0] `git` (path forms and
+       `env`-prefixed forms included; compound commands split on
+       `&&`/`&`/`||`/`;`/`|`/newline with every segment checked — the
+       single `&` matters because `bash -c` executes BOTH sides of an
+       asynchronous list, so `git status & git push` is a mutation
+       segment) with a subcommand in the closed mutation set (45 verbs:
+       push, reset, clean, checkout, branch, merge, rebase, cherry-pick,
+       revert, restore, worktree, commit, tag, stash, apply, am, clone,
+       fetch, pull, add, rm, mv, switch, config, sparse-checkout,
+       submodule, update-ref, symbolic-ref, gc, prune — plus the 15
+       hyphenated plumbing verbs add--interactive, checkout--worker,
+       checkout-index, commit-graph, commit-tree, merge-file,
+       merge-index, merge-octopus, merge-one-file, merge-ours,
+       merge-recursive, merge-resolve, merge-subtree, merge-tree,
+       update-index; opencode's boundary is hyphen-aware, so each is
+       enumerated as a full token). Read-only git
+       (`status`, `log`, `diff`, `show`, `grep`, …) stays rule-eligible.
+       `git` with no subcommand, flags before the subcommand, or a
+       quoting-evaded shape denies (cannot identify ⇒ deny), and a
+       git-headed segment denies if ANY word carries a substitution
+       metacharacter (`$`, backtick, `(`, `)`) — `git log $(git push)`
+       executes the substitution, so the words are not provably
+       read-only. Wrapper shapes whose argv[0] is not `git` (`sudo git
+       push`, `nohup git push`, `sh -c "git push …"`) are covered by a
+       word-level git-adjacency scan: a segment containing BOTH the
+       word `git` and a mutation-subcommand word hard-denies. *Honest
+       false-positive direction (accepted):* the adjacency scan is
+       deliberately over-approximating — prose like `echo about git
+       push` denies too, and the `&` split is lexical (a quoted or
+       redirection `&` shape can over-split into extra segments, which
+       can only lose an allow, never gain one);
     - **exec-intermediary tripwires (closed class)** — the exec
       bridges that assemble a child argv the segment scans cannot
       follow. The words `xargs`, `parallel` (GNU parallel), `-exec`,
@@ -1734,6 +1772,40 @@ the no-`--policy` posture.
      nesting depth, and `--sandbox…`-shaped flags or a `sandbox=`
      prefix in a `run_shell` command. Per-call sandbox override does
      not exist on the tool surface; requesting it is an escape attempt.
+   - **infra-lifecycle** (P3.5 parity with the opencode floor) —
+     `apt`/`apt-get` with a subcommand in the closed install-class set
+     (`install`, `reinstall`, `upgrade`, `full-upgrade`, `remove`,
+     `purge`, `autoremove` — read-only `list`/`search`/`policy`/`show`
+     and the distinct `apt-cache`/`apt-key` argv0s stay
+     rule-eligible); the user/group management family (`usermod`,
+     `useradd`, `groupadd`, `groupmod`, `groupdel`, `userdel`,
+     `deluser`) wherever a standalone word appears (basename-aware —
+     path-qualified and sudo-wrapped forms trip); ssh host-key bypass
+     option values (`StrictHostKeyChecking=no`,
+     `StrictHostKeyChecking=accept-new`,
+     `UserKnownHostsFile=/dev/null` — the union of the opencode rule
+     and the mission text; detached `-o VALUE`, attached `-oVALUE`, or
+     bare); and `scp` ANY invocation. *Honest over-approximation
+     (accepted, deny direction):* word-anywhere tripwires with no
+     inspector carve-outs — prose mentions deny too (`echo about
+     useradd`, `echo scp is how files moved`), and the matches are
+     whole-word anchored, never substring (`userslist`,
+     `delusernotes`, `scpnotes.txt` do not trip);
+   - **system-temp write authoring** (P3.5 parity) — a `run_shell`
+     redirection operator (`>`, `>>`, `2>`, `2>>`, `&>`, `&>>`, `>&`,
+     `>|`, `>>|` — attached or detached target) or a `tee` targeting
+     an ABSOLUTE path under `/tmp`, `/var/tmp`, or `/dev/shm` (the
+     closed client-side system-temp floor; opencode's system-tmp-access
+     rule). Reads of the roots (`ls /tmp`) and relative targets
+     (`> out.txt`, `tee out.txt`) are NOT this class — relative writes
+     fall to the daemon-side sandbox/roots (workspace-write writable
+     roots deliberately include the OS temp dir), and a relative
+     redirection still denies via the plain-word gate, just without
+     this class's reason. Process substitution is out of scope (the
+     plain-word gate owns the words). Lexical-split caveat: operators
+     that themselves carry `&` or `|` (`>&`, `>|`, `>>|`) over-split
+     and deny via the plain-word gate with the generic reason — same
+     deny outcome, generic reason;
    - **fail-closed args rule** — for the known-risky tools
      (`run_shell`, `read`, `write`, `edit`) an args object that does
      not parse into the tool's known shape (missing/ mistyped required
@@ -1822,24 +1894,28 @@ vh-agent-harness exec bash docker/selftest/run.sh    # agent form
 `run.sh` builds the image (multi-stage `golang:1.25-bookworm` →
 `debian:bookworm-slim`; the worktree-root `.dockerignore` keeps the
 context to go.mod/go.sum/cmd/internal + the battery itself) and runs
-`battery.sh`, which drives 11 scenarios — greeting, tool round-trip,
+`battery.sh`, which drives 12 scenarios — greeting, tool round-trip,
 policy parse/load, empty-response retry, sandbox denial, retry ladder,
 subagent recursion, spill paging, Anthropic dialect, verify
-determinism — asserting on client output, `--verify-log` on every
-produced log, and the mock's `/count` + `/journal`. The final line is
-`SELFTEST: N/M scenarios passed` (exit 1 on any failure).
+determinism, approval flow — asserting on client output,
+`--verify-log` on every produced log, and the mock's `/count` +
+`/journal`. The final line is `SELFTEST: N/M scenarios passed`
+(exit 1 on any failure).
 
 `--security-opt seccomp=unconfined` is required because Docker's
 DEFAULT seccomp profile blocks the landlock syscalls; the flag lifts
 only Docker's profile — the engine's own trampoline (Landlock +
 seccomp) then enforces confinement, which is exactly what the
 sandbox_denial scenario proves (a read-only `run_shell` write is
-kernel-denied inside the container). Approval grant/deny are
-deliberately NOT battery scenarios: the shipped daemon emits no asks,
-so those paths are covered at the client's library seam
-(`cmd/vh-agent-client/policy_seam_test.go`); the battery proves the
-fail-closed policy parse (exit 2 before daemon spawn) and the
-loaded-but-unconsulted posture instead.
+kernel-denied inside the container). The approval_flow scenario (P3.5)
+exercises the FULL approval waterfall over the real binaries: the
+daemon started with `--ask-tools run_shell` ask-routes the calls,
+`approval/request` rides the wire, the client's `--policy` engine
+answers (a broad `run_shell` allow auto-allows the benign call —
+which then EXECUTES — while `git push` under the SAME broad rule
+HARD-DENIES via the git-mutation class with a typed denial: the
+executor never ran). The timeout/disconnect deny directions stay
+covered at the bridge seam (`internal/protocol/disconnect_test.go`).
 
 ## Private redlines (`redlines guidance`, `redlines scan`)
 

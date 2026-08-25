@@ -18,6 +18,7 @@ import (
 
 	"github.com/vhqtvn/vh-agent-harness/internal/jobs"
 	"github.com/vhqtvn/vh-agent-harness/internal/protocol"
+	"github.com/vhqtvn/vh-agent-harness/internal/tools"
 )
 
 // schedulerStateFilename is the scheduler's persisted cursor file,
@@ -34,6 +35,21 @@ type sessionTracker struct {
 	protocol.Engine
 	mu     sync.Mutex
 	active *protocol.EngineSession
+}
+
+// SetApprover forwards the wire approval bridge to the wrapped engine.
+// LOAD-BEARING (P3.5): the decorator promotes only protocol.Engine's
+// declared methods, and Engine does NOT declare SetApprover — without
+// this forward, protocol.NewServer's ApprovalAwareEngine assertion on
+// the tracker fails SILENTLY and the daemon's pipeline is built
+// without the wire bridge (every ask then denies "no approver is
+// configured"). The bug was latent until --ask-tools gave the daemon
+// its first real ask source; the compile-time assertion in
+// asktools_test.go and the real-binary approval-flow e2e pin it.
+func (t *sessionTracker) SetApprover(a tools.Approver) {
+	if aa, ok := t.Engine.(protocol.ApprovalAwareEngine); ok {
+		aa.SetApprover(a)
+	}
 }
 
 // NewSession delegates to the wrapped engine and records the new active

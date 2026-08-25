@@ -105,6 +105,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		sandbox           = new(string)
 		spillMaxInline    = new(int64)
 		workdirRoots      = new(string)
+		askTools          = new(string)
 		compilePrompt     = new(bool)
 		verifyLog         = new(string)
 		showVersion       = new(bool)
@@ -126,6 +127,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	fs.StringVar(workdirRoots, "workdir-roots", "", "comma-separated ABSOLUTE paths to existing DIRECTORIES confining the file tools (read/write/edit/glob/search) and run_shell absolute workdirs: relative file paths resolve against the FIRST root, absolute paths must sit under a root, escapes and symlink crossings reject fail-closed with zero filesystem effects, and entries resolving to a non-directory (a file, even via symlink) refuse at startup; default = the daemon's working directory resolved absolute")
 	fs.BoolVar(compilePrompt, "compile-prompt", false, "run the prompt compilation with the current config, write the artifact under <session-dir>/compiled-prompts/, and exit — no protocol session; default --optimizer llm makes ONE compile-time LLM call and requires the variable named by --api-key-env to be set (fail-closed exit 2 without it); --optimizer dedup is the offline, keyless alternative")
 	fs.StringVar(verifyLog, "verify-log", "", "read-only mode: replay the session log at PATH, print ONE JSON line {events, format_version, surface_sha256, messages} (sha256 over the canonical derived-surface JSON) to stdout, and exit — no protocol session, no engine flags required; exit 1 with the reason on stderr on any replay error (fail-closed). Two runs on the same log print identical bytes (replay-determinism prover)")
+	fs.StringVar(askTools, "ask-tools", "", "comma-separated REGISTERED tool names whose calls ride the approval waterfall (the daemon-side ask source: ask → approval/request on the wire → the client's interactive/--json/policy approver; unanswerable = deny fail-closed). Unknown name = exit 2. Default empty = the daemon emits no asks (behavior unchanged)")
 	fs.BoolVar(showVersion, "version", false, "print engine and protocol versions and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -148,6 +150,15 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	}
 
 	cfg, err := validate(*adapter, *model, *baseURL, *apiKeyEnv, *sessionDir, *optimizer, *maxTokens, *approvalTimeoutMs, *cacheBreakpoints, *sandbox, *spillMaxInline, *workdirRoots)
+	if err != nil {
+		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
+		return 2
+	}
+	// P3.5 --ask-tools: fail-closed syntax parse (empty entries,
+	// garbage) on the same exit-2 path as validate(). The
+	// registered-set check runs after buildServer (the catalog lives
+	// on the engine's pipeline); both refuse BEFORE any serving.
+	cfg.AskTools, err = parseAskTools(*askTools)
 	if err != nil {
 		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
 		return 2
@@ -208,6 +219,20 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		log.Printf("system prompt: source=%s reason=%s (run with --compile-prompt to populate the artifact)", served.Source, served.Reason)
 	} else {
 		log.Printf("system prompt: source=%s", served.Source)
+	}
+
+	// P3.5 --ask-tools: validate against the REGISTERED tool set (now
+	// that the engine's pipeline carries it) and arm the observer —
+	// BEFORE Serve, so every turn of this session rides the routed
+	// waterfall. An unknown name is a usage error: exit 2, never a
+	// silently-unrouted run.
+	if err := validateAskTools(cfg.AskTools, engine.Pipeline().Definitions()); err != nil {
+		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
+		return 2
+	}
+	if len(cfg.AskTools) > 0 {
+		engine.Pipeline().AddPreObserver(newAskToolsObserver(cfg.AskTools))
+		log.Printf("ask-tools: %s (calls to these tools ask the client; unanswerable approvals deny fail-closed)", strings.Join(cfg.AskTools, ","))
 	}
 
 	// Scheduler: real Manager seams through the tracker, state file

@@ -9,16 +9,19 @@
 # (the model request plane) → kill the mock → next.
 #
 # SCENARIO NOTES (honest scope):
-#   - approval_grant / approval_deny / policy_hard-deny were RE-SCOPED
-#     (operator decision): the shipped daemon emits no asks (no
-#     ask-observer exists outside tests), so the client's policy engine
-#     and y/N responder are never consulted over the real binaries.
-#     policy_bad_file proves the fail-closed policy parse (exit 2
-#     BEFORE the daemon spawns); policy_loaded_clean proves a valid
-#     policy loads and stays unconsulted (honestly asserted: NO
-#     "policy: " decision line appears). The ask-path approval
-#     machinery stays covered at its library seam
-#     (cmd/vh-agent-client/policy_seam_test.go).
+#   - approval_flow (P3.5): the daemon's --ask-tools flag is the real
+#     daemon-side ask source (previously none existed — the old
+#     re-scope note here said approval grant/deny could only be
+#     covered at the library seam). The scenario drives the FULL
+#     waterfall over the real binaries: ask-routed run_shell calls,
+#     approval/request on the wire, the client's --policy engine
+#     answering (a broad allow for the benign call, the git-mutation
+#     HARD-DENY for `git push` under the SAME broad rule), the tool
+#     executing on grant, and a typed denial — executor never ran —
+#     on hard-deny. The fail-closed policy parse (policy_bad_file) and
+#     the loaded-but-unconsulted posture (policy_loaded_clean) stay.
+#     The timeout/disconnect deny directions remain covered at the
+#     bridge seam (internal/protocol/disconnect_test.go).
 #   - empty_response_retry exercises the mock's "empty" step class
 #     through the real adapter retry ladder (a real engine behavior).
 #   - spill_paging is a TWO-RUN scenario: run A creates the spill (its
@@ -436,6 +439,58 @@ sc_verify_determinism() {
     stop_mock
 }
 
+sc_approval_flow() {
+    local sc=approval_flow
+    fresh_session "$sc"
+    start_mock "$SCEN/approval_flow.json"
+    # The daemon ask-routes run_shell (--ask-tools); the client's
+    # --policy engine answers the wire asks. A BROAD run_shell allow
+    # rule proves the floor: the benign echo auto-allows and EXECUTES;
+    # `git push` under the SAME rule HARD-DENIES (git-mutation class)
+    # — the executor never runs.
+    run_client --session-dir "$SESS" --json \
+        --policy "$SCEN/approval_flow.policy" \
+        --prompt "run the routed tools" \
+        --exec "$DAEMON" --ask-tools run_shell \
+        --adapter openai --model mock-model \
+        --base-url "$MOCK_URL/v1" --api-key-env MOCK_KEY
+    check "$sc" "client exits 0" [ "$CODE" -eq 0 ]
+    check "$sc" "daemon startup log names the routed tools" \
+        grep -q "ask-tools: run_shell" "$WORK/client.err"
+    check "$sc" "policy loaded (1 rules)" grep -q "policy loaded (1 rules)" "$WORK/client.err"
+    check "$sc" "approval/request fired on the wire" grep -q "ask-routed by --ask-tools" "$WORK/client.out"
+    check "$sc" "policy auto-ALLOWED the benign call" \
+        grep -q "policy: allow run_shell(command=echo approval-flow-ran)" "$WORK/client.err"
+    check "$sc" "policy HARD-DENIED git push under the same broad rule" \
+        grep -q "policy: HARD-DENY run_shell(command=git push origin main)" "$WORK/client.err"
+    check "$sc" "final text delivered" grep -Fq "approval flow exercised" "$WORK/client.out"
+    newest_log
+    # jq on the durable session log: grant → executed with the real
+    # stdout; hard-deny → typed denial, executor never ran. The
+    # capture-then-test idiom (spill_paging's shape) is deliberate:
+    # jq 1.6 (bookworm) exits 4 from `jq -e` whenever the LAST input
+    # line matches nothing, even when earlier lines matched — the
+    # var-emptiness test is version-robust.
+    local gexec ddenied dnever
+    gexec=$(jq -c 'select(.type == "tool/result" and .payload.callId == "call-af-1"
+                     and (.payload.denied != true)
+                     and (.payload.content | contains("approval-flow-ran")))' "$LOG" | head -1)
+    check "$sc" "granted call EXECUTED (result present, not denied)" [ -n "$gexec" ]
+    ddenied=$(jq -c 'select(.type == "tool/result" and .payload.callId == "call-af-2"
+                     and .payload.denied == true
+                     and .payload.deniedBy == "ask-tools")' "$LOG" | head -1)
+    check "$sc" "denied call settled as a typed denial by ask-tools" [ -n "$ddenied" ]
+    dnever=$(jq -c 'select(.type == "tool/result" and .payload.callId == "call-af-2")
+                     | select(.payload.content | contains("exitCode") or contains("fatal:") | not)' "$LOG" | head -1)
+    check "$sc" "the denied call's executor NEVER ran (no shell outcome)" [ -n "$dnever" ]
+    local n
+    n=$(chat_count)
+    check "$sc" "model called exactly twice (tool turn + final turn) — got ${n:-none}" \
+        [ "${n:-0}" -eq 2 ]
+    check "$sc" "--verify-log ok" verify_log_ok "$LOG"
+    stop_mock
+}
+
 # ---- run the battery -------------------------------------------------------
 
 note "=== native-engine docker self-test battery ==="
@@ -450,6 +505,7 @@ run_scenario subagent_recursion sc_subagent_recursion
 run_scenario spill_paging sc_spill_paging
 run_scenario anthropic_dialect sc_anthropic_dialect
 run_scenario verify_determinism sc_verify_determinism
+run_scenario approval_flow sc_approval_flow
 
 TOTAL=$((PASS + FAIL))
 echo

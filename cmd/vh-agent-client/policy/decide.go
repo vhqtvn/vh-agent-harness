@@ -13,7 +13,8 @@
 //
 // THE FOUR HARD-DENY CLASSES (plus the fail-closed args-shape rule,
 // the plain-word provability gate, the closed exec-intermediary
-// tripwire set, and the fail-closed env-option rule):
+// tripwire set, the fail-closed env-option rule, and the two P3.5
+// parity classes 5 and 6):
 //
 //  0. Unrecognized args on a known-risky tool (run_shell, read,
 //     write, edit): the args must parse into the tool's known shape.
@@ -124,6 +125,23 @@
 //     depth; "--sandbox…"-shaped flags or a "sandbox=" env prefix in
 //     a run_shell command}. Per-call sandbox override does not exist
 //     on the tool surface; requesting it is an escape attempt.
+//  5. Infra-lifecycle (P3.5 parity): apt/apt-get with a subcommand in
+//     the closed install-class set {install, reinstall, upgrade,
+//     full-upgrade, remove, purge, autoremove}; the user/group
+//     management family {usermod, useradd, groupadd, groupmod,
+//     groupdel, userdel, deluser} wherever a standalone word appears;
+//     ssh host-key bypass option values (StrictHostKeyChecking=no |
+//     accept-new, UserKnownHostsFile=/dev/null — the union of the
+//     opencode rule and the mission text); scp ANY invocation.
+//     Deny-direction over-approximation: word-anywhere tripwires, no
+//     inspector carve-outs — prose mentions deny too.
+//  6. System-temp write authoring (P3.5 parity): a run_shell
+//     redirection operator (>, >>, 2>, &>, >&, 2>>, &>>, >|, >>| —
+//     attached or detached target) or a `tee` targeting an absolute
+//     path under /tmp, /var/tmp, or /dev/shm (the closed client-side
+//     system-temp floor). In-root vs out-of-root generally is enforced
+//     DAEMON-SIDE by the sandbox/roots; this is the client-side floor.
+//     Process substitution is out of scope (gate 2a owns the words).
 //
 // All command-text analysis is LEXICAL (whitespace fields; no quoting
 // or expansion semantics). That is deliberately conservative in the
@@ -173,19 +191,28 @@ var envAssignRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=`)
 // direction).
 var segmentSplitRe = regexp.MustCompile(`&&|&|\|\||;|\||\n`)
 
-// gitMutationSubcommands is the CLOSED git-mutation set. Anything
-// outside it (status, log, diff, show, grep, describe, ...) stays
-// rule-eligible; the daemon's own policy/sandbox remains the backstop
-// for exotic subcommands.
+// gitMutationSubcommands is the CLOSED git-mutation set (45 verbs,
+// alphabetical; P3.5 parity grew it 30 → 45 with the 15 hyphenated
+// plumbing verbs). opencode's boundary is hyphen-aware (`(?![\w-])` —
+// a verb followed by `-` does not match), so every hyphenated mutating
+// plumbing command must be enumerated as a full token. Anything
+// outside the set (status, log, diff, show, grep, describe, ls-files,
+// cat-file, ...) stays rule-eligible; the daemon's own
+// policy/sandbox remains the backstop for exotic subcommands.
 var gitMutationSubcommands = map[string]bool{
-	"add": true, "am": true, "apply": true, "branch": true,
-	"checkout": true, "cherry-pick": true, "clean": true, "clone": true,
-	"commit": true, "config": true, "fetch": true, "merge": true,
-	"mv": true, "pull": true, "push": true, "rebase": true,
-	"reset": true, "restore": true, "revert": true, "rm": true,
-	"sparse-checkout": true, "stash": true, "submodule": true,
-	"switch": true, "tag": true, "worktree": true, "update-ref": true,
-	"symbolic-ref": true, "gc": true, "prune": true,
+	"add": true, "add--interactive": true, "am": true, "apply": true,
+	"branch": true, "checkout": true, "checkout--worker": true,
+	"checkout-index": true, "cherry-pick": true, "clean": true,
+	"clone": true, "commit": true, "commit-graph": true,
+	"commit-tree": true, "config": true, "fetch": true, "gc": true,
+	"merge": true, "merge-file": true, "merge-index": true,
+	"merge-octopus": true, "merge-one-file": true, "merge-ours": true,
+	"merge-recursive": true, "merge-resolve": true, "merge-subtree": true,
+	"merge-tree": true, "mv": true, "prune": true, "pull": true,
+	"push": true, "rebase": true, "reset": true, "restore": true,
+	"revert": true, "rm": true, "sparse-checkout": true, "stash": true,
+	"submodule": true, "switch": true, "symbolic-ref": true, "tag": true,
+	"update-index": true, "update-ref": true, "worktree": true,
 }
 
 // HardDeny reports whether (tool, args) falls in a hard-deny class and
@@ -194,19 +221,38 @@ func HardDeny(tool string, args json.RawMessage) (reason string, denied bool) {
 	if r, ok := unrecognizedArgs(tool, args); ok {
 		return r, true
 	}
+	// Class 5 (P3.5 parity) runs before the secret-env class: the ssh
+	// host-key-bypass shapes carry a NAME=value word that ALSO matches
+	// the KEY scrub pattern — the infra-lifecycle reason is the more
+	// precise hazard provenance.
+	if r, ok := infraLifecycle(tool, args); ok {
+		return r, true
+	}
 	if r, ok := secretEnvWrite(tool, args); ok {
 		return r, true
 	}
-	// Class 2b runs FIRST among the run_shell command classes: an
-	// exec-bridge word (any xargs/parallel/-exec/-execdir/-ok/-okdir
-	// word, git-* dashed form) always trips, so its reason wins even
-	// when the git scans below would co-fire on the same command.
-	// Class 2c (env options) follows: an env OPTION word leaves the
-	// segment unidentifiable after the env-prefix strip.
+	// Class 2b runs before the other run_shell command classes below
+	// it: an exec-bridge word (any xargs/parallel/-exec/-execdir/
+	// -ok/-okdir word, git-* dashed form) always trips, so its reason
+	// wins even when the git scans below would co-fire on the same
+	// command. Class 2c (env options) follows: an env OPTION word
+	// leaves the segment unidentifiable after the env-prefix strip.
 	if r, ok := execIntermediary(tool, args); ok {
 		return r, true
 	}
 	if r, ok := envOptionPrefix(tool, args); ok {
+		return r, true
+	}
+	// Class 6 (P3.5 parity) runs BEFORE the git classes and gate 2a:
+	// the lexical &-split turns `cmd &> /tmp/all` into a redirection
+	// TAIL segment ("> /tmp/all") whose first word is the operator —
+	// the git class's unidentifiable-argv0 branch and gate 2a would
+	// otherwise steal the reason for what is precisely a system-temp
+	// authoring shape (the parity report's reason gap). A git-headed
+	// segment carrying BOTH a mutation and a system-temp redirection
+	// reports the system-temp reason — both are hard-denies; the
+	// reason choice is provenance, not severity.
+	if r, ok := systemTempWriteAuthoring(tool, args); ok {
 		return r, true
 	}
 	if r, ok := gitMutation(tool, args); ok {
@@ -601,6 +647,185 @@ func gitAdjacentMutation(words []string) (string, bool) {
 // MORE recognizable, and every recognized shape denies.
 func trimQuoteRunes(s string) string {
 	return strings.Trim(s, `"'`)
+}
+
+// --- class 5: infra-lifecycle (P3.5 parity) ----------------------------------
+
+// infraLifecycleSubcommands is the CLOSED install-class subcommand set
+// for apt/apt-get (the package-lifecycle mutations; list/search/policy/
+// show are read-only and stay rule-eligible).
+var infraLifecycleSubcommands = map[string]bool{
+	"install": true, "reinstall": true, "upgrade": true,
+	"full-upgrade": true, "remove": true, "purge": true,
+	"autoremove": true,
+}
+
+// infraUserWords is the CLOSED user/group management family — word
+// anywhere, basename-aware (path-qualified and sudo-wrapped forms trip
+// like the bare argv0).
+var infraUserWords = map[string]bool{
+	"usermod": true, "useradd": true, "groupadd": true,
+	"groupmod": true, "groupdel": true, "userdel": true,
+	"deluser": true,
+}
+
+// infraSSHOptionValues is the CLOSED ssh host-key-bypass value set:
+// the UNION of the opencode rule (StrictHostKeyChecking=no,
+// UserKnownHostsFile=/dev/null) and the mission text (accept-new) —
+// deny direction, superset of both. Matched as whole words, with or
+// without a `-o` prefix attached (`-oStrictHostKeyChecking=no`).
+var infraSSHOptionValues = map[string]bool{
+	"StrictHostKeyChecking=no":         true,
+	"StrictHostKeyChecking=accept-new": true,
+	"UserKnownHostsFile=/dev/null":     true,
+}
+
+// infraLifecycle denies the CLOSED infra-lifecycle vocabulary (the
+// P3.5 parity addition; the opencode floor's rules 1-4):
+//
+//   - apt / apt-get with a subcommand from the closed install-class set
+//     anywhere in the same segment (argv0 or adjacency — sudo/apt-get
+//     -y wrappers trip identically);
+//   - the user/group management family {usermod, useradd, groupadd,
+//     groupmod, groupdel, userdel, deluser} wherever a standalone word
+//     appears (path-qualified via basename);
+//   - ssh host-key bypass option values (see infraSSHOptionValues),
+//     detached `-o VALUE`, attached `-oVALUE`, or bare;
+//   - scp ANY invocation (word-anywhere, basename-aware).
+//
+// DENY-DIRECTION OVER-APPROXIMATION (documented, accepted): the
+// matches are word-anywhere tripwires with NO inspector carve-outs
+// (unlike opencode's allowIf carve-outs for read-only inspector forms)
+// — prose mentioning a trigger denies too (`echo about useradd`,
+// `echo scp is how files moved`), and scp denies even for a
+// download-shaped invocation. The closed sets are whole-word anchored
+// (exact or basename, never substring): `apt-cache`/`apt-key` are not
+// `apt`, `userslist`/`delusernotes`/`scpnotes.txt` do not trip, and
+// read-only apt (list/search/policy/show) stays rule-eligible.
+// Runs BEFORE the secret-env class so the ssh-bypass shapes (whose
+// NAME=value word also matches the KEY scrub pattern) carry the
+// infra-lifecycle reason — the more precise hazard provenance.
+func infraLifecycle(tool string, args json.RawMessage) (string, bool) {
+	if tool != "run_shell" {
+		return "", false
+	}
+	cmd := stringValue(rawJSON(args, "command"))
+	for _, seg := range commandSegments(cmd) {
+		words := stripEnvPrefix(strings.Fields(seg))
+		hasApt := false
+		for _, w := range words {
+			tw := trimQuoteRunes(w)
+			base := path.Base(tw)
+			if base == "apt" || base == "apt-get" {
+				hasApt = true
+			}
+			if infraUserWords[base] {
+				return fmt.Sprintf("infra-lifecycle: user/group management word %q wherever it appears (hard-deny): %s", w, seg), true
+			}
+			if base == "scp" {
+				return fmt.Sprintf("infra-lifecycle: scp invocation (any scp use denies; git pull over ssh is the sanctioned transport): %s (hard-deny)", seg), true
+			}
+			if infraSSHOptionValues[tw] || infraSSHOptionValues[strings.TrimPrefix(tw, "-o")] {
+				return fmt.Sprintf("infra-lifecycle: ssh host-key bypass option %q (hard-deny): %s", tw, seg), true
+			}
+			if infraLifecycleSubcommands[tw] && hasApt {
+				return fmt.Sprintf("infra-lifecycle: apt %s is in the closed install-class set (hard-deny): %s", tw, seg), true
+			}
+		}
+	}
+	return "", false
+}
+
+// --- class 6: system-temp write authoring (P3.5 parity) ----------------------
+
+// systemTempRoots is the CLOSED client-side system-temp floor
+// (opencode's system-tmp-access rule roots): absolute writes AUTHORING
+// into these deny. In-root vs out-of-root generally is enforced
+// DAEMON-SIDE by the sandbox/roots (workspace-write writable roots
+// deliberately include os.TempDir()); this class is only the
+// client-side /tmp floor in front of it.
+var systemTempRoots = []string{"/tmp", "/var/tmp", "/dev/shm"}
+
+// systemTempRedirectionOps is the CLOSED redirection-operator list,
+// longest-first for prefix matching (>, >>, 2>, &>, >&, 2>>, &>>, >|,
+// >>| — attached or detached target; the P3.5 parity contract).
+// LEXICAL-SPLIT CAVEAT: the single-pass segment split cuts at EVERY
+// `&` and `|`, so operators that themselves carry one (`>&`, `>|`,
+// `>>|`) never keep their target pairing — those shapes deny via the
+// plain-word gate (2a) with the generic reason (deny outcome
+// identical; pinned in parity_test.go).
+var systemTempRedirectionOps = []string{
+	"2>>", "&>>", ">>|", ">>", "2>", "&>", ">|", ">&", ">",
+}
+
+// isSystemTempPath reports whether p is an absolute path at or under
+// one of the closed system-temp roots (rooted-prefix semantics:
+// "/tmpfoo" is NOT under "/tmp").
+func isSystemTempPath(p string) bool {
+	for _, root := range systemTempRoots {
+		if p == root || strings.HasPrefix(p, root+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// systemTempWriteAuthoring denies run_shell commands that AUTHOR a
+// write into the system-temp roots: a redirection operator (attached
+// or detached target) or a `tee` targeting an absolute path under
+// /tmp, /var/tmp, or /dev/shm (the P3.5 parity addition — the outcome
+// gap: `tee /tmp/x` is all plain words and previously allowed; the
+// reason gap: a `>/tmp/x` redirection previously denied only
+// incidentally via the plain-word gate with no class/reason).
+//
+// Boundary (documented): reads of the roots (`ls /tmp`) and relative
+// targets (`> out.txt`, `tee out.txt`) are NOT this class — relative
+// writes fall to the daemon-side sandbox/roots, and a relative
+// redirection still denies via the plain-word gate (2a), just without
+// this class's reason. Process substitution (`<(…)`) is OUT OF SCOPE
+// by contract: not trivially detectable lexically, and gate 2a already
+// denies the non-plain words. This class runs BEFORE the git classes
+// and gate 2a so a system-temp authoring reason beats the generic
+// unidentifiable ones (see the ordering note in HardDeny).
+func systemTempWriteAuthoring(tool string, args json.RawMessage) (string, bool) {
+	if tool != "run_shell" {
+		return "", false
+	}
+	cmd := stringValue(rawJSON(args, "command"))
+	for _, seg := range commandSegments(cmd) {
+		words := strings.Fields(seg)
+		hasTee := false
+		for _, w := range words {
+			if base := path.Base(trimQuoteRunes(w)); base == "tee" {
+				hasTee = true
+			}
+		}
+		for i, w := range words {
+			// Redirection operator (longest-first): the target is the
+			// attached remainder or the next word.
+			for _, op := range systemTempRedirectionOps {
+				if !strings.HasPrefix(w, op) {
+					continue
+				}
+				target := strings.TrimPrefix(w, op)
+				if target == "" && i+1 < len(words) {
+					target = words[i+1]
+				}
+				if isSystemTempPath(target) || isSystemTempPath(trimQuoteRunes(target)) {
+					return fmt.Sprintf("system-temp write authoring: redirection %s targets %s (client-side /tmp floor; in-root policy is the daemon sandbox's): %s (hard-deny)", op, target, seg), true
+				}
+				break // matched an operator; target not system-temp
+			}
+			// tee targeting the closed roots.
+			if hasTee {
+				tw := trimQuoteRunes(w)
+				if isSystemTempPath(tw) {
+					return fmt.Sprintf("system-temp write authoring: tee targets %s (client-side /tmp floor; in-root policy is the daemon sandbox's): %s (hard-deny)", tw, seg), true
+				}
+			}
+		}
+	}
+	return "", false
 }
 
 // --- class 2a: plain-word provability gate -----------------------------------

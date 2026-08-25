@@ -517,3 +517,24 @@ HTTP/WS transport; streaming token deltas (committed events only);
 multi-session muxing beyond create/subscribe (single active session);
 transport auth (stdio-local trust boundary, §1); server→client
 requests (dead capability, like dsh); job cancellation over the wire.
+
+## 11. Deploying and running the daemon
+
+Operational findings that the offline self-test battery cannot surface
+(its image talks only to the local mock over plain HTTP):
+
+- **Runtime images need `ca-certificates` for real HTTPS providers.**
+  Bake the system CA bundle into the image (`apt-get install
+  ca-certificates` at IMAGE build time — never ad-hoc in a running
+  container). Without it every real provider call over `https://`
+  fails TLS verification ("unknown authority"). A battery-green image
+  is not proof that real providers work.
+- **Under Docker, the kernel sandbox needs `--security-opt
+  seccomp=unconfined`.** Docker's DEFAULT seccomp profile blocks the
+  Landlock syscalls, so `--sandbox read-only|workspace-write` calls
+  fail closed with typed sandbox-unavailable errors inside a
+  default-profile container. Run the daemon container with
+  `--security-opt seccomp=unconfined` (the same rationale as
+  `docker/selftest/run.sh`): the flag lifts only Docker's profile —
+  the engine's own trampoline (Landlock + seccomp) then enforces the
+  confinement (see README.agent.md → the daemon's deployment notes).

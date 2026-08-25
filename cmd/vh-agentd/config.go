@@ -98,6 +98,13 @@ type Config struct {
 	// working directory resolved absolute. Entries are canonicalized
 	// (symlinks resolved) at validation time.
 	WorkdirRoots []string
+	// AskTools is the validated --ask-tools set: tool names whose
+	// calls are routed through the approval waterfall by the
+	// ask-tools observer (ask → wire approval/request → the client's
+	// approver or --policy engine). Empty (the default) = no observer,
+	// behavior unchanged. Names are validated against the registered
+	// tool set at startup — an unknown name exits 2 fail-closed.
+	AskTools []string
 }
 
 // usageDoc documents credential handling on the help surface (the key is
@@ -186,12 +193,23 @@ System prompt (compiled-sysprompt model):
   hash, and falls back to raw assembly otherwise (the fallback is logged,
   never silent). Populate the artifact with --compile-prompt.
 
+Ask routing (--ask-tools run_shell[,TOOL...]):
+  The daemon-side ask source: tool calls whose name is listed ride the
+  REAL approval waterfall — the wire bridge emits approval/request, and
+  the CLIENT decides (interactive y/N, --json approval lines, or the
+  client's --policy engine). Every unanswerable direction (no answer,
+  timeout, disconnect) denies fail-closed; the deny-only guard layer
+  still runs after an approval grant. Names are validated against the
+  registered tool set at startup: an unknown name exits 2. Default
+  (omit the flag) = the daemon emits no asks, behavior unchanged.
+
 Usage:
   vh-agentd --adapter openai|anthropic --model M --base-url URL
             --api-key-env VAR --session-dir DIR [--max-tokens N]
             [--approval-timeout-ms MS] [--cache-breakpoints N]
             [--sandbox off|read-only|workspace-write]
             [--spill-max-inline N] [--workdir-roots DIR[,DIR...]]
+            [--ask-tools TOOL[,TOOL...]]
             [--optimizer dedup|llm] [--compile-prompt] [--version]
   vh-agentd --verify-log PATH
 
