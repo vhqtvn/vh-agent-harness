@@ -65,12 +65,20 @@ func (m *Manager) appendStarted(job Job) {
 	rec.startedSeq = ev.Seq
 }
 
-// runJob executes one job body and settles it. Cancellation is a
+// runJob executes one job body and settles it. Executors implementing
+// OutputExecutor (P6) receive the job's output writer and their
+// terminal detail rides job/settled + job/report. Cancellation is a
 // documented non-goal of this slice: runners use a background context.
 func (m *Manager) runJob(job Job) {
 	defer m.finishJob()
-	err := m.executor.Run(context.Background(), job)
-	_ = m.Settle(job.ID, err) // first-wins; settle errors surface in the log
+	var detail string
+	var err error
+	if ox, ok := m.executor.(OutputExecutor); ok {
+		detail, err = ox.RunWithOutput(context.Background(), job, m.writerFor(job.ID))
+	} else {
+		err = m.executor.Run(context.Background(), job)
+	}
+	_ = m.SettleWithDetail(job.ID, err, detail) // first-wins; settle errors surface in the log
 }
 
 // finishJob releases the owner slot and marks the job no longer pending.

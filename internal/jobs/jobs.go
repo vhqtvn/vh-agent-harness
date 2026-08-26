@@ -68,6 +68,10 @@ type Options struct {
 	// MaxInFlightPerOwner caps concurrently RUNNING jobs per owner;
 	// 0 ⇒ DefaultMaxInFlightPerOwner.
 	MaxInFlightPerOwner int
+	// OutputRetentionBytes caps retained output PER JOB (the P6
+	// tailing ring); <=0 ⇒ DefaultOutputRetentionBytes. See
+	// output.go for the full retention posture.
+	OutputRetentionBytes int64
 }
 
 // Manager owns the async-jobs lifecycle over one session log: dispatch,
@@ -91,6 +95,13 @@ type Manager struct {
 	counters map[string]int64
 	jobs     map[string]*jobRecord
 	order    []string // enqueue order
+
+	// outputs holds the per-job in-memory output buffers (P6 tailing).
+	// Lazily created by writerFor (a queued job has none yet); NOT
+	// seeded by the fold — captured output is non-durable across
+	// restart (see output.go).
+	outputs         map[string]*outputBuffer
+	outputRetention int64
 }
 
 // jobRecord is the fold-level state of one job.
@@ -101,6 +112,7 @@ type jobRecord struct {
 	settledSeq   int64
 	settleResult string
 	settleReason string
+	settleDetail string
 	reportedSeq  int64
 }
 
@@ -118,13 +130,18 @@ func NewManager(lg *session.Log, executor Executor, opts Options) (*Manager, err
 	if maxInFly <= 0 {
 		maxInFly = DefaultMaxInFlightPerOwner
 	}
+	retention := opts.OutputRetentionBytes
+	if retention <= 0 {
+		retention = DefaultOutputRetentionBytes
+	}
 	m := &Manager{
-		lg:       lg,
-		executor: executor,
-		maxInFly: maxInFly,
-		slots:    make(chan struct{}, maxInFly),
-		counters: make(map[string]int64),
-		jobs:     make(map[string]*jobRecord),
+		lg:              lg,
+		executor:        executor,
+		maxInFly:        maxInFly,
+		slots:           make(chan struct{}, maxInFly),
+		counters:        make(map[string]int64),
+		jobs:            make(map[string]*jobRecord),
+		outputRetention: retention,
 	}
 	m.drained = sync.NewCond(&m.mu)
 	m.queueCond = sync.NewCond(&m.mu)
@@ -188,30 +205,7 @@ func (m *Manager) Dispatch(kind string, payload json.RawMessage) (Receipt, error
 // FIRST-WINS (dsh): if the job is already settled this is a logged
 // no-op — exactly one job/settled event ever lands per job.
 func (m *Manager) Settle(jobID string, runErr error) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	rec, ok := m.jobs[jobID]
-	if !ok {
-		return fmt.Errorf("jobs: settle unknown job %q", jobID)
-	}
-	if rec.settledSeq != 0 {
-		return nil // first-wins: the terminal event already landed
-	}
-	result, reason := session.JobResultCompleted, ""
-	if runErr != nil {
-		result, reason = session.JobResultFailed, runErr.Error()
-	}
-	ev, err := m.lg.Append(session.TypeJobSettled, nil, session.JobPayload{
-		JobID: rec.job.ID, Kind: rec.job.Kind, Owner: rec.job.Owner,
-		Result: result, Reason: reason,
-	})
-	if err != nil {
-		return fmt.Errorf("jobs: log job/settled: %w", err)
-	}
-	rec.settledSeq = ev.Seq
-	rec.settleResult = result
-	rec.settleReason = reason
-	return nil
+	return m.SettleWithDetail(jobID, runErr, "")
 }
 
 // EmitReports surfaces settled-but-unreported jobs to the model: one
@@ -237,7 +231,7 @@ func (m *Manager) EmitReports() (int, error) {
 		rec := m.jobs[id]
 		ev, err := m.lg.Append(session.TypeJobReport, &session.SurfaceOp{Op: session.SurfaceOpAppend}, session.JobPayload{
 			JobID: rec.job.ID, Kind: rec.job.Kind, Owner: rec.job.Owner,
-			Result: rec.settleResult, Reason: rec.settleReason,
+			Result: rec.settleResult, Reason: rec.settleReason, Detail: rec.settleDetail,
 		})
 		if err != nil {
 			return emitted, fmt.Errorf("jobs: log job/report: %w", err)
@@ -305,6 +299,7 @@ func foldJobs(events []session.Event) (recs map[string]*jobRecord, order []strin
 			rec.settledSeq = ev.Seq
 			rec.settleResult = p.Result
 			rec.settleReason = p.Reason
+			rec.settleDetail = p.Detail
 		case session.TypeJobReport:
 			var p session.JobPayload
 			if err := json.Unmarshal(ev.Payload, &p); err != nil {

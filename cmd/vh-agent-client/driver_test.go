@@ -572,6 +572,12 @@ func (l *laggingEndRenderer) RenderApproval(params json.RawMessage) { l.inner.Re
 func (l *laggingEndRenderer) RenderProtocolError(params json.RawMessage) {
 	l.inner.RenderProtocolError(params)
 }
+func (l *laggingEndRenderer) RenderJobOutput(rec JobOutputRecord) {
+	// Optional forward (compiles against pre-P6 renderers too).
+	if r, ok := l.inner.(interface{ RenderJobOutput(JobOutputRecord) }); ok {
+		r.RenderJobOutput(rec)
+	}
+}
 func (l *laggingEndRenderer) LastTurnEnd() (string, bool) { return l.inner.LastTurnEnd() }
 func (l *laggingEndRenderer) ResetTurnEnd() {
 	// Optional forward (compiles against pre-hotfix renderers too).

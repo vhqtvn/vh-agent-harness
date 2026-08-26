@@ -45,6 +45,13 @@
 #     asserted from the mock journal, and the compacted log must pass
 #     the deterministic replay prover with the post-compaction
 #     message count.
+#   - job_tailing (P6) drives the background run_shell round-trip: the
+#     model dispatches a multi-second ticker with background:true, the
+#     tool result is the non-blocking receipt, the CLIENT's drain loop
+#     tails jobs/output mid-flight (partial chunks while running, the
+#     complete reassembled stream at settlement), settlement + report
+#     events land on the durable log, and the log replays
+#     deterministically.
 #   - Cross-run byte-comparison of DIFFERENT sessions is a NON-GOAL —
 #     session ids are random by design (sess-<random hex>). Determinism
 #     is proven per-log: two --verify-log runs on the SAME log must
@@ -632,6 +639,85 @@ sc_compaction() {
     stop_mock
 }
 
+# sc_job_tailing (P6): the background run_shell round-trip over REAL
+# binaries. The model dispatches a 5-tick producer (~2s) with
+# background:true; the turn returns on the receipt (non-blocking). The
+# client's drain loop polls jobs/status + jobs/output: mid-flight tails
+# are CLIENT-SYNTHESIZED {"kind":"job-output"} NDJSON records on
+# stdout. Asserts: receipt shape; at least one mid-flight (state
+# running) partial chunk; the cursor chain (each record's offset ==
+# the previous nextOffset — never re-serve, never skip); byte-exact
+# reassembly of the FULL expected producer output at settlement;
+# job/settled + job/report events in the stream; and the durable log
+# (with the job lifecycle + exit-facts detail) replays deterministically.
+sc_job_tailing() {
+    local sc=job_tailing
+    fresh_session "$sc"
+    start_mock "$SCEN/job_tailing.json"
+    run_client --session-dir "$SESS" --json --prompt "start the ticker in background" \
+        --exec "$DAEMON" --adapter openai --model mock-model \
+        --base-url "$MOCK_URL/v1" --api-key-env MOCK_KEY
+    check "$sc" "client exits 0" [ "$CODE" -eq 0 ]
+    check "$sc" "background receipt in the stream (jobId shell-1)" \
+        grep -Fq '"jobId":"shell-1"' "$WORK/client.out"
+    check "$sc" "receipt marks background:true" \
+        grep -Fq '"background":true' "$WORK/client.out"
+    check "$sc" "client-synthesized job-output records present" \
+        grep -Fq '"kind":"job-output"' "$WORK/client.out"
+    check "$sc" "mid-flight partial tail while running" \
+        grep -Eq '"kind":"job-output".*"state":"running"' "$WORK/client.out"
+    check "$sc" "settled-state tail records present" \
+        grep -Eq '"kind":"job-output".*"state":"settled"' "$WORK/client.out"
+    check "$sc" "settlement event streamed (job/settled completed)" \
+        grep -Eq '"type":"job/settled".*"result":"completed"' "$WORK/client.out"
+    check "$sc" "job/report notice streamed" \
+        grep -Fq '"type":"job/report"' "$WORK/client.out"
+    check "$sc" "final text delivered" grep -Fq "job tailing complete" "$WORK/client.out"
+    # Cursor chain over the client's job-output records: consecutive
+    # reads continue EXACTLY at the previous nextOffset (jq 1.6-safe:
+    # capture-then-test, no -e).
+    local chain
+    chain=$(jq -s '[.[] | select(.kind=="job-output" and .jobId=="shell-1")] as $r
+                   | ($r | length) > 0
+                   and ([range(1; $r | length) | $r[.].offset == $r[. - 1].nextOffset] | all)' \
+        "$WORK/client.out")
+    check "$sc" "cursor chain exact (offset == previous nextOffset)" [ "$chain" = "true" ]
+    # Byte-exact reassembly: concatenated chunks (by offset order) ==
+    # the complete producer output — no re-served bytes, no gaps.
+    local joined
+    joined=$(jq -s -r '[.[] | select(.kind=="job-output" and .jobId=="shell-1")]
+                | sort_by(.offset) | map(.chunk) | join("")' "$WORK/client.out")
+    check "$sc" "reassembled tail is byte-exact" \
+        [ "$joined" = "$(printf 'tick 1\ntick 2\ntick 3\ntick 4\ntick 5')" ]
+    # B-F1 (hotfix 3): the ONE-TIME empty terminal record — the drain's
+    # LAST job-output record is the deterministic end-of-tail marker
+    # (empty chunk, settled, offset == nextOffset) even when the final
+    # settled read carried bytes (jq 1.6-safe: last of a non-empty
+    # stream; null record → false).
+    local term
+    term=$(jq -s '[.[] | select(.kind=="job-output" and .jobId=="shell-1")] | last
+                  | .chunk == "" and .state == "settled"
+                    and .offset == .nextOffset and .hasMore == false' \
+        "$WORK/client.out")
+    check "$sc" "one-time empty terminal record (settled, offset == nextOffset)" [ "$term" = "true" ]
+    local n
+    n=$(chat_count)
+    check "$sc" "model called exactly twice (tool turn + final turn) — got ${n:-none}" \
+        [ "${n:-0}" -eq 2 ]
+    newest_log
+    # Durable log: the full job lifecycle + the exit-facts detail.
+    local settledetail
+    settledetail=$(jq -c 'select(.type == "job/settled" and .payload.jobId == "shell-1")
+                    | .payload.detail // empty' "$LOG" | head -1)
+    check "$sc" "job/settled carries exit facts detail" \
+        bash -c "[[ '$settledetail' == *'cause=exit exitCode=0'* ]]"
+    local report
+    report=$(jq -c 'select(.type == "job/report" and .payload.jobId == "shell-1")' "$LOG" | head -1)
+    check "$sc" "job/report landed in the durable log" [ -n "$report" ]
+    check "$sc" "--verify-log ok" verify_log_ok "$LOG"
+    stop_mock
+}
+
 # ---- run the battery -------------------------------------------------------
 
 note "=== native-engine docker self-test battery ==="
@@ -649,6 +735,7 @@ run_scenario verify_determinism sc_verify_determinism
 run_scenario approval_flow sc_approval_flow
 run_scenario resume_restart sc_resume_restart
 run_scenario compaction sc_compaction
+run_scenario job_tailing sc_job_tailing
 
 TOTAL=$((PASS + FAIL))
 echo

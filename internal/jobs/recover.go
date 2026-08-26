@@ -94,13 +94,18 @@ func Recover(path string, executor Executor, opts Options) (*Manager, RecoverySu
 	if maxInFly <= 0 {
 		maxInFly = DefaultMaxInFlightPerOwner
 	}
+	retention := opts.OutputRetentionBytes
+	if retention <= 0 {
+		retention = DefaultOutputRetentionBytes
+	}
 	m := &Manager{
-		lg:       lg,
-		executor: executor,
-		maxInFly: maxInFly,
-		slots:    make(chan struct{}, maxInFly),
-		counters: make(map[string]int64),
-		jobs:     make(map[string]*jobRecord),
+		lg:              lg,
+		executor:        executor,
+		maxInFly:        maxInFly,
+		slots:           make(chan struct{}, maxInFly),
+		counters:        make(map[string]int64),
+		jobs:            make(map[string]*jobRecord),
+		outputRetention: retention,
 	}
 	m.drained = sync.NewCond(&m.mu)
 	m.queueCond = sync.NewCond(&m.mu)

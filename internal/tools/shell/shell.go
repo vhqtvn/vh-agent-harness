@@ -34,8 +34,9 @@ const (
 // (JSON-schema-ish, same style as the echo/clock dogfood tools).
 const parametersSchema = `{"type":"object","properties":{` +
 	`"command":{"type":"string","description":"shell command line; executed by bash -c, non-interactive, no profile/rc, no history, no injected shell options"},` +
-	`"timeout_ms":{"type":"integer","description":"execution deadline in milliseconds; default 30000, clamped to the configured cap (default 600000). On expiry the whole process group is killed"},` +
-	`"workdir":{"type":"string","description":"optional working directory; must be an existing directory. Confinement: relative paths must stay inside the engine working directory; absolute paths are rejected unless the engine configured them under a workdir root"}}` +
+	`"timeout_ms":{"type":"integer","description":"execution deadline in milliseconds; default 30000, clamped to the configured cap (default 600000). On expiry the whole process group is killed. With background:true the default is the cap instead"},` +
+	`"workdir":{"type":"string","description":"optional working directory; must be an existing directory. Confinement: relative paths must stay inside the engine working directory; absolute paths are rejected unless the engine configured them under a workdir root"},` +
+	`"background":{"type":"boolean","description":"dispatch as a durable background job instead of running synchronously: returns {background:true, jobId, ...} immediately, output streams to the job's capture channel, settlement (exit facts) arrives as a job report. Same validation, sandbox, and timeout cap; omitted timeout_ms defaults to the cap"}}` +
 	`,"required":["command"],"additionalProperties":false}`
 
 // Config configures one run_shell Definition. The zero value is the
@@ -101,6 +102,13 @@ type Config struct {
 	// ShellPath is the shell binary; default "bash" (resolved via the
 	// parent PATH).
 	ShellPath string
+
+	// Background, when non-nil, arms the background:true dispatch path
+	// (see background.go): the tool body validates exactly like the
+	// sync path, then enqueues one durable job through this seam and
+	// returns the receipt immediately. Nil keeps run_shell
+	// synchronous-only (a background:true call fails closed typed).
+	Background BackgroundDispatch
 }
 
 func (c *Config) normalize() {
@@ -122,7 +130,15 @@ func (c *Config) normalize() {
 	if c.SandboxName == "" {
 		c.SandboxName = "none"
 	}
-} // sandboxLabel returns the recorded sandbox name after normalization
+}
+
+// Normalize resolves the zero-value fields to the production defaults.
+// It is the exported form of normalize() for compositions that hold ONE
+// shared Config outside a ToolDefinition (the daemon's background-jobs
+// executor uses the same config object as the model-facing tool).
+func (c *Config) Normalize() { c.normalize() }
+
+// sandboxLabel returns the recorded sandbox name after normalization
 // ("none" when unset).
 func (c *Config) sandboxLabel() string {
 	if c.SandboxName == "" {
@@ -136,6 +152,9 @@ type Args struct {
 	Command   string `json:"command"`
 	TimeoutMs *int64 `json:"timeout_ms,omitempty"`
 	Workdir   string `json:"workdir,omitempty"`
+	// Background (P6) dispatches a durable job instead of executing
+	// synchronously (see background.go). Optional; absent = sync.
+	Background bool `json:"background,omitempty"`
 }
 
 // Definition returns the run_shell ToolDefinition for cfg (zero value
@@ -173,7 +192,8 @@ const description = "Runs a shell command via bash -c (non-interactive, no profi
 	"Not concurrency-safe: runs as an exclusive barrier. timeout_ms defaults to 30000 and is capped at 600000; on expiry the whole process group is killed. " +
 	"Captured output is capped per stream (64KiB default) with a truncation marker. " +
 	"The child env is explicit: PATH, HOME, TERM=dumb, LANG plus a configured allowlist; names matching KEY/SECRET/TOKEN/PASSWORD (case-insensitive) and engine credential vars are never passed. " +
-	"Sandbox: check the sandbox field — \"none\" means NO confinement (the command runs with the engine's own privileges); \"read-only\" or \"workspace-write\" mean kernel-enforced confinement (writes outside the configured contract and network access are denied). "
+	"Sandbox: check the sandbox field — \"none\" means NO confinement (the command runs with the engine's own privileges); \"read-only\" or \"workspace-write\" mean kernel-enforced confinement (writes outside the configured contract and network access are denied). " +
+	"background:true dispatches a durable background job instead: the result is an immediate receipt {background:true, jobId, command, effectiveTimeoutMs}, the command runs through the SAME exec path inside the job, its combined output streams to the job's capture channel (tail via the host's jobs/output), and settlement (exit facts) reaches you as a background-job report; an omitted timeout_ms defaults to the 600000 cap in background mode"
 
 // sensitiveEnvPattern is the dsh SENSITIVE_ENV_PATTERN
 // (/KEY|PASSWORD|SECRET|TOKEN/i, name-match drop).
@@ -370,6 +390,16 @@ func execute(ctx context.Context, cfg *Config, raw json.RawMessage) (string, err
 	if ok, reason := policyAllows(cfg, a.Command); !ok {
 		return "", fmt.Errorf("run_shell: %s", reason)
 	}
+
+	// P6 background path: same validation up to here, then dispatch a
+	// durable job and return the enqueue receipt (never blocks the
+	// turn). The sync deadline resolution below does NOT apply — the
+	// background timeout posture (omitted ⇒ the cap) is resolved in
+	// executeBackground.
+	if a.Background {
+		return executeBackground(ctx, cfg, a)
+	}
+
 	timeoutMs, err := resolveTimeout(cfg, a.TimeoutMs)
 	if err != nil {
 		return "", err

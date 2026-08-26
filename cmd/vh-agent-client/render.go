@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/session"
@@ -32,6 +33,13 @@ type Renderer interface {
 	RenderApproval(params json.RawMessage)
 	// RenderProtocolError renders one protocol/error notification.
 	RenderProtocolError(params json.RawMessage)
+	// RenderJobOutput renders one client-synthesized job-output tail
+	// record (P6): the driver's background-drain loop polls jobs/output
+	// and hands each non-empty chunk here. These records are CLIENT-
+	// SYNTHESIZED (the wire jobs/output response reshaped) — in --json
+	// mode they ride the NDJSON stream with kind:"job-output", a shape
+	// the DAEMON never emits.
+	RenderJobOutput(rec JobOutputRecord)
 	// LastTurnEnd reports the kind of the most recent turn/end event
 	// ("" and "ok" are clean; "error" maps to exit 1).
 	LastTurnEnd() (kind string, seen bool)
@@ -41,6 +49,20 @@ type Renderer interface {
 	// turn's kind=error cannot misclassify the next turn in the
 	// response-beats-notification window.
 	ResetTurnEnd()
+}
+
+// JobOutputRecord is the client-side tail record the driver's
+// background-drain loop derives from one jobs/output response.
+type JobOutputRecord struct {
+	Kind         string `json:"kind"` // always "job-output" (client-synthesized)
+	JobID        string `json:"jobId"`
+	State        string `json:"state"`
+	Offset       int64  `json:"offset"`
+	NextOffset   int64  `json:"nextOffset"`
+	Chunk        string `json:"chunk"`
+	Written      int64  `json:"written"`
+	HasMore      bool   `json:"hasMore"`
+	EvictedBytes int64  `json:"evictedBytes"`
 }
 
 // turnEndTracker is the shared last-turn/end state (both renderers).
@@ -163,7 +185,11 @@ func (h *humanRenderer) RenderEvent(params json.RawMessage) {
 		case p.IsError:
 			h.line("✘ tool result %s: %s", p.Name, compactOneLine(p.Content, 60))
 		default:
-			h.line("✔ tool result (%d bytes)", len(p.Content))
+			if id, cmd, ok := backgroundReceiptOf(p.Name, p.Content); ok {
+				h.line("↪ background %s → job %s", compactOneLine(cmd, 48), id)
+			} else {
+				h.line("✔ tool result (%d bytes)", len(p.Content))
+			}
 		}
 	case session.TypeJobEnqueued:
 		var p session.JobPayload
@@ -233,6 +259,32 @@ func (h *humanRenderer) renderAssistant(content string) {
 	}
 }
 
+// backgroundReceiptOf recognizes a run_shell background-dispatch
+// receipt in a tool result's content ({background:true, jobId,
+// command, ...} — the deterministic shape the tool body emits).
+func backgroundReceiptOf(toolName, content string) (jobID, command string, ok bool) {
+	if toolName != "run_shell" || !strings.Contains(content, `"background":true`) {
+		return "", "", false
+	}
+	var r struct {
+		Background bool   `json:"background"`
+		JobID      string `json:"jobId"`
+		Command    string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(content), &r); err != nil || !r.Background || r.JobID == "" {
+		return "", "", false
+	}
+	return r.JobID, r.Command, true
+}
+
+// RenderJobOutput renders one tailed chunk (the driver's background
+// drain loop): a compact progress line per non-empty read, with the
+// served byte delta (len(chunk)); the empty terminal record renders
+// as +0B — an honest end-of-tail marker, not a fake delta.
+func (h *humanRenderer) RenderJobOutput(rec JobOutputRecord) {
+	h.line("↧ job %s @%d +%dB (%s)", rec.JobID, rec.Offset, len(rec.Chunk), rec.State)
+}
+
 // RenderApproval is a no-op for the human renderer: the interactive
 // responder's y/N prompt is the approval notice.
 func (h *humanRenderer) RenderApproval(params json.RawMessage) {}
@@ -287,6 +339,20 @@ func (j *jsonRenderer) RenderApproval(params json.RawMessage) { j.verbatim(param
 
 // RenderProtocolError writes the protocol/error params verbatim.
 func (j *jsonRenderer) RenderProtocolError(params json.RawMessage) { j.verbatim(params) }
+
+// RenderJobOutput writes one CLIENT-SYNTHESIZED job-output record as
+// an NDJSON line (kind:"job-output" — a record shape the daemon never
+// emits; machine consumers distinguish it from session/event
+// notifications by the absent seq/type fields).
+func (j *jsonRenderer) RenderJobOutput(rec JobOutputRecord) {
+	line, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	_, _ = j.w.Write(append(line, '\n'))
+}
 
 // LastTurnEnd reports the most recent turn/end kind.
 func (j *jsonRenderer) LastTurnEnd() (string, bool) { return j.last() }

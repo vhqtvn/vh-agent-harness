@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"time"
 )
@@ -165,8 +166,42 @@ func run(ctx context.Context, cfg *Config, command string, timeoutMs int64, work
 	}
 	stdout := newLimitedWriter(cfg.MaxCapturedBytes)
 	stderr := newLimitedWriter(cfg.MaxCapturedBytes)
+	out.causeAndFacts(ctx, cfg, command, workdir, stdout, stderr, start)
+	finishOutcome(&out, stdout, stderr, cfg, start)
+	return out
+}
 
-	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
+// RunStreamed executes the SAME exec path as the synchronous tool body
+// (env scrub, sandbox WrapCommand, workdir, process-group teardown) but
+// streams the child's COMBINED stdout+stderr into out as it is produced
+// instead of capturing per-stream in memory. It is the body of the
+// daemon's background shell jobs (run_shell background:true dispatches a
+// job whose executor calls this with the job's output writer); the
+// returned Outcome carries the exit facts with Stdout/Stderr empty —
+// the produced output belongs to the caller's channel.
+//
+// out must never block or bound the child: the writer accepts
+// everything (retention is the receiver's concern), keeping exec's pipe
+// copiers draining exactly like the in-memory limitedWriter does.
+func RunStreamed(ctx context.Context, cfg *Config, command string, timeoutMs int64, workdir string, out io.Writer) Outcome {
+	start := time.Now()
+	o := Outcome{
+		Command:            command,
+		EffectiveTimeoutMs: timeoutMs,
+		Sandbox:            cfg.sandboxLabel(),
+	}
+	o.causeAndFacts(ctx, cfg, command, workdir, out, out, start)
+	o.DurationMs = time.Since(start).Milliseconds()
+	return o
+}
+
+// causeAndFacts is the shared execution core of run and RunStreamed:
+// build the child (identical argv/env/workdir/process-group/sandbox
+// wrapping), run it under the deadline, and classify the outcome. The
+// stdout/stderr writers are the capture seam (limitedWriter pair for
+// the sync tool, one shared progressive writer for background jobs).
+func (out *Outcome) causeAndFacts(ctx context.Context, cfg *Config, command, workdir string, stdout, stderr io.Writer, start time.Time) {
+	cctx, cancel := context.WithTimeout(ctx, time.Duration(out.EffectiveTimeoutMs)*time.Millisecond)
 	defer cancel()
 
 	cmd := newCommand(cctx, cfg, command)
@@ -186,13 +221,11 @@ func run(ctx context.Context, cfg *Config, command string, timeoutMs int64, work
 			if errors.As(err, &unavail) {
 				out.sandboxErr = unavail // typed fail-closed: execute() rethrows it
 			}
-			finishOutcome(&out, stdout, stderr, cfg, start)
-			return out
+			return
 		}
 	}
 
 	err := cmd.Run()
-	finishOutcome(&out, stdout, stderr, cfg, start)
 
 	switch {
 	case err == nil:
@@ -219,7 +252,6 @@ func run(ctx context.Context, cfg *Config, command string, timeoutMs int64, work
 		out.Cause = CauseError
 		out.SpawnError = err.Error()
 	}
-	return out
 }
 
 // finishOutcome stamps capture results (with in-band truncation

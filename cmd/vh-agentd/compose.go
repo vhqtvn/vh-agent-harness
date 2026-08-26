@@ -23,7 +23,6 @@ import (
 	"github.com/vhqtvn/vh-agent-harness/internal/adapters"
 	"github.com/vhqtvn/vh-agent-harness/internal/adapters/anthropic"
 	"github.com/vhqtvn/vh-agent-harness/internal/adapters/openaicompat"
-	"github.com/vhqtvn/vh-agent-harness/internal/jobs"
 	"github.com/vhqtvn/vh-agent-harness/internal/loop"
 	"github.com/vhqtvn/vh-agent-harness/internal/prompt"
 	"github.com/vhqtvn/vh-agent-harness/internal/protocol"
@@ -88,12 +87,14 @@ func buildAdapter(cfg *Config, apiKey string) adapters.Adapter {
 // scheduler needs the tracker, which needs the engine) and BEFORE
 // Serve, so every session/create stamps it — see sched.go.
 func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.Server, *protocol.FileEngine, *sessionTracker, prompt.ServeResult) {
-	// The session→manager registry backs the MODEL-FACING subagent tool
-	// family: the engine binds root managers here (create/supersede),
-	// the child-turn executor binds per-turn child managers, and the
-	// tool bodies resolve the executing session's manager through it.
+	// The session→manager registries: subagents (model-facing spawn
+	// tools) and jobs (the run_shell background dispatcher). Root
+	// managers bind at create/resume; child-turn managers bind per turn.
 	reg := subagents.NewRegistry()
-	defs := daemonTools(realNow, cfg, reg)
+	jobsReg := newJobsRegistry()
+	shellCfg := shellConfigFor(cfg)
+	shellCfg.Background = jobsReg.dispatcher()
+	defs := daemonTools(realNow, cfg, reg, shellCfg)
 	specs := make([]adapters.ToolSpec, 0, len(defs))
 	for _, d := range defs {
 		specs = append(specs, d.Spec())
@@ -101,7 +102,7 @@ func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.
 
 	engine := &protocol.FileEngine{
 		Dir:      cfg.SessionDir,
-		Executor: daemonExecutor{},
+		Executor: daemonExecutor{shell: shellCfg},
 		Ad:       buildAdapter(cfg, apiKey),
 		TurnOpts: tools.TurnOptions{
 			Model:     cfg.Model,
@@ -122,7 +123,7 @@ func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.
 			}
 		}
 	}
-	tracker := &sessionTracker{Engine: engine}
+	tracker := &sessionTracker{Engine: engine, jobsReg: jobsReg}
 
 	// P5 compaction trigger: decorate the engine's TurnRunner with the
 	// post-turn surface-pressure check (see compact.go for the seam
@@ -143,7 +144,7 @@ func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.
 	// below the depth fence runs with the same model-facing spawn
 	// capability), child logs under <session-dir>/subagents, and the
 	// registry the spawn tools resolve through.
-	wireSubagents(engine, cfg.SessionDir, reg)
+	wireSubagents(engine, cfg.SessionDir, reg, jobsReg)
 
 	// Serving rule: compiled bytes when a matching artifact exists,
 	// raw assembly otherwise. A fallback is never silent — the
@@ -178,7 +179,9 @@ func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.
 // The registry is per-call (specs only — the tool BODIES are never
 // executed on this path).
 func toolSpecsForPrompt(cfg *Config) []adapters.ToolSpec {
-	defs := daemonTools(realNow, cfg, subagents.NewRegistry())
+	// Spec-only callers never execute tool bodies, so the background
+	// dispatcher stays unset (the SCHEMA is identical either way).
+	defs := daemonTools(realNow, cfg, subagents.NewRegistry(), shellConfigFor(cfg))
 	specs := make([]adapters.ToolSpec, 0, len(defs))
 	for _, d := range defs {
 		specs = append(specs, d.Spec())
@@ -186,22 +189,12 @@ func toolSpecsForPrompt(cfg *Config) []adapters.ToolSpec {
 	return specs
 }
 
-// daemonTools returns the daemon's tool set: the read-only dogfood
-// probes (echo, clock), the REAL run_shell tool from
-// internal/tools/shell, spill_read — the retrieval path for spilled
-// oversize results (rooted at the session dir so it reaches every
-// session's store; see internal/tools/spillread) — the MODEL-FACING
-// subagent family (subagent_spawn/subagent_send, resolved through the
-// session registry reg; advertised per-session while below the
-// delegation-depth fence — the ROOT session, at depth 0, always is;
-// see internal/tools/subagenttools and cmd/vh-agentd/subagents.go for
-// the depth-conditional advertising on child turns) — and the
-// MODEL-FACING FILE FAMILY (read/write/edit/glob/search from
-// internal/tools/filetools), confined to the same WorkdirRoots that
-// run_shell's absolute-workdir policy consults (--workdir-roots;
-// default = the daemon's working directory resolved absolute — one
-// root set for every path-taking surface). Config posture
-// (documented defaults):
+// shellConfigFor builds the ONE shared run_shell Config from the
+// validated daemon Config: the model-facing tool body AND the
+// background jobs executor run the SAME exec path through it (env
+// scrub, sandbox, workdir policy, teardown — reused, never duplicated).
+//
+// Config posture (documented defaults — unchanged by P6):
 //
 //   - policy lists default-EMPTY: AllowedCommands/DeniedCommands are
 //     unset — in-tool hygiene is opt-in; the Pipeline guards/approval
@@ -225,39 +218,63 @@ func toolSpecsForPrompt(cfg *Config) []adapters.ToolSpec {
 //   - WorkdirRoots = Config.WorkdirRoots (--workdir-roots, default
 //     the daemon cwd): run_shell's ABSOLUTE workdirs are admitted
 //     exactly under these roots (symlink-safe; the pre-file-family
-//     default of rejecting every absolute workdir was the
-//     empty-roots posture — a daemon configuring roots EXTENDS what
-//     is allowed). Relative run_shell workdirs keep their
-//     inside-the-engine-cwd behavior unchanged.
+//     default of rejecting every absolute workdir was the empty-roots
+//     posture — a daemon configuring roots EXTENDS what is allowed).
+//     Relative run_shell workdirs keep their inside-the-engine-cwd
+//     behavior unchanged.
 //
-// now is injected for the deterministic clock tool.
-func daemonTools(now func() time.Time, cfg *Config, reg *subagents.Registry) []tools.ToolDefinition {
+// A nil cfg (spec-only callers) yields the process cwd as the lone
+// workdir root — the tool BODIES never run there, so the stand-in only
+// keeps descriptions/schemas identical.
+func shellConfigFor(cfg *Config) shell.Config {
 	shellCfg := shell.Config{}
+	if cfg != nil {
+		shellCfg.WorkdirRoots = cfg.WorkdirRoots
+		if cfg.SandboxMode != shell.SandboxOff {
+			fn, err := shell.NewSandboxFunc(shell.SandboxOptions{
+				Mode:          cfg.SandboxMode,
+				WritableRoots: cfg.SandboxWritableRoots,
+			})
+			if err != nil {
+				// A validated mode cannot fail construction; this is a
+				// programming error in the daemon wiring — fail loudly.
+				panic(fmt.Sprintf("vh-agentd: sandbox %s: %v", cfg.SandboxMode, err))
+			}
+			shellCfg.Sandbox = fn
+			shellCfg.SandboxName = string(cfg.SandboxMode)
+		}
+	} else if cwd, err := os.Getwd(); err == nil {
+		shellCfg.WorkdirRoots = []string{cwd}
+	}
+	// Normalize ONCE here: both consumers (the tool Definition — which
+	// normalizes its own copy anyway — and the background jobs
+	// executor, which uses this config directly) need the resolved
+	// defaults (ShellPath, caps, labels).
+	shellCfg.Normalize()
+	return shellCfg
+}
+
+// daemonTools returns the daemon's tool set: the read-only dogfood
+// probes (echo, clock), the REAL run_shell tool from
+// internal/tools/shell (the ONE shared shellCfg — background jobs run
+// the same exec path through the same config), spill_read — the
+// retrieval path for spilled oversize results — the MODEL-FACING
+// subagent family (resolved through the session registry reg), and the
+// MODEL-FACING FILE FAMILY (read/write/edit/glob/search), confined to
+// the same WorkdirRoots that run_shell's absolute-workdir policy
+// consults (one root set for every path-taking surface). See
+// shellConfigFor for the config postures; now is injected for the
+// deterministic clock tool.
+func daemonTools(now func() time.Time, cfg *Config, reg *subagents.Registry, shellCfg shell.Config) []tools.ToolDefinition {
 	// File-family roots: cfg is nil only for spec-only callers (the
 	// offline --compile-prompt catalog); the tool BODIES never run
 	// there, so the process cwd is a harmless stand-in that keeps the
 	// descriptions/schemas identical.
 	fileRoots := []string{}
 	if cfg != nil {
-		shellCfg.WorkdirRoots = cfg.WorkdirRoots
 		fileRoots = cfg.WorkdirRoots
-	} else {
-		if cwd, err := os.Getwd(); err == nil {
-			fileRoots = []string{cwd}
-		}
-	}
-	if cfg != nil && cfg.SandboxMode != shell.SandboxOff {
-		fn, err := shell.NewSandboxFunc(shell.SandboxOptions{
-			Mode:          cfg.SandboxMode,
-			WritableRoots: cfg.SandboxWritableRoots,
-		})
-		if err != nil {
-			// A validated mode cannot fail construction; this is a
-			// programming error in the daemon wiring — fail loudly.
-			panic(fmt.Sprintf("vh-agentd: sandbox %s: %v", cfg.SandboxMode, err))
-		}
-		shellCfg.Sandbox = fn
-		shellCfg.SandboxName = string(cfg.SandboxMode)
+	} else if cwd, err := os.Getwd(); err == nil {
+		fileRoots = []string{cwd}
 	}
 	// spill_read retrieves from the session dir root (it has no session
 	// context; content addressing + hash validation make the walk
@@ -319,24 +336,4 @@ func daemonTools(now func() time.Time, cfg *Config, reg *subagents.Registry) []t
 	defs = append(defs, filetools.Definitions(filetools.Config{Roots: fileRoots})...)
 	defs = append(defs, subagenttools.Definitions(reg)...)
 	return defs
-}
-
-// daemonExecutor is the minimal dogfood jobs.Executor: deterministic,
-// no-subprocess bodies for the kinds the dogfood protocol exercises;
-// every unknown kind settles failed (fail-closed — the executor is the
-// seam where a real runtime attaches in a later slice).
-type daemonExecutor struct{}
-
-// Run executes one job body. "echo" settles completed; "fail" settles
-// failed (exercising the failed settlement path over the wire);
-// anything else is refused.
-func (daemonExecutor) Run(ctx context.Context, job jobs.Job) error {
-	switch job.Kind {
-	case "echo":
-		return nil
-	case "fail":
-		return errors.New("fail: requested failure")
-	default:
-		return fmt.Errorf("vh-agentd: unknown job kind %q (no executor registered; fail-closed)", job.Kind)
-	}
 }

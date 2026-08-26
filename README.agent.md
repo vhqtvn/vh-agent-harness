@@ -1465,7 +1465,16 @@ get the same set minus the subagent family at the fence):
 - `clock` — the daemon's current UTC time, RFC 3339 (read-only probe);
 - `run_shell` — executes a shell command (guards → wire-bridged
   approval → capture caps; `--sandbox` confinement; exclusive barrier
-  around it in the tool scheduler);
+  around it in the tool scheduler). With `background:true` it instead
+  dispatches a durable `shell` job: the result is the immediate
+  receipt `{background:true, jobId, command, effectiveTimeoutMs}`, the
+  command runs through the SAME exec path inside the job, its combined
+  output streams to the job's capture channel (tail over the wire via
+  `jobs/output`), and settlement — exit facts in `job/settled` /
+  `job/report` `detail` — reaches the model as a background-job report
+  notice; omitted `timeout_ms` defaults to the 600000ms cap in
+  background mode; the sandbox applies identically (unavailable ⇒
+  typed dispatch refusal, never unconfined);
 - `spill_read` — pages back spilled oversize tool results by opaque
   locator (content-addressed, sha256-validated, windowed so every page
   fits inline);
@@ -1607,7 +1616,20 @@ vh-agent-client [--session-dir DIR] [--json] [--prompt TEXT] [--repl] \
   assistant text on stdout, exit. The client drives the host-side
   multi-turn loop (`session/prompt` is ONE synchronous tool turn; while
   the model requests tools, a minimal continuation prompt re-submits
-  the surface, capped at 32 turns).
+  the surface, capped at 32 turns). After the conversation, any jobs
+  enqueued during the run are DRAINED to settlement (P6): the client
+  polls `jobs/status`/`jobs/output`, renders every tailed chunk (in
+  `--json` mode as client-synthesized `{"kind":"job-output"}` NDJSON
+  records — a record shape the daemon never emits), re-syncs its
+  cursor forward to `evictedBase` when the output retention ring
+  evicts behind it (the evicted prefix is honestly absent) and clamps
+  back to `written` when the cursor runs ahead of the produced output
+  (after a daemon restart a recovered job reports `written:0` — the
+  clamp completes the drain over that honest absence), and calls
+  `session/surface` once so pending `job/report` notices land; without
+  the drain, client exit would tear the daemon down with the jobs
+  still running. REPL-mode tailing (interactive slash-commands) is a
+  deferred slice.
 - `--repl` / a TTY — interactive REPL: a line is one user message;
   `exit`/`quit`/Ctrl-D end cleanly; Ctrl-C sends nothing and closes the
   connection — the daemon denies any pending approvals (fail-closed)

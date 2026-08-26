@@ -62,6 +62,7 @@ import (
 	"context"
 	"path/filepath"
 
+	"github.com/vhqtvn/vh-agent-harness/internal/jobs"
 	"github.com/vhqtvn/vh-agent-harness/internal/protocol"
 	"github.com/vhqtvn/vh-agent-harness/internal/subagents"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/subagenttools"
@@ -84,6 +85,11 @@ type subagentTurnExecutor struct {
 	// reg is the session→manager registry the model-facing subagent
 	// tools resolve through (the same instance the engine holds).
 	reg *subagents.Registry
+	// jobsReg is the session→jobs registry the run_shell background
+	// dispatcher resolves through (P6): a child turn binds a jobs
+	// manager for the CHILD's own log for the duration of the turn, so
+	// a child model's background dispatch lands on the child's log.
+	jobsReg *jobsRegistry
 }
 
 // Run drives one child turn. The returned error is the manager's
@@ -113,6 +119,19 @@ func (x subagentTurnExecutor) Run(ctx context.Context, child subagents.Child) er
 		return err
 	}
 	x.reg.Put(child.ID, childMgr)
+	// P6 child-turn jobs binding (mirrors childMgr exactly): a jobs
+	// manager over the CHILD's own log, so run_shell background calls
+	// from the child's model dispatch onto the child's log (the events
+	// and reports belong to the child session). Drained and stopped
+	// with the same lifecycle as the subagent manager below.
+	var childJobs *jobs.Manager
+	if x.jobsReg != nil {
+		childJobs, err = jobs.NewManager(child.Log, x.engine.Executor, x.engine.JobsOpts)
+		if err != nil {
+			return err
+		}
+		x.jobsReg.Put(child.ID, childJobs)
+	}
 	defer func() {
 		// Drain-then-stop: every grandchild turn this child turn queued
 		// reaches its post-run disposition before the manager goes away
@@ -120,6 +139,13 @@ func (x subagentTurnExecutor) Run(ctx context.Context, child subagents.Child) er
 		childMgr.Drain()
 		childMgr.Stop()
 		x.reg.Remove(child.ID)
+		if childJobs != nil {
+			// Same discipline for the child's background jobs: every
+			// dispatched job this turn settles before the manager dies.
+			childJobs.Drain()
+			childJobs.Stop()
+			x.jobsReg.Remove(child.ID)
+		}
 	}()
 	opts.Tools = subagenttools.SpecsForDepth(opts.Tools, child.Depth, maxDepth)
 
@@ -131,11 +157,12 @@ func (x subagentTurnExecutor) Run(ctx context.Context, child subagents.Child) er
 // executor (self-referential — it reads the engine's lazily-built
 // pipeline, so the approval-bridge-then-tools composition order in
 // buildServer is preserved for child turns too), the child-log store
-// under <session-dir>/subagents, and the session registry binding both
-// the engine (root sessions) and the executor (child sessions) write
-// into and the model-facing subagent tools read from.
-func wireSubagents(engine *protocol.FileEngine, sessionDir string, reg *subagents.Registry) {
-	engine.SubagentExecutor = subagentTurnExecutor{engine: engine, reg: reg}
+// under <session-dir>/subagents, the session registry binding both the
+// engine (root sessions) and the executor (child sessions) write into
+// and the model-facing subagent tools read from, and (P6) the jobs
+// registry the child-turn executor binds child jobs managers into.
+func wireSubagents(engine *protocol.FileEngine, sessionDir string, reg *subagents.Registry, jobsReg *jobsRegistry) {
+	engine.SubagentExecutor = subagentTurnExecutor{engine: engine, reg: reg, jobsReg: jobsReg}
 	engine.SubagentStore = subagents.NewFileStore(filepath.Join(sessionDir, subagentsDirName))
 	engine.SubagentRegistry = reg
 }

@@ -237,6 +237,70 @@ func handleJobsStatus(ctx context.Context, s *Server, req *Request) (json.RawMes
 	return result, nil
 }
 
+// outputParams is the jobs/output request body (strict: exactly
+// jobId + offset; the chunk bound is server-owned).
+type outputParams struct {
+	JobID  string `json:"jobId"`
+	Offset int64  `json:"offset"`
+}
+
+// handleJobsOutput serves one bounded chunk of a job's captured output
+// at an absolute byte offset (§4g — the P6 tailing read). Typed errors:
+// unknown job ⇒ -32602 `unknown job`; offset behind the retention
+// window ⇒ -32602 with data naming the oldest readable offset; offset
+// ahead of the produced output ⇒ -32602. A job with no output yet
+// (queued, or produced nothing so far) is an HONEST EMPTY response
+// carrying the fold state — polling is the intended use, not an error.
+// Concurrent-safe with the writing job body by construction (the
+// manager's per-buffer lock; no turn gate — read-only seam).
+func handleJobsOutput(ctx context.Context, s *Server, req *Request) (json.RawMessage, *Error) {
+	es, perr := s.requireSession()
+	if perr != nil {
+		return nil, perr
+	}
+	var p outputParams
+	if perr := decodeParams(req, &p, false); perr != nil {
+		return nil, perr
+	}
+	if p.JobID == "" {
+		return nil, &Error{Code: ErrInvalidParams, Message: "jobId is required"}
+	}
+	reader, ok := es.Jobs.(OutputReader)
+	if !ok {
+		return nil, &Error{Code: ErrEngine, Message: "protocol: this engine's jobs dispatcher does not implement jobs/output (built before P6?)"}
+	}
+	chunk, err := reader.ReadOutput(p.JobID, p.Offset)
+	if err != nil {
+		var evicted *jobs.OutputEvictedError
+		var ahead *jobs.OutputAheadError
+		var unknown *jobs.UnknownJobError
+		switch {
+		case errors.As(err, &unknown):
+			return nil, &Error{Code: ErrInvalidParams, Message: err.Error()}
+		case errors.As(err, &evicted):
+			data, _ := json.Marshal(struct {
+				Kind        string `json:"kind"`
+				EvictedBase int64  `json:"evictedBase"`
+				Evicted     int64  `json:"evicted"`
+			}{"output-evicted", evicted.Base, evicted.Evicted})
+			return nil, &Error{Code: ErrInvalidParams, Message: err.Error(), Data: data}
+		case errors.As(err, &ahead):
+			data, _ := json.Marshal(struct {
+				Kind    string `json:"kind"`
+				Written int64  `json:"written"`
+			}{"output-ahead", ahead.Written})
+			return nil, &Error{Code: ErrInvalidParams, Message: err.Error(), Data: data}
+		default:
+			return nil, &Error{Code: ErrInvalidParams, Message: err.Error()}
+		}
+	}
+	result, merr := json.Marshal(chunk)
+	if merr != nil {
+		return nil, &Error{Code: ErrEngine, Message: merr.Error()}
+	}
+	return result, nil
+}
+
 // promptParams is the session/prompt request body.
 type promptParams struct {
 	Text string `json:"text"`

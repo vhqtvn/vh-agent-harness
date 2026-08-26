@@ -336,9 +336,11 @@ type CompactionEndPayload struct {
 //     (the fencing session id), Payload (the dispatched work item);
 //   - job/started: JobID, Kind, Owner;
 //   - job/settled: JobID, Kind, Owner, Result (completed|failed), Reason
-//     (failure text, omitempty);
-//   - job/report: JobID, Kind, Owner, Result, Reason — the notice the
-//     surface derives its message from.
+//     (failure text, omitempty), Detail (compact terminal facts,
+//     omitempty — P6: e.g. the background shell's exit facts; additive,
+//     old logs replay byte-identically);
+//   - job/report: JobID, Kind, Owner, Result, Reason, Detail — the
+//     notice the surface derives its message from.
 //
 // dsh pattern (session-cognition.md §jobs/, from docs/subsystems/jobs.md):
 // `<kind>-N` ids are per-kind monotonic; owner fencing "is authorization,
@@ -353,6 +355,7 @@ type JobPayload struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 	Result  string          `json:"result,omitempty"`
 	Reason  string          `json:"reason,omitempty"`
+	Detail  string          `json:"detail,omitempty"`
 }
 
 // SubagentPayload is the shared payload shape of the subagent/* family.

@@ -70,6 +70,7 @@ requests ⇒ `-32001`. `initialize` is idempotent.
 | `session/surface` | `{}` | `{messages[]}` | current DeriveMessages snapshot; emits pending job reports first |
 | `approval/respond` | `{approvalId, allow, reason?}` | `{resolved:true}` | one-shot answer to an approval/request |
 | `jobs/status` | `{}` | `{jobs[]}` | fold-derived, enqueue order; `{jobs:[]}` without a session |
+| `jobs/output` | `{jobId, offset}` | `{jobId, state, chunk, offset, nextOffset, hasMore, written, evictedBytes}` | offset-cursor read of a job's captured output (§4g); requires an active session (`-32003`); strict params; typed `-32602` errors for unknown job / behind-retention / ahead-of-output |
 | `subagent/spawn` | `{role?, prompt, mode, seedFromParent?}` | `{childId}` | enqueue receipt, returns **before** the child's first turn (§7b); `mode` = `oneshot\|continuable`; depth auto-derived (never client-supplied) |
 | `subagent/send` | `{childId, message}` | `{queued:true}` | one follow-up inbox message + one queued child turn; continuable, not-yet-settled children only |
 | `subagent/list` | `{}` | `{children[]}` | fold-derived snapshot (running/waiting/settled + `contentSeq`); `{children:[]}` without a session |
@@ -100,7 +101,7 @@ these rules are what make a TURN atomic, not just its records):
 - **Concurrent (no ordering guarantees, safe to overlap):** every
   read-only or receipt-shaped method — `initialize`,
   `session/subscribe`, `session/surface`, `session/dispatch`,
-  `jobs/status`, `subagent/spawn`, `subagent/send`, `subagent/list`,
+  `jobs/status`, `jobs/output`, `subagent/spawn`, `subagent/send`, `subagent/list`,
   `schedule/add`, `schedule/list`, `schedule/remove`,
   `approval/respond` — plus all background job and child-turn event
   appends. Background job events may interleave WITHIN an open turn
@@ -550,6 +551,104 @@ event vocabulary has no record for non-turn LLM calls, so it writes no
 log-side audit trail; the request itself is observable only on the
 provider plane. `--context-tokens 0` disables the subsystem outright.
 
+## 4g. Job output tailing (P6): jobs/output + background run_shell
+
+The daily-driver loop — run a long shell command in background, keep
+chatting, tail its output, get settlement — lands as TWO additive
+surfaces (ProtocolVersion stays 1; see §8):
+
+**`jobs/output`** `{jobId, offset}` → `{jobId, state, chunk, offset,
+nextOffset, hasMore, written, evictedBytes}` — the offset-cursor read
+of a job's captured output, in the `spill_read` family:
+
+- `chunk` is the served byte window (a string; may be empty — an
+  honest poll answer, NOT an error) and `nextOffset = offset +
+  len(chunk)` is EXACT: paging at the returned cursor never re-serves
+  a byte and never skips one; a terminal read (`nextOffset ==
+  written`, `hasMore:false`) has consumed the whole stream.
+- `state` is the fold state (`queued|running|settled`); reads of a
+  queued job or a running job with no bytes yet are empty responses.
+- The chunk is bounded server-side (16 KiB); `hasMore:true` marks a
+  chunk-bound cut with more unread bytes available NOW. Truncation is
+  signaled STRUCTURALLY (`hasMore`, `evictedBytes`), never by injected
+  marker bytes — in-band markers would corrupt byte-offset reassembly.
+- Typed `-32602` errors: `unknown job` (the fold does not know the
+  id); `offset behind the retention window` (data
+  `{kind:"output-evicted", evictedBase, evicted}` — the oldest bytes
+  were dropped by the ring; re-sync to `evictedBase`); `offset ahead
+  of the produced output` (data `{kind:"output-ahead", written}` — a
+  client arithmetic bug; `nextOffset` never exceeds `written`).
+
+**RETENTION POSTURE (deliberate v1, disclosed):**
+
+- **In-memory, non-durable.** Captured output lives in the session's
+  jobs manager (an accelerator), NOT in the session log. Across a
+  daemon restart the job's SETTLEMENT facts survive (they are log
+  events) but its captured output does not: a read at offset 0 reports
+  `written:0`, and a read at a stale pre-restart offset (beyond
+  `written:0`) is the typed `output-ahead` error above — the client's
+  one-shot clamp resolves it and completes the drain over the honest
+  absence. Durability would need a per-job spill store plus recovery
+  wiring — deferred; the log stays byte-stable.
+- **Tail-keeping ring, 256 KiB per job** (the most recent bytes are
+  retained; older bytes evict as the producer wraps). Post-settle the
+  buffer freezes: reads keep serving the tail within retention for
+  the session's lifetime. Buffer memory is bounded per job (≤256 KiB)
+  and by the per-owner in-flight cap while running; settled tails
+  live until the session is superseded.
+- **One combined stream.** A job has ONE byte stream (a background
+  shell's stdout and stderr interleave in write order). Per-stream
+  cursors would double the read surface; the sync run_shell result
+  already captures per-stream for its frozen outcome.
+- **jobs/status stays fold-pure.** Exposing `hasMore`/`nextOffset`
+  there was considered and DECLINED: output cursors are in-memory
+  accelerator state, not fold state — coupling the fold projection to
+  non-durable memory would blur the log-is-truth discipline.
+
+**Background `run_shell`:** the tool gains a `background:true` arg
+(schema-documented). The tool body runs the SAME validation
+(command policy, workdir confinement), then dispatches a durable job
+(kind `shell`, id `shell-N`) whose body runs the SAME exec path (env
+scrub, sandbox `WrapCommand`, workdir policy, process-group teardown —
+reused, not duplicated) with the child's combined output streaming
+into the capture channel above. The tool result is the immediate
+receipt `{background:true, jobId, command, effectiveTimeoutMs}` (the
+turn never blocks); `job/settled` and `job/report` carry the exit
+facts in a compact `detail` (`cause=exit exitCode=0 durationMs=…
+outputBytes=… sandbox=…`) and the report notice enters the surface as
+`background job shell-1 completed (…)`. Timeout semantics: the SAME
+per-call vocabulary and 600000ms hard cap, but an OMITTED `timeout_ms`
+defaults to the CAP in background mode (long-running intent; a
+surprise 30s kill would defeat the feature) — expiry kills the process
+group by the identical teardown and settles the job FAILED with the
+timeout reason. Non-zero exits are normal outcomes (job settles
+`completed` with the facts). Sandbox posture: fail-closed as ever —
+a configured sandbox that is UNAVAILABLE at dispatch refuses the
+dispatch typed (no job created, never unconfined); per-call setup
+failures inside the job settle it failed, never unconfined.
+
+Client posture (honest scope): the one-shot client DRAINS observed
+background jobs to settlement after the conversation — polling
+`jobs/status`/`jobs/output` (every non-empty chunk rendered, plus a
+ONE-TIME empty terminal record when a job is settled and fully
+consumed — the deterministic end-of-tail marker; in `--json` mode
+these are CLIENT-SYNTHESIZED `{"kind":"job-output"}` NDJSON records, a
+  shape the daemon never emits) and calling `session/surface` once at
+  the end so pending `job/report` notices land. On the typed
+  output-evicted `-32602` the drain re-syncs its cursor FORWARD to
+  `data.evictedBase` (one note names the honestly-absent prefix;
+  `evictedBytes` carries it structurally), so a settled job whose early
+  output fell behind retention still completes its drain over the
+  retained tail; on the typed output-ahead `-32602` it clamps BACK to
+  `data.written` — including the recovered-job case after a daemon
+  restart, where the server types the stale pre-restart cursor as ahead
+  with `written:0` and the clamp plus the one-time empty terminal
+  record at 0 complete the drain with the honest-absence note. Both
+  re-syncs are one-shot per call. REPL-mode tailing
+(slash-commands) is a deferred slice: in the REPL, background jobs
+keep running and settle on the log, but the client does not tail them
+interactively.
+
 ## 7b. Async contract (subagents, B2)
 
 Same discipline as §7 jobs: `subagent/spawn` returns its `{childId}`
@@ -607,6 +706,15 @@ never-started jobs (at-least-once), synthetically settles torn tails
 (`result:"failed"`, reason `recovered-after-crash`), and emits pending
 reports — all as ordinary appended events on the same stream.
 
+P6 extends the contract with a PROGRESSIVE OUTPUT channel (§4g):
+jobs whose executor produces output stream it into a bounded in-memory
+retention buffer, readable mid-flight through `jobs/output` with exact
+offset-cursor semantics. The model-facing entry is `run_shell`
+`background:true` — the tool result is the enqueue receipt and the
+settlement notice (`job/report`) carries the exit facts in `detail`;
+the OUTPUT itself is host-side (the wire read), not model-facing.
+Captured output is non-durable across restart (§4g posture).
+
 ## 8. Extensibility & versioning
 
 - Unknown **method** ⇒ `-32601`. Unknown **notification** ⇒ ignored.
@@ -629,6 +737,16 @@ reports — all as ordinary appended events on the same stream.
 - **B3 decision (schedule/* family): ProtocolVersion stays 1** — same
   rule, same verification (§4c; old fixtures byte-stable, new methods'
   shapes locked by their own fixtures).
+- **P6 decision (jobs/output + background run_shell): ProtocolVersion
+  stays 1.** `jobs/output` is a NEW method name — additive under the
+  rule above; no field was added to any existing method's params or
+  result (its shape is locked by its own fixtures). The additive LOG
+  payloads (`job/settled`/`job/report` gain an omitempty `detail`;
+  surface derivation appends it only when present) keep pre-P6 logs
+  replaying byte-identically, and old fixtures were verified
+  byte-stable. The `run_shell` tool SCHEMA gained the `background`
+  arg — a tool-adapter surface, not a wire-method shape; tool schemas
+  are advertised per request and consumed per provider.
 
 ## 9. Error codes
 

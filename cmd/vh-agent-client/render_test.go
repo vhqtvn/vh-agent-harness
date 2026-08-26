@@ -118,6 +118,66 @@ func TestHumanRendererJobSettlement(t *testing.T) {
 	}
 }
 
+// TestHumanRendererBackgroundReceiptAndTail (P6): a run_shell
+// background-dispatch receipt renders the ↪ background line (not the
+// byte-count line), and a tailed chunk renders the ↧ job line.
+func TestHumanRendererBackgroundReceiptAndTail(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	receipt := `{"background":true,"jobId":"shell-1","command":"for i in 1 2 3; do echo tick $i; done","effectiveTimeoutMs":600000}`
+	r.RenderEvent(eventParams(t, session.TypeToolResult, `{"callId":"c1","name":"run_shell","content":`+escapeJSONString(t, receipt)+`,"isError":false}`))
+	r.RenderJobOutput(JobOutputRecord{Kind: "job-output", JobID: "shell-1", State: "running", Offset: 0, NextOffset: 14, Chunk: "tick 1\ntick 2\n", Written: 14})
+	out := buf.String()
+	for _, want := range []string{
+		"↪ background for i in 1 2 3; do echo tick $i; done → job shell-1",
+		"↧ job shell-1 @0 +14B (running)", // the served delta is rendered, not a literal
+	} {
+		if !bytes.Contains([]byte(out), []byte(want)) {
+			t.Fatalf("background lines missing %q in:\n%s", want, out)
+		}
+	}
+	// A plain (sync) run_shell result keeps the byte-count line.
+	r2 := newHumanRenderer(&buf)
+	r2.RenderEvent(eventParams(t, session.TypeToolResult, `{"callId":"c9","name":"run_shell","content":"{\"cause\":\"exit\"}","isError":false}`))
+	if !bytes.Contains(buf.Bytes(), []byte("✔ tool result (")) {
+		t.Fatalf("sync run_shell result lost the byte-count line:\n%s", buf.String())
+	}
+}
+
+// escapeJSONString marshals s as a JSON string literal (embedding a
+// JSON document as tool-result content).
+func escapeJSONString(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestJSONRendererJobOutputRecord (P6): the synthesized job-output
+// record rides the NDJSON stream with kind:"job-output".
+func TestJSONRendererJobOutputRecord(t *testing.T) {
+	var buf bytes.Buffer
+	r := newJSONRenderer(&buf)
+	r.RenderJobOutput(JobOutputRecord{Kind: "job-output", JobID: "shell-2", State: "settled", Offset: 40, NextOffset: 40, Chunk: "", Written: 40})
+	line := buf.String()
+	if !bytes.Contains([]byte(line), []byte(`"kind":"job-output"`)) || !bytes.Contains([]byte(line), []byte(`"jobId":"shell-2"`)) {
+		t.Fatalf("job-output record = %q", line)
+	}
+	var rec JobOutputRecord
+	if err := json.Unmarshal([]byte(trimNL(line)), &rec); err != nil || rec.State != "settled" {
+		t.Fatalf("record does not round-trip: %v %v", err, rec)
+	}
+}
+
+func trimNL(s string) string {
+	for len(s) > 0 && s[len(s)-1] == '\n' {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
 func TestHumanRendererTurnError(t *testing.T) {
 	var buf bytes.Buffer
 	r := newHumanRenderer(&buf)

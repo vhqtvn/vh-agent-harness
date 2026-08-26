@@ -127,10 +127,16 @@ func surfaceMessage(ev Event) (Message, error) {
 		// same family as the compaction summary: it enters the surface as
 		// a user message (the environment addressing the model, never
 		// assistant self-talk). Content is derived deterministically from
-		// the payload so replay reproduces it byte-for-byte.
+		// the payload so replay reproduces it byte-for-byte. The P6
+		// Detail (compact terminal facts, e.g. the background shell's
+		// exit facts) appends in parentheses — absent on old logs, so
+		// pre-P6 content is byte-identical.
 		content := fmt.Sprintf("background job %s %s", p.JobID, p.Result)
 		if p.Reason != "" {
 			content += ": " + p.Reason
+		}
+		if p.Detail != "" {
+			content += " (" + p.Detail + ")"
 		}
 		return Message{Role: "user", Content: content}, nil
 	case TypeSubagentReport:

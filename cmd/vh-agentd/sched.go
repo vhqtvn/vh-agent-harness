@@ -36,6 +36,12 @@ type sessionTracker struct {
 	protocol.Engine
 	mu     sync.Mutex
 	active *protocol.EngineSession
+	// jobsReg receives every root session's jobs manager (P6: the
+	// run_shell background dispatcher resolves the executing session's
+	// manager through it; create/resume bind here, superseded sessions
+	// stay bound — their managers are drained-but-alive folds of their
+	// own logs).
+	jobsReg *jobsRegistry
 }
 
 // SetApprover forwards the wire approval bridge to the wrapped engine.
@@ -70,6 +76,9 @@ func (t *sessionTracker) NewSession(path, sessionID string, sink io.Writer) (*pr
 		return nil, err
 	}
 	t.active = es
+	if t.jobsReg != nil {
+		t.jobsReg.bindSession(es, sessionID)
+	}
 	return es, nil
 }
 
@@ -93,6 +102,9 @@ func (t *sessionTracker) ResumeSession(sessionID string, sink io.Writer) (*proto
 		return nil, nil, err
 	}
 	t.active = es
+	if t.jobsReg != nil {
+		t.jobsReg.bindSession(es, sessionID)
+	}
 	return es, sum, nil
 }
 

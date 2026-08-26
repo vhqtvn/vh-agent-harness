@@ -59,7 +59,7 @@ func TestParseAskTools(t *testing.T) {
 // route nothing).
 func TestValidateAskToolsAgainstRegisteredSet(t *testing.T) {
 	cfg := testConfig(t, "openai", "http://127.0.0.1:1")
-	defs := daemonTools(realNow, cfg, nil)
+	defs := daemonTools(realNow, cfg, nil, shellConfigFor(cfg))
 	if err := validateAskTools([]string{"run_shell", "write", "echo"}, defs); err != nil {
 		t.Fatalf("known names rejected: %v", err)
 	}

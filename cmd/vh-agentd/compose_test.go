@@ -100,7 +100,7 @@ func TestDogfoodToolsExecute(t *testing.T) {
 		t.Fatalf("validate: %v", err)
 	}
 	p := tools.NewPipeline()
-	for _, d := range daemonTools(func() time.Time { return fixed }, offCfg, subagents.NewRegistry()) {
+	for _, d := range daemonTools(func() time.Time { return fixed }, offCfg, subagents.NewRegistry(), shellConfigFor(offCfg)) {
 		if err := p.Register(d); err != nil {
 			t.Fatalf("register %s: %v", d.Name, err)
 		}

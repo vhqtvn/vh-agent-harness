@@ -94,10 +94,22 @@ type TurnRunner interface {
 }
 
 // JobDispatcher is the async-jobs seam (satisfied by *jobs.Manager).
+// ReadOutput is the P6 offset-cursor output read behind jobs/output;
+// managers built before P6 do not implement it and the method fails
+// closed with a typed engine error (the interface assertion is on the
+// concrete EngineSession.Jobs).
 type JobDispatcher interface {
 	Dispatch(kind string, payload json.RawMessage) (jobs.Receipt, error)
 	Snapshot() []jobs.Status
 	EmitReports() (int, error)
+}
+
+// OutputReader is the optional jobs seam behind jobs/output (P6). The
+// concrete *jobs.Manager implements it; a custom dispatcher that does
+// not gets a typed fail-closed refusal, mirroring the subagent/
+// schedule optional-seam discipline.
+type OutputReader interface {
+	ReadOutput(jobID string, offset int64) (jobs.OutputChunk, error)
 }
 
 // ServerOptions configures one Server.
@@ -129,7 +141,7 @@ type ServerOptions struct {
 //     completes on its own session, and the new session becomes active
 //     immediately.
 //   - read-only seams (session/subscribe, session/surface, jobs/status,
-//     subagent/list, schedule/list) and the async receipts
+//     jobs/output, subagent/list, schedule/list) and the async receipts
 //     (session/dispatch, subagent/spawn, subagent/send,
 //     approval/respond) stay fully concurrent.
 type Server struct {
@@ -192,6 +204,7 @@ var handlers = map[string]handlerFunc{
 	"session/prompt":    handleSessionPrompt,
 	"session/surface":   handleSessionSurface,
 	"jobs/status":       handleJobsStatus,
+	"jobs/output":       handleJobsOutput,
 	"subagent/spawn":    handleSubagentSpawn,
 	"subagent/send":     handleSubagentSend,
 	"subagent/list":     handleSubagentList,

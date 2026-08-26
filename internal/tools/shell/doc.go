@@ -1,7 +1,10 @@
 // Package shell implements the run_shell tool: native subprocess
 // execution behind the slice-3 tool Pipeline, with orthogonal outcome
 // facts, explicit child-environment hygiene, output caps, and an
-// injectable sandbox seam.
+// injectable sandbox seam. The optional background:true arg (P6,
+// background.go) dispatches the SAME execution path as a durable jobs
+// job instead of running synchronously — the tool returns an enqueue
+// receipt and the output streams to the job's capture channel.
 //
 // # Platform assumption (unix)
 //

@@ -175,6 +175,20 @@ func fixtureCases() []fixtureCase {
 		{"request-jobs_status", func() ([]byte, error) {
 			return MarshalRequest(8, "jobs/status", nil)
 		}},
+		{"request-jobs_output", func() ([]byte, error) {
+			return MarshalRequest(14, "jobs/output", json.RawMessage(`{"jobId":"shell-1","offset":0}`))
+		}},
+		{"response-jobs_output", func() ([]byte, error) {
+			return json.Marshal(struct {
+				JSONRPC string           `json:"jsonrpc"`
+				ID      int64            `json:"id"`
+				Result  jobs.OutputChunk `json:"result"`
+			}{JSONRPCVersion, 14, jobs.OutputChunk{
+				JobID: "shell-1", State: "running", Chunk: "tick 1\ntick 2\n",
+				Offset: 0, NextOffset: 14, HasMore: false,
+				Written: 14, EvictedBytes: 0,
+			}})
+		}},
 		{"response-jobs_status", func() ([]byte, error) {
 			return json.Marshal(struct {
 				JSONRPC string `json:"jsonrpc"`

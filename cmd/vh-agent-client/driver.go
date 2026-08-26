@@ -57,6 +57,55 @@ type driver struct {
 
 	mu          sync.Mutex
 	interrupted bool
+
+	// bgMu guards the background-job tail state (P6): jobs observed
+	// enqueued during THIS client process, each with its output cursor.
+	bgMu   sync.Mutex
+	bgJobs map[string]*bgTail
+}
+
+// bgTail is the driver-side tail state of one background job.
+type bgTail struct {
+	cursor int64 // next jobs/output offset to read
+	// terminalDone guards the ONE-TIME terminal record: once a job is
+	// settled AND fully consumed, the drain emits a single empty-chunk
+	// settled-state record (the deterministic end-of-tail marker for
+	// machine consumers — the final BYTES may have been read a poll
+	// earlier, while the job was still running).
+	terminalDone bool
+}
+
+// observeJobEvent tracks job/enqueued events so the drain loop knows
+// which jobs to tail (any kind — output-producing kinds stream;
+// echo/fail kinds simply read empty).
+func (d *driver) observeJobEvent(ev *session.Event) {
+	if ev.Type != session.TypeJobEnqueued {
+		return
+	}
+	var p session.JobPayload
+	if len(ev.Payload) > 0 {
+		_ = json.Unmarshal(ev.Payload, &p)
+	}
+	if p.JobID == "" {
+		return
+	}
+	d.bgMu.Lock()
+	defer d.bgMu.Unlock()
+	if d.bgJobs == nil {
+		d.bgJobs = make(map[string]*bgTail)
+	}
+	if _, ok := d.bgJobs[p.JobID]; !ok {
+		d.bgJobs[p.JobID] = &bgTail{}
+	}
+}
+
+// onSessionEvent feeds the renderer and the background-job tracker.
+func (d *driver) onSessionEvent(params json.RawMessage) {
+	var ev session.Event
+	if err := json.Unmarshal(params, &ev); err == nil {
+		d.observeJobEvent(&ev)
+	}
+	d.renderer.RenderEvent(params)
 }
 
 // interrupt implements the Ctrl-C contract: send nothing, close the
@@ -96,7 +145,7 @@ func (d *driver) note(format string, args ...any) {
 // for the honest Ctrl-C exit.
 func (d *driver) run(ctx context.Context) error {
 	// Notification wiring BEFORE subscribe (live-only stream).
-	d.client.OnNotification("session/event", d.renderer.RenderEvent)
+	d.client.OnNotification("session/event", d.onSessionEvent)
 	d.client.OnNotification("approval/request", d.onApprovalRequest)
 	d.client.OnNotification("protocol/error", d.renderer.RenderProtocolError)
 
@@ -316,12 +365,15 @@ func (d *driver) converse(text string) (string, error) {
 
 // oneShot sends the prompt, streams the turn(s), prints the final
 // assistant text on stdout (machine-readable content — the ONLY stdout
-// output in human mode), and returns.
+// output in human mode), drains observed background jobs to
+// settlement (P6 tailing — without this the daemon would be torn down
+// at client exit with the jobs still running), and returns.
 func (d *driver) oneShot() error {
 	content, err := d.converse(d.cfg.Prompt)
 	if err != nil {
 		return err
 	}
+	d.drainBackgroundJobs()
 	if d.cfg.JSON {
 		// Machine mode: the final result object is the last NDJSON
 		// line on stdout.
@@ -341,6 +393,206 @@ func (d *driver) oneShot() error {
 	}
 	fmt.Fprintln(d.out, content)
 	return nil
+}
+
+// bgWaitMax bounds the background-drain loop: a job is itself bounded
+// by the run_shell timeout cap (600s default), so waiting the same
+// ceiling for settlement is enough; exceeding it gives up honestly.
+const bgWaitMax = 10 * time.Minute
+
+// bgPollInterval is the jobs/status + jobs/output poll cadence.
+const bgPollInterval = 150 * time.Millisecond
+
+// drainBackgroundJobs tails every job observed enqueued during this
+// client process until settlement: each poll pages jobs/output from
+// the per-job cursor (rendering every non-empty chunk), and once every
+// tracked job is settled it calls session/surface ONCE so pending
+// job/report notices land in the durable log and the model-visible
+// surface (the daemon emits reports only at prompt/surface — the next
+// conversation turn would otherwise carry them, and a one-shot client
+// has no next turn).
+//
+// HONEST SCOPE: REPL mode does NOT drain (tailing there is the deferred
+// slash-command slice); a drain gives up after bgWaitMax with a note.
+func (d *driver) drainBackgroundJobs() {
+	d.bgMu.Lock()
+	tracked := make([]string, 0, len(d.bgJobs))
+	for id := range d.bgJobs {
+		tracked = append(tracked, id)
+	}
+	d.bgMu.Unlock()
+	if len(tracked) == 0 {
+		return
+	}
+	d.note("draining %d background job(s) — tailing via jobs/output", len(tracked))
+
+	deadline := time.Now().Add(bgWaitMax)
+	for {
+		if isDone(d.client) {
+			return
+		}
+		allSettled := d.pollOnce(tracked)
+		if allSettled {
+			// Flush pending job/report notices into the log + surface.
+			if err := d.client.Call("session/surface", nil, nil); err != nil {
+				d.note("warning: session/surface after job drain: %v", err)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			d.note("warning: background jobs still unsettled after %s — giving up the tail (settlement will surface on the next prompt/surface)", bgWaitMax)
+			return
+		}
+		time.Sleep(bgPollInterval)
+	}
+}
+
+// pollOnce runs one jobs/status + jobs/output pass over the tracked
+// jobs and reports whether every one of them is settled with its tail
+// fully consumed.
+func (d *driver) pollOnce(tracked []string) bool {
+	var st struct {
+		Jobs []struct {
+			JobID string `json:"jobId"`
+			State string `json:"state"`
+		} `json:"jobs"`
+	}
+	if err := d.client.Call("jobs/status", nil, &st); err != nil {
+		d.note("warning: jobs/status during drain: %v", err)
+		return false
+	}
+	states := make(map[string]string, len(st.Jobs))
+	for _, j := range st.Jobs {
+		states[j.JobID] = j.State
+	}
+	allSettled := true
+	for _, id := range tracked {
+		state, known := states[id]
+		if !known {
+			continue // engine folded it away? nothing to tail
+		}
+		if !d.tailJob(id) {
+			allSettled = false // output still flowing
+		}
+		if state != "settled" {
+			allSettled = false
+		}
+	}
+	return allSettled
+}
+
+// tailJob pages jobs/output from the job's cursor, rendering every
+// non-empty chunk plus a ONE-TIME empty terminal record once the job
+// is settled and fully consumed; it reports whether the tail is fully
+// consumed (cursor at written, nothing pending). The typed re-sync
+// errors (§4g — output-evicted / output-ahead) are consumed IN-LOOP
+// via resyncTailCursor, so a job whose early output fell behind the
+// retention window still drains to completion over its retained tail
+// (a persistent evicted condition is never treated as unsettled).
+func (d *driver) tailJob(jobID string) bool {
+	d.bgMu.Lock()
+	t := d.bgJobs[jobID]
+	d.bgMu.Unlock()
+	if t == nil {
+		return true
+	}
+	for i := 0; i < 64; i++ { // bounded pages per poll; rest waits for the next
+		var ch jobsOutputChunk
+		err := d.client.Call("jobs/output", map[string]any{"jobId": jobID, "offset": t.cursor}, &ch)
+		if err != nil {
+			if d.resyncTailCursor(jobID, t, err) {
+				continue // cursor re-synced (§4g): page from the new offset
+			}
+			d.note("warning: jobs/output %s: %v", jobID, err)
+			return false
+		}
+		if ch.Chunk != "" {
+			d.renderer.RenderJobOutput(JobOutputRecord{
+				Kind: "job-output", JobID: jobID, State: ch.State,
+				Offset: ch.Offset, NextOffset: ch.NextOffset, Chunk: ch.Chunk,
+				Written: ch.Written, HasMore: ch.HasMore, EvictedBytes: ch.EvictedBytes,
+			})
+		}
+		consumed := !ch.HasMore && ch.NextOffset >= ch.Written
+		if consumed && ch.State == "settled" && !t.terminalDone {
+			// §4g uniform contract (B-F1): the ONE-TIME empty terminal
+			// record follows EVERY settled-and-fully-consumed read —
+			// including when that final read carried bytes (rendered
+			// above), so the end-of-tail marker is deterministic for
+			// machine consumers regardless of whether the last drain
+			// poll raced settlement. The marker sits AT the post-read
+			// cursor (offset == nextOffset == written), keeping the
+			// record chain's offset == previous-nextOffset invariant.
+			t.terminalDone = true
+			d.renderer.RenderJobOutput(JobOutputRecord{
+				Kind: "job-output", JobID: jobID, State: ch.State,
+				Offset: ch.NextOffset, NextOffset: ch.NextOffset, Chunk: "",
+				Written: ch.Written, HasMore: false, EvictedBytes: ch.EvictedBytes,
+			})
+		}
+		t.cursor = ch.NextOffset
+		if !ch.HasMore {
+			return consumed
+		}
+	}
+	return false
+}
+
+// resyncTailCursor handles the two typed jobs/output -32602 errors
+// whose error.data carries a re-sync hint (§4g). output-evicted: the
+// retention ring dropped the bytes before data.evictedBase — jump
+// FORWARD to the oldest retained byte and keep paging (the retained
+// tail is served from there; the evicted prefix is honestly absent,
+// surfaced once here and structurally via evictedBytes on every
+// subsequent record). output-ahead: the cursor is beyond the produced
+// output (a client arithmetic bug — nextOffset never exceeds written)
+// — clamp BACK to the server's written. Both are one-shot per call: a
+// hint that does not move the cursor falls through to the caller's
+// warning path, so a misbehaving server cannot spin the paging loop.
+// It reports whether the cursor moved (the caller continues paging).
+func (d *driver) resyncTailCursor(jobID string, t *bgTail, err error) bool {
+	var perr *protocol.Error
+	if !errors.As(err, &perr) || len(perr.Data) == 0 {
+		return false
+	}
+	var hint struct {
+		Kind        string `json:"kind"`
+		EvictedBase int64  `json:"evictedBase"`
+		Evicted     int64  `json:"evicted"`
+		Written     int64  `json:"written"`
+	}
+	if json.Unmarshal(perr.Data, &hint) != nil {
+		return false
+	}
+	switch hint.Kind {
+	case "output-evicted":
+		if hint.EvictedBase > t.cursor {
+			d.note("job %s: %d tail bytes were evicted behind the output retention window — resuming at the oldest retained byte %d (the earlier %d evicted bytes are gone)",
+				jobID, hint.EvictedBase-t.cursor, hint.EvictedBase, hint.Evicted)
+			t.cursor = hint.EvictedBase
+			return true
+		}
+	case "output-ahead":
+		if hint.Written < t.cursor {
+			d.note("job %s: cursor %d was ahead of the produced output — re-syncing back to written %d",
+				jobID, t.cursor, hint.Written)
+			t.cursor = hint.Written
+			return true
+		}
+	}
+	return false
+}
+
+// jobsOutputChunk is the wire shape of one jobs/output response.
+type jobsOutputChunk struct {
+	JobID        string `json:"jobId"`
+	State        string `json:"state"`
+	Chunk        string `json:"chunk"`
+	Offset       int64  `json:"offset"`
+	NextOffset   int64  `json:"nextOffset"`
+	HasMore      bool   `json:"hasMore"`
+	Written      int64  `json:"written"`
+	EvictedBytes int64  `json:"evictedBytes"`
 }
 
 // errDaemonGone marks a REPL send that failed because the daemon
