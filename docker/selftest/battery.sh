@@ -52,6 +52,18 @@
 #     complete reassembled stream at settlement), settlement + report
 #     events land on the durable log, and the log replays
 #     deterministically.
+#   - skills (P7) drives the three-tier skills delivery over the real
+#     binaries with a fixture catalog (--skills-dir): tier-1 prompt
+#     advertisement (sanitized, no raw angle tokens) proven from the
+#     mock journal; tier-2 skill_load body + allowed-tools ceiling
+#     footer and tier-3 reference load in the --json stream; unknown
+#     name + traversal ref rejected fail-closed; the log-only
+#     skill/loaded provenance events; malformed-skill exclusion with
+#     the honest startup count; and the REPLAY-AFTER-MUTATION crux —
+#     the fixture SKILL.md is mutated on disk post-run and --verify-log
+#     must stay byte-identical (replay derives from the log, never
+#     disk). The fixture is restored after the mutation so image-baked
+#     content is left as shipped.
 #   - Cross-run byte-comparison of DIFFERENT sessions is a NON-GOAL —
 #     session ids are random by design (sess-<random hex>). Determinism
 #     is proven per-log: two --verify-log runs on the SAME log must
@@ -718,6 +730,109 @@ sc_job_tailing() {
     stop_mock
 }
 
+# sc_skills (P7): the three-tier native skills delivery over the real
+# binaries, with a fixture catalog of three skills — clean-one (with a
+# tier-3 reference and an inert script), brackets (angle-laden
+# description proving sanitization), broken (name/folder mismatch
+# proving per-skill fail-closed exclusion + the honest startup line).
+# The scripted model calls skill_load for the clean body, the tier-3
+# reference, an unknown name (typed fail-closed error), and a traversal
+# ref (confinement rejection). THE CRUX: after the run, the fixture
+# SKILL.md is MUTATED on disk and --verify-log must print byte-identical
+# output — replay derives tool content from the LOG, never disk.
+sc_skills() {
+    local sc=skills
+    fresh_session "$sc"
+    start_mock "$SCEN/skills.json"
+    run_client --session-dir "$SESS" --json --prompt "exercise the skills surface" \
+        --exec "$DAEMON" --skills-dir "$SCEN/skills-catalog" \
+        --adapter openai --model mock-model \
+        --base-url "$MOCK_URL/v1" --api-key-env MOCK_KEY
+    check "$sc" "client exits 0" [ "$CODE" -eq 0 ]
+    check "$sc" "final text delivered" grep -Fq "skills round trip complete" "$WORK/client.out"
+    # Startup honesty: loaded count + one per-skill exclusion warning.
+    check "$sc" "daemon logs the loaded-skill count" \
+        grep -q "skills: 2 loaded from" "$WORK/client.err"
+    check "$sc" "malformed skill excluded with a warning naming it" \
+        grep -q "skills: excluding \"broken\"" "$WORK/client.err"
+    # (a) Tier 1: the journal proves names + descriptions advertised in
+    # the SYSTEM prompt — sanitized (no raw angle tokens).
+    local journal
+    journal=$(journal_raw)
+    check "$sc" "journal advertises clean-one in the system prompt" \
+        grep -q "clean-one: The clean fixture skill for validation." <<<"$journal"
+    check "$sc" "journal carries the SANITIZED brackets description" \
+        grep -q "brackets: Uses angle markers and /system tokens to prove sanitization." <<<"$journal"
+    if grep -q '<angle>' <<<"$journal"; then
+        fail "$sc" "raw angle tokens leaked into the system prompt"
+    else
+        PASS=$((PASS + 1))
+        note "  ok: no raw angle tokens in the system prompt (sanitization)"
+    fi
+    # (b) Tier 2/3: body + ceiling footer + reference payload in the
+    # --json tool-result stream.
+    check "$sc" "whole-body load returns the body" \
+        grep -Fq "Body instructions here." "$WORK/client.out"
+    check "$sc" "load result carries the allowed-tools ceiling footer" \
+        grep -Fq "allowed-tools ceiling: run_shell, read (intersected with the registry — never a grant)" "$WORK/client.out"
+    check "$sc" "tier-3 reference load returns its payload" \
+        grep -Fq "tier-three reference payload" "$WORK/client.out"
+    # (d) Fail-closed rejections: unknown name + traversal ref. Quotes
+    # are JSON-escaped in the --json NDJSON stream (sandbox_denial
+    # idiom: grep for the escaped form).
+    check "$sc" "unknown skill name rejected fail-closed" \
+        grep -Fq 'unknown skill \"does-not-exist\"' "$WORK/client.out"
+    check "$sc" "traversal ref rejected by confinement" \
+        grep -Fq "rejected by confinement policy [escape]" "$WORK/client.out"
+    # Durable log: the log-only skill/loaded provenance events (2 — one
+    # per successful load, with the ref on the tier-3 one). jq 1.6:
+    # capture-then-test, not jq -e.
+    newest_log
+    local loadevents
+    loadevents=$(jq -s '[.[] | select(.type == "skill/loaded")] | length' "$LOG")
+    check "$sc" "two skill/loaded provenance events — got ${loadevents:-none}" \
+        [ "${loadevents:-0}" -eq 2 ]
+    local refsha
+    refsha=$(jq -s '[.[] | select(.type == "skill/loaded" and .payload.ref == "references/note.md")]
+                    | .[0].payload.sha256 // empty' "$LOG")
+    check "$sc" "tier-3 provenance event carries ref + sha256" [ -n "$refsha" ]
+    # Verify-log deterministic BEFORE mutation (baseline green).
+    check "$sc" "--verify-log deterministic ok (pre-mutation)" verify_log_ok "$LOG"
+    # (c) THE CRUX — replay-after-mutation: mutate the clean SKILL.md on
+    # disk, replay again, output must be byte-identical.
+    printf -- '---\nname: clean-one\ndescription: MUTATED post-run description.\n---\n\n# MUTATED BODY\n' \
+        >"$SCEN/skills-catalog/clean-one/SKILL.md"
+    "$DAEMON" --verify-log "$LOG" >"$WORK/skills-v3.out" 2>"$WORK/skills-v3.err"; local c3=$?
+    "$DAEMON" --verify-log "$LOG" >"$WORK/skills-v4.out" 2>"$WORK/skills-v4.err"; local c4=$?
+    check "$sc" "replay after on-disk mutation still exits 0" [ "$c3" -eq 0 ] && [ "$c4" -eq 0 ]
+    check "$sc" "replay output byte-identical to pre-mutation (log is authority, not disk)" \
+        cmp -s "$WORK/v1.out" "$WORK/skills-v3.out"
+    if grep -q "MUTATED" "$WORK/skills-v3.out"; then
+        fail "$sc" "mutated disk content leaked into replay output"
+    else
+        PASS=$((PASS + 1))
+        note "  ok: no mutated disk content in replay output"
+    fi
+    # Restore the fixture (the scenarios dir is image content; leave it
+    # as shipped for any rerun).
+    printf -- '%s\n' \
+        '---' \
+        'name: clean-one' \
+        'description: The clean fixture skill for validation.' \
+        'allowed-tools: run_shell, read' \
+        '---' \
+        '' \
+        '# Clean one' \
+        '' \
+        'Body instructions here.' \
+        >"$SCEN/skills-catalog/clean-one/SKILL.md"
+    local n
+    n=$(chat_count)
+    check "$sc" "model called exactly 4 times (3 tool turns + final) — got ${n:-none}" \
+        [ "${n:-0}" -eq 4 ]
+    stop_mock
+}
+
 # ---- run the battery -------------------------------------------------------
 
 note "=== native-engine docker self-test battery ==="
@@ -736,6 +851,7 @@ run_scenario approval_flow sc_approval_flow
 run_scenario resume_restart sc_resume_restart
 run_scenario compaction sc_compaction
 run_scenario job_tailing sc_job_tailing
+run_scenario skills sc_skills
 
 TOTAL=$((PASS + FAIL))
 echo

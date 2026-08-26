@@ -1375,6 +1375,7 @@ vh-agentd --adapter openai|openaicompat|anthropic --model <name> \
   [--workdir-roots DIR[,DIR...]] \
   [--ask-tools TOOL[,TOOL...]] \
   [--context-tokens N] [--compact-threshold R] \
+  [--skills-dir DIR] \
   [--optimizer dedup|llm]
 ```
 
@@ -1457,12 +1458,16 @@ to the LATEST due occurrence (no storm replay after downtime); a due
 schedule lands as an ordinary `job/enqueued` on the active session, so
 settlement and reporting ride the existing job/* event stream.
 
-**Model-facing tool surface (eleven tools).** The daemon's model is
+**Model-facing tool surface (twelve tools).** The daemon's model is
 offered exactly these tools (child sessions below the delegation fence
 get the same set minus the subagent family at the fence):
 
 - `echo` — echoes the given text back (read-only dogfood probe);
 - `clock` — the daemon's current UTC time, RFC 3339 (read-only probe);
+- `skill_load` — loads a skill from the catalog (tier 2 of the skills
+  delivery, `--skills-dir`; see the Skills paragraph below) or, with
+  `ref`, a reference file under that skill's own folder (tier 3,
+  symlink-safe confinement + size cap); read-only, concurrency-safe;
 - `run_shell` — executes a shell command (guards → wire-bridged
   approval → capture caps; `--sandbox` confinement; exclusive barrier
   around it in the tool scheduler). With `background:true` it instead
@@ -1512,6 +1517,60 @@ walks never follow symlinked directories. Oversize results are NOT
 special-cased: the commit-time spill seam applies to them exactly as
 to any other tool result, and each tool keeps its default output under
 a sane size via its own cap/bound with explicit markers.
+
+**Skills delivery (`--skills-dir DIR`, three-tier progressive
+disclosure).** The daemon delivers an Agent Skills catalog
+(agentskills.io `SKILL.md` convention — the same shape as the
+harness's own `.opencode/skills/*/SKILL.md`) as a GUARDED TOOL surface,
+never as model filesystem-reads:
+
+- **Tier 1 — prompt lines.** A `Skills` section in the assembled system
+  prompt lists each skill's name + SANITIZED description (angle
+  brackets, code fences, and section-header tokens stripped — a
+  catalog entry cannot inject prompt structure) plus one guidance
+  sentence pointing at `skill_load`. No catalog ⇒ the section is
+  omitted entirely.
+- **Tier 2 — `skill_load`.** The full SKILL.md body (frontmatter
+  stripped) plus an `allowed-tools ceiling:` footer, delivered through
+  the normal tool pipeline — the same guards, timeout, and audit
+  logging as every other tool.
+- **Tier 3 — references.** `ref: references/foo.md` loads a reference
+  file under that skill's OWN folder, with the filetools confinement
+  discipline re-scoped per skill (no `..`, no absolute paths,
+  symlink-safe, size-capped like `read`, fail-closed typed errors).
+
+Flag semantics: default DIR is `./.opencode/skills` resolved against
+the daemon's working directory — an ABSENT default is honest absence
+(one startup line `skills: none (no catalog at <path>)`, engine runs
+normally), while an explicitly-passed-but-missing DIR is a fail-closed
+exit 2. The catalog is validated at startup against the spec limits
+(name ≤64 chars lowercase kebab-case matching the folder, reserved
+names rejected, description ≤1024 chars non-empty, flat frontmatter
+only — multi-line YAML values are unparseable BY DESIGN): a skill that
+fails validation is EXCLUDED with one stderr warning and the daemon
+continues. The catalog is read ONCE at startup — no per-turn
+hot-reload.
+
+Operator invariants (enforced structurally): a loaded SKILL.md is
+UNTRUSTED candidate-instruction data, never system authority — nothing
+it says relaxes allow/deny/ask anywhere in the engine; `allowed-tools`
+is a CEILING intersected with the tool registry (narrow-never-widen,
+never a grant — nothing consumes it to ALLOW anything; it surfaces in
+the load footer and the `skill/loaded` log event for AUDIT only, and
+the documented enforcement seam for running risky skills scoped is
+per-spawn tool scoping on the durable-subagent path — a later knob);
+bundled `scripts/` NEVER auto-execute — they are inert files, and a
+model that wants to run one goes through `run_shell` and the full
+approval waterfall. Every successful `skill_load` also appends a
+log-only `skill/loaded` provenance event `{name, ref?, sha256}` (the
+body itself already rides the logged `tool/result`, so replay derives
+it from the LOG, never disk — the battery proves this by mutating the
+catalog after a run and replaying byte-identically). Fire-rate tuning:
+every `skill_load` is a logged `tool/call`, so skill-usage rates are
+replay-derivable from session logs — that is the documented method for
+deciding when a catalog outgrows the full-listing prompt section (the
+`SkillBudget` seam in `internal/skills` marks where top-k selection or
+a `skill_search` tool would slot in; no RAG today).
 
 **Model-facing recursive subagents** (child-of-child): besides the
 client-driven `subagent/spawn|send|list` wire methods, the daemon's
@@ -1966,10 +2025,12 @@ vh-agent-harness exec bash docker/selftest/run.sh    # agent form
 `run.sh` builds the image (multi-stage `golang:1.25-bookworm` →
 `debian:bookworm-slim`; the worktree-root `.dockerignore` keeps the
 context to go.mod/go.sum/cmd/internal + the battery itself) and runs
-`battery.sh`, which drives 12 scenarios — greeting, tool round-trip,
+`battery.sh`, which drives 16 scenarios — greeting, tool round-trip,
 policy parse/load, empty-response retry, sandbox denial, retry ladder,
 subagent recursion, spill paging, Anthropic dialect, verify
-determinism, approval flow — asserting on client output,
+determinism, approval flow, resume-restart, compaction, job tailing,
+skills (the P7 three-tier delivery over a fixture catalog, including
+the replay-after-mutation crux) — asserting on client output,
 `--verify-log` on every produced log, and the mock's `/count` +
 `/journal`. The final line is `SELFTEST: N/M scenarios passed`
 (exit 1 on any failure).

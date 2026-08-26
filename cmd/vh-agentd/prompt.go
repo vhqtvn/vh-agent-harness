@@ -101,6 +101,43 @@ func buildPromptInputs(cfg *Config, specs []adapters.ToolSpec) (*prompt.Assemble
 			Body: tg.String(),
 		},
 	}
+	// P7 tier 1 — the Skills section (three-tier progressive
+	// disclosure). Content is name + SANITIZED description ONLY, one
+	// line per skill (sanitization happens at catalog load — angle
+	// brackets, code fences, and "# section" tokens are stripped, and
+	// descriptions are single-line by parser construction, so a catalog
+	// entry can never inject prompt-structural lines here), plus ONE
+	// guidance sentence pointing at skill_load — the whole point of
+	// progressive disclosure: the body costs context ONLY when loaded.
+	//
+	// Catalog absent/empty ⇒ the section is omitted ENTIRELY (no empty
+	// header — a section that renders nothing must not exist).
+	//
+	// COMPILED-PROMPT HASH IMPLICATION (same mechanism as the
+	// tool-guidance growth note above): this section's bytes are part
+	// of the assembled prompt, so a daemon whose catalog differs (added
+	// skills, first catalog, removed catalog) has a different content
+	// hash — previously compiled artifacts no longer match and serving
+	// falls back to RAW assembly (explicitly reported at startup, never
+	// silent) until --compile-prompt is rerun.
+	//
+	// SCALE VALVE (skills.SkillBudget seam): the full catalog ships
+	// when its tier-1 rendering fits the budget (~a dozen skills is far
+	// under it). When a catalog exceeds it, top-k description selection
+	// or a skill_search tool slots in HERE — selection before assembly,
+	// keeping the three-tier contract intact. NO RAG, no search today.
+	if cfg != nil && cfg.Skills != nil && cfg.Skills.Len() > 0 {
+		var sk strings.Builder
+		sk.WriteString("Skills available (name — description):\n")
+		for _, s := range cfg.Skills.Skills {
+			sk.WriteString(fmt.Sprintf("- %s: %s\n", s.Name, s.Description))
+		}
+		sk.WriteString("Call the skill_load tool with a skill's name to load its full body (pass ref for a reference file under that skill's folder).")
+		sections = append(sections, prompt.Section{
+			Number: 110, Key: "skills", Owner: "core", Required: false, CacheStable: true,
+			Body: sk.String(),
+		})
+	}
 	for _, s := range sections {
 		if err := asm.Register(s); err != nil {
 			return nil, nil, prompt.ToolCatalog{}, fmt.Errorf("vh-agentd: prompt section %s: %w", s.Key, err)

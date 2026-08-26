@@ -106,6 +106,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		spillMaxInline    = new(int64)
 		workdirRoots      = new(string)
 		askTools          = new(string)
+		skillsDir         = new(string)
 		contextTokens     = new(int)
 		compactThreshold  = new(float64)
 		compilePrompt     = new(bool)
@@ -130,6 +131,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	fs.BoolVar(compilePrompt, "compile-prompt", false, "run the prompt compilation with the current config, write the artifact under <session-dir>/compiled-prompts/, and exit — no protocol session; default --optimizer llm makes ONE compile-time LLM call and requires the variable named by --api-key-env to be set (fail-closed exit 2 without it); --optimizer dedup is the offline, keyless alternative")
 	fs.StringVar(verifyLog, "verify-log", "", "read-only mode: replay the session log at PATH, print ONE JSON line {events, format_version, surface_sha256, messages} (sha256 over the canonical derived-surface JSON) to stdout, and exit — no protocol session, no engine flags required; exit 1 with the reason on stderr on any replay error (fail-closed). Two runs on the same log print identical bytes (replay-determinism prover)")
 	fs.StringVar(askTools, "ask-tools", "", "comma-separated REGISTERED tool names whose calls ride the approval waterfall (the daemon-side ask source: ask → approval/request on the wire → the client's interactive/--json/policy approver; unanswerable = deny fail-closed). Unknown name = exit 2. Default empty = the daemon emits no asks (behavior unchanged)")
+	fs.StringVar(skillsDir, "skills-dir", "", "Agent Skills catalog directory of <name>/SKILL.md folders (agentskills.io convention; three-tier delivery: prompt lines + guarded skill_load tool + confined reference reads). Default ./.opencode/skills against the daemon cwd — absent default = zero skills with an honest startup line; an EXPLICITLY-passed missing dir = exit 2 (fail-closed). Catalog read once at startup")
 	fs.IntVar(contextTokens, "context-tokens", defaultContextTokens, "context budget in tokens anchoring the post-turn compaction trigger (surface pressure = estimated tokens over this budget; estimate is chars/4 anchored by the last provider usage report; threshold from --compact-threshold, default 0.8). At/above threshold a turn boundary shadows the surface head behind ONE adapter-generated summary — log never rewritten, replay deterministic, a failed compaction never fails the turn (deferred to the next boundary). 0 DISABLES compaction. Default 128000")
 	fs.Float64Var(compactThreshold, "compact-threshold", session.DefaultPressureThreshold, "surface-pressure ratio at which a turn boundary triggers compaction (0.8 default; must be within [0,1]; 0 takes the default). Only meaningful with a positive --context-tokens")
 	fs.BoolVar(showVersion, "version", false, "print engine and protocol versions and exit")
@@ -171,6 +173,16 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	// sibling flag. A zero budget is the documented disable path (cfg
 	// .Compaction stays zero — buildServer then arms no decorator).
 	cfg.Compaction, err = validateCompaction(*contextTokens, *compactThreshold)
+	if err != nil {
+		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
+		return 2
+	}
+	// P7 skills catalog: load ONCE here (before buildServer and the
+	// --compile-prompt path, both of which consume cfg.Skills for the
+	// prompt section and the tool catalog). Startup honesty lines
+	// (count / honest-absent / per-exclusion warnings) go to the daemon
+	// log; an explicitly-passed-but-missing dir is a usage error: exit 2.
+	cfg.Skills, err = loadSkillsCatalog(*skillsDir, log)
 	if err != nil {
 		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
 		return 2

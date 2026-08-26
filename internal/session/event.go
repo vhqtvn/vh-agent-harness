@@ -108,6 +108,31 @@ const (
 	TypeSubagentMessage = "subagent/message"
 )
 
+// Slice-P7 event types — the skill family. skill/loaded is LOG-ONLY
+// provenance: every successful skill_load tool call appends one record
+// (name, optional ref, sha256 of the returned bytes) to the durable
+// stream. The loaded body itself already rides the message-bearing
+// tool/result (the replay-from-log invariant: replay derives tool output
+// from the log, never disk), so skill/loaded adds auditability without
+// any surface change. SESSION_FORMAT_VERSION stays 0: the addition is
+// strictly additive within version 0, omitempty payload fields keep old
+// logs byte-stable, and forward compatibility is governed by the
+// fail-closed unknown-event reader.
+const (
+	TypeSkillLoaded = "skill/loaded"
+)
+
+// SkillLoadedPayload is the payload of the log-only skill/loaded
+// provenance event. Ref is the tier-3 reference path (relative to the
+// skill's folder) and is omitted for whole-SKILL.md loads; SHA256 is the
+// hex digest of the returned content — cross-checkable against the
+// tool/result recorded in the same turn.
+type SkillLoadedPayload struct {
+	Name   string `json:"name"`
+	Ref    string `json:"ref,omitempty"`
+	SHA256 string `json:"sha256"`
+}
+
 // Subagent kinds (subagent/spawned Kind field).
 const (
 	SubagentKindOneShot     = "one-shot"
@@ -173,6 +198,7 @@ var knownTypes = map[string]bool{
 	TypeSubagentReport:    true,
 	TypeSubagentSettled:   true,
 	TypeSubagentMessage:   true,
+	TypeSkillLoaded:       true,
 }
 
 // messageBearing reports whether an event type contributes a message to

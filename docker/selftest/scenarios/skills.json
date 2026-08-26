@@ -1,0 +1,6 @@
+[
+  {"tool_calls":[{"id":"sk-1","name":"skill_load","args":{"name":"clean-one"}}]},
+  {"tool_calls":[{"id":"sk-2","name":"skill_load","args":{"name":"clean-one","ref":"references/note.md"}}]},
+  {"tool_calls":[{"id":"sk-3","name":"skill_load","args":{"name":"does-not-exist"}},{"id":"sk-4","name":"skill_load","args":{"name":"clean-one","ref":"../../escape.md"}}]},
+  {"text":"skills round trip complete"}
+]

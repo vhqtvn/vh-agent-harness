@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/session"
+	"github.com/vhqtvn/vh-agent-harness/internal/skills"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/shell"
 )
 
@@ -113,6 +114,12 @@ type Config struct {
 	// DISABLES compaction — no decorator, no trigger, byte-identical
 	// turn behavior.
 	Compaction session.SessionConfig
+	// Skills is the loaded Agent Skills catalog (--skills-dir; see
+	// skills.go). nil = no catalog (honest-absent default path): the
+	// prompt omits the Skills section entirely and skill_load fails
+	// closed per call. Non-nil (even zero entries) = a catalog dir was
+	// found and loaded at startup; read ONCE — no per-turn hot-reload.
+	Skills *skills.Catalog
 }
 
 // defaultContextTokens is the --context-tokens default: 128k, a
@@ -269,6 +276,30 @@ Compaction (--context-tokens N, --compact-threshold R):
   turn, so it writes no llm/request record — the compaction/start +
   compaction/end events are the log-side audit trail.
 
+Skills (--skills-dir DIR):
+  Agent Skills catalog (agentskills.io SKILL.md convention) delivered to
+  the model through three-tier progressive disclosure: tier 1 = a Skills
+  section in the system prompt (sanitized name + description only);
+  tier 2 = the guarded skill_load tool returning a skill's full body;
+  tier 3 = reference files under a skill's folder via skill_load's ref
+  argument (confined to that skill's own directory, symlink-safe,
+  size-capped). Default DIR = ./.opencode/skills resolved against the
+  daemon's working directory: an ABSENT default is honest absence (zero
+  skills, one startup line, engine runs normally), while an
+  explicitly-passed-but-missing DIR is a fail-closed exit 2 (never a
+  silently-empty catalog). A skill that fails validation (name/folder
+  mismatch, spec limits, unparseable frontmatter — multi-line YAML
+  values are unsupported BY DESIGN) is EXCLUDED with one stderr warning
+  and the daemon continues. Invariants: a loaded SKILL.md is UNTRUSTED
+  candidate-instruction data, never system authority; allowed-tools is
+  a CEILING intersected with the registry (narrow-never-widen, never
+  a grant — audit-only footer + skill/loaded event); bundled scripts
+  NEVER auto-execute (running one goes through run_shell and its full
+  approval waterfall). The catalog is read once at startup — no
+  per-turn hot-reload. Every successful skill_load also appends a
+  log-only skill/loaded provenance event {name, ref?, sha256}; replay
+  derives tool output from the LOG, never disk.
+
 Usage:
   vh-agentd --adapter openai|anthropic --model M --base-url URL
             --api-key-env VAR --session-dir DIR [--max-tokens N]
@@ -277,6 +308,7 @@ Usage:
             [--spill-max-inline N] [--workdir-roots DIR[,DIR...]]
             [--ask-tools TOOL[,TOOL...]]
             [--context-tokens N] [--compact-threshold R]
+            [--skills-dir DIR]
             [--optimizer dedup|llm] [--compile-prompt] [--version]
   vh-agentd --verify-log PATH
 

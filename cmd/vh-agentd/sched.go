@@ -42,6 +42,12 @@ type sessionTracker struct {
 	// stay bound — their managers are drained-but-alive folds of their
 	// own logs).
 	jobsReg *jobsRegistry
+	// logsReg receives every root session's *session.Log (P7: the
+	// skill_load provenance sink resolves the executing session's log
+	// through it to append skill/loaded events; create/resume bind
+	// here). Best-effort by design — an unbound session simply gets no
+	// provenance event (the body already rides tool/result).
+	logsReg *sessionLogRegistry
 }
 
 // SetApprover forwards the wire approval bridge to the wrapped engine.
@@ -79,6 +85,9 @@ func (t *sessionTracker) NewSession(path, sessionID string, sink io.Writer) (*pr
 	if t.jobsReg != nil {
 		t.jobsReg.bindSession(es, sessionID)
 	}
+	if t.logsReg != nil {
+		t.logsReg.bind(es, sessionID)
+	}
 	return es, nil
 }
 
@@ -104,6 +113,9 @@ func (t *sessionTracker) ResumeSession(sessionID string, sink io.Writer) (*proto
 	t.active = es
 	if t.jobsReg != nil {
 		t.jobsReg.bindSession(es, sessionID)
+	}
+	if t.logsReg != nil {
+		t.logsReg.bind(es, sessionID)
 	}
 	return es, sum, nil
 }

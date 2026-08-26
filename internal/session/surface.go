@@ -56,7 +56,8 @@ func FoldSurface(events []Event) (*Surface, error) {
 			case TypeSessionHeader, TypeLLMRequest, TypeToolCall, TypeTurnBegin, TypeTurnEnd,
 				TypeCompactionStart, TypeCompactionEnd, TypeLLMRetry, TypeLLMRetryStarted,
 				TypeJobEnqueued, TypeJobStarted, TypeJobSettled,
-				TypeSubagentSpawned, TypeSubagentSettled:
+				TypeSubagentSpawned, TypeSubagentSettled,
+				TypeSkillLoaded:
 				// log-only: contributes nothing to the surface
 			default:
 				if ev.Ignorable {

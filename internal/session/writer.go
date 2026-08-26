@@ -304,6 +304,16 @@ func (l *Log) AppendSubagentMessage(childID, from, text string) (Event, error) {
 	})
 }
 
+// AppendSkillLoaded records the log-only provenance event for one
+// successful skill_load (whole SKILL.md or a tier-3 ref). The loaded body
+// already rides the message-bearing tool/result of the same turn, so this
+// event adds auditability only — it contributes nothing to the surface.
+func (l *Log) AppendSkillLoaded(name, ref, sha256 string) (Event, error) {
+	return l.Append(TypeSkillLoaded, nil, SkillLoadedPayload{
+		Name: name, Ref: ref, SHA256: sha256,
+	})
+}
+
 // Events returns a copy of the events appended so far (live fold input).
 func (l *Log) Events() []Event {
 	l.mu.RLock()

@@ -27,6 +27,7 @@ import (
 
 	"github.com/vhqtvn/vh-agent-harness/internal/adapters"
 	"github.com/vhqtvn/vh-agent-harness/internal/session"
+	"github.com/vhqtvn/vh-agent-harness/internal/tools/skillload"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/spillread"
 )
 
@@ -91,8 +92,11 @@ func TestDaemonToolSetIncludesSpillRead(t *testing.T) {
 	if !got["read"] || !got["write"] || !got["edit"] || !got["glob"] || !got["search"] {
 		t.Fatalf("model-facing file tools not registered: %v", got)
 	}
-	if len(eng.TurnOptions().Tools) != 11 {
-		t.Fatalf("turn options do not advertise all eleven tools: %+v", eng.TurnOptions().Tools)
+	if !got[skillload.Name] {
+		t.Fatalf("skill_load not registered (always advertised, catalog-independent): %v", got)
+	}
+	if len(eng.TurnOptions().Tools) != 12 {
+		t.Fatalf("turn options do not advertise all twelve tools: %+v", eng.TurnOptions().Tools)
 	}
 	// The per-session policy seam is wired: a new session's log carries
 	// an armed policy with a FileSpillStore under <dir>/<id>.spill/.

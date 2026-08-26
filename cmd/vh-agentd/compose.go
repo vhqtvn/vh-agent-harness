@@ -27,10 +27,12 @@ import (
 	"github.com/vhqtvn/vh-agent-harness/internal/prompt"
 	"github.com/vhqtvn/vh-agent-harness/internal/protocol"
 	"github.com/vhqtvn/vh-agent-harness/internal/session"
+	"github.com/vhqtvn/vh-agent-harness/internal/skills"
 	"github.com/vhqtvn/vh-agent-harness/internal/subagents"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/filetools"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/shell"
+	"github.com/vhqtvn/vh-agent-harness/internal/tools/skillload"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/spillread"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/subagenttools"
 )
@@ -92,9 +94,15 @@ func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.
 	// managers bind at create/resume; child-turn managers bind per turn.
 	reg := subagents.NewRegistry()
 	jobsReg := newJobsRegistry()
+	// P7: the session→log registry the skill_load provenance sink
+	// resolves the EXECUTING session's *session.Log through (created
+	// BEFORE daemonTools — the tool closes over its provenance closure —
+	// and handed to the tracker AFTER, avoiding a tracker→engine
+	// circularity; the jobsRegistry pattern re-scoped).
+	logsReg := newSessionLogRegistry()
 	shellCfg := shellConfigFor(cfg)
 	shellCfg.Background = jobsReg.dispatcher()
-	defs := daemonTools(realNow, cfg, reg, shellCfg)
+	defs := daemonTools(realNow, cfg, reg, shellCfg, logsReg.provenance())
 	specs := make([]adapters.ToolSpec, 0, len(defs))
 	for _, d := range defs {
 		specs = append(specs, d.Spec())
@@ -123,7 +131,7 @@ func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.
 			}
 		}
 	}
-	tracker := &sessionTracker{Engine: engine, jobsReg: jobsReg}
+	tracker := &sessionTracker{Engine: engine, jobsReg: jobsReg, logsReg: logsReg}
 
 	// P5 compaction trigger: decorate the engine's TurnRunner with the
 	// post-turn surface-pressure check (see compact.go for the seam
@@ -177,11 +185,11 @@ func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.
 // compile path (--compile-prompt): the catalog must describe the same
 // tool set the serving daemon advertises, so the artifact hash matches.
 // The registry is per-call (specs only — the tool BODIES are never
-// executed on this path).
+// executed on this path, so the skills provenance sink is nil).
 func toolSpecsForPrompt(cfg *Config) []adapters.ToolSpec {
 	// Spec-only callers never execute tool bodies, so the background
 	// dispatcher stays unset (the SCHEMA is identical either way).
-	defs := daemonTools(realNow, cfg, subagents.NewRegistry(), shellConfigFor(cfg))
+	defs := daemonTools(realNow, cfg, subagents.NewRegistry(), shellConfigFor(cfg), nil)
 	specs := make([]adapters.ToolSpec, 0, len(defs))
 	for _, d := range defs {
 		specs = append(specs, d.Spec())
@@ -259,13 +267,17 @@ func shellConfigFor(cfg *Config) shell.Config {
 // internal/tools/shell (the ONE shared shellCfg — background jobs run
 // the same exec path through the same config), spill_read — the
 // retrieval path for spilled oversize results — the MODEL-FACING
-// subagent family (resolved through the session registry reg), and the
+// subagent family (resolved through the session registry reg), the
 // MODEL-FACING FILE FAMILY (read/write/edit/glob/search), confined to
 // the same WorkdirRoots that run_shell's absolute-workdir policy
-// consults (one root set for every path-taking surface). See
-// shellConfigFor for the config postures; now is injected for the
-// deterministic clock tool.
-func daemonTools(now func() time.Time, cfg *Config, reg *subagents.Registry, shellCfg shell.Config) []tools.ToolDefinition {
+// consults (one root set for every path-taking surface), and skill_load
+// — tier 2 of the P7 skills delivery, ALWAYS registered (the
+// advertised set is independent of catalog contents: with no catalog
+// every call fails closed "no skills catalog"). skillsProv is the
+// session-resolving provenance sink for skill/loaded events (nil for
+// spec-only callers — bodies never run there). See shellConfigFor for
+// the config postures; now is injected for the deterministic clock tool.
+func daemonTools(now func() time.Time, cfg *Config, reg *subagents.Registry, shellCfg shell.Config, skillsProv skillload.Provenance) []tools.ToolDefinition {
 	// File-family roots: cfg is nil only for spec-only callers (the
 	// offline --compile-prompt catalog); the tool BODIES never run
 	// there, so the process cwd is a harmless stand-in that keeps the
@@ -333,6 +345,14 @@ func daemonTools(now func() time.Time, cfg *Config, reg *subagents.Registry, she
 		spillread.Definition(spillRoot, spillInline),
 		shell.Definition(shellCfg),
 	}
+	// P7 skill_load: catalog from cfg.Skills (nil ⇒ fail-closed per
+	// call — the tool stays advertised); ref cap = the read-tool cap
+	// (skillload defaults it when 0).
+	var skillsCat *skills.Catalog
+	if cfg != nil {
+		skillsCat = cfg.Skills
+	}
+	defs = append(defs, skillload.Definition(skillsCat, 0, skillsProv))
 	defs = append(defs, filetools.Definitions(filetools.Config{Roots: fileRoots})...)
 	defs = append(defs, subagenttools.Definitions(reg)...)
 	return defs

@@ -72,8 +72,12 @@ func TestBuildServerBothAdapters(t *testing.T) {
 			if !got["subagent_spawn"] || !got["subagent_send"] {
 				t.Fatalf("subagent tools not registered: %v", got)
 			}
-			if len(eng.TurnOptions().Tools) != 11 {
-				t.Fatalf("turn options do not advertise all eleven tools: %+v", eng.TurnOptions().Tools)
+			// P7: skill_load is always advertised (catalog-independent).
+			if !got["skill_load"] {
+				t.Fatalf("skill_load not registered: %v", got)
+			}
+			if len(eng.TurnOptions().Tools) != 12 {
+				t.Fatalf("turn options do not advertise all twelve tools: %+v", eng.TurnOptions().Tools)
 			}
 			if eng.TurnOptions().Retry == nil {
 				t.Fatal("retry ladder not armed on the daemon turn path")
@@ -100,7 +104,7 @@ func TestDogfoodToolsExecute(t *testing.T) {
 		t.Fatalf("validate: %v", err)
 	}
 	p := tools.NewPipeline()
-	for _, d := range daemonTools(func() time.Time { return fixed }, offCfg, subagents.NewRegistry(), shellConfigFor(offCfg)) {
+	for _, d := range daemonTools(func() time.Time { return fixed }, offCfg, subagents.NewRegistry(), shellConfigFor(offCfg), nil) {
 		if err := p.Register(d); err != nil {
 			t.Fatalf("register %s: %v", d.Name, err)
 		}
