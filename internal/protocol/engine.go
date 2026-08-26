@@ -73,6 +73,21 @@ type FileEngine struct {
 	// schedule/remove fail closed -32000, schedule/list is an honest
 	// empty.
 	Schedules ScheduleManager
+	// TurnRunnerDecorator, when non-nil, wraps the runner TurnRunner()
+	// returns — the seam POST-TURN engine concerns ride (P5: the
+	// daemon's compaction trigger decorates the pipeline so the
+	// surface-pressure check runs AFTER a successfully completed turn
+	// and INSIDE the handler's per-session turn gate, serialized with
+	// turns by construction — no new locking surface). Assignment
+	// follows the Schedules discipline: set by the composition root
+	// BEFORE Serve (no session can exist yet, so the read on every
+	// later TurnRunner() call is race-free) and never mutated after.
+	// The decorator MUST preserve RunTurn's contract: a failed inner
+	// turn returns unchanged, and the decorator's own concerns must
+	// NEVER fail the turn (post-turn side concerns are best-effort at
+	// the boundary, not turn outcomes). Nil (the zero value) keeps
+	// TurnRunner() returning the bare pipeline.
+	TurnRunnerDecorator func(TurnRunner) TurnRunner
 	// SpillPolicyFor, when non-nil, arms the oversize tool-result spill
 	// (the commit-time preview+locator rewrite, see internal/session
 	// SpillPolicy) on EVERY NewSession log — the per-session seam, since
@@ -230,8 +245,17 @@ func (e *FileEngine) Adapter() adapters.Adapter { return e.Ad }
 func (e *FileEngine) TurnOptions() tools.TurnOptions { return e.TurnOpts }
 
 // TurnRunner returns the tool pipeline (built lazily so the approval
-// bridge injected by NewServer is already in place).
-func (e *FileEngine) TurnRunner() TurnRunner { return e.Pipeline() }
+// bridge injected by NewServer is already in place), wrapped by the
+// engine's TurnRunnerDecorator when one is armed (set BEFORE Serve;
+// see the field). The decorator is re-applied per call — it must be a
+// pure wrapper (stateless over calls), so wrapping twice is harmless.
+func (e *FileEngine) TurnRunner() TurnRunner {
+	r := TurnRunner(e.Pipeline())
+	if e.TurnRunnerDecorator != nil {
+		r = e.TurnRunnerDecorator(r)
+	}
+	return r
+}
 
 // Pipeline builds (once) and returns the tool pipeline.
 func (e *FileEngine) Pipeline() *tools.Pipeline {

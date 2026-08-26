@@ -193,6 +193,13 @@ func parseResumeFlag(args []string) (asked bool, id string, filtered []string, e
 			// not look like another flag.
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				next := args[i+1]
+				if next == "" {
+					// F5: a space-separated EMPTY id is the same usage
+					// error as the --resume= equals form (`--resume ""`) —
+					// swallowing it silently left Resume unset and turned
+					// the flag into a no-op.
+					return false, "", nil, usagef("--resume must not be empty (omit the value to resume the last session, or pass an id: --resume <sessionId>)")
+				}
 				if id != "" && id != next {
 					return false, "", nil, usagef("conflicting --resume ids (%q and %q) — pass one id", id, next)
 				}

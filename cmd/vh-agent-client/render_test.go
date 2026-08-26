@@ -186,3 +186,36 @@ func TestJSONRendererApprovalAndProtocolErrorVerbatim(t *testing.T) {
 		t.Fatalf("json approval/protocol-error output = %q", out)
 	}
 }
+
+// TestHumanRendererCompactionLine (P5): the compaction bracket renders
+// ONE honest line at compaction/end — start and summary are silent
+// (an unmatched start — a refused compaction — is surfaced by the
+// daemon's stderr, not invented here), the count comes from the paired
+// summary's citations, and the generation from the end payload. An end
+// without a prior summary (subscription mid-bracket) renders only what
+// it carries.
+func TestHumanRendererCompactionLine(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	r.RenderEvent(eventParams(t, session.TypeCompactionStart, `{"reason":"turn-boundary pressure","pressure":0.93,"shadowedRange":[0,2]}`))
+	if got := buf.String(); got != "" {
+		t.Fatalf("compaction/start must render nothing, got %q", got)
+	}
+	r.RenderEvent(eventParams(t, session.TypeCompactionSummary, `{"text":"condensed","sourceEventSeqs":[3,5,9],"shadowedRange":[0,2],"replaceGeneration":1}`))
+	if got := buf.String(); got != "" {
+		t.Fatalf("compaction/summary must render nothing on its own, got %q", got)
+	}
+	r.RenderEvent(eventParams(t, session.TypeCompactionEnd, `{"summarySeq":12,"replaceGeneration":1}`))
+	if got, want := buf.String(), "⤾ compacted: 3 events shadowed (generation 1)\n"; got != want {
+		t.Fatalf("compaction line = %q, want %q", got, want)
+	}
+}
+
+func TestHumanRendererCompactionEndAlone(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	r.RenderEvent(eventParams(t, session.TypeCompactionEnd, `{"summarySeq":12,"replaceGeneration":2}`))
+	if got, want := buf.String(), "⤾ compacted (generation 2)\n"; got != want {
+		t.Fatalf("unpaired compaction/end line = %q, want %q", got, want)
+	}
+}

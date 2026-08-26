@@ -335,6 +335,30 @@ func TestResumeEmptyExplicitFormStillUsageError(t *testing.T) {
 	}
 }
 
+// TestResumeEmptySpaceSeparatedFormUsageError (F5 rider): the
+// SPACE-SEPARATED empty id (`--resume ""`) is the same usage error as
+// the equals form — it used to set id="" silently, turning the flag
+// into a no-op instead of exit 2.
+func TestResumeEmptySpaceSeparatedFormUsageError(t *testing.T) {
+	for _, args := range [][]string{
+		{"--prompt", "x", "--resume", ""},
+		{"--resume", "", "--exec", "myd"},
+	} {
+		_, err := parseArgs(args, fixedTTY(false), discard())
+		if err == nil || exitCodeFor(err) != 2 {
+			t.Fatalf("args %v: space-separated empty --resume must be a usage error (exit 2), got %v", args, err)
+		}
+	}
+	// Post-boundary (daemon region): untouched, verbatim passthrough.
+	cfg, err := parseArgs([]string{"--prompt", "x", "--exec", "myd", "--resume", ""}, fixedTTY(false), discard())
+	if err != nil {
+		t.Fatalf("post-boundary empty --resume belongs to the daemon, not a client error: %v", err)
+	}
+	if cfg.Resume || cfg.ResumeID != "" {
+		t.Fatalf("post-boundary empty --resume must not touch the client posture: Resume=%v ResumeID=%q", cfg.Resume, cfg.ResumeID)
+	}
+}
+
 // TestResumeConflictingExplicitIDsUsageError (hotfix R6): two explicit
 // --resume forms naming DIFFERENT sessions used to last-win silently;
 // they are now a fail-closed usage error (exit 2), consistent with the

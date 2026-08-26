@@ -124,6 +124,19 @@ func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.
 	}
 	tracker := &sessionTracker{Engine: engine}
 
+	// P5 compaction trigger: decorate the engine's TurnRunner with the
+	// post-turn surface-pressure check (see compact.go for the seam
+	// rationale). Armed ONLY when the budget is positive — the disable
+	// path (--context-tokens 0) keeps the bare pipeline, byte-identical
+	// turn behavior. Follows the Schedules discipline: assigned here,
+	// BEFORE Serve (no session can exist yet), never mutated after.
+	if cfg.Compaction.ContextBudgetTokens > 0 {
+		compCfg := cfg.Compaction
+		engine.TurnRunnerDecorator = func(inner protocol.TurnRunner) protocol.TurnRunner {
+			return newCompactingTurnRunner(inner, compCfg, nil)
+		}
+	}
+
 	// B2 + child-of-child: arm the subagent surface — the REAL executor
 	// (child turns run through this same pipeline + adapter + retry
 	// ladder once the approval bridge is attached below, and any child

@@ -37,6 +37,14 @@
 #     pointer (session/resume over the wire) and continues the SAME
 #     durable log — surface continuity, derived title, event-count
 #     growth, and the deterministic replay prover across the restart.
+#   - compaction (P5) drives the post-turn compaction trigger over the
+#     real binaries with a tiny --context-tokens budget. The mock
+#     script accounts for the SUMMARIZE call (a real LLM call through
+#     the same adapter, consumed as step 2 BETWEEN the tool turn and
+#     the continuation's final answer); the KV-prefix request shape is
+#     asserted from the mock journal, and the compacted log must pass
+#     the deterministic replay prover with the post-compaction
+#     message count.
 #   - Cross-run byte-comparison of DIFFERENT sessions is a NON-GOAL —
 #     session ids are random by design (sess-<random hex>). Determinism
 #     is proven per-log: two --verify-log runs on the SAME log must
@@ -544,6 +552,86 @@ sc_resume_restart() {
     stop_mock
 }
 
+# sc_compaction (P5): the compaction wire crux over REAL binaries. A
+# tiny --context-tokens budget makes ONE tool turn cross the pressure
+# threshold; the turn-boundary trigger shadows the surface head behind
+# the mock's summarize response (the summarize call IS an LLM call
+# through the same adapter — the mock script accounts for it as step 2,
+# BEFORE the continuation turn's final answer). Asserts: the client
+# renders the one-line compaction notice; the daemon logs the shadow
+# summary; the mock saw exactly 3 chat calls (turn, summarize,
+# continuation); the summarize request is a KV-CACHE PREFIX of the
+# running conversation (journal: req2's first messages == req1's, plus
+# exactly one appended instruction); the durable log carries the full
+# compaction bracket with citations; and the compacted log replays
+# deterministically with the post-compaction message count (5 = summary
+# + 2 retained results + continuation prompt + final answer; the
+# un-compacted surface would be 6).
+sc_compaction() {
+    local sc=compaction
+    fresh_session "$sc"
+    start_mock "$SCEN/compaction.json"
+    # 1200-char working brief: surface ≈ 1224 chars ≈ 306 estimated
+    # tokens over a 300-token budget ⇒ pressure ≈ 1.02 ≥ 0.8. Post-
+    # compaction surface ≈ 41 tokens ⇒ no re-trigger at later
+    # boundaries.
+    local big
+    big=$(printf 'x%.0s' $(seq 1 1200))
+    run_client --session-dir "$SESS" --prompt "$big" \
+        --exec "$DAEMON" --adapter openai --model mock-model \
+        --base-url "$MOCK_URL/v1" --api-key-env MOCK_KEY \
+        --context-tokens 300
+    check "$sc" "client exits 0 (compaction never fails the turn)" [ "$CODE" -eq 0 ]
+    check "$sc" "final answer correct after compaction" \
+        grep -Fxq "compaction e2e final: surface was shadowed and continued" "$WORK/client.out"
+    check "$sc" "client rendered the one-line compaction notice" \
+        grep -q "⤾ compacted: 2 events shadowed (generation 1)" "$WORK/client.err"
+    check "$sc" "daemon logged the shadow summary" \
+        grep -q "compaction: shadowed surface messages \[0,2)" "$WORK/client.err"
+    local n
+    n=$(chat_count)
+    check "$sc" "mock saw exactly 3 chat calls (turn + summarize + continuation) — got ${n:-none}" \
+        [ "${n:-0}" -eq 3 ]
+    # KV-prefix proof from the request journal: the summarize request
+    # (req 2) carries req 1's messages verbatim as its head, exactly
+    # one appended instruction message, and the same tool ads.
+    local journal kv pfx len4 lastr role tools
+    journal=$(journal_raw)
+    pfx=$(jq -c '[.[] | select(.path=="/v1/chat/completions")] | .[1].body.messages[0:2] == .[0].body.messages[0:2]' <<<"$journal")
+    check "$sc" "summarize request is a KV prefix of the running conversation (journal)" \
+        [ "$pfx" = "true" ]
+    len4=$(jq -c '[.[] | select(.path=="/v1/chat/completions")] | .[1].body.messages | length' <<<"$journal")
+    check "$sc" "summarize request = prefix + ONE instruction (4 messages) — got ${len4:-none}" \
+        [ "${len4:-0}" -eq 4 ]
+    lastr=$(jq -r '[.[] | select(.path=="/v1/chat/completions")] | .[1].body.messages[3].role' <<<"$journal")
+    check "$sc" "appended instruction rides a user-role message — got ${lastr:-none}" \
+        [ "$lastr" = "user" ]
+    tools=$(jq -c '[.[] | select(.path=="/v1/chat/completions")] | .[1].body.tools | map(.function.name) | index("echo") != null' <<<"$journal")
+    check "$sc" "summarize request advertises the same tools (echo present)" \
+        [ "$tools" = "true" ]
+    # Durable log: the full bracket, the citations, the generation.
+    newest_log
+    local cstart csum cend cgen csrc
+    cstart=$(jq -s '[.[] | select(.type=="compaction/start")] | length' "$LOG")
+    csum=$(jq -s '[.[] | select(.type=="compaction/summary")] | length' "$LOG")
+    cend=$(jq -s '[.[] | select(.type=="compaction/end")] | length' "$LOG")
+    check "$sc" "log carries compaction start+summary+end — ${cstart:-0}/${csum:-0}/${cend:-0}" \
+        bash -c "[ '${cstart:-0}' -eq 1 ] && [ '${csum:-0}' -eq 1 ] && [ '${cend:-0}' -eq 1 ]"
+    cgen=$(jq -s '[.[] | select(.type=="compaction/summary")] | .[0].payload.replaceGeneration' "$LOG")
+    csrc=$(jq -s '[.[] | select(.type=="compaction/summary")] | .[0].payload.sourceEventSeqs | length' "$LOG")
+    check "$sc" "summary cites 2 shadowed events at generation 1 — gen=${cgen:-?} srcs=${csrc:-?}" \
+        bash -c "[ '${cgen:-0}' -eq 1 ] && [ '${csrc:-0}' -eq 2 ]"
+    # Post-compaction surface + deterministic replay of the compacted
+    # log: 5 messages (summary + 2 retained + continuation + final).
+    local vmsg
+    "$DAEMON" --verify-log "$LOG" >"$WORK/cv.out" 2>"$WORK/cv.err"
+    vmsg=$(jq -r .messages "$WORK/cv.out")
+    check "$sc" "verify-log reports the post-compaction surface (5 messages) — got ${vmsg:-none}" \
+        [ "${vmsg:-0}" -eq 5 ]
+    check "$sc" "compacted log --verify-log deterministic" verify_log_ok "$LOG"
+    stop_mock
+}
+
 # ---- run the battery -------------------------------------------------------
 
 note "=== native-engine docker self-test battery ==="
@@ -560,6 +648,7 @@ run_scenario anthropic_dialect sc_anthropic_dialect
 run_scenario verify_determinism sc_verify_determinism
 run_scenario approval_flow sc_approval_flow
 run_scenario resume_restart sc_resume_restart
+run_scenario compaction sc_compaction
 
 TOTAL=$((PASS + FAIL))
 echo

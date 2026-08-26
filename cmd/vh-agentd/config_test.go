@@ -118,6 +118,26 @@ func TestRunInvalidAPIKeyEnvNameExits2(t *testing.T) {
 	}
 }
 
+// TestRunCompactThresholdNaNExits2: Go's flag parser accepts "NaN" for
+// a float64 flag (strconv.ParseFloat), so a literal --compact-threshold
+// NaN reaches validation as a real NaN — and NaN slips both sides of a
+// `<0 || >1` range check. The binary-level refusal must be the explicit
+// non-finite guard on the same exit-2 path as sibling flags. The env
+// key is deliberately NOT set: validateCompaction runs BEFORE the
+// credential check, so the finite-ratio message on stderr proves the
+// guard fired (with the bug, this same run exits 2 at the credential
+// check with the wrong message — no serving, no hang).
+func TestRunCompactThresholdNaNExits2(t *testing.T) {
+	code, _, stderr := runArgs(t, []string{
+		"--adapter", "openai", "--model", "m", "--base-url", "http://x.test",
+		"--api-key-env", "K", "--session-dir", t.TempDir(),
+		"--compact-threshold", "NaN",
+	}, map[string]string{})
+	if code != 2 || !strings.Contains(stderr, "--compact-threshold") || !strings.Contains(stderr, "finite") {
+		t.Fatalf("compact-threshold NaN: exit=%d stderr=%q, want 2 + finite-ratio rejection", code, stderr)
+	}
+}
+
 // TestRunRelativeSessionDirExits2: a relative --session-dir is rejected
 // at validation (fail-loud). It would otherwise be wired into the
 // workspace-write Landlock RWDirs and resolve against the sandboxed

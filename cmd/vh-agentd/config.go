@@ -5,12 +5,14 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
+	"github.com/vhqtvn/vh-agent-harness/internal/session"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/shell"
 )
 
@@ -105,6 +107,49 @@ type Config struct {
 	// behavior unchanged. Names are validated against the registered
 	// tool set at startup — an unknown name exits 2 fail-closed.
 	AskTools []string
+	// Compaction is the validated context-budget policy for the
+	// post-turn compaction trigger (--context-tokens +
+	// --compact-threshold; see compact.go). The zero value (budget 0)
+	// DISABLES compaction — no decorator, no trigger, byte-identical
+	// turn behavior.
+	Compaction session.SessionConfig
+}
+
+// defaultContextTokens is the --context-tokens default: 128k, a
+// conservative modern context window. Compaction therefore arms by
+// default but does not fire until the surface genuinely approaches the
+// budget; operators with a smaller provider window pass the real
+// number, and 0 disables the whole subsystem.
+const defaultContextTokens = 128000
+
+// validateCompaction checks the compaction flag pair fail-closed (the
+// same exit-2 posture as every sibling flag) and returns the derived
+// session policy: budget <= 0 is the documented DISABLE path (zero
+// SessionConfig); a threshold of 0 means "session default" (0.8);
+// anything non-finite (NaN, ±Inf), negative, or > 1 is a usage error.
+func validateCompaction(contextTokens int, compactThreshold float64) (session.SessionConfig, error) {
+	if contextTokens < 0 {
+		return session.SessionConfig{}, fmt.Errorf("invalid --context-tokens %d: must be >= 0 (a positive token budget arms the compaction trigger; 0 disables compaction)", contextTokens)
+	}
+	// Non-finite guard BEFORE the range check: NaN compares false on
+	// both sides of `< 0 || > 1` and would sail through to become the
+	// armed PressureThreshold (±Inf only happen to trip a side — the
+	// refusal must not depend on that accident).
+	if math.IsNaN(compactThreshold) || math.IsInf(compactThreshold, 0) {
+		return session.SessionConfig{}, fmt.Errorf("invalid --compact-threshold %f: must be a finite ratio in [0,1] (the surface-pressure ratio at which a turn boundary compacts)", compactThreshold)
+	}
+	if compactThreshold < 0 || compactThreshold > 1 {
+		return session.SessionConfig{}, fmt.Errorf("invalid --compact-threshold %f: must be within [0,1] (the surface-pressure ratio at which a turn boundary compacts; 0 takes the 0.8 default)", compactThreshold)
+	}
+	if contextTokens == 0 {
+		// Disabled: the threshold is moot, but a garbage value still
+		// refuses above — a nonsense threshold must never pass silent.
+		return session.SessionConfig{}, nil
+	}
+	return session.SessionConfig{
+		ContextBudgetTokens: contextTokens,
+		PressureThreshold:   compactThreshold,
+	}, nil
 }
 
 // usageDoc documents credential handling on the help surface (the key is
@@ -203,6 +248,27 @@ Ask routing (--ask-tools run_shell[,TOOL...]):
   registered tool set at startup: an unknown name exits 2. Default
   (omit the flag) = the daemon emits no asks, behavior unchanged.
 
+Compaction (--context-tokens N, --compact-threshold R):
+  After every successfully completed parent-session turn the daemon
+  checks surface pressure (estimated tokens over the context budget;
+  the estimate is chars/4 anchored by the last provider usage report)
+  and, at or above the threshold, compacts the session surface: the
+  head of the message surface is shadowed behind ONE user-role summary
+  (citing every shadowed event, so the pre-compaction surface stays
+  recoverable from the log) while the recent tail is retained. The
+  event log is NEVER rewritten — replay determinism holds. The summary
+  is produced by ONE LLM call through the same adapter, built as a
+  prefix of the running conversation (same system prompt + tools +
+  the shadowed messages, one instruction appended) so the provider's
+  KV cache absorbs it. A failed or refused compaction NEVER fails the
+  turn: the surface stays un-compacted, one stderr line is logged, and
+  the next turn boundary retries. --context-tokens 0 disables the
+  subsystem outright. Default budget 128000, default threshold 0.8.
+  v1 compacts parent sessions only (subagent children are short-lived;
+  documented posture). Known audit gap: the summarize call is not a
+  turn, so it writes no llm/request record — the compaction/start +
+  compaction/end events are the log-side audit trail.
+
 Usage:
   vh-agentd --adapter openai|anthropic --model M --base-url URL
             --api-key-env VAR --session-dir DIR [--max-tokens N]
@@ -210,6 +276,7 @@ Usage:
             [--sandbox off|read-only|workspace-write]
             [--spill-max-inline N] [--workdir-roots DIR[,DIR...]]
             [--ask-tools TOOL[,TOOL...]]
+            [--context-tokens N] [--compact-threshold R]
             [--optimizer dedup|llm] [--compile-prompt] [--version]
   vh-agentd --verify-log PATH
 

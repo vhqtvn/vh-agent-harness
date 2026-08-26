@@ -1374,6 +1374,7 @@ vh-agentd --adapter openai|openaicompat|anthropic --model <name> \
   [--spill-max-inline N] \
   [--workdir-roots DIR[,DIR...]] \
   [--ask-tools TOOL[,TOOL...]] \
+  [--context-tokens N] [--compact-threshold R] \
   [--optimizer dedup|llm]
 ```
 
@@ -1420,6 +1421,26 @@ preview + opaque locator; the model pages the bytes back via the
 `spill_read` tool with `offset`/`length` windows that always fit
 inside the inline cap by construction (§4d of the protocol doc; replay
 never depends on spill files).
+
+`--context-tokens N` (default 128000, `0` disables) and
+`--compact-threshold R` (default 0.8) arm session compaction (§4f of
+the protocol doc): after every successfully completed parent-session
+turn the daemon checks surface pressure (estimated tokens — surface
+chars/4 anchored by the last provider usage report — over the budget)
+and, at or above the threshold, shadows the surface head behind ONE
+user-role summary message citing every shadowed event, retaining the
+recent tail. The event log is never rewritten (replay determinism
+holds; the pre-compaction surface stays recoverable from the
+citations). The summary comes from ONE LLM call through the same
+adapter, built as a KV-cache prefix of the running conversation (same
+system prompt + tools + the shadowed messages, one instruction
+appended), so providers absorb it from cache. A failed or refused
+compaction (provider error, empty answer, summary not strictly
+smaller) NEVER fails the turn: the surface stays un-compacted, one
+stderr line is logged, and the next turn boundary retries. v1 compacts
+parent sessions only (subagent children are short-lived). The
+`compaction/*` events surface on the wire like any other session
+event; the reference client renders one `⤾ compacted: …` line.
 
 **Schedule wire surface** (`schedule/add|list|remove`, protocol doc
 §4c): time-based job triggers alongside the manual `session/dispatch`.
@@ -1594,14 +1615,15 @@ vh-agent-client [--session-dir DIR] [--json] [--prompt TEXT] [--repl] \
 - `--resume [ID]` (P4) — resume a prior session over the wire: with an
   ID that exact session, without it the last-session pointer. The
   existing log is NEVER truncated (see "Resume" below); missing
-  pointer = exit 2, unknown id = typed engine error exit 1, and two
-  explicit `--resume` forms naming DIFFERENT sessions = exit 2
-  (conflicting ids — repeating the same id is idempotent and legal).
-  Mutually exclusive with `--new`. This is a CLIENT flag: it is
-  recognized only before the `--exec` boundary — a daemon-side
-  `--resume ...` in the exec spec passes through to the daemon
-  verbatim, exactly like every other token after the daemon binary
-  name.
+  pointer = exit 2, unknown id = typed engine error exit 1, an EMPTY
+  id — `--resume=` or `--resume ""` — = exit 2 (fail-closed, same
+  posture as `--policy`), and two explicit `--resume` forms naming
+  DIFFERENT sessions = exit 2 (conflicting ids — repeating the same
+  id is idempotent and legal). Mutually exclusive with `--new`. This
+  is a CLIENT flag: it is recognized only before the `--exec`
+  boundary — a daemon-side `--resume ...` in the exec spec passes
+  through to the daemon verbatim, exactly like every other token
+  after the daemon binary name.
 - `--json` — machine mode: NDJSON events verbatim on stdout (no
   rendering), the final prompt result as the last line, and approval
   answers as JSON lines (`{"id":"<approvalId>","approve":bool}`) on

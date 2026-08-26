@@ -88,6 +88,11 @@ type humanRenderer struct {
 	w  io.Writer
 	mu sync.Mutex
 	turnEndTracker
+	// compShadowed stashes the pending compaction's shadowed-event
+	// count (observed at compaction/summary) for the one-line render
+	// at compaction/end — the end payload carries the generation but
+	// not the count, so the pair renders honestly from both events.
+	compShadowed int
 }
 
 func newHumanRenderer(w io.Writer) *humanRenderer { return &humanRenderer{w: w} }
@@ -184,6 +189,34 @@ func (h *humanRenderer) RenderEvent(params json.RawMessage) {
 		}
 		// clean turn/end renders nothing (the final text / next prompt
 		// is the signal); tracking happened in observe.
+	case session.TypeCompactionStart, session.TypeCompactionSummary:
+		// The compaction bracket renders nothing ON ITS OWN: start is
+		// the log-only lock (an unmatched one — a refused or crashed
+		// compaction — is surfaced by the daemon's stderr line, not
+		// invented here), and the summary's text is engine bookkeeping
+		// until the bracket commits. The summary stashes its shadowed
+		// count; compaction/end renders the ONE honest line.
+		if ev.Type == session.TypeCompactionSummary {
+			var p session.CompactionSummaryPayload
+			_ = json.Unmarshal(ev.Payload, &p)
+			h.mu.Lock()
+			h.compShadowed = len(p.SourceEventSeqs)
+			h.mu.Unlock()
+		}
+	case session.TypeCompactionEnd:
+		var p session.CompactionEndPayload
+		_ = json.Unmarshal(ev.Payload, &p)
+		h.mu.Lock()
+		n := h.compShadowed
+		h.compShadowed = 0
+		h.mu.Unlock()
+		if n > 0 {
+			h.line("⤾ compacted: %d events shadowed (generation %d)", n, p.ReplaceGeneration)
+		} else {
+			// The paired summary was not observed (subscription began
+			// mid-bracket): render only what the end event carries.
+			h.line("⤾ compacted (generation %d)", p.ReplaceGeneration)
+		}
 	default:
 		h.line("· %s", ev.Type)
 	}

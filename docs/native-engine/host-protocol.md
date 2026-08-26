@@ -507,6 +507,49 @@ testdata/` lock their shapes.
   whole listing closed naming the file; a TORN final record is
   tolerated (the crashed session still lists).
 
+## 4f. Compaction (P5): post-turn surface-pressure trigger
+
+Sessions stop growing unbounded: after every successfully completed
+PARENT-session `session/prompt` turn (never mid-turn, never on subagent
+child turns — children are short-lived by design), the daemon checks
+surface pressure against the context budget (`--context-tokens N`,
+default 128000; `--compact-threshold R`, default 0.8; the estimate is
+surface chars/4 anchored by the last provider `llm/response` usage
+report). At or above the threshold the daemon compacts:
+
+- **Surface-only, log-preserving.** The head of the derived message
+  surface (`[0, len-retain)`, retain-tail 2) is shadowed behind ONE
+  user-role summary message citing every shadowed event's seq
+  (`compaction/start` → `compaction/summary` → `compaction/end` on the
+  durable log; the fold's `replaceGeneration` advances). The event log
+  is NEVER rewritten — replay determinism holds, and `Unfold` recovers
+  the pre-compaction surface from the citations at any time.
+- **KV-prefix summarize call.** The summary is ONE LLM call through
+  the same adapter, built as a genuine prefix of the running
+  conversation: the SAME system prompt + tool advertisements + the
+  shadowed-region messages, plus exactly ONE appended user-role
+  instruction — everything before the instruction is byte-identical
+  to the running conversation's request, so the provider's KV cache
+  absorbs it (the dsh `region.ts buildSummarizationInput` pattern).
+- **Failure semantics.** A failed or refused compaction (provider
+  error, empty answer, or a summary not strictly smaller than the
+  shadowed span) NEVER fails the turn or the wire call: the surface
+  stays un-compacted, the unmatched `compaction/start` remains as the
+  durable lock, the daemon logs one stderr line, and the NEXT turn
+  boundary retries — the boundary loop is the retry ladder (there is
+  deliberately no retry inside the summarizer).
+- **Serialization.** The trigger is a TurnRunner decorator executing
+  INSIDE the handler's per-session turn gate (§4): compaction is
+  serialized with turns by construction, and the `compaction/*`
+  events reach subscribers before the `session/prompt` response.
+
+Known audit gap (disclosed): the summarize call is not a turn and the
+event vocabulary has no record for non-turn LLM calls, so it writes no
+`llm/request` event — the `compaction/start`+`compaction/end` bracket
+(pressure snapshot, shadowed range, citations, generation) is the
+log-side audit trail; the request itself is observable only on the
+provider plane. `--context-tokens 0` disables the subsystem outright.
+
 ## 7b. Async contract (subagents, B2)
 
 Same discipline as §7 jobs: `subagent/spawn` returns its `{childId}`
