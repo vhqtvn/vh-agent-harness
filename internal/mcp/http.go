@@ -2,8 +2,10 @@
 // net/http (stdlib only, no SDK): POST each JSON-RPC request with
 // `Accept: application/json, text/event-stream`; the response is EITHER
 // a single `application/json` body OR a `text/event-stream` stream —
-// parsed by hand (data: frames, heartbeat comments ignored, FIRST
-// JSON-RPC result wins, stream end without a result is a typed error).
+// parsed by hand (data: frames, heartbeat comments ignored, the FIRST
+// awaited response frame wins and is carried INTACT — a result passes
+// through, an error frame surfaces typed with the server's code +
+// message — and stream end without a response is a typed error).
 //
 // Bounds: the shared http.Client carries dial/TLS-response-header
 // timeouts; every call is additionally bounded by its context deadline
@@ -137,7 +139,16 @@ func (h *HTTPClient) doRequest(ctx context.Context, method string, params json.R
 	ct := resp.Header.Get("Content-Type")
 	switch {
 	case strings.Contains(ct, "text/event-stream"):
-		return readSSEResponse(resp.Body, id)
+		out, err := readSSEResponse(resp.Body, id)
+		if err != nil {
+			// SSE error strings can embed server-authored content (an
+			// error frame's message/data echoes credentials back) —
+			// scrub through the server's redactor before the error
+			// can reach any log surface, exactly like the JSON-body
+			// path below (a-F1 discipline).
+			return nil, errors.New(h.red.Clean(err.Error()))
+		}
+		return out, nil
 	default: // application/json (and anything else JSON-shaped)
 		raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 		if err != nil {
@@ -150,16 +161,32 @@ func (h *HTTPClient) doRequest(ctx context.Context, method string, params json.R
 		if out.Error != nil {
 			return nil, errors.New(h.red.Clean(out.Error.Error()))
 		}
+		// Frame-shape fidelity (the c-F2 genus): a body that is not a
+		// RESPONSE to this call must not be normalized into a
+		// nil-result "success" (it would die downstream as an
+		// unparseable result) — and a wrong-id body must not be
+		// silently correlated as ours. Error frames were already
+		// surfaced above (fidelity wins over correlation strictness).
+		if out.Method != "" || out.ID == nil {
+			return nil, errors.New(h.red.Clean(fmt.Sprintf("mcp: %s: response is not a JSON-RPC response (content-type %s): %v", method, ct, truncateForError(string(raw)))))
+		}
+		if *out.ID != *id {
+			return nil, errors.New(h.red.Clean(fmt.Sprintf("mcp: %s: response id mismatch (want %d, got %d)", method, *id, *out.ID)))
+		}
 		return &out, nil
 	}
 }
 
 // readSSEResponse parses a text/event-stream body by hand: comment
 // lines (`:` heartbeats) ignored, `data:` frames accumulate until a
-// blank line dispatches the event; the first frame carrying a JSON-RPC
-// result/error with the awaited id wins; frames with other ids or
-// notifications are skipped; stream end without the result is a typed
-// error (fail-closed, never a hang).
+// blank line dispatches the event; the first frame carrying the
+// awaited JSON-RPC response wins — result OR error, carried INTACT
+// (the caller's typed branch renders the server's code + message —
+// a normalized-away error frame would surface as a nil-result
+// "success" and die later as an unparseable result); server-initiated
+// frames (method set — notifications and server requests) and frames
+// with other ids are skipped; stream end without the response is a
+// typed error (fail-closed, never a hang).
 func readSSEResponse(r io.Reader, want *int64) (*rpcResponse, error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var data []string
@@ -173,16 +200,25 @@ func readSSEResponse(r io.Reader, want *int64) (*rpcResponse, error) {
 		if err := json.Unmarshal([]byte(payload), &resp); err != nil {
 			return nil, false // a non-JSON data frame: heartbeat-class, ignore
 		}
+		if resp.Method != "" {
+			return nil, false // server-initiated frame (notification/request): ignore (v1)
+		}
 		if resp.ID == nil {
-			return nil, false // notification frame: ignore
+			return nil, false // no id: nothing to correlate
 		}
 		if want != nil && *resp.ID != *want {
 			return nil, false // another call's frame: ignore
 		}
-		if resp.Error != nil {
-			return &rpcResponse{ID: resp.ID}, true // caller renders via typed path
+		if resp.Result == nil && resp.Error == nil {
+			// id-bearing but NO payload: not a valid response — skip
+			// and keep waiting (stream-tolerant; the stdio transport
+			// instead fails pending closed on this shape — a line
+			// there is the whole frame, here a stray data frame among
+			// heartbeats is ambient, and stream-end still fails
+			// closed). Never a nil-result "success".
+			return nil, false
 		}
-		return &resp, true
+		return &resp, true // the awaited response — result or error, intact
 	}
 	for {
 		line, err := br.ReadString('\n')
@@ -190,10 +226,7 @@ func readSSEResponse(r io.Reader, want *int64) (*rpcResponse, error) {
 		switch {
 		case trimmed == "":
 			if resp, ok := flush(); ok {
-				if resp.Error == nil {
-					return resp, nil
-				}
-				return nil, errors.New(fmt.Sprintf("mcp: stream carried an error frame: %v", resp.Error))
+				return finishSSEResponse(resp)
 			}
 		case strings.HasPrefix(trimmed, ":"):
 			// comment / heartbeat — ignore
@@ -206,14 +239,25 @@ func readSSEResponse(r io.Reader, want *int64) (*rpcResponse, error) {
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				if resp, ok := flush(); ok && resp.Error == nil {
-					return resp, nil
+				if resp, ok := flush(); ok {
+					return finishSSEResponse(resp)
 				}
 				return nil, errors.New("mcp: event stream ended without a result frame (fail-closed)")
 			}
-			return nil, errors.New(fmt.Sprintf("mcp: event stream read error: %v", err))
+			return nil, fmt.Errorf("mcp: event stream read error: %v", err)
 		}
 	}
+}
+
+// finishSSEResponse renders the awaited frame: a result passes
+// through; an error frame becomes the typed error CARRYING the
+// server's code + message (fidelity — the caller's diagnosis names
+// what the server actually said).
+func finishSSEResponse(resp *rpcResponse) (*rpcResponse, error) {
+	if resp.Error != nil {
+		return nil, fmt.Errorf("mcp: stream carried an error frame: %v", resp.Error)
+	}
+	return resp, nil
 }
 
 // Initialize performs the handshake (initialize → notifications/

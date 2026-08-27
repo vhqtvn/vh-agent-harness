@@ -35,6 +35,18 @@
 //	                text/event-stream with a leading heartbeat comment
 //	                line — exercises the host's SSE parsing against a
 //	                real server (not just a hand-written fixture).
+//	--notify-during-call
+//	                interleave a server-initiated notification frame
+//	                (method, no id — a real-MCP progress shape) BEFORE
+//	                each tools/call response: stdio writes the
+//	                notification line first; http --sse writes a
+//	                notification data frame before the result frame (a
+//	                plain application/json body cannot carry two
+//	                messages — no-op there). Real servers emit progress/
+//	                logging notifications exactly while a host's call is
+//	                pending; a host that treats them as garbage and
+//	                fails pending calls breaks against every chatty
+//	                server — this flag is that proof.
 //
 // # Protocol surface (both modes, one dispatch function)
 //
@@ -84,10 +96,15 @@ modes:
 fault injection:
   --garbage          every response is garbage (invalid JSON line / HTTP 500)
   --call-garbage     tools/call responses only are garbage
+  --notify-during-call  server-initiated notification frame before each
+                      tools/call response (stdio line / http --sse data
+                      frame; no-op with plain http JSON) — the mid-call
+                      notification a chatty real server emits while the
+                      host's call is pending
   --bad-schema-tool  advertise a tool with an unmappable inputSchema
   --env-tool         advertise the env tool (subprocess env readback)
   --require-session  (http) assign + require Mcp-Session-Id — the
-                     real-server session discipline a host must honor
+                      real-server session discipline a host must honor
 
 exit codes: 0 clean · 1 runtime failure · 2 usage
 `
@@ -104,6 +121,7 @@ func run(args []string, stderrw io.Writer) int {
 		sse       = fs.Bool("sse", false, "http mode: frame responses as text/event-stream")
 		garbage   = fs.Bool("garbage", false, "every response is garbage")
 		callGarb  = fs.Bool("call-garbage", false, "tools/call responses are garbage")
+		notifyCal = fs.Bool("notify-during-call", false, "server-initiated notification frame before each tools/call response (mid-call notification proof)")
 		badSchema = fs.Bool("bad-schema-tool", false, "advertise the unmappable-schema tool")
 		envTool   = fs.Bool("env-tool", false, "advertise the env readback tool")
 		reqSess   = fs.Bool("require-session", false, "http mode: assign + require Mcp-Session-Id (the real-server session discipline)")
@@ -124,12 +142,13 @@ func run(args []string, stderrw io.Writer) int {
 	}
 
 	cfg := mockConfig{
-		sse:       *sse,
-		garbage:   *garbage,
-		callGarb:  *callGarb,
-		badSchema: *badSchema,
-		envTool:   *envTool,
-		reqSess:   *reqSess,
+		sse:              *sse,
+		garbage:          *garbage,
+		callGarb:         *callGarb,
+		notifyDuringCall: *notifyCal,
+		badSchema:        *badSchema,
+		envTool:          *envTool,
+		reqSess:          *reqSess,
 	}
 	if *httpAddr != "" {
 		if err := serveHTTP(cfg, *httpAddr, stderrw); err != nil {

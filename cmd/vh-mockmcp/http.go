@@ -51,7 +51,7 @@ func newHTTPHandler(cfg mockConfig) http.Handler {
 			writeHTTPResponse(cfg, w, &jsonrpcResponse{
 				JSONRPC: "2.0", ID: json.RawMessage("null"),
 				Error: &jsonrpcError{Code: -32600, Message: "mock: invalid request body"},
-			})
+			}, false)
 			return
 		}
 		// The real-server session discipline (--require-session):
@@ -79,15 +79,19 @@ func newHTTPHandler(cfg mockConfig) http.Handler {
 			// Notification: accepted, no body.
 			w.WriteHeader(http.StatusAccepted)
 		default:
-			writeHTTPResponse(cfg, w, resp)
+			writeHTTPResponse(cfg, w, resp, cfg.notifyDuringCall && req.Method == "tools/call")
 		}
 	})
 	return mux
 }
 
 // writeHTTPResponse frames one response per cfg: plain JSON, or an SSE
-// stream with a heartbeat comment + one data frame.
-func writeHTTPResponse(cfg mockConfig, w http.ResponseWriter, resp *jsonrpcResponse) {
+// stream with a heartbeat comment + one data frame. notifyFirst adds a
+// server-initiated notification data frame BEFORE the result frame (the
+// mid-call notification proof) — representable only in the SSE framing;
+// a single application/json body cannot carry two messages, so the flag
+// is a no-op there.
+func writeHTTPResponse(cfg mockConfig, w http.ResponseWriter, resp *jsonrpcResponse, notifyFirst bool) {
 	out, err := json.Marshal(resp)
 	if err != nil {
 		http.Error(w, "mock: marshal", http.StatusInternalServerError)
@@ -102,9 +106,14 @@ func writeHTTPResponse(cfg mockConfig, w http.ResponseWriter, resp *jsonrpcRespo
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
 	fl, ok := w.(http.Flusher)
-	// Heartbeat comment first (a host must ignore it), then the result
-	// data frame, then stream end — the first result frame wins.
+	// Heartbeat comment first (a host must ignore it), then — with
+	// notifyFirst — the notification data frame (method set, no id — a
+	// host must skip it mid-stream), then the result data frame, then
+	// stream end — the first RESULT frame wins.
 	_, _ = w.Write([]byte(": mock heartbeat\n\n"))
+	if notifyFirst {
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", notificationLine)
+	}
 	_, _ = fmt.Fprintf(w, "data: %s\n\n", out)
 	if ok {
 		fl.Flush()

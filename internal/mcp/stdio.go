@@ -9,10 +9,12 @@
 //     (the shell env policy; the scrub wins). The battery + unit tests
 //     pin this from both sides.
 //   - one stdout reader goroutine parses each line and routes responses
-//     to pending calls BY ID; server-initiated notifications are
-//     ignored (v1 host posture); a GARBAGE line fails every pending
-//     call with a typed error (fail-closed; with barrier scheduling
-//     there is at most one in flight — conservative by design).
+//     to pending calls BY ID; server-initiated frames (notifications,
+//     requests) are ignored (v1 host posture — real servers emit
+//     progress/logging notifications DURING a call); a GARBAGE line
+//     fails every pending call with a typed error (fail-closed; with
+//     barrier scheduling there is at most one in flight —
+//     conservative by design).
 //   - stderr is captured into a small bounded ring (diagnostics on
 //     transport failure), redacted through the server's redactor.
 //   - shutdown ladder: close stdin → wait (3s) → Kill → wait. Close is
@@ -31,6 +33,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -88,6 +91,11 @@ type StdioClient struct {
 	ids    idSource
 	logf   func(string, ...any)
 	stderr *boundedLines
+
+	// notifications counts server-initiated frames seen (notifications
+	// and requests): the starve-safe observability for the v1 ignore
+	// posture — never per-frame logging, never pending-failing.
+	notifications atomic.Int64
 
 	writeMu sync.Mutex // serializes stdin writes (one line per request)
 	mu      sync.Mutex // guards pending + garbageSeen
@@ -177,25 +185,37 @@ func (c *StdioClient) exitError(readErr error) error {
 	return errors.New(msg)
 }
 
-// handleLine routes one stdout line: a response with an id resolves its
-// pending call; a notification (no id) is ignored; garbage fails every
-// pending call (typed, fail-closed).
+// handleLine routes one stdout line by JSON-RPC 2.0 frame class:
+//
+//   - a frame carrying `method` is SERVER-INITIATED (a notification
+//     has no id; a server request carries one) → IGNORED under the v1
+//     host posture, never failing pending calls. Real servers emit
+//     progress/logging notifications DURING a tools/call — exactly
+//     when pending is non-empty — so treating them as garbage breaks
+//     every chatty server. Observability is starve-safe: count every
+//     frame, log only the first (a chatty server can neither stall
+//     the reader nor spam the log).
+//   - a frame with `id` and a result/error payload is a RESPONSE →
+//     existing id correlation.
+//   - anything else — unparseable JSON, or a frame with no method and
+//     no id (e.g. `{}`), or an id-bearing frame with NO payload (not a
+//     valid response) — is garbage → every pending call fails with a
+//     typed error (fail-closed).
 func (c *StdioClient) handleLine(line string) {
 	var resp rpcResponse
-	if err := json.Unmarshal([]byte(line), &resp); err != nil || (resp.Result == nil && resp.Error == nil) {
-		// Garbage or an unsolicited message with no payload: if calls
-		// are pending, fail them closed naming the garbage; otherwise
-		// ignore (a chatty server's notifications never break us).
-		c.mu.Lock()
-		n := len(c.pending)
-		c.mu.Unlock()
-		if n > 0 {
-			c.failAllPending(fmt.Errorf("mcp: server sent invalid JSON-RPC output (%q)", c.red.Clean(truncateForError(line))))
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		c.garbageLine(line)
+		return
+	}
+	if resp.Method != "" {
+		if c.notifications.Add(1) == 1 && c.logf != nil {
+			c.logf("mcp: server-initiated frame (%s) ignored — v1 host posture; further frames counted, not logged", resp.Method)
 		}
 		return
 	}
-	if resp.ID == nil {
-		return // server-initiated message: ignored (v1)
+	if resp.ID == nil || (resp.Result == nil && resp.Error == nil) {
+		c.garbageLine(line)
+		return
 	}
 	c.mu.Lock()
 	ch, ok := c.pending[*resp.ID]
@@ -203,6 +223,18 @@ func (c *StdioClient) handleLine(line string) {
 	c.mu.Unlock()
 	if ok {
 		ch <- &resp // buffered(1): never blocks the reader
+	}
+}
+
+// garbageLine fails every pending call naming the offending output
+// (typed, fail-closed — no call may hang on a broken server); with no
+// pending calls it is ignored (a chatty server's junk never broke us).
+func (c *StdioClient) garbageLine(line string) {
+	c.mu.Lock()
+	n := len(c.pending)
+	c.mu.Unlock()
+	if n > 0 {
+		c.failAllPending(fmt.Errorf("mcp: server sent invalid JSON-RPC output (%q)", c.red.Clean(truncateForError(line))))
 	}
 }
 

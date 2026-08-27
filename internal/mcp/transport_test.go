@@ -146,6 +146,33 @@ func TestStdioCallGarbageFailsCallClosedNotList(t *testing.T) {
 	}
 }
 
+func TestStdioNotificationDuringCallDoesNotFailPending(t *testing.T) {
+	// c-F1: real MCP servers emit progress/logging notifications DURING
+	// a tools/call — exactly when pending is non-empty. The
+	// notification frame (method, no id) must be IGNORED (v1 host
+	// posture), never treated as garbage that fails pending calls.
+	c := dialStdio(t, "--notify-during-call")
+	ctx := context.Background()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	res, err := c.CallTool(ctx, "echo", jsonRaw(`{"text":"mid-notification"}`))
+	if err != nil {
+		t.Fatalf("call interrupted by mid-call notification: %v", err)
+	}
+	if got := JoinContent(res); got != "echo: mid-notification" {
+		t.Fatalf("content = %q", got)
+	}
+	if n := c.notifications.Load(); n == 0 {
+		t.Fatal("no server-initiated frames were classified — the scenario never fired (vacuous pass)")
+	}
+	// The transport stays usable after notification-interleaved calls.
+	res, err = c.CallTool(ctx, "echo", jsonRaw(`{"text":"still-alive"}`))
+	if err != nil || JoinContent(res) != "echo: still-alive" {
+		t.Fatalf("post-notification call: %v %+v", err, res)
+	}
+}
+
 func TestStdioPerCallDeadline(t *testing.T) {
 	c := dialStdio(t)
 	ctx := context.Background()
@@ -245,8 +272,12 @@ func TestStdioCloseIsIdempotentAndReaps(t *testing.T) {
 
 func TestStdioDyingProcessTypedError(t *testing.T) {
 	// A command that exits immediately: initialize must fail typed
-	// (with the captured stderr tail), never hang.
-	sc := localCfg("/bin/sh", "-c", "echo 'mock server fatal' >&2; exit 3")
+	// (with the captured stderr tail), never hang. The brief sleep
+	// keeps the child's pipes alive past the host's initialize WRITE —
+	// without it the write can win a race into EPIPE (a typed write
+	// error with no stderr tail) instead of the reader-EOF death path
+	// this test exists to prove.
+	sc := localCfg("/bin/sh", "-c", "echo 'mock server fatal' >&2; sleep 0.3; exit 3")
 	c, err := DialStdio(sc, newRedactor(sc), nil)
 	if err != nil {
 		t.Fatalf("DialStdio: %v", err)
@@ -357,6 +388,140 @@ func TestHTTPSSEResponseWithHeartbeatsAndJunkFrames(t *testing.T) {
 	}
 	if JoinContent(res) != "http-proof" {
 		t.Fatalf("content = %q", JoinContent(res))
+	}
+}
+
+func TestHTTPSSLErrorFrameSurfacesTyped(t *testing.T) {
+	// c-F2/d-F1: an SSE stream whose awaited data frame is a JSON-RPC
+	// ERROR must surface the server's code + message through the typed
+	// error path — not be normalized into a nil-result "success" that
+	// dies later as an unparseable result.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Method == "tools/call" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: %s\n\n",
+				fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32603,"message":"sse-server-said-no v1"}}`, deref(req.ID)))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":"%s"}}`, deref(req.ID), ClientProtocolVersion)
+	}))
+	defer srv.Close()
+	sc := httpCfg(srv.URL, nil)
+	c := NewHTTPClient(sc, newRedactor(sc), nil)
+	ctx := context.Background()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	_, err := c.CallTool(ctx, "echo", jsonRaw(`{}`))
+	if err == nil {
+		t.Fatal("SSE error frame became a success")
+	}
+	if !strings.Contains(err.Error(), "-32603") || !strings.Contains(err.Error(), "sse-server-said-no v1") {
+		t.Fatalf("error lost the server's code/message: %v", err)
+	}
+}
+
+func TestHTTPSSLErrorFrameRedactsServerMessage(t *testing.T) {
+	// a-F1 (folded): the SSE error path now carries server-authored
+	// message content — it must still pass through the server's
+	// redactor (adapters.RedactSecret via the per-server credential
+	// set) before the error can reach any log surface. A server
+	// echoing the configured header credential in its error message
+	// must not leak it.
+	const cred = "header-value-secret-889900"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Method == "tools/call" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: %s\n\n",
+				fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32000,"message":"boom echo %s inside"}}`, deref(req.ID), cred))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":"%s"}}`, deref(req.ID), ClientProtocolVersion)
+	}))
+	defer srv.Close()
+	sc := httpCfg(srv.URL, map[string]string{"X-Private": cred})
+	c := NewHTTPClient(sc, newRedactor(sc), nil)
+	ctx := context.Background()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	_, err := c.CallTool(ctx, "echo", jsonRaw(`{}`))
+	if err == nil || !strings.Contains(err.Error(), "-32000") {
+		t.Fatalf("redacted-path error = %v", err)
+	}
+	if strings.Contains(err.Error(), cred) {
+		t.Fatalf("server-echoed credential leaked through the SSE error path: %v", err)
+	}
+}
+
+func TestHTTPRealMockSSENotificationMidStream(t *testing.T) {
+	// Genus parity with the stdio proof, against the REAL vh-mockmcp
+	// binary: --http --sse --notify-during-call interleaves a
+	// server-initiated notification data frame BEFORE the tools/call
+	// result frame — the host must skip it mid-stream and complete.
+	cmd := exec.Command(mockMCP(t), "--http", "127.0.0.1:0", "--sse", "--notify-during-call")
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start mock: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	line, err := bufio.NewReader(stderrPipe).ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "listening ") {
+		t.Fatalf("mock did not report its address (%q, %v)", line, err)
+	}
+	sc := httpCfg("http://"+strings.TrimSpace(strings.TrimPrefix(line, "listening ")), nil)
+	c := NewHTTPClient(sc, newRedactor(sc), nil)
+	ctx := context.Background()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	res, err := c.CallTool(ctx, "echo", jsonRaw(`{"text":"sse-mid-notification"}`))
+	if err != nil {
+		t.Fatalf("call interrupted by mid-stream notification: %v", err)
+	}
+	if got := JoinContent(res); got != "echo: sse-mid-notification" {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+func TestHTTPJSONBodyFrameShapeNotNormalizedAway(t *testing.T) {
+	// Genus sweep pins (c-F2 class): a JSON body that is not a
+	// RESPONSE to this call must surface as a typed error — never be
+	// normalized into a nil-result "success" (which dies downstream
+	// as an unparseable result) or a wrong-id body silently
+	// correlated as ours.
+	handler := func(body string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		})
+	}
+	// Notification-shaped body (method, no id).
+	srv := httptest.NewServer(handler(`{"jsonrpc":"2.0","method":"notifications/message","params":{}}`))
+	sc := httpCfg(srv.URL, nil)
+	c := NewHTTPClient(sc, newRedactor(sc), nil)
+	err := c.Initialize(context.Background())
+	srv.Close()
+	if err == nil || !strings.Contains(err.Error(), "not a JSON-RPC response") {
+		t.Fatalf("notification-shaped body = %v", err)
+	}
+	// Wrong-id body: never correlated as ours.
+	srv2 := httptest.NewServer(handler(`{"jsonrpc":"2.0","id":999,"result":{"protocolVersion":"2025-06-18"}}`))
+	defer srv2.Close()
+	sc2 := httpCfg(srv2.URL, nil)
+	c2 := NewHTTPClient(sc2, newRedactor(sc2), nil)
+	err = c2.Initialize(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "id mismatch") {
+		t.Fatalf("wrong-id body = %v", err)
 	}
 }
 

@@ -153,6 +153,68 @@ func TestServeStdioGarbageMode(t *testing.T) {
 	}
 }
 
+func TestServeStdioNotifyDuringCall(t *testing.T) {
+	// --notify-during-call: the notification line arrives BEFORE the
+	// tools/call response (the mid-call window), carries method and NO
+	// id, and leaves initialize/tools/list responses untouched.
+	in := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"x"}}}`,
+	}, "\n") + "\n"
+	var out bytes.Buffer
+	if err := serveStdio(mockConfig{notifyDuringCall: true}, strings.NewReader(in), &out, io_discard()); err != nil {
+		t.Fatalf("serveStdio: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 4 { // initialize, tools/list, NOTIFICATION, tools/call response
+		t.Fatalf("response lines = %d (%q)", len(lines), out.String())
+	}
+	var note map[string]any
+	if err := json.Unmarshal([]byte(lines[2]), &note); err != nil {
+		t.Fatalf("notification line not JSON: %q", lines[2])
+	}
+	if _, ok := note["method"]; !ok {
+		t.Fatalf("notification line has no method: %q", lines[2])
+	}
+	if _, ok := note["id"]; ok {
+		t.Fatalf("notification line carries an id (would correlate as a response): %q", lines[2])
+	}
+	if !strings.Contains(lines[3], "echo: x") {
+		t.Fatalf("tools/call response line = %q", lines[3])
+	}
+}
+
+func TestHTTPNotifyDuringCallSSEAndJSONNoop(t *testing.T) {
+	post := func(cfg mockConfig, body string) string {
+		srv := httptest.NewServer(newHTTPHandler(cfg))
+		defer srv.Close()
+		resp, err := http.Post(srv.URL+"/mcp", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		defer resp.Body.Close()
+		buf := new(bytes.Buffer)
+		_, _ = buf.ReadFrom(resp.Body)
+		return buf.String()
+	}
+	call := `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"echo","arguments":{"text":"x"}}}`
+	// SSE framing: notification data frame BEFORE the result frame.
+	sseBody := post(mockConfig{sse: true, notifyDuringCall: true}, call)
+	if iN, iR := strings.Index(sseBody, notificationLine), strings.Index(sseBody, `"echo: x"`); iN < 0 || iR < 0 || iN > iR {
+		t.Fatalf("sse body notification/result order wrong: %q", sseBody)
+	}
+	// Plain JSON framing: a single body cannot carry two messages —
+	// the flag is a no-op and the response stays one valid object.
+	jsonBody := post(mockConfig{notifyDuringCall: true}, call)
+	if strings.Contains(jsonBody, notificationLine) || !strings.Contains(jsonBody, `"echo: x"`) {
+		t.Fatalf("json body under --notify-during-call = %q", jsonBody)
+	}
+	if !json.Valid([]byte(jsonBody)) {
+		t.Fatalf("json body not a single JSON object: %q", jsonBody)
+	}
+}
+
 func TestHTTPHandlerJSONAndSSE(t *testing.T) {
 	post := func(cfg mockConfig, body string) (*http.Response, string) {
 		srv := httptest.NewServer(newHTTPHandler(cfg))

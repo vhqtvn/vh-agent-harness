@@ -57,6 +57,15 @@ func serveStdio(cfg mockConfig, r io.Reader, w io.Writer, stderrw io.Writer) err
 				return werr
 			}
 		} else if resp != nil {
+			// --notify-during-call: interleave the server-initiated
+			// notification line BEFORE the tools/call response — the
+			// mid-call window where the host necessarily has the call
+			// pending (garbage modes stay pure: no notification).
+			if cfg.notifyDuringCall && req.Method == "tools/call" {
+				if _, werr := fmt.Fprintf(bw, "%s\n", notificationLine); werr != nil {
+					return werr
+				}
+			}
 			out, merr := json.Marshal(resp)
 			if merr != nil {
 				return merr

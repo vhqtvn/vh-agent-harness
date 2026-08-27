@@ -17,13 +17,23 @@ const protocolVersion = "2025-06-18"
 
 // mockConfig carries the fault-injection and tool-set flags.
 type mockConfig struct {
-	sse       bool // http framing: text/event-stream responses
-	garbage   bool // EVERY response is garbage (server-level degrade proof)
-	callGarb  bool // tools/call responses only are garbage
-	badSchema bool // advertise the unmappable-schema tool
-	envTool   bool // advertise the env readback tool
-	reqSess   bool // http framing: assign + REQUIRE Mcp-Session-Id (the real-server discipline)
+	sse              bool // http framing: text/event-stream responses
+	garbage          bool // EVERY response is garbage (server-level degrade proof)
+	callGarb         bool // tools/call responses only are garbage
+	badSchema        bool // advertise the unmappable-schema tool
+	envTool          bool // advertise the env readback tool
+	reqSess          bool // http framing: assign + REQUIRE Mcp-Session-Id (the real-server discipline)
+	notifyDuringCall bool // emit a server-initiated notification BEFORE each tools/call response
 }
+
+// notificationLine is the server-initiated notification frame the mock
+// interleaves MID-CALL before each tools/call response when
+// --notify-during-call is set: a real-MCP-shape progress notification
+// (method set, NO id — never a response). Real servers emit exactly
+// this class of frame while a host's call is pending; a host that
+// mistakes it for garbage and fails pending calls breaks against every
+// chatty server. This flag is that proof.
+const notificationLine = `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"mock-notify-token","progress":50,"total":100}}`
 
 // jsonrpcRequest is one incoming call or notification.
 type jsonrpcRequest struct {

@@ -91,10 +91,16 @@ type rpcRequest struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
-// rpcResponse is one incoming result or error.
+// rpcResponse is one incoming frame. A true JSON-RPC RESPONSE carries
+// id + result/error and NEVER a method; Method is set only on
+// SERVER-INITIATED frames (a notification has method and no id; a
+// server request has both) — the transports classify on it to ignore
+// that frame class under the v1 host posture instead of mistaking it
+// for garbage or correlating it as a response.
 type rpcResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      *int64          `json:"id"`
+	Method  string          `json:"method,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *rpcError       `json:"error,omitempty"`
 }
