@@ -1376,6 +1376,7 @@ vh-agentd --adapter openai|openaicompat|anthropic --model <name> \
   [--ask-tools TOOL[,TOOL...]] \
   [--context-tokens N] [--compact-threshold R] \
   [--skills-dir DIR] \
+  [--mcp-config PATH] [--mcp-timeout-ms MS] \
   [--optimizer dedup|llm]
 ```
 
@@ -1458,9 +1459,14 @@ to the LATEST due occurrence (no storm replay after downtime); a due
 schedule lands as an ordinary `job/enqueued` on the active session, so
 settlement and reporting ride the existing job/* event stream.
 
-**Model-facing tool surface (twelve tools).** The daemon's model is
-offered exactly these tools (child sessions below the delegation fence
-get the same set minus the subagent family at the fence):
+**Model-facing tool surface (twelve built-in tools + the discovered
+MCP family).** The daemon's model is offered exactly these tools
+(child sessions below the delegation fence get the same set minus the
+subagent family at the fence), plus — when `--mcp-config` yields
+servers — every namespaced `mcp_<server>_<tool>` definition the MCP
+registry discovered at startup (see the MCP host paragraph below; the
+degraded-server sentinel `mcp_<server>` included, keeping the
+advertised set stable):
 
 - `echo` — echoes the given text back (read-only dogfood probe);
 - `clock` — the daemon's current UTC time, RFC 3339 (read-only probe);
@@ -1571,6 +1577,58 @@ replay-derivable from session logs — that is the documented method for
 deciding when a catalog outgrows the full-listing prompt section (the
 `SkillBudget` seam in `internal/skills` marks where top-k selection or
 a `skill_search` tool would slot in; no RAG today).
+
+**MCP host delivery (`--mcp-config PATH`, `--mcp-timeout-ms MS`).**
+The daemon is an MCP HOST: it consumes the operator's opencode MCP
+config, discovers each server's tools at startup, and exposes them in
+the SAME guarded registry as every built-in tool — namespaced
+`mcp_<server>_<tool>` (lowercase, sanitized to `[a-z0-9_]`,
+collision-safe `_N` suffixes), description prefixed `(<server>) ` and
+sanitized like the skills tier-1 lines. Config shapes: the file is
+EITHER a full `opencode.json` (its top-level `.mcp` block is
+extracted) OR a bare `{"<name>": {...}}` server map; local stdio
+servers are `{"type":"local","command":[...]}` (optionally
+`"env": {...}` — merged into the subprocess's CLEAN explicit env
+AFTER the scrub discipline, so secret-named variables
+— `KEY|PASSWORD|SECRET|TOKEN`, case-insensitive, and the engine
+credential prefix — are dropped exactly as `run_shell`'s env policy
+drops them) and remote Streamable-HTTP servers are
+`{"type":"remote","url":"https://…"}` (optionally `"headers": {...}`
+sent on every request; the client hand-rolls the transport on the
+stdlib — POST with `Accept: application/json, text/event-stream`,
+single-JSON OR SSE-framed responses, `Mcp-Session-Id` echo when a
+server assigns one). Unknown keys are ignored with one startup note.
+Default (`--mcp-config` unset): `~/.config/opencode/opencode.json`
+when it exists (an honest startup line says so), else zero MCP; an
+explicitly-passed missing/invalid file is a fail-closed exit 2 with a
+file:line-ish error. **Posture — MCP tools are EXTERNAL CANDIDATE
+INPUT:** every call rides the full guard/waterfall/approval machinery
+by construction (they are ordinary registered tools — no MCP result is
+trusted authority), and MCP tool names match NO shipped allow rule,
+so under `--policy` (or interactive) they ASK and fall to the human
+responder; operators allow them explicitly by tool name
+(`--policy 'allow mcp_vhmcp_web_search'`). URL, header, and env
+values are CREDENTIALS: startup lines carry names, types, and counts
+only, and every error surface is redacted exactly like provider keys
+(URL path tokens included). **Fail-closed everywhere:** every exchange
+is bounded by `--mcp-timeout-ms` (default 60000, cap 600000 — the
+`run_shell` cap; a hung server fails closed within the bound, never a
+hung turn); a server that will not start, times out, or returns
+garbage DEGRADES that server — no tools from it, one reserved
+`mcp_<server>` sentinel whose call is the typed "server degraded"
+error (a hallucinated full tool name still reports unknown), surfaced
+at startup and at call time; an unmappable tool schema (non-object
+`inputSchema`) skips THAT tool with a warning while the server stays
+up. v1 scope (honest): tools only — no MCP resources, prompts,
+sampling, or elicitation; no OAuth/token refresh (static headers and
+env); servers launch at daemon startup only (no mid-life supervision
+or auto-restart — relaunching a dead server is a daemon restart); the
+tool list is discovered at startup (a `Refresh` seam exists in
+`internal/mcp`, unwired at the daemon); MCP tools render to the
+client as ordinary tool calls — ZERO client changes. As with skills,
+growing the advertised tool set changes the assembled prompt bytes:
+previously compiled prompt artifacts fall back to raw assembly
+(reported, never silent) until `--compile-prompt` is rerun.
 
 **Model-facing recursive subagents** (child-of-child): besides the
 client-driven `subagent/spawn|send|list` wire methods, the daemon's
@@ -2009,6 +2067,45 @@ vh-mockllm [--addr 127.0.0.1:8099] --script scenarios/X.json \
   (method, path, auth-header PRESENCE ONLY, full request body JSON).
 - **Redaction discipline**: the auth-header VALUE is never recorded —
   not in `/journal`, not in the `--journal` disk mirror.
+
+### `vh-mockmcp` — scriptable mock MCP server (experimental)
+
+`vh-mockmcp` (same experimental branch) is the MCP-host testing
+twin of `vh-mockllm`: a standalone mock MCP server speaking JSON-RPC
+2.0 over BOTH transport shapes the host supports, with a canned tool
+set and fault-injection flags for the fail-closed proofs. It is the
+server the docker battery's `mcp` scenario runs against.
+
+```sh
+vh-mockmcp [--stdio]                            # default: NDJSON on stdin/stdout
+vh-mockmcp --http HOST:PORT [--sse] [faults]    # Streamable-HTTP; port 0 prints
+                                                # "listening <addr>" on stderr
+```
+
+- **Canned tools (deterministic)**: `echo {text}` → text block
+  `echo: <text>`; `slow {ms}` → sleeps (capped 120s) then confirms —
+  the timeout proof; `fail {message}` → `isError:true` result — the
+  typed tool-error proof; `--env-tool` adds `env {name}` returning
+  the subprocess env value or `(unset)` — the env-scrub proof;
+  `--bad-schema-tool` adds `weird` whose `inputSchema` is a BARE
+  STRING (`{"type":"string"}`) — the unmappable-schema skip proof.
+- **Protocol**: `initialize` (negotiates `2025-06-18`) →
+  `notifications/initialized` (accepted, no response) → `tools/list`
+  → `tools/call` (`{name, arguments}` → content blocks). Unknown
+  method → `-32601`; unknown tool / bad args → `-32602`.
+- **Faults**: `--garbage` = EVERY response is garbage (invalid JSON
+  line over stdio / HTTP 500 + junk) — pointed at by a host, the
+  server DEGRADES at initialize; `--call-garbage` = garbage
+  `tools/call` responses only (initialize/tools/list stay healthy) —
+  the call-level fail-closed proof (error, no hang, no crash);
+  `--sse` = frame HTTP responses as `text/event-stream` with a
+  leading heartbeat comment (exercises the host's hand-rolled SSE
+  parsing); `--require-session` = assign `Mcp-Session-Id` on
+  initialize and REQUIRE it afterwards (400 without — the real-server
+  session discipline, added after a live endpoint rejected a
+  sessionless follow-up).
+- **HTTP endpoints**: POST any path except `GET /healthz` (the mock
+  accepts both the root and `/mcp`-style paths).
 
 ### Docker self-test battery (`docker/selftest/`)
 

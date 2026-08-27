@@ -64,6 +64,18 @@
 #     must stay byte-identical (replay derives from the log, never
 #     disk). The fixture is restored after the mutation so image-baked
 #     content is left as shipped.
+#   - mcp (P8) drives the MCP-host surface over the real binaries: the
+#     daemon starts with --mcp-config carrying BOTH transport shapes
+#     (vh-mockmcp stdio subprocess + vh-mockmcp --http --sse on a
+#     computed port, with a FAKE TOKEN embedded in the remote URL path)
+#     plus the two fail-closed twins (a call-garbage stdio server and a
+#     dead-port remote). Asserts: namespaced mcp_<server>_<tool> names
+#     advertised in the mock journal, round-trip content through both
+#     transports, the typed degraded-sentinel and garbage-call errors
+#     with the turn still completing, tool/call+tool/result on the
+#     durable log, deterministic --verify-log replay, and ZERO
+#     occurrences of the fake URL token in daemon stderr and the
+#     session log (credential redaction posture).
 #   - Cross-run byte-comparison of DIFFERENT sessions is a NON-GOAL —
 #     session ids are random by design (sess-<random hex>). Determinism
 #     is proven per-log: two --verify-log runs on the SAME log must
@@ -161,8 +173,14 @@ stop_mock() {
 # stdout (headers stripped). HTTP/1.0 + Connection: close so the read
 # terminates at EOF.
 http_get() {
-    exec 3<>"/dev/tcp/${MOCK_ADDR}/${MOCK_PORT}" || return 1
-    printf 'GET %s HTTP/1.0\r\nHost: mock\r\nConnection: close\r\n\r\n' "$1" >&3
+    http_get_port "$MOCK_PORT" "$1"
+}
+
+# http_get_port <port> <path> — http_get against an arbitrary local
+# port (the MCP scenario's vh-mockmcp server runs beside vh-mockllm).
+http_get_port() {
+    exec 3<>"/dev/tcp/${MOCK_ADDR}/$1" || return 1
+    printf 'GET %s HTTP/1.0\r\nHost: mock\r\nConnection: close\r\n\r\n' "$2" >&3
     cat <&3 | awk 'begin{skip=0} /^\r?$/{skip=1; next} skip{print}'
     exec 3<&- 3>&-
 }
@@ -833,6 +851,111 @@ sc_skills() {
     stop_mock
 }
 
+# sc_mcp (P8): the MCP-host crux over REAL binaries. The daemon starts
+# with --mcp-config covering BOTH transport shapes plus the two
+# fail-closed twins: localmock (vh-mockmcp stdio subprocess),
+# remotemock (vh-mockmcp --http --sse on a computed port, URL carrying
+# a FAKE TOKEN in the path — the redaction proof), garbagemock (stdio
+# whose tools/call responses are garbage — error not crash), and
+# deadmock (remote at a dead port — the degraded posture). Asserts:
+# namespaced names advertised in the model request (journal), round-
+# trip content through BOTH transports, tool/call+tool/result on the
+# durable log, the typed degraded error + garbage error with the turn
+# still completing, replay determinism, and ZERO occurrences of the
+# fake token in daemon stderr and the session log.
+MCPMCP=/usr/local/bin/vh-mockmcp
+MCPMCP_PORT=8177
+MCPMCP_PID=""
+sc_mcp() {
+    local sc=mcp
+    fresh_session "$sc"
+    # The MCP remote server: vh-mockmcp over HTTP with SSE framing (the
+    # harder response shape exercised over the real wire).
+    "$MCPMCP" --http "127.0.0.1:${MCPMCP_PORT}" --sse >"$WORK/mockmcp.out" 2>"$WORK/mockmcp.err" &
+    MCPMCP_PID=$!
+    local i mcp_ready=0
+    for i in $(seq 1 100); do
+        if http_get_port "${MCPMCP_PORT}" /healthz 2>/dev/null | grep -q '"ok"'; then
+            mcp_ready=1
+            break
+        fi
+        sleep 0.1
+    done
+    if [ "$mcp_ready" -ne 1 ]; then
+        fail "$sc" "vh-mockmcp http server failed to become healthy"
+        kill "$MCPMCP_PID" 2>/dev/null
+        return 0
+    fi
+    # The config: both shapes + the garbage and dead twins. The remote
+    # URL embeds a fake token in the path (credential-posture proof).
+    local token="fake-path-token-77aa88bb99cc"
+    cat >"$WORK/mcp-config.json" <<MCPJSON
+{
+  "localmock":  {"type": "local",  "command": ["vh-mockmcp", "--stdio"]},
+  "remotemock": {"type": "remote", "url": "http://127.0.0.1:${MCPMCP_PORT}/${token}/mcp"},
+  "garbagemock":{"type": "local",  "command": ["vh-mockmcp", "--stdio", "--call-garbage"]},
+  "deadmock":   {"type": "remote", "url": "http://127.0.0.1:1/mcp"}
+}
+MCPJSON
+    start_mock "$SCEN/mcp.json"
+    run_client --session-dir "$SESS" --json \
+        --prompt "exercise both mcp transports" \
+        --exec "$DAEMON" --mcp-config "$WORK/mcp-config.json" --mcp-timeout-ms 15000 \
+        --adapter openai --model mock-model \
+        --base-url "$MOCK_URL/v1" --api-key-env MOCK_KEY
+    check "$sc" "client exits 0 (no hang — got $CODE)" [ "$CODE" -ne 124 ]
+    check "$sc" "client exits cleanly" [ "$CODE" -eq 0 ]
+    check "$sc" "final text delivered" grep -Fq "mcp round trip complete" "$WORK/client.out"
+    # Round-trip content through BOTH transports (the --json stream
+    # carries tool result content).
+    check "$sc" "stdio transport round trip" grep -Fq "echo: stdio-payload" "$WORK/client.out"
+    check "$sc" "http(SSE) transport round trip" grep -Fq "echo: http-payload" "$WORK/client.out"
+    # Startup honesty: per-server lines + summary; the degraded twin
+    # names its server (typed, credential-free).
+    check "$sc" "stdio server startup line" grep -q "mcp: localmock (stdio) up — 3 tool(s)" "$WORK/client.err"
+    check "$sc" "remote server startup line" grep -q "mcp: remotemock (remote) up — 3 tool(s)" "$WORK/client.err"
+    check "$sc" "dead server DEGRADED startup line" grep -q "mcp: deadmock DEGRADED" "$WORK/client.err"
+    check "$sc" "startup summary counts" \
+        grep -q "mcp: 3 server(s) connected, 1 degraded; 9 tool(s) registered" "$WORK/client.err"
+    # Fail-closed twins: the typed degraded error (sentinel call) and
+    # the garbage-call error — errors, not crashes; the turn completed.
+    check "$sc" "degraded sentinel typed error" \
+        grep -Fq "mcp: server deadmock is degraded" "$WORK/client.out"
+    check "$sc" "garbage call fails with an error" \
+        grep -Fq "tool mcp_garbagemock_echo failed" "$WORK/client.out"
+    # Namespaced names advertised to the model (journal = request
+    # plane): both transports' echo tools present.
+    local journal
+    journal=$(journal_raw)
+    check "$sc" "journal advertises mcp_localmock_echo" grep -q "mcp_localmock_echo" <<<"$journal"
+    check "$sc" "journal advertises mcp_remotemock_echo" grep -q "mcp_remotemock_echo" <<<"$journal"
+    check "$sc" "journal carries the degraded sentinel mcp_deadmock" grep -q '"mcp_deadmock"' <<<"$journal"
+    # Durable log: 4 tool calls, 4 tool results.
+    newest_log
+    local calls results
+    calls=$(jq -s '[.[] | select(.type == "tool/call")] | length' "$LOG")
+    results=$(jq -s '[.[] | select(.type == "tool/result")] | length' "$LOG")
+    check "$sc" "log carries 4 tool/call events — got ${calls:-none}" [ "${calls:-0}" -eq 4 ]
+    check "$sc" "log carries 4 tool/result events — got ${results:-none}" [ "${results:-0}" -eq 4 ]
+    # Replay determinism (MCP results are logged content like every
+    # tool — replay needs no server).
+    check "$sc" "--verify-log deterministic" verify_log_ok "$LOG"
+    # THE REDACTION CRUX: the fake URL token appears ZERO times in the
+    # daemon stderr AND the durable session log.
+    local tok_err tok_log
+    tok_err=$(grep -c "$token" "$WORK/client.err" || true)
+    tok_log=$(grep -c "$token" "$LOG" || true)
+    check "$sc" "URL token absent from daemon stderr (${tok_err:-0} hits)" [ "${tok_err:-0}" -eq 0 ]
+    check "$sc" "URL token absent from session log (${tok_log:-0} hits)" [ "${tok_log:-0}" -eq 0 ]
+    local n
+    n=$(chat_count)
+    check "$sc" "model called exactly 3 times (2 tool turns + final) — got ${n:-none}" [ "${n:-0}" -eq 3 ]
+    stop_mock
+    kill "$MCPMCP_PID" 2>/dev/null
+    wait "$MCPMCP_PID" 2>/dev/null
+    MCPMCP_PID=""
+}
+
 # ---- run the battery -------------------------------------------------------
 
 note "=== native-engine docker self-test battery ==="
@@ -852,6 +975,7 @@ run_scenario resume_restart sc_resume_restart
 run_scenario compaction sc_compaction
 run_scenario job_tailing sc_job_tailing
 run_scenario skills sc_skills
+run_scenario mcp sc_mcp
 
 TOTAL=$((PASS + FAIL))
 echo

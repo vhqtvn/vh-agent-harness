@@ -109,6 +109,8 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		skillsDir         = new(string)
 		contextTokens     = new(int)
 		compactThreshold  = new(float64)
+		mcpConfig         = new(string)
+		mcpTimeoutMs      = new(int)
 		compilePrompt     = new(bool)
 		verifyLog         = new(string)
 		showVersion       = new(bool)
@@ -134,6 +136,8 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	fs.StringVar(skillsDir, "skills-dir", "", "Agent Skills catalog directory of <name>/SKILL.md folders (agentskills.io convention; three-tier delivery: prompt lines + guarded skill_load tool + confined reference reads). Default ./.opencode/skills against the daemon cwd — absent default = zero skills with an honest startup line; an EXPLICITLY-passed missing dir = exit 2 (fail-closed). Catalog read once at startup")
 	fs.IntVar(contextTokens, "context-tokens", defaultContextTokens, "context budget in tokens anchoring the post-turn compaction trigger (surface pressure = estimated tokens over this budget; estimate is chars/4 anchored by the last provider usage report; threshold from --compact-threshold, default 0.8). At/above threshold a turn boundary shadows the surface head behind ONE adapter-generated summary — log never rewritten, replay deterministic, a failed compaction never fails the turn (deferred to the next boundary). 0 DISABLES compaction. Default 128000")
 	fs.Float64Var(compactThreshold, "compact-threshold", session.DefaultPressureThreshold, "surface-pressure ratio at which a turn boundary triggers compaction (0.8 default; must be within [0,1]; 0 takes the default). Only meaningful with a positive --context-tokens")
+	fs.StringVar(mcpConfig, "mcp-config", "", "MCP host config: a JSON file that is EITHER a full opencode.json (its .mcp block is extracted) OR a bare {\"<name>\": {...}} server map, with local stdio servers ({\"type\":\"local\",\"command\":[...]}) and/or remote Streamable-HTTP servers ({\"type\":\"remote\",\"url\":\"https://…\"}) — each server's tools join the guarded registry as mcp_<server>_<tool> under the FULL approval/guard waterfall (external candidate input; url/headers/env values are credentials, redacted on every surface). Default (unset): ~/.config/opencode/opencode.json when it exists (honest startup line), else zero MCP. Explicitly-passed missing/invalid file = exit 2 fail-closed")
+	fs.IntVar(mcpTimeoutMs, "mcp-timeout-ms", defaultMCPTimeoutMs, "bound on EVERY MCP exchange (initialize + tools/list + each tools/call), 60000 default; 0 takes the default; capped at 600000 (the run_shell cap — no unbounded waits, a hung server fails closed within the bound)")
 	fs.BoolVar(showVersion, "version", false, "print engine and protocol versions and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -186,6 +190,31 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	if err != nil {
 		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
 		return 2
+	}
+	// P8 MCP host: validate the timeout flag and CONNECT every
+	// configured server NOW (launch stdio subprocesses, initialize
+	// remotes, discover tools) — BEFORE buildServer and the
+	// --compile-prompt path, both of which consume cfg.MCP for the
+	// advertised tool catalog (the prompt content hash covers MCP
+	// tools). Server launch is startup-only: a degraded server logs
+	// its typed reason and stays degraded; relaunch is a daemon
+	// restart (documented). The registry (its subprocesses) closes at
+	// daemon exit on every exit path.
+	mcpTimeout, err := validateMCPTimeout(*mcpTimeoutMs)
+	if err != nil {
+		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
+		return 2
+	}
+	cfg.MCP, err = setupMCP(*mcpConfig, mcpTimeout, log)
+	if err != nil {
+		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
+		return 2
+	}
+	if cfg.MCP != nil {
+		defer func() {
+			cfg.MCP.Close()
+			log.Printf("mcp: servers stopped")
+		}()
 	}
 
 	// Loud posture note: a requested confinement mode whose OS backend

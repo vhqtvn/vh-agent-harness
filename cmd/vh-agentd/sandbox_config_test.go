@@ -20,6 +20,15 @@ import (
 // run() dispatch: when the sandbox func re-execs the TEST BINARY as
 // [testbin, __exec_sandbox_child, --, target, args...], dispatch into
 // execsandbox.RunChild instead of running the suite.
+//
+// It also pins HOME to an empty temp dir for the WHOLE test binary:
+// --mcp-config UNSET makes the daemon adopt ~/.config/opencode/
+// opencode.json when it exists (the operator feature), which would
+// make daemon-level tests machine-dependent on a dev box carrying a
+// real opencode config (real servers connected mid-test, advertised
+// tool catalog — and therefore prompt-artifact hashes — drifting per
+// machine). In-process run() calls and spawned daemon children both
+// inherit the pin; the production default is untouched.
 func TestMain(m *testing.M) {
 	if rest, handled := trampolineArgs(os.Args[1:]); handled {
 		if err := execsandbox.RunChild(rest); err != nil {
@@ -27,6 +36,14 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		os.Exit(0) // unreachable on success: syscall.Exec replaced us
+	}
+	if orig := os.Getenv("HOME"); orig != "" {
+		if dir, err := os.MkdirTemp("", "vh-agentd-test-home-"); err == nil {
+			defer os.RemoveAll(dir)
+			_ = os.Setenv("HOME", dir)
+		} else {
+			fmt.Fprintf(os.Stderr, "test home isolation: %v\n", err)
+		}
 	}
 	os.Exit(m.Run())
 }

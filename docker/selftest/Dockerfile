@@ -12,7 +12,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 COPY internal/ ./internal/
 COPY cmd/ ./cmd/
-RUN go build -o /out/ ./cmd/vh-agentd ./cmd/vh-agent-client ./cmd/vh-mockllm
+RUN go build -o /out/ ./cmd/vh-agentd ./cmd/vh-agent-client ./cmd/vh-mockllm ./cmd/vh-mockmcp
 
 FROM debian:bookworm-slim
 RUN apt-get update \
@@ -21,7 +21,7 @@ RUN apt-get update \
 COPY --from=builder /out/ /usr/local/bin/
 COPY docker/selftest/scenarios/ /app/scenarios/
 COPY docker/selftest/battery.sh /app/battery.sh
-RUN chmod +x /app/battery.sh /usr/local/bin/vh-agentd /usr/local/bin/vh-agent-client /usr/local/bin/vh-mockllm \
+RUN chmod +x /app/battery.sh /usr/local/bin/vh-agentd /usr/local/bin/vh-agent-client /usr/local/bin/vh-mockllm /usr/local/bin/vh-mockmcp \
     && mkdir -p /tmp/battery
 WORKDIR /tmp/battery
 ENTRYPOINT ["/app/battery.sh"]

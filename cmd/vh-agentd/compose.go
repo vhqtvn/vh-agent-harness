@@ -355,5 +355,14 @@ func daemonTools(now func() time.Time, cfg *Config, reg *subagents.Registry, she
 	defs = append(defs, skillload.Definition(skillsCat, 0, skillsProv))
 	defs = append(defs, filetools.Definitions(filetools.Config{Roots: fileRoots})...)
 	defs = append(defs, subagenttools.Definitions(reg)...)
+	// P8 MCP host: the connected registry's namespaced definitions —
+	// ORDINARY ToolDefinitions, so the guards, the waterfall, the
+	// approval bridge, and the P3 policy classes apply by construction
+	// (MCP is external candidate input; no MCP result is authority).
+	// A degraded server contributes its typed-error sentinel. Spec-only
+	// callers (nil cfg) and zero-MCP configs (nil registry) add none.
+	if cfg != nil && cfg.MCP != nil {
+		defs = append(defs, cfg.MCP.ToolDefinitions()...)
+	}
 	return defs
 }

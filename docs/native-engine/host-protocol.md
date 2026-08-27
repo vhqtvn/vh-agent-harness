@@ -649,6 +649,65 @@ these are CLIENT-SYNTHESIZED `{"kind":"job-output"}` NDJSON records, a
 keep running and settle on the log, but the client does not tail them
 interactively.
 
+## 4h. MCP host (P8): engine-side tools, no wire changes
+
+The daemon becomes an MCP HOST (`--mcp-config PATH`,
+`--mcp-timeout-ms MS`): it consumes the operator's opencode MCP
+config (local stdio servers + remote Streamable-HTTP servers),
+launches/initializes each server at daemon startup, discovers its
+tools, and registers them in the guarded tool registry namespaced
+`mcp_<server>_<tool>`.
+
+**NO WIRE CHANGES — stated explicitly.** MCP tools ride the EXISTING
+tool events end-to-end: the model calls them as ordinary tool calls;
+`tool/call` (pre-execution) and `tool/result` land on the durable log
+exactly as for every built-in tool; approvals (when the server is
+ask-listed) use the existing `approval/request`/`approval/response`
+bridge; results replay from the log via the unchanged
+`--verify-log` prover (an MCP call needs NO server at replay time —
+the logged content IS the result, same as every tool). The protocol
+`ProtocolVersion` stays 1; every pre-P8 fixture replays byte-identical
+(a server that never advertised MCP tools sends requests that are
+byte-identical to before — the tool array only grows when the
+operator's config actually yields servers). Zero client changes: MCP
+tools render as normal tool calls.
+
+**Posture (the load-bearing invariants):**
+
+- **External candidate input.** MCP tools are EXTERNAL CANDIDATE
+  INPUT under the FULL approval/guard waterfall — by construction:
+  they register as ordinary `ToolDefinition`s, so the guard layer,
+  the allow/deny/ask waterfall, the approval bridge, and the P3
+  policy classes apply to every `mcp_*` call exactly as to
+  `run_shell`. No MCP result is trusted authority (results are
+  logged tool content, nothing more).
+- **Policy default = ASK.** MCP tool names match no shipped allow
+  rule; under a client `--policy` (or interactive) an MCP call ASKS
+  and falls to the human responder. Operators allow explicitly by
+  tool name (e.g. `allow mcp_vhmcp_web_search`).
+- **Credentials redacted like provider keys.** URL (path-embedded
+  tokens included), header values, and env values never reach a log
+  line (startup lines carry names, transport kinds, and counts only)
+  and are scrubbed from every error surface via the same
+  `adapters.RedactSecret` discipline.
+- **Fail-closed, never hung.** Every exchange (initialize,
+  tools/list, tools/call) is bounded by `--mcp-timeout-ms` (default
+  60000; validated 0<ms≤600000, the run_shell cap). A server that
+  will not start, times out, or returns garbage DEGRADES: it
+  contributes no tools, its `mcp_<server>` namespace is RESERVED as
+  one sentinel tool whose call returns the typed "server degraded"
+  error (the advertised set stays stable; a hallucinated full tool
+  name still reports unknown), surfaced at startup and at call time.
+  An unmappable tool schema (non-object `inputSchema`) skips THAT
+  tool with a startup warning — the server stays up (fail-closed
+  per-tool, never per-daemon).
+- **v1 scope (honest).** Tools only — no resources, prompts,
+  sampling, or elicitation; no OAuth (static headers/env); servers
+  launch at startup with no mid-life supervision (a dead server
+  stays degraded until a daemon restart — documented, deliberate);
+  the tool list refreshes at startup only (a `Refresh` seam exists
+  in `internal/mcp`, unwired at the daemon).
+
 ## 7b. Async contract (subagents, B2)
 
 Same discipline as §7 jobs: `subagent/spawn` returns its `{childId}`

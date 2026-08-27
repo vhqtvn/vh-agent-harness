@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/vhqtvn/vh-agent-harness/internal/mcp"
 	"github.com/vhqtvn/vh-agent-harness/internal/session"
 	"github.com/vhqtvn/vh-agent-harness/internal/skills"
 	"github.com/vhqtvn/vh-agent-harness/internal/tools/shell"
@@ -120,6 +121,14 @@ type Config struct {
 	// closed per call. Non-nil (even zero entries) = a catalog dir was
 	// found and loaded at startup; read ONCE — no per-turn hot-reload.
 	Skills *skills.Catalog
+	// MCP is the connected MCP host registry (--mcp-config; see
+	// mcp.go). nil = zero MCP (honest-absent default or explicit zero
+	// servers): no MCP tools are advertised. Non-nil = every configured
+	// server was launched/initialized at startup; its namespaced
+	// ToolDefinitions join the guarded registry. Server supervision is
+	// launch-at-startup only — a dead server stays degraded until a
+	// daemon restart (documented non-goal: mid-life relaunch).
+	MCP *mcp.Registry
 }
 
 // defaultContextTokens is the --context-tokens default: 128k, a
@@ -300,6 +309,40 @@ Skills (--skills-dir DIR):
   log-only skill/loaded provenance event {name, ref?, sha256}; replay
   derives tool output from the LOG, never disk.
 
+MCP host (--mcp-config PATH, --mcp-timeout-ms MS):
+  The daemon is an MCP HOST: it consumes the operator's opencode MCP
+  config, discovers each server's tools, and exposes them in the
+  guarded registry namespaced mcp_<server>_<tool>. Config shapes: a
+  full opencode.json (the .mcp block is extracted) OR a bare
+  {"<name>": {...}} map; local stdio servers are
+  {"type":"local","command":[...]} (optionally "env": {…} — merged
+  into the child's clean env AFTER the scrub discipline: secret-named
+  vars, KEY/SECRET/TOKEN/PASSWORD case-insensitive and the engine
+  credential prefix, are still DROPPED) and remote Streamable-HTTP
+  servers are {"type":"remote","url":"https://…"} (optionally
+  "headers": {…}, sent on every request). Unknown keys are ignored
+  with one startup note. Default (flag unset): ~/.config/opencode/
+  opencode.json when it exists (honest startup line), else zero MCP.
+  An explicitly-passed missing/invalid file exits 2 with a
+  file:line-ish error. POSTURE: MCP tools are EXTERNAL CANDIDATE
+  INPUT — every call rides the same approval/guard waterfall and
+  hard-deny classes as run_shell; no MCP result is trusted authority;
+  MCP tool names match no shipped allow rule, so under --policy (or
+  interactive) they ASK and fall to the human responder — operators
+  allow them explicitly by tool name. CREDENTIALS: url, header, and
+  env values never reach a log line (startup lines carry names, types,
+  and counts only) and are redacted out of every error surface like
+  provider keys. FAIL-CLOSED: every exchange is bounded by
+  --mcp-timeout-ms (60s default, 600s cap — no unbounded waits); a
+  server that will not start, times out, or returns garbage DEGRADES
+  that server (typed error at startup and at call time via the
+  reserved mcp_<server> sentinel; a hallucinated full tool name still
+  reports unknown); an unmappable tool schema skips THAT tool with a
+  warning while the server stays up. Servers launch at startup only —
+  no mid-life supervision; relaunch is a daemon restart. Tools only
+  in v1: no MCP resources/prompts/sampling/elicitation, no OAuth
+  (static headers/env).
+
 Usage:
   vh-agentd --adapter openai|anthropic --model M --base-url URL
             --api-key-env VAR --session-dir DIR [--max-tokens N]
@@ -309,6 +352,7 @@ Usage:
             [--ask-tools TOOL[,TOOL...]]
             [--context-tokens N] [--compact-threshold R]
             [--skills-dir DIR]
+            [--mcp-config PATH] [--mcp-timeout-ms MS]
             [--optimizer dedup|llm] [--compile-prompt] [--version]
   vh-agentd --verify-log PATH
 
