@@ -187,3 +187,30 @@ func TestDecideAllowCarriesRuleProvenance(t *testing.T) {
 		t.Fatalf("ask decision must not claim a rule, got %+v", d)
 	}
 }
+
+// TestDecideUnderscorePrefixGlob (P8.2): "prefix_*" is the
+// underscore-namespace twin of "prefix:*" — the per-server allow
+// shape for MCP tool names (mcp_mock_*). Anchored at the underscore:
+// mcp_mock_* matches mcp_mock_echo but NOT mcp_mockery_echo; the
+// whole-namespace mcp_* shape is an explicit operator choice. Deny
+// direction untouched (hard-deny runs before rules regardless).
+func TestDecideUnderscorePrefixGlob(t *testing.T) {
+	p := mustPolicy(t, "[[allow]]\ntool = \"mcp_mock_*\"\n")
+	if d := decideOf(t, p, "mcp_mock_echo", `{"text":"hi"}`); d.Kind != DecisionAllow {
+		t.Fatalf("mcp_mock_* must match mcp_mock_echo, got %+v", d)
+	}
+	if d := decideOf(t, p, "mcp_mockery_echo", `{"text":"hi"}`); d.Kind != DecisionAsk {
+		t.Fatalf("mcp_mock_* must NOT match mcp_mockery_echo (anchored at the underscore), got %+v", d)
+	}
+	if d := decideOf(t, p, "mcp_other_echo", `{"text":"hi"}`); d.Kind != DecisionAsk {
+		t.Fatalf("mcp_mock_* must NOT match mcp_other_echo, got %+v", d)
+	}
+	// The whole-namespace shape: explicit, legal, operator's choice.
+	pAll := mustPolicy(t, "[[allow]]\ntool = \"mcp_*\"\n")
+	if d := decideOf(t, pAll, "mcp_anything", `{}`); d.Kind != DecisionAllow {
+		t.Fatalf("mcp_* must match any mcp_ name, got %+v", d)
+	}
+	if d := decideOf(t, pAll, "mcpancake", `{}`); d.Kind != DecisionAsk {
+		t.Fatalf("mcp_* must NOT match mcpancake (no underscore), got %+v", d)
+	}
+}

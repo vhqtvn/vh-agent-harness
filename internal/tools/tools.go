@@ -189,6 +189,21 @@ func (p *Pipeline) Definitions() []ToolDefinition {
 	return out
 }
 
+// PreObserverNames returns the registered pre-execute observers' names
+// in registration order. Inspection seam only: it exists so a composer
+// (the daemon's ask posture) can PIN the observer chain order — the
+// waterfall is order-sensitive (a downstream allow resolves an upstream
+// ask), and an unordered composition is a silent security regression.
+func (p *Pipeline) PreObserverNames() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]string, 0, len(p.preObservers))
+	for _, o := range p.preObservers {
+		out = append(out, o.Name())
+	}
+	return out
+}
+
 // policy is the immutable snapshot of the decision lattice consulted by
 // one Execute (taken under RLock so execution itself runs lock-free and
 // Pipeline.Execute is safe for concurrent use).

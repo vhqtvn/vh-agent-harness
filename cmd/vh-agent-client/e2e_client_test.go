@@ -46,11 +46,16 @@ func buildBinaries(t *testing.T) (clientBin, daemonBin string) {
 }
 
 // runClient spawns the real client binary with the given args and
-// stdin, returning (exit code, stdout, stderr).
+// stdin, returning (exit code, stdout, stderr). HOME is scrubbed to a
+// temp dir (P8.2 hermeticity): the daemon's MCP default config lives
+// at $HOME/.config/opencode/opencode.json, and since P8.2 a present
+// default changes the ASK posture (mcp namespace observer armed /
+// folded into ask-tools provenance) — these e2e tests must not depend
+// on the operator's real MCP config.
 func runClient(t *testing.T, clientBin string, args []string, stdin string) (int, string, string) {
 	t.Helper()
 	cmd := exec.Command(clientBin, args...)
-	cmd.Env = append(os.Environ(), "VH_AGENTD_TEST_KEY=test-key-e2e")
+	cmd.Env = append(os.Environ(), "VH_AGENTD_TEST_KEY=test-key-e2e", "HOME="+t.TempDir())
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errbuf syncBuf
 	cmd.Stdout = &out
@@ -395,11 +400,12 @@ func TestClientBinaryREPLImmediateEOF(t *testing.T) {
 // runClientInDir spawns the real client binary with a controlled
 // working directory (the default session dir resolves against the
 // CLIENT's cwd — that resolution is under test), returning (exit
-// code, stdout, stderr).
+// code, stdout, stderr). HOME scrubbed to a temp dir for the same
+// P8.2 hermeticity reason as runClient.
 func runClientInDir(t *testing.T, clientBin, dir string, args []string, stdin string) (int, string, string) {
 	t.Helper()
 	cmd := exec.Command(clientBin, args...)
-	cmd.Env = append(os.Environ(), "VH_AGENTD_TEST_KEY=test-key-e2e")
+	cmd.Env = append(os.Environ(), "VH_AGENTD_TEST_KEY=test-key-e2e", "HOME="+t.TempDir())
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errbuf syncBuf

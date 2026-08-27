@@ -21,6 +21,10 @@
 //	                       {"type":"string"} — the UNMAPPABLE schema a
 //	                       host must skip per-tool with a warning
 //
+// Every tools/call that DISPATCHES a known tool is COUNTED (per tool
+// + total); http mode exposes the counters at GET /calls so an
+// external harness can prove a denied call never executed.
+//
 // # Fault injection (flags)
 //
 //	--garbage       every response is garbage: stdio mode writes an
@@ -58,7 +62,9 @@
 //	errors     unknown method → -32601; unknown tool name → -32602;
 //	          bad params → -32700/-32600 class errors
 //
-// http mode also serves GET /healthz → {"ok":true}.
+// http mode also serves GET /healthz → {"ok":true} and GET /calls →
+// {"total":N,"by_tool":{name:count}} — the execution counter the
+// ask-by-default proofs read to show a denied call never ran.
 //
 // Usage:
 //

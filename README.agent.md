@@ -1375,12 +1375,12 @@ vh-agentd --adapter openai|openaicompat|anthropic --model <name> \
   [--workdir-roots DIR[,DIR...]] \
   [--ask-tools TOOL[,TOOL...]] \
   [--context-tokens N] [--compact-threshold R] \
-  [--skills-dir DIR] \
-  [--mcp-config PATH] [--mcp-timeout-ms MS] \
-  [--optimizer dedup|llm]
+   [--skills-dir DIR] \
+   [--mcp-config PATH] [--mcp-timeout-ms MS] [--mcp-auto-allow] \
+   [--optimizer dedup|llm]
 ```
 
-`--ask-tools run_shell[,TOOL...]` (P3.5) is the daemon-side ask
+`--ask-tools run_shell[,TOOL...]` (P3.5) is the operator-named ask
 source: calls to the named tools ride the REAL approval waterfall —
 the wire bridge emits `approval/request`, and the CLIENT decides
 (interactive y/N, `--json` approval lines, or the client's `--policy`
@@ -1388,7 +1388,13 @@ engine). Every unanswerable direction (no answer, approval timeout,
 disconnect) denies fail-closed, and the deny-only guard layer still
 runs after an approval grant. Names are validated against the
 registered tool set at startup — an unknown name exits 2. Default
-(omit the flag): the daemon emits no asks, behavior unchanged.
+(omit the flag): no named-tool asks. Since P8.2 the daemon carries a
+SECOND ask source (the mcp namespace, above); the two are registered
+through ONE folded observer (`ask-tools+mcp-ask`) because the
+waterfall resolves an upstream ask on a downstream allow — two
+Allow-returning sibling observers would silently disable each other
+in either order. Denial provenance names the armed source: `ask-tools`
+alone, `mcp-ask` alone, or the fold.
 
 `--verify-log PATH` is a READ-ONLY operator mode (parsed before the
 required flags — no adapter/model/session-dir needed, no protocol
@@ -1578,10 +1584,13 @@ deciding when a catalog outgrows the full-listing prompt section (the
 `SkillBudget` seam in `internal/skills` marks where top-k selection or
 a `skill_search` tool would slot in; no RAG today).
 
-**MCP host delivery (`--mcp-config PATH`, `--mcp-timeout-ms MS`).**
+**MCP host delivery (`--mcp-config PATH`, `--mcp-timeout-ms MS`,
+`--mcp-auto-allow`).**
 The daemon is an MCP HOST: it consumes the operator's opencode MCP
 config, discovers each server's tools at startup, and exposes them in
-the SAME guarded registry as every built-in tool — namespaced
+the SAME guarded registry as every built-in tool (same waterfall,
+guards, and approval bridge — NOT the same containment: see the
+posture paragraph below) — namespaced
 `mcp_<server>_<tool>` (lowercase, sanitized to `[a-z0-9_]`,
 collision-safe `_N` suffixes), description prefixed `(<server>) ` and
 sanitized like the skills tier-1 lines. Config shapes: the file is
@@ -1602,12 +1611,26 @@ Default (`--mcp-config` unset): `~/.config/opencode/opencode.json`
 when it exists (an honest startup line says so), else zero MCP; an
 explicitly-passed missing/invalid file is a fail-closed exit 2 with a
 file:line-ish error. **Posture — MCP tools are EXTERNAL CANDIDATE
-INPUT:** every call rides the full guard/waterfall/approval machinery
-by construction (they are ordinary registered tools — no MCP result is
-trusted authority), and MCP tool names match NO shipped allow rule,
-so under `--policy` (or interactive) they ASK and fall to the human
-responder; operators allow them explicitly by tool name
-(`--policy 'allow mcp_vhmcp_web_search'`). URL, header, and env
+INPUT and ASK-BY-DEFAULT (P8.2):** every call rides the full
+guard/waterfall/approval machinery by construction (they are ordinary
+registered tools — no MCP result is trusted authority), and — the
+load-bearing P8.2 correction — MCP tools are NOT sandboxed. Unlike
+`run_shell` under `--sandbox read-only|workspace-write` (Landlock:
+network denied, writes confined), an MCP call is raw external network
+egress to the configured server with none of that containment. The
+approval ASK is therefore the boundary, and it is armed by DEFAULT:
+every `mcp_<server>_<tool>` call (the degraded `mcp_<server>`
+sentinel included) emits `approval/request` on the wire, the client's
+`--policy` engine or interactive responder answers, and every
+unanswerable direction (no answer, timeout, disconnect) denies
+fail-closed with the tool never executing. Promotion is explicit:
+`[[allow]] tool = "mcp_mock_echo"` (exact name) or
+`tool = "mcp_mock_*"` (the per-server underscore prefix glob,
+anchored at the underscore — the P8.2 twin of the colon glob);
+hard-deny classes apply exactly as for every other tool. Operators
+who want the old allow-without-ask behavior opt back in explicitly
+with `--mcp-auto-allow` (DEFAULT FALSE; the startup line states the
+posture either way). URL, header, and env
 values are CREDENTIALS: startup lines carry names, types, and counts
 only, and every error surface is redacted exactly like provider keys
 (URL path tokens included). **Fail-closed everywhere:** every exchange
@@ -1807,7 +1830,11 @@ only the ask path can block (that block belongs to the responder).
 # whole-line comments and blank lines are the only ignored shapes
 
 [[allow]]
-tool = "read"          # exact tool name, or a single-segment glob "edit:*"
+tool = "read"          # exact tool name, or a single-segment glob:
+                       #   "edit:*"  (colon namespace — matches edit:big)
+                       #   "mcp_mock_*" (underscore namespace, P8.2 — the
+                       #                 per-server MCP allow, anchored at
+                       #                 the underscore)
 path = "docs/"         # optional rooted-path prefix (read/write/edit only)
 
 [[allow]]
@@ -1822,8 +1849,9 @@ tool = "echo"          # a bare rule allows the tool pattern broadly,
 
 The parse is FAIL-CLOSED: unknown keys or sections, malformed lines,
 duplicate keys, unquoted values, inline comments, unreadable files, and
-semantically inexpressible rules (a bare `*`, wildcards outside
-`prefix:*`, a `path` on a non-file tool, a `path`/`argv0` on the wrong
+semantically inexpressible rules (a bare `*`, wildcards outside the
+two `prefix:*` / `prefix_*` glob shapes, a `path` on a non-file tool,
+a `path`/`argv0` on the wrong
 tool, `..`/`.`/empty path segments in a rule) exit 2 at startup with
 the exact offending file:line (and byte offset). Nothing is silently
 ignored. An EMPTY file is valid and means "everything asks" — exactly

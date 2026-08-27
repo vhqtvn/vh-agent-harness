@@ -178,6 +178,13 @@ func buildServer(cfg *Config, apiKey string, rwc io.ReadWriteCloser) (*protocol.
 			panic(fmt.Sprintf("vh-agentd: register tool %s: %v", d.Name, err))
 		}
 	}
+
+	// P8.2: arm the ask observers at the COMPOSITION level — the mcp_
+	// namespace is ask-by-default (--mcp-auto-allow opts back into
+	// allow-by-default), composed with --ask-tools through the fold.
+	// ONE registration site; see mcpask.go for why the sources cannot
+	// be registered as order-sensitive siblings.
+	armAskObservers(engine, cfg)
 	return srv, engine, tracker, served
 }
 

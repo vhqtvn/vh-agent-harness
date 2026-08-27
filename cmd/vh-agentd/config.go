@@ -129,6 +129,14 @@ type Config struct {
 	// launch-at-startup only — a dead server stays degraded until a
 	// daemon restart (documented non-goal: mid-life relaunch).
 	MCP *mcp.Registry
+	// MCPAutoAllow is the P8.2 opt-back-in flag --mcp-auto-allow
+	// (DEFAULT FALSE). When false (the default), every mcp_-namespaced
+	// tool call ASKS through the approval waterfall — MCP tools are
+	// un-sandboxed external network egress and must not silently
+	// auto-execute. When true, the mcp ask observer is not registered
+	// and mcp calls execute without asking (the pre-P8.2 posture, an
+	// explicit operator choice logged at startup).
+	MCPAutoAllow bool
 }
 
 // defaultContextTokens is the --context-tokens default: 128k, a
@@ -255,14 +263,18 @@ System prompt (compiled-sysprompt model):
   never silent). Populate the artifact with --compile-prompt.
 
 Ask routing (--ask-tools run_shell[,TOOL...]):
-  The daemon-side ask source: tool calls whose name is listed ride the
-  REAL approval waterfall — the wire bridge emits approval/request, and
-  the CLIENT decides (interactive y/N, --json approval lines, or the
-  client's --policy engine). Every unanswerable direction (no answer,
-  timeout, disconnect) denies fail-closed; the deny-only guard layer
-  still runs after an approval grant. Names are validated against the
-  registered tool set at startup: an unknown name exits 2. Default
-  (omit the flag) = the daemon emits no asks, behavior unchanged.
+  An operator-named ask source: tool calls whose name is listed ride
+  the REAL approval waterfall — the wire bridge emits
+  approval/request, and the CLIENT decides (interactive y/N, --json
+  approval lines, or the client's --policy engine). Every
+  unanswerable direction (no answer, timeout, disconnect) denies
+  fail-closed; the deny-only guard layer still runs after an
+  approval grant. Names are validated against the registered tool
+  set at startup: an unknown name exits 2. Default (omit the flag) =
+  no named-tool asks — note the mcp_ namespace asks by DEFAULT since
+  P8.2 (see --mcp-auto-allow), and when both sources are armed their
+  denials are attributed to the folded observer
+  "ask-tools+mcp-ask".
 
 Compaction (--context-tokens N, --compact-threshold R):
   After every successfully completed parent-session turn the daemon
@@ -309,7 +321,7 @@ Skills (--skills-dir DIR):
   log-only skill/loaded provenance event {name, ref?, sha256}; replay
   derives tool output from the LOG, never disk.
 
-MCP host (--mcp-config PATH, --mcp-timeout-ms MS):
+MCP host (--mcp-config PATH, --mcp-timeout-ms MS, --mcp-auto-allow):
   The daemon is an MCP HOST: it consumes the operator's opencode MCP
   config, discovers each server's tools, and exposes them in the
   guarded registry namespaced mcp_<server>_<tool>. Config shapes: a
@@ -326,13 +338,20 @@ MCP host (--mcp-config PATH, --mcp-timeout-ms MS):
   An explicitly-passed missing/invalid file exits 2 with a
   file:line-ish error. POSTURE: MCP tools are EXTERNAL CANDIDATE
   INPUT — every call rides the same approval/guard waterfall and
-  hard-deny classes as run_shell; no MCP result is trusted authority;
-  MCP tool names match no shipped allow rule, so under --policy (or
-  interactive) they ASK and fall to the human responder — operators
-  allow them explicitly by tool name. CREDENTIALS: url, header, and
-  env values never reach a log line (startup lines carry names, types,
-  and counts only) and are redacted out of every error surface like
-  provider keys. FAIL-CLOSED: every exchange is bounded by
+  hard-deny classes as run_shell; no MCP result is trusted authority.
+  ASK-BY-DEFAULT (P8.2): unlike run_shell under --sandbox confinement
+  (Landlock: network denied, writes confined), MCP tools are
+  NOT sandboxed — they are raw external network egress — so every
+  mcp_ namespaced call ASKS by default: approval/request on the wire,
+  answered by the client's --policy engine (exact tool name, or the
+  mcp_<server>_* prefix glob) or interactive responder; unanswerable
+  approvals (no answer, timeout, disconnect) deny fail-closed and the
+  tool never executes. --mcp-auto-allow (DEFAULT FALSE) opts back into
+  the pre-P8.2 allow-without-ask posture — an explicit operator
+  choice, stated on the startup line. CREDENTIALS: url, header, and
+  env values never reach a log line (startup lines carry names,
+  types, and counts only) and are redacted out of every error surface
+  like provider keys. FAIL-CLOSED: every exchange is bounded by
   --mcp-timeout-ms (60s default, 600s cap — no unbounded waits); a
   server that will not start, times out, or returns garbage DEGRADES
   that server (typed error at startup and at call time via the
@@ -352,7 +371,7 @@ Usage:
             [--ask-tools TOOL[,TOOL...]]
             [--context-tokens N] [--compact-threshold R]
             [--skills-dir DIR]
-            [--mcp-config PATH] [--mcp-timeout-ms MS]
+            [--mcp-config PATH] [--mcp-timeout-ms MS] [--mcp-auto-allow]
             [--optimizer dedup|llm] [--compile-prompt] [--version]
   vh-agentd --verify-log PATH
 

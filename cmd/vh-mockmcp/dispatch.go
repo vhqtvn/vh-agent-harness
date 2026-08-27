@@ -9,8 +9,41 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 )
+
+// callCounts is the EXECUTION counter the P8.2 ask-by-default proofs
+// read: one increment per tools/call that actually DISPATCHES a known
+// tool (unknown-tool -32602s are refusals, not executions). Shared by
+// both framings (stdio subprocess + HTTP) because dispatch is the one
+// protocol brain; the HTTP framing exposes it at GET /calls, so a test
+// harness can prove "the tool NEVER ran" against a server it cannot
+// otherwise inspect from outside.
+var callCounts = struct {
+	mu sync.Mutex
+	n  int
+	by map[string]int
+}{by: map[string]int{}}
+
+// countCall records one known-tool execution.
+func countCall(name string) {
+	callCounts.mu.Lock()
+	callCounts.n++
+	callCounts.by[name]++
+	callCounts.mu.Unlock()
+}
+
+// callCountSnapshot returns (total, per-tool) at read time.
+func callCountSnapshot() (int, map[string]int) {
+	callCounts.mu.Lock()
+	defer callCounts.mu.Unlock()
+	by := make(map[string]int, len(callCounts.by))
+	for k, v := range callCounts.by {
+		by[k] = v
+	}
+	return callCounts.n, by
+}
 
 // protocolVersion is the version this mock negotiates in initialize.
 const protocolVersion = "2025-06-18"
@@ -182,6 +215,7 @@ func callTool(req *jsonrpcRequest) (*jsonrpcResponse, bool) {
 		if err := json.Unmarshal(p.Arguments, &a); err != nil || a.Text == "" {
 			return argError(req, "echo", "text (non-empty string)"), false
 		}
+		countCall(p.Name)
 		res = callResult{Content: []contentBlock{{Type: "text", Text: "echo: " + a.Text}}}
 
 	case "slow":
@@ -191,6 +225,7 @@ func callTool(req *jsonrpcRequest) (*jsonrpcResponse, bool) {
 		if err := json.Unmarshal(p.Arguments, &a); err != nil {
 			return argError(req, "slow", "ms (number)"), false
 		}
+		countCall(p.Name)
 		ms := time.Duration(a.MS) * time.Millisecond
 		if ms > 120*time.Second {
 			ms = 120 * time.Second
@@ -207,6 +242,7 @@ func callTool(req *jsonrpcRequest) (*jsonrpcResponse, bool) {
 		if err := json.Unmarshal(p.Arguments, &a); err != nil || a.Message == "" {
 			return argError(req, "fail", "message (non-empty string)"), false
 		}
+		countCall(p.Name)
 		res = callResult{
 			Content: []contentBlock{{Type: "text", Text: a.Message}},
 			IsError: true,
@@ -219,6 +255,7 @@ func callTool(req *jsonrpcRequest) (*jsonrpcResponse, bool) {
 		if err := json.Unmarshal(p.Arguments, &a); err != nil || a.Name == "" {
 			return argError(req, "env", "name (non-empty string)"), false
 		}
+		countCall(p.Name)
 		v := os.Getenv(a.Name)
 		if v == "" {
 			v = "(unset)"

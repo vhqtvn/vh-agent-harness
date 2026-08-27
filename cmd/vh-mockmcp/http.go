@@ -36,6 +36,19 @@ func newHTTPHandler(cfg mockConfig) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})
+	// GET /calls — the EXECUTION counter (P8.2): {"total":N,"by_tool":
+	// {name:count}} over every tools/call that dispatched a known tool.
+	// The ask-by-default proofs read this to show a DENIED call never
+	// reached the server (total stays 0) where a granted one did.
+	mux.HandleFunc("/calls", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "mock: GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		total, by := callCountSnapshot()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"total": total, "by_tool": by})
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "mock: POST only", http.StatusMethodNotAllowed)

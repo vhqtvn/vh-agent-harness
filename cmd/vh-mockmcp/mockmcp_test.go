@@ -264,6 +264,59 @@ func TestHTTPHandlerJSONAndSSE(t *testing.T) {
 	_ = hr.Body.Close()
 }
 
+// TestHTTPCallsCounter (P8.2): GET /calls exposes the execution
+// counter — one increment per tools/call that dispatches a KNOWN
+// tool; unknown-tool refusals and non-call methods never count. The
+// counter is process-global, so the test asserts DELTAS.
+func TestHTTPCallsCounter(t *testing.T) {
+	srv := httptest.NewServer(newHTTPHandler(mockConfig{}))
+	defer srv.Close()
+	getCalls := func() (int, int) {
+		resp, err := http.Get(srv.URL + "/calls")
+		if err != nil {
+			t.Fatalf("GET /calls: %v", err)
+		}
+		defer resp.Body.Close()
+		var body struct {
+			Total  int            `json:"total"`
+			ByTool map[string]int `json:"by_tool"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode /calls: %v", err)
+		}
+		return body.Total, body.ByTool["echo"]
+	}
+	before, beforeEcho := getCalls()
+	post := func(body string) {
+		resp, err := http.Post(srv.URL+"/mcp", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		defer resp.Body.Close()
+	}
+	// Non-call methods do not count.
+	post(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	if after, afterEcho := getCalls(); after != before || afterEcho != beforeEcho {
+		t.Fatalf("tools/list moved the counter: %d→%d (echo %d→%d)", before, after, beforeEcho, afterEcho)
+	}
+	// An unknown-tool refusal is not an execution.
+	post(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nope","arguments":{}}}`)
+	if after, _ := getCalls(); after != before {
+		t.Fatalf("unknown-tool call moved the counter: %d→%d", before, after)
+	}
+	// One real echo execution: total and by_tool each +1.
+	post(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"count-me"}}}`)
+	after, afterEcho := getCalls()
+	if after != before+1 || afterEcho != beforeEcho+1 {
+		t.Fatalf("echo execution: total %d→%d (want +1), echo %d→%d (want +1)", before, after, beforeEcho, afterEcho)
+	}
+	// A bad-argument echo refusal does not count.
+	post(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"text":""}}}`)
+	if after2, _ := getCalls(); after2 != after {
+		t.Fatalf("bad-argument refusal moved the counter: %d→%d", after, after2)
+	}
+}
+
 func TestHTTPRequireSessionDiscipline(t *testing.T) {
 	srv := httptest.NewServer(newHTTPHandler(mockConfig{reqSess: true}))
 	defer srv.Close()

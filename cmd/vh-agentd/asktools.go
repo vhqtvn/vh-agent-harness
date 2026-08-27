@@ -14,6 +14,15 @@
 // direction (absence, timeout, disconnect) denies fail-closed. Guards
 // still run AFTER the waterfall, so an approved call remains subject
 // to the deny-only guard layer (monotonic ordering unchanged).
+//
+// P8.2 UPDATE — the composition-order note below is superseded: a
+// second ask observer IS wired (the mcp namespace observer), and the
+// waterfall's downstream-allow-resolves-upstream-ask semantics make
+// two Allow-returning siblings non-composable in ANY order. The
+// a-F4 defer is discharged by the FOLD in mcpask.go (armAskObservers
+// registers ask-tools alone, mcp-ask alone, or the folded
+// "ask-tools+mcp-ask" — never an order-sensitive pair). This file's
+// observer is UNCHANGED; see mcpask.go for the full story.
 package main
 
 import (
@@ -86,13 +95,13 @@ func toolNames(defs []tools.ToolDefinition) []string {
 //
 // Verdict choice (closed lattice; there is no abstain): Allow for
 // non-matching tools — in the waterfall an Allow would resolve an
-// UPSTREAM ask, but this observer is currently the daemon's only
-// pre-observer (nothing is upstream), and the composition-order note
-// in compose.go governs future insertions: an upstream-asking
-// observer must be added BEFORE this one, or this delegate shape must
-// be revisited. Matching tools return Ask — the unresolved ask goes
-// to the Approver (the wire bridge) exactly as the fail-closed
-// contract requires.
+// UPSTREAM ask, so this delegate shape is composable ONLY through the
+// P8.2 fold (mcpask.go): alone (nothing is upstream), or folded with
+// the mcp-ask observer where the fold suppresses the sibling-allow
+// resolution. Registered by armAskObservers — never by a bare
+// AddPreObserver next to another ask source. Matching tools return
+// Ask — the unresolved ask goes to the Approver (the wire bridge)
+// exactly as the fail-closed contract requires.
 type askToolsObserver struct {
 	names map[string]bool
 }

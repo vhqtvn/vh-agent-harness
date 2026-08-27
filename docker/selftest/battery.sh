@@ -64,18 +64,17 @@
 #     must stay byte-identical (replay derives from the log, never
 #     disk). The fixture is restored after the mutation so image-baked
 #     content is left as shipped.
-#   - mcp (P8) drives the MCP-host surface over the real binaries: the
-#     daemon starts with --mcp-config carrying BOTH transport shapes
-#     (vh-mockmcp stdio subprocess + vh-mockmcp --http --sse on a
-#     computed port, with a FAKE TOKEN embedded in the remote URL path)
-#     plus the two fail-closed twins (a call-garbage stdio server and a
-#     dead-port remote). Asserts: namespaced mcp_<server>_<tool> names
-#     advertised in the mock journal, round-trip content through both
-#     transports, the typed degraded-sentinel and garbage-call errors
-#     with the turn still completing, tool/call+tool/result on the
-#     durable log, deterministic --verify-log replay, and ZERO
-#     occurrences of the fake URL token in daemon stderr and the
-#     session log (credential redaction posture).
+#   - mcp (P8/P8.2) drives the MCP-host surface over the real binaries
+#     in THREE runs against one mockmcp server: (a) the DEFAULT
+#     ask-by-default posture — no --policy, no --ask-tools, EOF-stdin
+#     client: approval/request on the wire, fail-closed denials, the
+#     tools provably NEVER executed (the mock's /calls counter stays
+#     0); (b) POLICY promotion — exact-name [[allow]] rules plus the
+#     per-server underscore glob grant the asks and the same tools
+#     round-trip (the degraded-sentinel / garbage-call twins, journal,
+#     log, replay-determinism, and token-redaction assertions live
+#     here); (c) the --mcp-auto-allow opt-in round-trips without
+#     asking.
 #   - Cross-run byte-comparison of DIFFERENT sessions is a NON-GOAL —
 #     session ids are random by design (sess-<random hex>). Determinism
 #     is proven per-log: two --verify-log runs on the SAME log must
@@ -851,24 +850,38 @@ sc_skills() {
     stop_mock
 }
 
-# sc_mcp (P8): the MCP-host crux over REAL binaries. The daemon starts
-# with --mcp-config covering BOTH transport shapes plus the two
-# fail-closed twins: localmock (vh-mockmcp stdio subprocess),
-# remotemock (vh-mockmcp --http --sse on a computed port, URL carrying
-# a FAKE TOKEN in the path — the redaction proof), garbagemock (stdio
-# whose tools/call responses are garbage — error not crash), and
-# deadmock (remote at a dead port — the degraded posture). Asserts:
-# namespaced names advertised in the model request (journal), round-
-# trip content through BOTH transports, tool/call+tool/result on the
-# durable log, the typed degraded error + garbage error with the turn
-# still completing, replay determinism, and ZERO occurrences of the
-# fake token in daemon stderr and the session log.
+# sc_mcp (P8/P8.2): the MCP-host crux over REAL binaries, THREE runs
+# against ONE mockmcp HTTP server + one config covering BOTH transport
+# shapes plus the two fail-closed twins: localmock (vh-mockmcp stdio
+# subprocess), remotemock (vh-mockmcp --http --sse on a computed port,
+# URL carrying a FAKE TOKEN in the path — the redaction proof),
+# garbagemock (stdio whose tools/call responses are garbage — error
+# not crash), and deadmock (remote at a dead port — the degraded
+# posture).
+#
+#   (a) DEFAULT POSTURE (P8.2 — the gap that hid the operator's live
+#       finding): NO --policy, NO --ask-tools, non-interactive client
+#       (EOF stdin). The mcp tool calls ASK: approval/request on the
+#       wire, the EOF responder denies fail-closed, the tools NEVER
+#       execute (the http mock's /calls counter stays 0; the stdio
+#       twin's denial is proven from the typed denied tool/result),
+#       the turn still completes, replay stays deterministic.
+#   (b) POLICY PROMOTION: --policy with exact-name allows plus the
+#       per-server underscore glob (mcp_remotemock_*) grants the asks —
+#       the SAME tools round-trip content through BOTH transports, the
+#       degraded sentinel + garbage-call errors land with the turn
+#       completing, names advertised in the model request (journal),
+#       tool/call+tool/result on the durable log, deterministic
+#       --verify-log replay, and ZERO occurrences of the fake URL
+#       token in daemon stderr and the session log.
+#   (c) AUTO-ALLOW OPT-IN: --mcp-auto-allow registers no mcp ask —
+#       the call round-trips with no approval on the wire (the
+#       pre-P8.2 posture as an explicit operator choice).
 MCPMCP=/usr/local/bin/vh-mockmcp
 MCPMCP_PORT=8177
 MCPMCP_PID=""
 sc_mcp() {
     local sc=mcp
-    fresh_session "$sc"
     # The MCP remote server: vh-mockmcp over HTTP with SSE framing (the
     # harder response shape exercised over the real wire).
     "$MCPMCP" --http "127.0.0.1:${MCPMCP_PORT}" --sse >"$WORK/mockmcp.out" 2>"$WORK/mockmcp.err" &
@@ -897,60 +910,145 @@ sc_mcp() {
   "deadmock":   {"type": "remote", "url": "http://127.0.0.1:1/mcp"}
 }
 MCPJSON
+    local base_cfg=(
+        --exec "$DAEMON" --mcp-config "$WORK/mcp-config.json" --mcp-timeout-ms 15000
+        --adapter openai --model mock-model
+        --base-url "$MOCK_URL/v1" --api-key-env MOCK_KEY
+    )
+
+    # ---- (a) DEFAULT POSTURE: ask, EOF-deny fail-closed, no execution.
+    fresh_session "$sc-default"
+    start_mock "$SCEN/mcp_default.json"
+    run_client --session-dir "$SESS" --json \
+        --prompt "try the mcp tools with nothing configured" \
+        "${base_cfg[@]}"
+    check "$sc" "(a) client exits 0 (no hang — got $CODE)" [ "$CODE" -ne 124 ]
+    check "$sc" "(a) client exits cleanly" [ "$CODE" -eq 0 ]
+    check "$sc" "(a) final text delivered after the denials" \
+        grep -Fq "mcp default posture complete" "$WORK/client.out"
+    check "$sc" "(a) startup posture line (ask-by-default)" \
+        grep -q "mcp tools: ask-by-default" "$WORK/client.err"
+    # The asks surfaced on the wire: the --json stream carries the
+    # approval/request (approvalId + the ask-by-default reason).
+    check "$sc" "(a) approval/request on the wire" grep -q "approvalId" "$WORK/client.out"
+    check "$sc" "(a) ask reason states the posture" grep -q "ask-by-default" "$WORK/client.out"
+    check "$sc" "(a) typed denials name the mcp-ask source" \
+        grep -q "denied by mcp-ask" "$WORK/client.out"
+    # NOT executed: no echo content anywhere, and the http mock's
+    # execution counter is ZERO.
+    if grep -q "echo: must-not-run" "$WORK/client.out"; then
+        fail "$sc" "(a) a denied mcp tool EXECUTED (echo content present)"
+    else
+        PASS=$((PASS + 1)); note "  ok: (a) no denied tool's content ever produced"
+    fi
+    local calls_a
+    calls_a=$(http_get_port "${MCPMCP_PORT}" /calls | grep -o '"total":[0-9]*' | cut -d: -f2)
+    check "$sc" "(a) mockmcp executed 0 tool calls — got ${calls_a:-none}" [ "${calls_a:-1}" -eq 0 ]
+    newest_log
+    local dcount
+    dcount=$(jq -s '[.[] | select(.type == "tool/result" and .payload.denied == true)] | length' "$LOG")
+    check "$sc" "(a) log carries 2 typed denials — got ${dcount:-none}" [ "${dcount:-0}" -eq 2 ]
+    local dby
+    dby=$(jq -s '[.[] | select(.type == "tool/result" and .payload.deniedBy == "mcp-ask")] | length' "$LOG")
+    check "$sc" "(a) denials attributed to mcp-ask — got ${dby:-none}" [ "${dby:-0}" -eq 2 ]
+    check "$sc" "(a) --verify-log deterministic" verify_log_ok "$LOG"
+    local n_a
+    n_a=$(chat_count)
+    check "$sc" "(a) model called exactly twice (tool turn + final) — got ${n_a:-none}" [ "${n_a:-0}" -eq 2 ]
+    stop_mock
+
+    # ---- (b) POLICY PROMOTION: exact names + the per-server glob.
+    fresh_session "$sc-policy"
     start_mock "$SCEN/mcp.json"
     run_client --session-dir "$SESS" --json \
+        --policy "$SCEN/mcp.policy" \
         --prompt "exercise both mcp transports" \
-        --exec "$DAEMON" --mcp-config "$WORK/mcp-config.json" --mcp-timeout-ms 15000 \
-        --adapter openai --model mock-model \
-        --base-url "$MOCK_URL/v1" --api-key-env MOCK_KEY
-    check "$sc" "client exits 0 (no hang — got $CODE)" [ "$CODE" -ne 124 ]
-    check "$sc" "client exits cleanly" [ "$CODE" -eq 0 ]
-    check "$sc" "final text delivered" grep -Fq "mcp round trip complete" "$WORK/client.out"
+        "${base_cfg[@]}"
+    check "$sc" "(b) client exits 0 (no hang — got $CODE)" [ "$CODE" -ne 124 ]
+    check "$sc" "(b) client exits cleanly" [ "$CODE" -eq 0 ]
+    check "$sc" "(b) policy loaded (4 rules)" grep -q "policy loaded (4 rules)" "$WORK/client.err"
+    check "$sc" "(b) policy auto-ALLOWED the exact-named stdio echo" \
+        grep -q "policy: allow mcp_localmock_echo" "$WORK/client.err"
+    check "$sc" "(b) policy auto-ALLOWED via the underscore glob" \
+        grep -q "policy: allow mcp_remotemock_echo" "$WORK/client.err"
+    check "$sc" "(b) final text delivered" grep -Fq "mcp round trip complete" "$WORK/client.out"
     # Round-trip content through BOTH transports (the --json stream
     # carries tool result content).
-    check "$sc" "stdio transport round trip" grep -Fq "echo: stdio-payload" "$WORK/client.out"
-    check "$sc" "http(SSE) transport round trip" grep -Fq "echo: http-payload" "$WORK/client.out"
+    check "$sc" "(b) stdio transport round trip" grep -Fq "echo: stdio-payload" "$WORK/client.out"
+    check "$sc" "(b) http(SSE) transport round trip" grep -Fq "echo: http-payload" "$WORK/client.out"
     # Startup honesty: per-server lines + summary; the degraded twin
     # names its server (typed, credential-free).
-    check "$sc" "stdio server startup line" grep -q "mcp: localmock (stdio) up — 3 tool(s)" "$WORK/client.err"
-    check "$sc" "remote server startup line" grep -q "mcp: remotemock (remote) up — 3 tool(s)" "$WORK/client.err"
-    check "$sc" "dead server DEGRADED startup line" grep -q "mcp: deadmock DEGRADED" "$WORK/client.err"
-    check "$sc" "startup summary counts" \
+    check "$sc" "(b) stdio server startup line" grep -q "mcp: localmock (stdio) up — 3 tool(s)" "$WORK/client.err"
+    check "$sc" "(b) remote server startup line" grep -q "mcp: remotemock (remote) up — 3 tool(s)" "$WORK/client.err"
+    check "$sc" "(b) dead server DEGRADED startup line" grep -q "mcp: deadmock DEGRADED" "$WORK/client.err"
+    check "$sc" "(b) startup summary counts" \
         grep -q "mcp: 3 server(s) connected, 1 degraded; 9 tool(s) registered" "$WORK/client.err"
     # Fail-closed twins: the typed degraded error (sentinel call) and
     # the garbage-call error — errors, not crashes; the turn completed.
-    check "$sc" "degraded sentinel typed error" \
+    check "$sc" "(b) degraded sentinel typed error" \
         grep -Fq "mcp: server deadmock is degraded" "$WORK/client.out"
-    check "$sc" "garbage call fails with an error" \
+    check "$sc" "(b) garbage call fails with an error" \
         grep -Fq "tool mcp_garbagemock_echo failed" "$WORK/client.out"
     # Namespaced names advertised to the model (journal = request
     # plane): both transports' echo tools present.
     local journal
     journal=$(journal_raw)
-    check "$sc" "journal advertises mcp_localmock_echo" grep -q "mcp_localmock_echo" <<<"$journal"
-    check "$sc" "journal advertises mcp_remotemock_echo" grep -q "mcp_remotemock_echo" <<<"$journal"
-    check "$sc" "journal carries the degraded sentinel mcp_deadmock" grep -q '"mcp_deadmock"' <<<"$journal"
-    # Durable log: 4 tool calls, 4 tool results.
+    check "$sc" "(b) journal advertises mcp_localmock_echo" grep -q "mcp_localmock_echo" <<<"$journal"
+    check "$sc" "(b) journal advertises mcp_remotemock_echo" grep -q "mcp_remotemock_echo" <<<"$journal"
+    check "$sc" "(b) journal carries the degraded sentinel mcp_deadmock" grep -q '"mcp_deadmock"' <<<"$journal"
+    # Durable log: 4 tool calls, 4 tool results, all EXECUTED (none
+    # denied — the policy granted every ask).
     newest_log
-    local calls results
+    local calls results denied_b
     calls=$(jq -s '[.[] | select(.type == "tool/call")] | length' "$LOG")
     results=$(jq -s '[.[] | select(.type == "tool/result")] | length' "$LOG")
-    check "$sc" "log carries 4 tool/call events — got ${calls:-none}" [ "${calls:-0}" -eq 4 ]
-    check "$sc" "log carries 4 tool/result events — got ${results:-none}" [ "${results:-0}" -eq 4 ]
+    denied_b=$(jq -s '[.[] | select(.type == "tool/result" and .payload.denied == true)] | length' "$LOG")
+    check "$sc" "(b) log carries 4 tool/call events — got ${calls:-none}" [ "${calls:-0}" -eq 4 ]
+    check "$sc" "(b) log carries 4 tool/result events — got ${results:-none}" [ "${results:-0}" -eq 4 ]
+    check "$sc" "(b) zero denials under the granting policy — got ${denied_b:-none}" [ "${denied_b:-1}" -eq 0 ]
     # Replay determinism (MCP results are logged content like every
     # tool — replay needs no server).
-    check "$sc" "--verify-log deterministic" verify_log_ok "$LOG"
+    check "$sc" "(b) --verify-log deterministic" verify_log_ok "$LOG"
     # THE REDACTION CRUX: the fake URL token appears ZERO times in the
     # daemon stderr AND the durable session log.
     local tok_err tok_log
     tok_err=$(grep -c "$token" "$WORK/client.err" || true)
     tok_log=$(grep -c "$token" "$LOG" || true)
-    check "$sc" "URL token absent from daemon stderr (${tok_err:-0} hits)" [ "${tok_err:-0}" -eq 0 ]
-    check "$sc" "URL token absent from session log (${tok_log:-0} hits)" [ "${tok_log:-0}" -eq 0 ]
+    check "$sc" "(b) URL token absent from daemon stderr (${tok_err:-0} hits)" [ "${tok_err:-0}" -eq 0 ]
+    check "$sc" "(b) URL token absent from session log (${tok_log:-0} hits)" [ "${tok_log:-0}" -eq 0 ]
     local n
     n=$(chat_count)
-    check "$sc" "model called exactly 3 times (2 tool turns + final) — got ${n:-none}" [ "${n:-0}" -eq 3 ]
+    check "$sc" "(b) model called exactly 3 times (2 tool turns + final) — got ${n:-none}" [ "${n:-0}" -eq 3 ]
     stop_mock
+
+    # ---- (c) AUTO-ALLOW OPT-IN: no ask, direct execution.
+    fresh_session "$sc-auto"
+    start_mock "$SCEN/mcp_auto.json"
+    local calls_before_c
+    calls_before_c=$(http_get_port "${MCPMCP_PORT}" /calls | grep -o '"total":[0-9]*' | cut -d: -f2)
+    # --mcp-auto-allow rides AFTER --exec (it is a DAEMON flag).
+    run_client --session-dir "$SESS" --json \
+        --prompt "auto-allow path" \
+        "${base_cfg[@]}" --mcp-auto-allow
+    check "$sc" "(c) client exits 0 (no hang — got $CODE)" [ "$CODE" -ne 124 ]
+    check "$sc" "(c) client exits cleanly" [ "$CODE" -eq 0 ]
+    check "$sc" "(c) startup posture line (auto-allow opt-in)" \
+        grep -q "mcp tools: auto-allow (operator opt-in via --mcp-auto-allow" "$WORK/client.err"
+    check "$sc" "(c) round trip without asking" grep -Fq "echo: auto-allowed-payload" "$WORK/client.out"
+    if grep -q "approvalId" "$WORK/client.out"; then
+        fail "$sc" "(c) an approval was requested under --mcp-auto-allow"
+    else
+        PASS=$((PASS + 1)); note "  ok: (c) no approval/request on the opt-in path"
+    fi
+    local calls_c
+    calls_c=$(http_get_port "${MCPMCP_PORT}" /calls | grep -o '"total":[0-9]*' | cut -d: -f2)
+    check "$sc" "(c) mockmcp executed exactly 1 more tool call — ${calls_before_c:-?}→${calls_c:-none}" \
+        [ "$((calls_c - calls_before_c))" -eq 1 ]
+    local n_c
+    n_c=$(chat_count)
+    check "$sc" "(c) model called exactly twice (tool turn + final) — got ${n_c:-none}" [ "${n_c:-0}" -eq 2 ]
+    stop_mock
+
     kill "$MCPMCP_PID" 2>/dev/null
     wait "$MCPMCP_PID" 2>/dev/null
     MCPMCP_PID=""

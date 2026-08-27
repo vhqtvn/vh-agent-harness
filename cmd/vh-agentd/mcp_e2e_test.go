@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -137,10 +136,13 @@ func mcpCfg(t *testing.T, reg *mcp.Registry) *Config {
 
 // TestMCPRoundTripBothTransports is the slice CRUX: the daemon's REAL
 // pipeline (buildServer → RunTurn) executes one MCP tool via EACH
-// transport, the namespaced names are advertised in the turn's tool
-// specs, tool/call + tool/result land on the durable log, and replay
-// of the persisted log reproduces the surface byte-identically (MCP
-// results are logged content, like every tool).
+// transport — P8.2 posture: every mcp call ASKS first, and the wire
+// client GRANTS (the wire-level mirror of a --policy exact-name allow;
+// the granting engine itself is proven over the real binaries by the
+// docker battery's mcp scenario). The namespaced names are advertised
+// in the turn's tool specs, tool/call + tool/result land on the
+// durable log, and replay of the persisted log reproduces the surface
+// byte-identically (MCP results are logged content, like every tool).
 func TestMCPRoundTripBothTransports(t *testing.T) {
 	remote := startMockMCPHTTP(t, "--sse")
 	cfgPath, token := mcpTestConfig(t, remote, nil)
@@ -149,9 +151,7 @@ func TestMCPRoundTripBothTransports(t *testing.T) {
 		t.Fatalf("degraded servers: %v", degraded)
 	}
 	cfg := mcpCfg(t, reg)
-	svc, cli := net.Pipe()
-	defer cli.Close()
-	_, _, tracker, _ := buildServer(cfg, "test-key", svc)
+	_, tracker, approvals, _, _ := bootMCPServe(t, cfg, "grant")
 
 	// Advertised specs carry BOTH namespaced names (this is what the
 	// provider request's tools array carries).
@@ -191,6 +191,19 @@ func TestMCPRoundTripBothTransports(t *testing.T) {
 	r1, err := tracker.TurnRunner().RunTurn(ctx, es.Log, ad, tracker.TurnOptions(), "use both mcp transports")
 	if err != nil {
 		t.Fatalf("RunTurn: %v", err)
+	}
+	// P8.2: BOTH calls asked first (ask-by-default), then executed on
+	// the grant.
+	if got := waitForApproval(t, approvals); got != "mcp_localmock_echo" {
+		t.Fatalf("first approval carried %q, want mcp_localmock_echo", got)
+	}
+	if got := waitForApproval(t, approvals); got != "mcp_remotemock_echo" {
+		t.Fatalf("second approval carried %q, want mcp_remotemock_echo", got)
+	}
+	select {
+	case extra := <-approvals:
+		t.Fatalf("unexpected extra approval: %q", extra)
+	default:
 	}
 	if len(r1.Results) != 2 {
 		t.Fatalf("results = %d, want 2", len(r1.Results))
@@ -254,6 +267,9 @@ func TestMCPRoundTripBothTransports(t *testing.T) {
 // TestMCPDegradedServerFailsClosedNoHang: one config entry points at a
 // dead port; the sentinel tool call returns the typed degraded error,
 // the turn COMPLETES, and the whole proof is bounded in wall-clock.
+// P8.2: the sentinel (mcp_deadmock) carries the namespace prefix and
+// therefore ASKS like every mcp tool — granted here so the typed
+// degraded error is reached.
 func TestMCPDegradedServerFailsClosedNoHang(t *testing.T) {
 	deadPort := "http://127.0.0.1:1/mcp" // nothing listens; connection refused fast
 	cfgPath, _ := mcpTestConfig(t, "", map[string]map[string]any{
@@ -265,9 +281,7 @@ func TestMCPDegradedServerFailsClosedNoHang(t *testing.T) {
 		t.Fatalf("degraded = %v", got)
 	}
 	cfg := mcpCfg(t, reg)
-	svc, cli := net.Pipe()
-	defer cli.Close()
-	_, _, tracker, _ := buildServer(cfg, "test-key", svc)
+	_, tracker, _, _, _ := bootMCPServe(t, cfg, "grant")
 	es, err := tracker.NewSession("", "sess-mcp-dead", io.Discard)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -314,13 +328,12 @@ func TestMCPDegradedServerFailsClosedNoHang(t *testing.T) {
 
 // TestMCPSlowToolTimesOut: the slow tool exceeds the per-call bound and
 // the pipeline records the ORTHOGONAL timedOut fact (bounded turn).
+// P8.2: granted through the ask gate before the slow call runs.
 func TestMCPSlowToolTimesOut(t *testing.T) {
 	cfgPath, _ := mcpTestConfig(t, "", nil)
 	reg := connectRegistry(t, cfgPath, 200) // 200ms per-exchange bound
 	cfg := mcpCfg(t, reg)
-	svc, cli := net.Pipe()
-	defer cli.Close()
-	_, _, tracker, _ := buildServer(cfg, "test-key", svc)
+	_, tracker, _, _, _ := bootMCPServe(t, cfg, "grant")
 	es, err := tracker.NewSession("", "sess-mcp-slow", io.Discard)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)

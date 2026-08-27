@@ -41,6 +41,15 @@ import (
 // daemon flag is unset (60s: a turn can be slow, never hung).
 const DefaultCallTimeoutMs = 60000
 
+// ToolNamePrefix is the namespace marker every MCP-sourced tool name
+// carries: mcp_<server>_<tool> for discovered tools and the bare
+// mcp_<server> for a degraded server's sentinel. The prefix IS the
+// naming scheme — no registry of "which tools are MCP" exists or is
+// needed beyond it. The daemon's ask-by-default observer
+// (cmd/vh-agentd/mcpask.go) keys on exactly this constant, so the
+// observer and the naming constructor can never drift apart.
+const ToolNamePrefix = "mcp_"
+
 // Options configures one Registry.
 type Options struct {
 	// CallTimeoutMs bounds EVERY client exchange (handshake included);
@@ -357,7 +366,7 @@ func (r *Registry) serverPID(name string) int {
 // deterministic collision suffix (_2, _3, ...). An empty tool segment
 // yields the bare mcp_<server> namespace (the degraded sentinel).
 func namespacedName(server, tool string, taken map[string]bool) string {
-	base := "mcp_" + sanitizeName(server)
+	base := ToolNamePrefix + sanitizeName(server)
 	if tool != "" {
 		base += "_" + sanitizeName(tool)
 	}

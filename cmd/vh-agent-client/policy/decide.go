@@ -321,11 +321,15 @@ func ruleMatches(r *Rule, tool string, args json.RawMessage) bool {
 	}
 }
 
-// toolPatternMatch: exact name, or "prefix:*" glob (matches tool names
-// starting "prefix:").
+// toolPatternMatch: exact name, "prefix:*" glob (matches tool names
+// starting "prefix:"), or "prefix_*" glob (starting "prefix_" — the
+// P8.2 underscore twin for per-server MCP allows).
 func toolPatternMatch(pattern, tool string) bool {
 	if prefix, ok := strings.CutSuffix(pattern, ":*"); ok {
 		return strings.HasPrefix(tool, prefix+":")
+	}
+	if prefix, ok := strings.CutSuffix(pattern, "_*"); ok {
+		return strings.HasPrefix(tool, prefix+"_")
 	}
 	return pattern == tool
 }

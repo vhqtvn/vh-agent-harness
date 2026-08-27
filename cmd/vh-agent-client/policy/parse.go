@@ -16,11 +16,13 @@
 //
 // SEMANTIC VALIDATION (also fail-closed, at parse time):
 //
-//	tool   = exact tool name, or a single-segment prefix glob
-//	         "prefix:*" (matches every tool name starting "prefix:").
-//	         A bare "*", a "*" anywhere else, or an empty value is
-//	         rejected — wildcards must not pretend to cover semantics
-//	         they do not.
+//	tool   = exact tool name, or a single-segment prefix glob in one of
+//	         two namespace shapes: "prefix:*" (matches every tool name
+//	         starting "prefix:") or "prefix_*" (matches every tool name
+//	         starting "prefix_", anchored at the underscore — the
+//	         per-server allow shape for MCP names, P8.2). A bare "*",
+//	         a "*" anywhere else, or an empty value is rejected —
+//	         wildcards must not pretend to cover semantics they do not.
 //	path   = rooted-path prefix for FILE tools only (tool must be
 //	         exactly "read", "write", or "edit" — the tools whose args
 //	         carry a "path" field). Clean relative or absolute prefix;
@@ -256,7 +258,12 @@ func applyKey(r *Rule, key, val string) error {
 	}
 }
 
-// validToolPattern accepts an exact tool name or "prefix:*".
+// validToolPattern accepts an exact tool name, "prefix:*", or
+// "prefix_*" (the underscore-namespace twin added in P8.2 for
+// per-server MCP allows: mcp_mock_* covers mcp_mock_echo but not
+// mcp_mockery_echo — the anchor is the separator itself). Exactly one
+// trailing "*" after a separator; a bare "*" and any other placement
+// stay rejected.
 func validToolPattern(v string) error {
 	if v == "" {
 		return fmt.Errorf("tool must not be empty")
@@ -272,10 +279,22 @@ func validToolPattern(v string) error {
 	if !strings.Contains(v, "*") {
 		return nil // exact name
 	}
-	if strings.Count(v, "*") != 1 || !strings.HasSuffix(v, ":*") {
-		return fmt.Errorf("tool %q: the only wildcard shape is a single-segment prefix glob \"prefix:*\"", v)
+	sep := byte(0)
+	switch {
+	case strings.HasSuffix(v, ":*"):
+		sep = ':'
+	case strings.HasSuffix(v, "_*"):
+		sep = '_'
+	default:
+		return fmt.Errorf("tool %q: the only wildcard shapes are the prefix globs \"prefix:*\" and \"prefix_*\"", v)
 	}
-	prefix := strings.TrimSuffix(v, ":*")
+	if strings.Count(v, "*") != 1 {
+		return fmt.Errorf("tool %q: the only wildcard shapes are the prefix globs \"prefix:*\" and \"prefix_*\" (exactly one star)", v)
+	}
+	if len(v) < 3 || v[len(v)-2] != sep {
+		return fmt.Errorf("tool %q: the only wildcard shapes are the prefix globs \"prefix:*\" and \"prefix_*\"", v)
+	}
+	prefix := v[:len(v)-2]
 	if prefix == "" {
 		return fmt.Errorf("tool %q: a bare \"*\" cannot be expressed (name the tools you allow)", v)
 	}

@@ -111,6 +111,7 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		compactThreshold  = new(float64)
 		mcpConfig         = new(string)
 		mcpTimeoutMs      = new(int)
+		mcpAutoAllow      = new(bool)
 		compilePrompt     = new(bool)
 		verifyLog         = new(string)
 		showVersion       = new(bool)
@@ -132,12 +133,13 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	fs.StringVar(workdirRoots, "workdir-roots", "", "comma-separated ABSOLUTE paths to existing DIRECTORIES confining the file tools (read/write/edit/glob/search) and run_shell absolute workdirs: relative file paths resolve against the FIRST root, absolute paths must sit under a root, escapes and symlink crossings reject fail-closed with zero filesystem effects, and entries resolving to a non-directory (a file, even via symlink) refuse at startup; default = the daemon's working directory resolved absolute")
 	fs.BoolVar(compilePrompt, "compile-prompt", false, "run the prompt compilation with the current config, write the artifact under <session-dir>/compiled-prompts/, and exit — no protocol session; default --optimizer llm makes ONE compile-time LLM call and requires the variable named by --api-key-env to be set (fail-closed exit 2 without it); --optimizer dedup is the offline, keyless alternative")
 	fs.StringVar(verifyLog, "verify-log", "", "read-only mode: replay the session log at PATH, print ONE JSON line {events, format_version, surface_sha256, messages} (sha256 over the canonical derived-surface JSON) to stdout, and exit — no protocol session, no engine flags required; exit 1 with the reason on stderr on any replay error (fail-closed). Two runs on the same log print identical bytes (replay-determinism prover)")
-	fs.StringVar(askTools, "ask-tools", "", "comma-separated REGISTERED tool names whose calls ride the approval waterfall (the daemon-side ask source: ask → approval/request on the wire → the client's interactive/--json/policy approver; unanswerable = deny fail-closed). Unknown name = exit 2. Default empty = the daemon emits no asks (behavior unchanged)")
+	fs.StringVar(askTools, "ask-tools", "", "comma-separated REGISTERED tool names whose calls ride the approval waterfall (an operator-named ask source: ask → approval/request on the wire → the client's interactive/--json/policy approver; unanswerable = deny fail-closed). Unknown name = exit 2. Default empty = no named-tool asks (the mcp_ namespace asks by DEFAULT since P8.2 — see --mcp-auto-allow)")
 	fs.StringVar(skillsDir, "skills-dir", "", "Agent Skills catalog directory of <name>/SKILL.md folders (agentskills.io convention; three-tier delivery: prompt lines + guarded skill_load tool + confined reference reads). Default ./.opencode/skills against the daemon cwd — absent default = zero skills with an honest startup line; an EXPLICITLY-passed missing dir = exit 2 (fail-closed). Catalog read once at startup")
 	fs.IntVar(contextTokens, "context-tokens", defaultContextTokens, "context budget in tokens anchoring the post-turn compaction trigger (surface pressure = estimated tokens over this budget; estimate is chars/4 anchored by the last provider usage report; threshold from --compact-threshold, default 0.8). At/above threshold a turn boundary shadows the surface head behind ONE adapter-generated summary — log never rewritten, replay deterministic, a failed compaction never fails the turn (deferred to the next boundary). 0 DISABLES compaction. Default 128000")
 	fs.Float64Var(compactThreshold, "compact-threshold", session.DefaultPressureThreshold, "surface-pressure ratio at which a turn boundary triggers compaction (0.8 default; must be within [0,1]; 0 takes the default). Only meaningful with a positive --context-tokens")
 	fs.StringVar(mcpConfig, "mcp-config", "", "MCP host config: a JSON file that is EITHER a full opencode.json (its .mcp block is extracted) OR a bare {\"<name>\": {...}} server map, with local stdio servers ({\"type\":\"local\",\"command\":[...]}) and/or remote Streamable-HTTP servers ({\"type\":\"remote\",\"url\":\"https://…\"}) — each server's tools join the guarded registry as mcp_<server>_<tool> under the FULL approval/guard waterfall (external candidate input; url/headers/env values are credentials, redacted on every surface). Default (unset): ~/.config/opencode/opencode.json when it exists (honest startup line), else zero MCP. Explicitly-passed missing/invalid file = exit 2 fail-closed")
 	fs.IntVar(mcpTimeoutMs, "mcp-timeout-ms", defaultMCPTimeoutMs, "bound on EVERY MCP exchange (initialize + tools/list + each tools/call), 60000 default; 0 takes the default; capped at 600000 (the run_shell cap — no unbounded waits, a hung server fails closed within the bound)")
+	fs.BoolVar(mcpAutoAllow, "mcp-auto-allow", false, "OPT BACK IN to allowing mcp tool calls without asking. DEFAULT FALSE: the mcp_ namespace is ask-by-default — MCP tools are un-sandboxed external network egress (unlike run_shell under --sandbox confinement), so every mcp_ call rides the approval waterfall (approval/request on the wire; the client's --policy/interactive approver answers; unanswerable approvals deny fail-closed). With this flag the mcp ask observer is not registered and mcp calls execute without asking (the pre-P8.2 posture, now an explicit operator choice)")
 	fs.BoolVar(showVersion, "version", false, "print engine and protocol versions and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -210,6 +212,10 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
 		return 2
 	}
+	// P8.2: the ask-by-default opt-back-in (default false — see
+	// mcpask.go). Recorded on Config so the composition (buildServer →
+	// armAskObservers) and the startup posture line read ONE source.
+	cfg.MCPAutoAllow = *mcpAutoAllow
 	if cfg.MCP != nil {
 		defer func() {
 			cfg.MCP.Close()
@@ -284,17 +290,28 @@ func run(args []string, getenv func(string) string, rwc io.ReadWriteCloser, stdo
 	}
 
 	// P3.5 --ask-tools: validate against the REGISTERED tool set (now
-	// that the engine's pipeline carries it) and arm the observer —
-	// BEFORE Serve, so every turn of this session rides the routed
-	// waterfall. An unknown name is a usage error: exit 2, never a
-	// silently-unrouted run.
+	// that the engine's pipeline carries it) BEFORE Serve — an unknown
+	// name is a usage error: exit 2, never a silently-unrouted run.
+	// (Arming happens INSIDE buildServer — armAskObservers, the one
+	// registration site; this validation refusing to serve leaves the
+	// armed composition unobservable.)
 	if err := validateAskTools(cfg.AskTools, engine.Pipeline().Definitions()); err != nil {
 		fmt.Fprintf(stderrw, "vh-agentd: %v\n\n%s", err, usageDoc)
 		return 2
 	}
 	if len(cfg.AskTools) > 0 {
-		engine.Pipeline().AddPreObserver(newAskToolsObserver(cfg.AskTools))
 		log.Printf("ask-tools: %s (calls to these tools ask the client; unanswerable approvals deny fail-closed)", strings.Join(cfg.AskTools, ","))
+	}
+
+	// P8.2 posture line: MCP tools ride the approval waterfall by
+	// default (un-sandboxed external egress must not silently
+	// auto-execute); --mcp-auto-allow is the loud operator opt-back-in.
+	if cfg.MCP != nil {
+		if cfg.MCPAutoAllow {
+			log.Printf("mcp tools: auto-allow (operator opt-in via --mcp-auto-allow; mcp calls do NOT ask)")
+		} else {
+			log.Printf("mcp tools: ask-by-default (every mcp_ call asks the client; unanswered approvals deny fail-closed)")
+		}
 	}
 
 	// Scheduler: real Manager seams through the tracker, state file

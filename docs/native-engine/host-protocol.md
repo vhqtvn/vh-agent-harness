@@ -661,8 +661,9 @@ tools, and registers them in the guarded tool registry namespaced
 **NO WIRE CHANGES — stated explicitly.** MCP tools ride the EXISTING
 tool events end-to-end: the model calls them as ordinary tool calls;
 `tool/call` (pre-execution) and `tool/result` land on the durable log
-exactly as for every built-in tool; approvals (when the server is
-ask-listed) use the existing `approval/request`/`approval/response`
+exactly as for every built-in tool; approvals (every `mcp_*` call asks
+by default, P8.2) use the existing `approval/request`/
+`approval/response`
 bridge; results replay from the log via the unchanged
 `--verify-log` prover (an MCP call needs NO server at replay time —
 the logged content IS the result, same as every tool). The protocol
@@ -674,6 +675,21 @@ tools render as normal tool calls.
 
 **Posture (the load-bearing invariants):**
 
+- **ASK-BY-DEFAULT (P8.2).** Every `mcp_*` call ASKS on the daemon
+  side, by default: a pre-execute observer returns the ask verdict for
+  the whole namespace, so the existing `approval/request` /
+  `approval/respond` bridge carries the question to the client and
+  every unanswerable direction (no answer, timeout, disconnect) DENIES
+  fail-closed with the tool never executing. Rationale (the operator's
+  live finding): `run_shell` is Landlock-sandboxed under confinement
+  (network denied); MCP tools are NOT sandboxed — raw external network
+  egress. Un-sandboxed external tools must not silently auto-execute.
+  Composition note: the mcp ask source and the `--ask-tools` source
+  are registered through ONE folded observer (`ask-tools+mcp-ask`) —
+  the waterfall resolves an upstream ask on a downstream allow, so two
+  Allow-returning sibling observers cannot compose in any order; the
+  fold makes the order-mistake class unrepresentable (the discharged
+  P3.5 a-F4 insertion-order defer).
 - **External candidate input.** MCP tools are EXTERNAL CANDIDATE
   INPUT under the FULL approval/guard waterfall — by construction:
   they register as ordinary `ToolDefinition`s, so the guard layer,
@@ -681,10 +697,18 @@ tools render as normal tool calls.
   policy classes apply to every `mcp_*` call exactly as to
   `run_shell`. No MCP result is trusted authority (results are
   logged tool content, nothing more).
-- **Policy default = ASK.** MCP tool names match no shipped allow
-  rule; under a client `--policy` (or interactive) an MCP call ASKS
-  and falls to the human responder. Operators allow explicitly by
-  tool name (e.g. `allow mcp_vhmcp_web_search`).
+- **Policy promotion.** The client's `--policy` engine answers the
+  daemon-side ask: a rule match GRANTS (the tool executes), everything
+  else falls to the human/`--json` responder, hard-deny classes deny
+  before rules are consulted (unchanged). Allow shapes for mcp names:
+  the exact tool name (`mcp_mock_echo`) or the per-server underscore
+  prefix glob (`mcp_mock_*`, anchored at the underscore — the P8.2
+  twin of the colon glob).
+- **Opt-back-in flag.** `--mcp-auto-allow` (DEFAULT FALSE) registers
+  no mcp ask observer: mcp calls execute without asking (the pre-P8.2
+  posture, now an explicit operator choice). The startup line states
+  the posture either way (`mcp tools: ask-by-default` / `mcp tools:
+  auto-allow (operator opt-in)`).
 - **Credentials redacted like provider keys.** URL (path-embedded
   tokens included), header values, and env values never reach a log
   line (startup lines carry names, transport kinds, and counts only)

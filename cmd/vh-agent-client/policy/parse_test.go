@@ -142,6 +142,10 @@ func TestParseFailureTable(t *testing.T) {
 		{"bare star tool", "[[allow]]\ntool = \"*\"\n", 2, "tool"},
 		{"mid wildcard", "[[allow]]\ntool = \"re*d\"\n", 2, "tool"},
 		{"glob star not final segment", "[[allow]]\ntool = \"a*b:*\"\n", 2, "tool"},
+		// P8.2: the underscore twin is legal; malformed variants stay
+		// rejected.
+		{"underscore glob star not final", "[[allow]]\ntool = \"a*b_*\"\n", 2, "tool"},
+		{"two stars in underscore glob", "[[allow]]\ntool = \"a_*_*\"\n", 2, "tool"},
 		{"empty tool value", "[[allow]]\ntool = \"\"\n", 2, "tool"},
 		{"path on non-file tool", "[[allow]]\ntool = \"echo\"\npath = \"docs/\"\n", 3, "path"},
 		{"path on run_shell", "[[allow]]\ntool = \"run_shell\"\npath = \"docs/\"\n", 3, "path"},
