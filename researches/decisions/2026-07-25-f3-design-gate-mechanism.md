@@ -576,3 +576,56 @@ memos' granularity exactly — decision granularity, not the per-slice build pla
 > "Governance (operator ruling, 2026-07-26)"). The b-F1 incident is the
 > validating precedent recorded there; this addendum points to the canonical
 > ruling rather than carrying its own copy.
+
+---
+
+## Addendum (2026-08-28): third validation site — ready → ready validate-when-supplied
+
+**Context:** a downstream adopter report (verified 2026-08-28 at HEAD
+`2ae3b28`, zero drift) surfaced an ungated-persist defect in
+`readyCoordinationTask`: the F3 gate fired only on the `wasDraft` branch,
+while the unconditional persist applied ANY payload-supplied
+`f3_design_readiness` on a ready card without validation. A created-as-ready
+task (via `saveCoordinationTask`, which has no F3 primary gate) could
+therefore have a malformed, stale, or null→anything envelope persisted onto
+the card through a ready → ready refresh, bypassing the structural check
+until the dispatch backstop ran.
+
+**Annotation (recorded, not a redesign):**
+
+- Decision 2 fixed "exactly two authoritative mutation points"
+  (task-card `draft → ready`; approved-plan `draft → approved`) plus the
+  dispatch backstops, and was **silent on ready → ready** — the exemption
+  of a ready → ready refresh from the F3 gate lived in build-level comment
+  prose in `state-lib.js` ("A ready -> ready metadata refresh does not cross
+  BUILD-READY and is exempt"), **not in this memo's canon**. The silence is
+  now resolved as follows.
+- **Third validation site (validate-when-supplied):** in
+  `readyCoordinationTask`'s locked update, when
+  `payload.f3_design_readiness !== undefined` and the task was NOT draft,
+  the same transition-agnostic `validateF3DesignReadiness` predicate runs
+  BEFORE the unconditional persist (envelope: supplied
+  `payload.f3_design_readiness` when `!== undefined`, else the persisted
+  current envelope — note a supplied explicit `null` is validated and refused
+  `missing_envelope`, not silently treated as absent;
+  `currentDesignDigest = computeTaskDesignDigest(current, payload)`,
+  same-lock, TOCTOU-safe; `transitionKind: "task_ready_refresh"`). A ready →
+  ready refresh that does NOT supply an envelope remains exempt (no
+  BUILD-READY crossing) — the legitimate corrected-envelope refresh for a
+  created-as-ready card still succeeds when the envelope is complete and
+  current-digest-bound.
+- **Authority model unchanged:** the envelope-INFORMS /
+  validator-decides split is untouched. The validator remains a pure
+  structural predicate; no lifecycle mutation authority moved into the
+  envelope or out of the gate. Honesty ceiling likewise unchanged and
+  applies to the new site verbatim: this closes the STRUCTURAL hole
+  (null → anything, stale, malformed), NOT authorship forgery — a forged
+  complete current-digest envelope still passes.
+- **Companion test:** `verify-f3-task-ready.js` Crux 7b mirrors the adopter
+  4-step repro (created-as-ready → backstop refusal → bad-envelope refresh
+  refusals incl. the stale-digest variant → complete-envelope refresh
+  persists → activation succeeds).
+
+This addendum records an implemented refinement of Decision 2's validation
+topology, not a change to Decision 2's authority boundaries or to the
+b-F1 envelope-level digest binding.
