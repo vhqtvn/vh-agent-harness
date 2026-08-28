@@ -1255,25 +1255,25 @@ vh-agent-harness WARNING: %d dead-lettered permission grant(s) in the emitted pe
 `, len(findings), strings.Join(lines, "\n    "), permconfig.DeadGrantRemediation)
 }
 
-// seamClassifierWithOverlays builds the seam classifier for one apply: the core
-// ownership defaults extended with overlay_extension rules for every path the
-// active overlays rendered, then resolved against the project's S2 raise-only
-// overrides (Slice 5.1). When overlayFiles and overrides are both empty this is
-// equivalent to the memoized core-only classifier. A downgrade override (or any
-// other D2-A violation: unknown path, invalid class, off-lattice class) makes
-// ownership.Resolve return a joined error; this function surfaces it so
-// seamApply aborts before any write touches the live tree.
 // seamClassifierWithOverlays builds the apply-time Classifier from the
-// selection-aware core ownership map plus overlay_extension rules. The inactive
-// set is the set of LIVE (suffix-stripped) core paths owned by capabilities NOT
-// in the resolved selection — those source files are skipped at render time, so
-// they must be excluded from the active ownership map (a prior-version file on
-// disk is residue, not a managed path). A nil/empty inactive set means no
-// capability owns core outputs OR every CoreOutputs-declaring capability is
-// selected — the map is byte-identical to the unconditional all-known walk.
-// Pass nil when the caller intentionally needs the ALL-KNOWN view (e.g.
-// pruneClassifier, which is about overlay orphan deletion-safety, not capability
-// residue).
+// selection-aware core ownership map plus overlay_extension rules for every
+// path the active overlays rendered, resolved against the project's S2
+// raise-only overrides (Slice 5.1). When overlayFiles and overrides are both
+// empty this is equivalent to the memoized core-only classifier. A downgrade
+// override (or any other D2-A violation: unknown path, invalid class,
+// off-lattice class) makes ownership.Resolve return a joined error; this
+// function surfaces it so seamApply aborts before any write touches the live
+// tree.
+//
+// The inactive set is the set of LIVE (suffix-stripped) core paths owned by
+// capabilities NOT in the resolved selection — those source files are skipped
+// at render time, so they must be excluded from the active ownership map (a
+// prior-version file on disk is residue, not a managed path). A nil/empty
+// inactive set means no capability owns core outputs OR every
+// CoreOutputs-declaring capability is selected — the map is byte-identical to
+// the unconditional all-known walk. Pass nil when the caller intentionally
+// needs the ALL-KNOWN view (e.g. pruneClassifier, which is about overlay
+// orphan deletion-safety, not capability residue).
 func seamClassifierWithOverlays(overlayFiles []string, overrides ownership.Overrides, inactive map[string]bool) (*substrate.Classifier, error) {
 	defaults, err := corpus.CoreOwnershipDefaultsWithExclusion(inactive)
 	if err != nil {
