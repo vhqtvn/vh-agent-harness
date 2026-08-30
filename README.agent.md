@@ -1200,7 +1200,9 @@ export default function transform({ context }) {
   cross-checks every per-agent `permission.bash` grant against the
   shell-guard engine's reachable forms (the shared `internal/permconfig`
   model: the command groups compiled exactly as `ALLOWED_PATTERNS` plus the
-  evaluate() branch structure). A grant is DEAD when the engine hard-denies
+  evaluate() branch structure). Grants denied only by project-owned
+  forbidden-pattern rules are out of scope and not counted here. A grant is
+  DEAD when the engine hard-denies
   every command the pattern matches BEFORE OpenCode consults the per-agent
   table — the plugin throws on deny, so the table entry can never take effect.
   Engine-over-table precedence is intentional and unchanged; the check only

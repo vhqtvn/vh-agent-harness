@@ -79,7 +79,7 @@ var doctorCmd = &cobra.Command{
   shipped-pilots  shipped default-on overlay pilot enablement    INFO if advisory orphan (deselected pilot with stale files); PASS otherwise; SKIP not installed
   closeout-reach  ledger reconciles with branch reachability     WARN if committed entry post_commit_head unreachable from any branch; INFO if unledgered branch commits; SKIP greenfield
   redlines        private-redlines registry hygiene (applicability-gated) FAIL if sensitive registry tracked/unignored; WARN if unreadable/insecure-mode; PASS with opaque binding ids; OMITTED (no section) when no registry
-  dead-grants     per-agent grants reachable past the shell-guard engine   FAIL if a dead allow/ask grant exists (an ask is an interaction promise that can never fire); INFO if only redundant dead deny grants; SKIP no opencode.jsonc
+  dead-grants     per-agent grants reachable past the shell-guard engine   FAIL if a dead allow/ask grant exists (an ask is an interaction promise that can never fire); INFO if only redundant dead deny grants; SKIP no opencode.jsonc — Grants denied only by project-owned forbidden-pattern rules are out of scope and not counted here.
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -996,7 +996,7 @@ func checkDeadGrants(target string) checkResult {
 		}
 		detail := fmt.Sprintf("dead allow/ask grant(s): %s. %s.", strings.Join(parts, "; "), permconfig.DeadGrantRemediation)
 		if len(redundant) > 0 {
-			detail += fmt.Sprintf(" (%d additional redundant dead deny grant(s) reported as INFO once these are repaired)", len(redundant))
+			detail += fmt.Sprintf(" (%d additional redundant dead deny grant(s) reported as INFO once these are repaired) Grants denied only by project-owned forbidden-pattern rules are out of scope and not counted here.", len(redundant))
 		}
 		return checkResult{name: name, tier: tierFail, detail: detail}
 	}
@@ -1006,7 +1006,7 @@ func checkDeadGrants(target string) checkResult {
 			parts = append(parts, f.String())
 		}
 		return checkResult{name: name, tier: tierInfo,
-			detail: fmt.Sprintf("redundant deny grant(s) — the engine already denies these commands before the table is consulted, so the deny entry never fires: %s. Remove them for clarity if desired.", strings.Join(parts, "; "))}
+			detail: fmt.Sprintf("redundant deny grant(s) — the engine already denies these commands before the table is consulted, so the deny entry never fires: %s. Remove them for clarity if desired. Grants denied only by project-owned forbidden-pattern rules are out of scope and not counted here.", strings.Join(parts, "; "))}
 	}
 	return checkResult{name: name, tier: tierPass,
 		detail: "no dead-lettered permission grants (every per-agent grant is engine-reachable or table-rescuable)"}

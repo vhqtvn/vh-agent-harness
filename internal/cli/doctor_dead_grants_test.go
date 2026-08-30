@@ -80,6 +80,14 @@ func TestDeadGrants_FailOnDeadAllowAndAsk(t *testing.T) {
 	if !strings.Contains(res.detail, "1 additional redundant dead deny grant") {
 		t.Errorf("FAIL detail should note the redundant dead deny; got:\n%s", res.detail)
 	}
+	// Lint-scope clause (2026-08-31): grants denied only by project-owned
+	// forbidden-pattern rules are outside the lint's model (the core engine
+	// surface only) and must be stated as out of scope on the FAIL suffix.
+	for _, want := range []string{"out of scope and not counted here", "project-owned forbidden-pattern rules"} {
+		if !strings.Contains(res.detail, want) {
+			t.Errorf("FAIL detail missing lint-scope clause %q; got:\n%s", want, res.detail)
+		}
+	}
 }
 
 // TestDeadGrants_InfoOnlyDeadDeny: when ONLY dead deny grants exist the check
@@ -111,6 +119,15 @@ func TestDeadGrants_InfoOnlyDeadDeny(t *testing.T) {
 	}
 	if !strings.Contains(res.detail, `"docker *"`) {
 		t.Errorf("INFO detail must name the redundant deny pattern; got:\n%s", res.detail)
+	}
+	// Lint-scope clause (2026-08-31): the INFO detail must state the lint's
+	// scope so a downstream engine-grounded probe count larger than doctor's
+	// (extra denies dead only under project-owned forbidden-pattern rules)
+	// reads as out of scope, not unreconciled.
+	for _, want := range []string{"out of scope and not counted here", "project-owned forbidden-pattern rules"} {
+		if !strings.Contains(res.detail, want) {
+			t.Errorf("INFO detail missing lint-scope clause %q; got:\n%s", want, res.detail)
+		}
 	}
 }
 
