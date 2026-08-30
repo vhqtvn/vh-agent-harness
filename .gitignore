@@ -31,6 +31,10 @@ node_modules/
 # Local-only notes (sensitive; never commit)
 *.local.md
 
+# Operator-local environment/credentials file at repo root (contents are
+# operator-private; never commit, never inspect)
+/.env
+
 # auto-classifier-pilot config files live under .opencode/repo-configs/.
 # Three kinds, two ignore rules:
 #   1. CONVENTION local-companions (gitignored): the optional `.local.json`
