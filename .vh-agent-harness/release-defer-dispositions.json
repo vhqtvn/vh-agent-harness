@@ -4,9 +4,9 @@
     "kind": "tag",
     "value": "v0.26.0"
   },
-  "evaluated_commit": "d22b9899769deb71daed802d5abf971b6364b2b5",
-  "evaluated_tree": "73a12493732d8862e64397dded9902f68c217d49",
-  "manifest_parent_commit": "d22b9899769deb71daed802d5abf971b6364b2b5",
+  "evaluated_commit": "65dc44f406d3f02e758a395497284c07914431a9",
+  "evaluated_tree": "e6dac78755d557f742215c74be7b19327fba1f4e",
+  "manifest_parent_commit": "65dc44f406d3f02e758a395497284c07914431a9",
   "reconciliation": {
     "status": "release-prep",
     "scope": "Release arc: v0.26.0 (the prior tag; evaluator-derived release_base) through evaluated_commit (the release-prep evaluation point = the readiness-artifact commit R = d22b9899769deb71daed802d5abf971b6364b2b5; intended release v0.26.1). The v0.26.0..R arc carries 2 fix commits (d9d5b26 fix(coordination) validate supplied F3 envelope on ready->ready refresh, the TrueAI adopter defect; f0ce85e fix(gate) resolve commit-gate paths per git-dir + surface honest lock errors), the non-feat-typed defect-surfacing pair for TrueAI defect 1a (3f9628e permconfig/cli inter-layer dead-grant lint incl. doctor check #27 dead-grants with O2 action-keyed severity + update-path WARN; 6d97ba7 permission static deny-time grant naming in the shell-guard wrapper), 1 comment-only chore tidy (d1bdd48 merge stacked duplicate doc comment on seamClassifierWithOverlays, zero behavior change), 1 test commit (2ae3b28 test(gate) worktree lock-path coverage + lock error honesty hardening), 1 CI commit (679172d ci adopt narrow assurance-convergence set P1-CI-002), and 3 docs/bookkeeping commits (d132751 + 82afe6f P1-CI-002 backlog close + archive companions; b44658b native-engine program decision records); zero breaking changes, zero feat commits. PATCH bump v0.26.0->v0.26.1. ZERO cards fire against this arc (mechanically verified: check-defer-triggers --mode=release-prep --since v0.26.0 reports fired_total 0, missing_disposition [], 12 fog + 2 cold cards INFORM-only; defer-comment-drift-coremanifest-seam does not re-fire because its two path_touched triggers are AND-semantics and this arc touches internal/cli/seam.go but NOT core_manifest.go). All 32 carried-forward records retain disposition=disclose with frozen historical reasons; the release-diff enumerator re-checks each card's trigger against the actual v0.26.0..R arc at evaluation time.",
