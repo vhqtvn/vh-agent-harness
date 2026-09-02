@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":7,"method":"approval/respond","params":{"approvalId":"approval-1","allow":true}}

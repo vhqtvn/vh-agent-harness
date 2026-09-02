@@ -1383,6 +1383,829 @@ export default function transform({ context }) {
   validator's fixtures, so it runs in `go test ./...`. This INFORMs only — it is
   a diagnostic, not a transition authority.
 
+## Experimental: `vh-agentd` headless daemon (native-engine branch)
+
+**Status: EXPERIMENTAL — native-engine program, not yet the default
+runtime.** The `.opencode` lane and every existing `vh-agent-harness`
+subcommand are unchanged. `vh-agentd` is a headless engine daemon that
+speaks the host protocol on stdio (one JSON object per line, NDJSON
+framing; JSON-RPC-shaped requests/responses): OpenAI-compatible and
+Anthropic adapters, durable sessions (JSONL logs), the tool pipeline
+with wire-bridged approvals, async background jobs, and subagents.
+Protocol contract: `docs/native-engine/host-protocol.md` (read it
+before driving the wire). Typical start:
+
+```sh
+# --approval-timeout-ms 0 = wait while connected; a disconnect still denies
+vh-agentd --adapter openai|openaicompat|anthropic --model <name> \
+  --base-url <https://...> --api-key-env <ENV_VAR_NAME> \
+  --session-dir <dir> [--max-tokens N] [--cache-breakpoints 0-4] \
+  [--approval-timeout-ms N] \
+  [--sandbox off|read-only|workspace-write] \
+  [--spill-max-inline N] \
+  [--workdir-roots DIR[,DIR...]] \
+  [--ask-tools TOOL[,TOOL...]] \
+  [--context-tokens N] [--compact-threshold R] \
+   [--skills-dir DIR] \
+   [--mcp-config PATH] [--mcp-timeout-ms MS] [--mcp-auto-allow] \
+   [--optimizer dedup|llm]
+```
+
+`--ask-tools run_shell[,TOOL...]` (P3.5) is the operator-named ask
+source: calls to the named tools ride the REAL approval waterfall —
+the wire bridge emits `approval/request`, and the CLIENT decides
+(interactive y/N, `--json` approval lines, or the client's `--policy`
+engine). Every unanswerable direction (no answer, approval timeout,
+disconnect) denies fail-closed, and the deny-only guard layer still
+runs after an approval grant. Names are validated against the
+registered tool set at startup — an unknown name exits 2. Default
+(omit the flag): no named-tool asks. Since P8.2 the daemon carries a
+SECOND ask source (the mcp namespace, above); the two are registered
+through ONE folded observer (`ask-tools+mcp-ask`) because the
+waterfall resolves an upstream ask on a downstream allow — two
+Allow-returning sibling observers would silently disable each other
+in either order. Denial provenance names the armed source: `ask-tools`
+alone, `mcp-ask` alone, or the fold.
+
+`--verify-log PATH` is a READ-ONLY operator mode (parsed before the
+required flags — no adapter/model/session-dir needed, no protocol
+session started): it replays the session log at PATH through the same
+fail-closed replay + surface-derivation surfaces the engine uses and
+prints exactly ONE JSON line to stdout —
+`{"events":N,"format_version":V,"surface_sha256":"<sha256-of-canonical-surface-JSON>","messages":M}`
+— exiting 0 on success and 1 with the reason on stderr on any replay
+error (malformed record, non-contiguous seq, unknown event, or a
+headerless/empty log). Two runs on the same log print byte-identical
+lines: it is the replay-determinism prover for real produced logs (the
+docker self-test battery uses it after every scenario).
+
+`--cache-breakpoints` is **Anthropic-only** (explicit `cache_control`
+breakpoints); it is rejected for `openai`/`openaicompat` because
+OpenAI-compatible endpoints cache implicitly via prefix matching —
+there is no breakpoint knob to map. `--sandbox` confines the
+`run_shell` tool: `off` (default) is the loud NO-confinement posture;
+`read-only` and `workspace-write` are kernel-enforced (Landlock +
+seccomp; writes outside the contract and network denied;
+workspace-write allows writes only under the session dir and OS temp).
+Confinement fail-closes: on hosts without the OS primitives, sandboxed
+`run_shell` calls return a typed sandbox-unavailable error — never a
+silently unconfined run. There is no `danger-full-access` mode (it is
+redundant with `off`).
+
+`--spill-max-inline N` (default 65536, `0` disables) arms oversize
+tool-result spill: results above the cap are written (temp file +
+atomic rename, so the content-addressed name never holds a partial
+file) under `<session-dir>/<session-id>.spill/` and the log keeps a
+preview + opaque locator; the model pages the bytes back via the
+`spill_read` tool with `offset`/`length` windows that always fit
+inside the inline cap by construction (§4d of the protocol doc; replay
+never depends on spill files).
+
+`--context-tokens N` (default 128000, `0` disables) and
+`--compact-threshold R` (default 0.8) arm session compaction (§4f of
+the protocol doc): after every successfully completed parent-session
+turn the daemon checks surface pressure (estimated tokens — surface
+chars/4 anchored by the last provider usage report — over the budget)
+and, at or above the threshold, shadows the surface head behind ONE
+user-role summary message citing every shadowed event, retaining the
+recent tail. The event log is never rewritten (replay determinism
+holds; the pre-compaction surface stays recoverable from the
+citations). The summary comes from ONE LLM call through the same
+adapter, built as a KV-cache prefix of the running conversation (same
+system prompt + tools + the shadowed messages, one instruction
+appended), so providers absorb it from cache. A failed or refused
+compaction (provider error, empty answer, summary not strictly
+smaller) NEVER fails the turn: the surface stays un-compacted, one
+stderr line is logged, and the next turn boundary retries. v1 compacts
+parent sessions only (subagent children are short-lived). The
+`compaction/*` events surface on the wire like any other session
+event; the reference client renders one `⤾ compacted: …` line.
+
+**Schedule wire surface** (`schedule/add|list|remove`, protocol doc
+§4c): time-based job triggers alongside the manual `session/dispatch`.
+`schedule/add {name, kind?, after?|at?, every?, payload?}` registers a
+schedule (UTC-canonicalized, slug-validated names, exactly one start —
+`after` XOR `at` — optional positive `every` for recurring); `list`
+returns the dispatch-priority snapshot with `nextRun` cursors;
+`remove {name}` unregisters. Cadence persists immediately in
+`<session-dir>/scheduler-state.json` (atomic temp+fsync+rename) and
+survives daemon restarts. Dispatch is at-least-once: the scheduler
+waits for executor idle (queued|running jobs of the active session),
+fires at most ONE dispatch per pass, and collapses fixed-rate catch-up
+to the LATEST due occurrence (no storm replay after downtime); a due
+schedule lands as an ordinary `job/enqueued` on the active session, so
+settlement and reporting ride the existing job/* event stream.
+
+**Model-facing tool surface (twelve built-in tools + the discovered
+MCP family).** The daemon's model is offered exactly these tools
+(child sessions below the delegation fence get the same set minus the
+subagent family at the fence), plus — when `--mcp-config` yields
+servers — every namespaced `mcp_<server>_<tool>` definition the MCP
+registry discovered at startup (see the MCP host paragraph below; the
+degraded-server sentinel `mcp_<server>` included, keeping the
+advertised set stable):
+
+- `echo` — echoes the given text back (read-only dogfood probe);
+- `clock` — the daemon's current UTC time, RFC 3339 (read-only probe);
+- `skill_load` — loads a skill from the catalog (tier 2 of the skills
+  delivery, `--skills-dir`; see the Skills paragraph below) or, with
+  `ref`, a reference file under that skill's own folder (tier 3,
+  symlink-safe confinement + size cap); read-only, concurrency-safe;
+- `run_shell` — executes a shell command (guards → wire-bridged
+  approval → capture caps; `--sandbox` confinement; exclusive barrier
+  around it in the tool scheduler). With `background:true` it instead
+  dispatches a durable `shell` job: the result is the immediate
+  receipt `{background:true, jobId, command, effectiveTimeoutMs}`, the
+  command runs through the SAME exec path inside the job, its combined
+  output streams to the job's capture channel (tail over the wire via
+  `jobs/output`), and settlement — exit facts in `job/settled` /
+  `job/report` `detail` — reaches the model as a background-job report
+  notice; omitted `timeout_ms` defaults to the 600000ms cap in
+  background mode; the sandbox applies identically (unavailable ⇒
+  typed dispatch refusal, never unconfined);
+- `spill_read` — pages back spilled oversize tool results by opaque
+  locator (content-addressed, sha256-validated, windowed so every page
+  fits inline);
+- `read` — returns a file as 1-based numbered lines (`LN: content`)
+  with optional line offset/limit, byte-capped with an explicit
+  resume-cursor truncation marker;
+- `write` — atomically creates/truncates a file (temp + fsync +
+  rename) and creates missing parent directories inside the roots;
+  returns the absolute path + bytes written;
+- `edit` — EXACT old→new string replacement (`replaceAll` bool for
+  ambiguous matches; no-match and non-unique are typed errors, never
+  partial writes) with a unified-diff-style result snippet;
+- `glob` — lists paths matching a pattern under the roots (stdlib
+  `filepath.Match` semantics: `*`/`?` never cross `/`, no `**`
+  recursion — documented honestly), sorted, bounded with an overflow
+  marker;
+- `search` — regex content search (Go RE2) with `path:LN: line`
+  matches, optional basename glob filter, bounded with an overflow
+  marker; malformed regex is a typed error;
+- `subagent_spawn` — spawn a child session (`mode: oneshot|continuable`);
+  oneshot blocks until the child settles and returns its report;
+- `subagent_send` — deliver a follow-up message to a continuable child
+  (queues exactly one child turn).
+
+The file family (`read`/`write`/`edit`/`glob`/`search`) is confined
+symlink-safe to the `--workdir-roots` set (comma-separated absolute
+paths to existing directories — a non-directory entry, even via
+symlink, refuses at startup; default = the daemon's working directory
+resolved absolute — the same roots `run_shell`'s absolute-workdir
+policy consults): every
+user-supplied path is checked before any filesystem effect, rejections
+are typed `isError` results naming the rule, a rejected write leaves
+no trace (no file, no created parent directories), and the glob/search
+walks never follow symlinked directories. Oversize results are NOT
+special-cased: the commit-time spill seam applies to them exactly as
+to any other tool result, and each tool keeps its default output under
+a sane size via its own cap/bound with explicit markers.
+
+**Skills delivery (`--skills-dir DIR`, three-tier progressive
+disclosure).** The daemon delivers an Agent Skills catalog
+(agentskills.io `SKILL.md` convention — the same shape as the
+harness's own `.opencode/skills/*/SKILL.md`) as a GUARDED TOOL surface,
+never as model filesystem-reads:
+
+- **Tier 1 — prompt lines.** A `Skills` section in the assembled system
+  prompt lists each skill's name + SANITIZED description (angle
+  brackets, code fences, and section-header tokens stripped — a
+  catalog entry cannot inject prompt structure) plus one guidance
+  sentence pointing at `skill_load`. No catalog ⇒ the section is
+  omitted entirely.
+- **Tier 2 — `skill_load`.** The full SKILL.md body (frontmatter
+  stripped) plus an `allowed-tools ceiling:` footer, delivered through
+  the normal tool pipeline — the same guards, timeout, and audit
+  logging as every other tool.
+- **Tier 3 — references.** `ref: references/foo.md` loads a reference
+  file under that skill's OWN folder, with the filetools confinement
+  discipline re-scoped per skill (no `..`, no absolute paths,
+  symlink-safe, size-capped like `read`, fail-closed typed errors).
+
+Flag semantics: default DIR is `./.opencode/skills` resolved against
+the daemon's working directory — an ABSENT default is honest absence
+(one startup line `skills: none (no catalog at <path>)`, engine runs
+normally), while an explicitly-passed-but-missing DIR is a fail-closed
+exit 2. The catalog is validated at startup against the spec limits
+(name ≤64 chars lowercase kebab-case matching the folder, reserved
+names rejected, description ≤1024 chars non-empty, flat frontmatter
+only — multi-line YAML values are unparseable BY DESIGN): a skill that
+fails validation is EXCLUDED with one stderr warning and the daemon
+continues. The catalog is read ONCE at startup — no per-turn
+hot-reload.
+
+Operator invariants (enforced structurally): a loaded SKILL.md is
+UNTRUSTED candidate-instruction data, never system authority — nothing
+it says relaxes allow/deny/ask anywhere in the engine; `allowed-tools`
+is a CEILING intersected with the tool registry (narrow-never-widen,
+never a grant — nothing consumes it to ALLOW anything; it surfaces in
+the load footer and the `skill/loaded` log event for AUDIT only, and
+the documented enforcement seam for running risky skills scoped is
+per-spawn tool scoping on the durable-subagent path — a later knob);
+bundled `scripts/` NEVER auto-execute — they are inert files, and a
+model that wants to run one goes through `run_shell` and the full
+approval waterfall. Every successful `skill_load` also appends a
+log-only `skill/loaded` provenance event `{name, ref?, sha256}` (the
+body itself already rides the logged `tool/result`, so replay derives
+it from the LOG, never disk — the battery proves this by mutating the
+catalog after a run and replaying byte-identically). Fire-rate tuning:
+every `skill_load` is a logged `tool/call`, so skill-usage rates are
+replay-derivable from session logs — that is the documented method for
+deciding when a catalog outgrows the full-listing prompt section (the
+`SkillBudget` seam in `internal/skills` marks where top-k selection or
+a `skill_search` tool would slot in; no RAG today).
+
+**MCP host delivery (`--mcp-config PATH`, `--mcp-timeout-ms MS`,
+`--mcp-auto-allow`).**
+The daemon is an MCP HOST: it consumes the operator's opencode MCP
+config, discovers each server's tools at startup, and exposes them in
+the SAME guarded registry as every built-in tool (same waterfall,
+guards, and approval bridge — NOT the same containment: see the
+posture paragraph below) — namespaced
+`mcp_<server>_<tool>` (lowercase, sanitized to `[a-z0-9_]`,
+collision-safe `_N` suffixes), description prefixed `(<server>) ` and
+sanitized like the skills tier-1 lines. Config shapes: the file is
+EITHER a full `opencode.json` (its top-level `.mcp` block is
+extracted) OR a bare `{"<name>": {...}}` server map; local stdio
+servers are `{"type":"local","command":[...]}` (optionally
+`"env": {...}` — merged into the subprocess's CLEAN explicit env
+AFTER the scrub discipline, so secret-named variables
+— `KEY|PASSWORD|SECRET|TOKEN`, case-insensitive, and the engine
+credential prefix — are dropped exactly as `run_shell`'s env policy
+drops them) and remote Streamable-HTTP servers are
+`{"type":"remote","url":"https://…"}` (optionally `"headers": {...}`
+sent on every request; the client hand-rolls the transport on the
+stdlib — POST with `Accept: application/json, text/event-stream`,
+single-JSON OR SSE-framed responses, `Mcp-Session-Id` echo when a
+server assigns one). Unknown keys are ignored with one startup note.
+Default (`--mcp-config` unset): `~/.config/opencode/opencode.json`
+when it exists (an honest startup line says so), else zero MCP; an
+explicitly-passed missing/invalid file is a fail-closed exit 2 with a
+file:line-ish error. **Posture — MCP tools are EXTERNAL CANDIDATE
+INPUT and ASK-BY-DEFAULT (P8.2):** every call rides the full
+guard/waterfall/approval machinery by construction (they are ordinary
+registered tools — no MCP result is trusted authority), and — the
+load-bearing P8.2 correction — MCP tools are NOT sandboxed. Unlike
+`run_shell` under `--sandbox read-only|workspace-write` (Landlock:
+network denied, writes confined), an MCP call is raw external network
+egress to the configured server with none of that containment. The
+approval ASK is therefore the boundary, and it is armed by DEFAULT:
+every `mcp_<server>_<tool>` call (the degraded `mcp_<server>`
+sentinel included) emits `approval/request` on the wire, the client's
+`--policy` engine or interactive responder answers, and every
+unanswerable direction (no answer, timeout, disconnect) denies
+fail-closed with the tool never executing. Promotion is explicit:
+`[[allow]] tool = "mcp_mock_echo"` (exact name) or
+`tool = "mcp_mock_*"` (the per-server underscore prefix glob,
+anchored at the underscore — the P8.2 twin of the colon glob);
+hard-deny classes apply exactly as for every other tool. Operators
+who want the old allow-without-ask behavior opt back in explicitly
+with `--mcp-auto-allow` (DEFAULT FALSE; the startup line states the
+posture either way). URL, header, and env
+values are CREDENTIALS: startup lines carry names, types, and counts
+only, and every error surface is redacted exactly like provider keys
+(URL path tokens included). **Fail-closed everywhere:** every exchange
+is bounded by `--mcp-timeout-ms` (default 60000, cap 600000 — the
+`run_shell` cap; a hung server fails closed within the bound, never a
+hung turn); a server that will not start, times out, or returns
+garbage DEGRADES that server — no tools from it, one reserved
+`mcp_<server>` sentinel whose call is the typed "server degraded"
+error (a hallucinated full tool name still reports unknown), surfaced
+at startup and at call time; an unmappable tool schema (non-object
+`inputSchema`) skips THAT tool with a warning while the server stays
+up. v1 scope (honest): tools only — no MCP resources, prompts,
+sampling, or elicitation; no OAuth/token refresh (static headers and
+env); servers launch at daemon startup only (no mid-life supervision
+or auto-restart — relaunching a dead server is a daemon restart); the
+tool list is discovered at startup (a `Refresh` seam exists in
+`internal/mcp`, unwired at the daemon); MCP tools render to the
+client as ordinary tool calls — ZERO client changes. As with skills,
+growing the advertised tool set changes the assembled prompt bytes:
+previously compiled prompt artifacts fall back to raw assembly
+(reported, never silent) until `--compile-prompt` is rerun.
+
+**Model-facing recursive subagents** (child-of-child): besides the
+client-driven `subagent/spawn|send|list` wire methods, the daemon's
+MODEL has the same capability as first-class tools — `subagent_spawn`
+(`mode: oneshot|continuable`) and `subagent_send` — and they work
+recursively: a child session's model can spawn grandchildren, a
+grandchild's great-grandchildren, up to the delegation depth fence
+(default 3 edges from the root; the executing session's persisted
+header depth is authoritative). `oneshot` spawn BLOCKS until the child
+settles and returns the child's report as the tool result (the report
+also lands in the executing session's log as a user-role
+`subagent/report`, provenance-clean); `continuable` returns a
+`childId` immediately for `subagent_send` follow-ups. The family is
+ADVERTISED to a session's model only while that session is below the
+fence (capability absence over refusal — a depth-maxed session is not
+offered the tools; a hallucinated call at the fence still gets a typed
+`isError` depth-fence refusal with zero durable effects). Child-log
+layout composes with the tree: `<session-dir>/subagents/<parent-id>/`
+nests per owning session, so `sess-a → sess-a.1 → sess-a.1.2` each get
+their own durable log. Every subagent tool call flows the normal
+pipeline (guards, approval bridge, timeouts, pre-execution
+`tool/call` logging, replay determinism). Note for prompt operators:
+growing the advertised tool set changes the assembled system-prompt
+bytes, so previously compiled prompt artifacts no longer match and
+serving falls back to raw assembly (reported, never silent) until
+`--compile-prompt` is rerun.
+
+`--compile-prompt` runs the compile-time prompt compilation (writes under
+`<session-dir>/compiled-prompts/`, exits; no protocol session).
+`--optimizer llm` (the default) backs it with the real adapter-backed
+optimizer — ONE compile-time LLM call through the configured adapter,
+output treated as a candidate and checked by the fail-closed compile
+invariants; it needs the key variable SET and exits 2 without it (never
+a silent dedup fallback; no retries — a failed compile is a rerun).
+`--optimizer dedup` selects the offline, keyless reference fake.
+
+**Deployment notes (operator findings, P3.5).** Two runtime-image
+requirements that the offline battery image does not surface:
+
+- **`ca-certificates` for real HTTPS providers.** Runtime images need
+  the system CA bundle (`apt-get install ca-certificates` at IMAGE
+  build time — never ad-hoc in a running container) for any real
+  provider call over `https://`; without it every provider call fails
+  TLS verification ("unknown authority"). The docker self-test image
+  deliberately ships without it (it only talks to the local mock over
+  plain HTTP), so a battery-green image is NOT proof that real
+  providers work — bake the CA bundle into production images.
+- **Under Docker, `--security-opt seccomp=unconfined` for the kernel
+  sandbox.** Docker's DEFAULT seccomp profile blocks the Landlock
+  syscalls, so `--sandbox read-only|workspace-write` fail-closes with
+  typed sandbox-unavailable errors inside a default-profile container.
+  Run the daemon container with `--security-opt seccomp=unconfined`
+  (same rationale as `docker/selftest/run.sh`): the flag lifts only
+  Docker's profile — the engine's own trampoline (Landlock + seccomp)
+  then enforces the confinement.
+
+Credential discipline: `--api-key-env` takes the **name** of an
+environment variable only — never a literal key — and the daemon fails
+closed when that variable is unset. Provider error bodies are
+key-redacted at the source: if a provider echoes the API-key value in a
+non-2xx body, every occurrence is replaced with `[REDACTED]` before the
+text can reach session logs (`llm/retry` messages, `turn/end` reasons),
+wire error responses, or daemon stderr (values shorter than 8 bytes are
+left alone — see `adapters.RedactSecret`). stdout is protocol;
+diagnostics go to stderr. Client EOF is a disconnect: pending approvals
+deny immediately, in-flight handlers drain, and the daemon exits 0.
+
+### `vh-agent-client` — reference CLI client (experimental)
+
+`vh-agent-client` (same experimental branch) is the minimal reference
+CLI client that drives a `vh-agentd` daemon end-to-end over the real
+host protocol: live event rendering, interactive approvals, and a
+machine mode. It is the canonical protocol-consumer example — when in
+doubt about how to talk to the daemon, read its wiring
+(`cmd/vh-agent-client`, built on the `internal/protocol` reference
+Client library).
+
+```sh
+# client flags BEFORE --exec: everything after the daemon command (or a
+# leading --) passes through to the daemon verbatim.
+vh-agent-client [--session-dir DIR] [--json] [--prompt TEXT] [--repl] \
+  [--policy FILE] \
+  [--exec vh-agentd --adapter openai --model <name> \
+          --base-url <https://...> --api-key-env <ENV_VAR_NAME> ...]
+```
+
+- `--exec <argv...>` — daemon launch spec, rest-of-line (default:
+  `vh-agentd` from PATH with just the forwarded `--session-dir`; the
+  daemon's own fail-closed validation supplies the loud missing-flag
+  messages). The daemon's stderr is inherited (its diagnostics flow to
+  the client's stderr); its stdout is the protocol pipe.
+- `--session-dir DIR` (default `.vh-agent-sessions`) — resolved by the
+  client to an absolute, cleaned path from its own cwd (the daemon
+  hard-rejects relative session dirs: under `--sandbox
+  workspace-write` the dir becomes a Landlock RWDir resolved against
+  the sandboxed child's cwd, not the daemon's startup cwd), then
+  forwarded to a spawned daemon when the exec spec lacks its own; it
+  also holds the client's last-session pointer file
+  (`.vh-agent-client-last-session`). Creating the dir stays the
+  daemon's job.
+- `--prompt TEXT` — one-shot: send, stream the turn(s), print the final
+  assistant text on stdout, exit. The client drives the host-side
+  multi-turn loop (`session/prompt` is ONE synchronous tool turn; while
+  the model requests tools, a minimal continuation prompt re-submits
+  the surface, capped at 32 turns). After the conversation, any jobs
+  enqueued during the run are DRAINED to settlement (P6): the client
+  polls `jobs/status`/`jobs/output`, renders every tailed chunk (in
+  `--json` mode as client-synthesized `{"kind":"job-output"}` NDJSON
+  records — a record shape the daemon never emits), re-syncs its
+  cursor forward to `evictedBase` when the output retention ring
+  evicts behind it (the evicted prefix is honestly absent) and clamps
+  back to `written` when the cursor runs ahead of the produced output
+  (after a daemon restart a recovered job reports `written:0` — the
+  clamp completes the drain over that honest absence), and calls
+  `session/surface` once so pending `job/report` notices land; without
+  the drain, client exit would tear the daemon down with the jobs
+  still running. REPL-mode tailing (interactive slash-commands) is a
+  deferred slice.
+- `--repl` / a TTY — interactive REPL: a line is one user message;
+  `exit`/`quit`/Ctrl-D end cleanly; Ctrl-C sends nothing and closes the
+  connection — the daemon denies any pending approvals (fail-closed)
+  and exits, and the client reports that honestly (exit 0).
+- `--resume [ID]` (P4) — resume a prior session over the wire: with an
+  ID that exact session, without it the last-session pointer. The
+  existing log is NEVER truncated (see "Resume" below); missing
+  pointer = exit 2, unknown id = typed engine error exit 1, an EMPTY
+  id — `--resume=` or `--resume ""` — = exit 2 (fail-closed, same
+  posture as `--policy`), and two explicit `--resume` forms naming
+  DIFFERENT sessions = exit 2 (conflicting ids — repeating the same
+  id is idempotent and legal). Mutually exclusive with `--new`. This
+  is a CLIENT flag: it is recognized only before the `--exec`
+  boundary — a daemon-side `--resume ...` in the exec spec passes
+  through to the daemon verbatim, exactly like every other token
+  after the daemon binary name.
+- `--json` — machine mode: NDJSON events verbatim on stdout (no
+  rendering), the final prompt result as the last line, and approval
+  answers as JSON lines (`{"id":"<approvalId>","approve":bool}`) on
+  stdin.
+- `--policy FILE` — attach the client-side auto-approver policy engine
+  at the `ApproverFunc` seam (see "Auto-approver policy (`--policy`)"
+  below). Composition, not replacement: calls the policy does not
+  allow still ask the interactive/`--json` responder, so
+  `--json --policy` works and humans still see real asks. Absent flag
+  = unchanged behavior (no engine). A present-but-broken file is a
+  usage error (exit 2) naming the exact offending line BEFORE the
+  daemon spawns.
+
+**Output discipline** mirrors the daemon's stdout-is-protocol purity:
+rendered events and prompts (including the approval `[y/N]` prompt) go
+to **stderr**; stdout carries machine-readable final content only (the
+one-shot final assistant text; NDJSON in `--json`). Exit codes: `0`
+clean · `1` protocol/engine error (including a typed daemon refusal of
+an unknown `--resume <id>`) · `2` usage/validation (including
+`--resume` with no prior session recorded).
+
+**Approvals** surface as a blocking `[y/N] approve tool <name>?` prompt
+(interactive mode) or as the NDJSON request + stdin answer (`--json`).
+ENTER alone, EOF, malformed input, or a non-affirmative answer DENIES —
+fail-closed, mirroring the daemon's bridge. The responders sit behind
+an `ApproverFunc` seam in the client wiring; `--policy` composes the
+P3 auto-approver engine in front of them (below) without touching the
+driver.
+
+**Auto-approver policy (`--policy`, P3).** `--policy FILE` attaches a
+client-side rule engine at the approval seam so scripted runs can
+proceed without a human at the terminal — without weakening the
+fail-closed posture. Every policy decision renders one stderr line
+(`policy: allow run_shell(command=git status)` /
+`policy: HARD-DENY edit(path=x) (…reason…)` / `policy: ask → human`).
+The engine never reads stdin: allow/hard-deny answer synchronously, and
+only the ask path can block (that block belongs to the responder).
+
+*Rule file syntax* (line-oriented TOML-ish subset; `cmd/vh-agent-client/policy`):
+
+```toml
+# whole-line comments and blank lines are the only ignored shapes
+
+[[allow]]
+tool = "read"          # exact tool name, or a single-segment glob:
+                       #   "edit:*"  (colon namespace — matches edit:big)
+                       #   "mcp_mock_*" (underscore namespace, P8.2 — the
+                       #                 per-server MCP allow, anchored at
+                       #                 the underscore)
+path = "docs/"         # optional rooted-path prefix (read/write/edit only)
+
+[[allow]]
+tool = "run_shell"
+argv0 = "git"          # optional exact argv[0] (run_shell only): every
+                       # command segment's argv[0] must equal it
+
+[[allow]]
+tool = "echo"          # a bare rule allows the tool pattern broadly,
+                       # still behind the hard-deny classes
+```
+
+The parse is FAIL-CLOSED: unknown keys or sections, malformed lines,
+duplicate keys, unquoted values, inline comments, unreadable files, and
+semantically inexpressible rules (a bare `*`, wildcards outside the
+two `prefix:*` / `prefix_*` glob shapes, a `path` on a non-file tool,
+a `path`/`argv0` on the wrong
+tool, `..`/`.`/empty path segments in a rule) exit 2 at startup with
+the exact offending file:line (and byte offset). Nothing is silently
+ignored. An EMPTY file is valid and means "everything asks" — exactly
+the no-`--policy` posture.
+
+*Decision order (fixed; no rule file can change it):*
+
+1. **HARD-DENY classes** — enforced before allow-rules are even
+   consulted; an allow rule that tries to cover one never gets the
+   chance (the tests prove this adversarially):
+   - **secret env writes** — any `NAME=value` assignment shape in a
+     `run_shell` command (or an `env` arg on any tool) whose NAME
+     matches the engine's env-scrub pattern `(?i)KEY|PASSWORD|SECRET|TOKEN`
+     or carries the `VH_AGENT_HARNESS_` prefix (mirrored from
+     `internal/tools/shell`);
+     - **git mutation** — `run_shell` argv[0] `git` (path forms and
+       `env`-prefixed forms included; compound commands split on
+       `&&`/`&`/`||`/`;`/`|`/newline with every segment checked — the
+       single `&` matters because `bash -c` executes BOTH sides of an
+       asynchronous list, so `git status & git push` is a mutation
+       segment) with a subcommand in the closed mutation set (45 verbs:
+       push, reset, clean, checkout, branch, merge, rebase, cherry-pick,
+       revert, restore, worktree, commit, tag, stash, apply, am, clone,
+       fetch, pull, add, rm, mv, switch, config, sparse-checkout,
+       submodule, update-ref, symbolic-ref, gc, prune — plus the 15
+       hyphenated plumbing verbs add--interactive, checkout--worker,
+       checkout-index, commit-graph, commit-tree, merge-file,
+       merge-index, merge-octopus, merge-one-file, merge-ours,
+       merge-recursive, merge-resolve, merge-subtree, merge-tree,
+       update-index; opencode's boundary is hyphen-aware, so each is
+       enumerated as a full token). Read-only git
+       (`status`, `log`, `diff`, `show`, `grep`, …) stays rule-eligible.
+       `git` with no subcommand, flags before the subcommand, or a
+       quoting-evaded shape denies (cannot identify ⇒ deny), and a
+       git-headed segment denies if ANY word carries a substitution
+       metacharacter (`$`, backtick, `(`, `)`) — `git log $(git push)`
+       executes the substitution, so the words are not provably
+       read-only. Wrapper shapes whose argv[0] is not `git` (`sudo git
+       push`, `nohup git push`, `sh -c "git push …"`) are covered by a
+       word-level git-adjacency scan: a segment containing BOTH the
+       word `git` and a mutation-subcommand word hard-denies. *Honest
+       false-positive direction (accepted):* the adjacency scan is
+       deliberately over-approximating — prose like `echo about git
+       push` denies too, and the `&` split is lexical (a quoted or
+       redirection `&` shape can over-split into extra segments, which
+       can only lose an allow, never gain one);
+    - **exec-intermediary tripwires (closed class)** — the exec
+      bridges that assemble a child argv the segment scans cannot
+      follow. The words `xargs`, `parallel` (GNU parallel), `-exec`,
+      `-execdir`, `-ok`, `-okdir` deny wherever they appear as
+      standalone words in any segment (path-qualified forms included,
+      basename) — position-independent, so no displacement wrapper
+      (`nohup xargs git`, `command`/`nice`/`time`/`stdbuf`/`setsid
+      xargs …`, `env -i xargs …`, `env env xargs …`, `sh -c 'xargs
+      git'`) can move the bridge out of scanning position: `echo
+      push | xargs git` splits the mutation word and the word `git`
+      across pipe segments — no single-segment adjacency — and bash
+      lets xargs assemble the child `git push`; `-ok`/`-okdir` are
+      find's prompt-exec variants of the `-exec`/`-execdir` bridges.
+      The class also denies any single word matching
+      `^git-[a-z][a-z0-9-]*$` (dashed-form git dispatch — `git-push
+      origin main` puts the subcommand inside argv[0]; a PATH-form
+      argv[0] basename-trips too; the regex is LOWERCASE-only, a
+      case-sensitivity boundary: `git-Push` does not trip it and
+      falls to the git-adjacency scan or the disclosed residual
+      below). This class runs first among the `run_shell` command
+      classes, so an exec-bridge word always trips even when the git
+      scans would co-fire. *Honest over-approximation (accepted, deny
+      direction):* the closed word set and `git-*` words deny even as
+      benign whole-word mentions (`man git-push`, `git log --grep
+      git-push`, `echo about xargs`/`parallel` prose — though an
+      embedded substring like `--grep=git-push` and the words
+      `xargus`/`parallels` do NOT trip: the word match is exact or
+      basename, never substring). Encoded, translated, or
+      undisplaced-vocabulary forms beyond this closed set fall to the
+      disclosed arbitrary-intermediary residual below: the policy is
+      tripwires, not proofs; the sandbox is the boundary;
+    - **env-option fail-closed (env prefix boundary)** — after the
+      leading `NAME=value` assignments and at most one literal `env`
+      are stripped from a segment, an env OPTION word (`-i`,
+      `-u NAME`, `--`) leaves the child environment/argv
+      unidentifiable to the lexical scan (`echo push | env -i xargs
+      git` would make `-i` the argv[0] and hide the bridge) — the
+      segment denies: uncertainty denies. Boundary: `env FOO=bar git
+      status` (assignments then a plain argv[0]) strips cleanly and
+      stays identifiable through the normal classes;
+    - **plain-word provability gate (anti-evasion)** — a
+      `run_shell` segment is allow-eligible only if EVERY word is
+      *plain*: after edge-quote trimming, matching the conservative
+      identifier grammar `^[A-Za-z0-9_./:@+=-]+$` (no interior quotes,
+      no `$`, no backtick, no parens, no other shell metacharacters).
+      Any non-plain word anywhere in any segment is lexically
+      UNIDENTIFIABLE and hard-denies; no allow rule can rescue it.
+      This one rule closes the quote-fragmentation genus (`sh -c
+      'gi''t pu''sh'` — interior-quote fragments match neither `git`
+      nor the mutation set) and the substitution-wrapped genus (`echo
+      $(git push)`, ``echo `git push` `` — argv[0] plain and non-git,
+      invisible to the adjacency scan) at any encoding, any position.
+      *Honest consequence (accepted):* the deny-direction
+      over-approximation WIDENS — `echo $(date)`, `ls $(pwd)`, `git
+      diff HEAD~1` (`~` is outside the grammar) now hard-deny under
+      ANY policy: v1 has NO policy path for command substitution or
+      non-grammar words in `run_shell`. Unidentifiable DENIES rather
+      than asks (the established uncertainty posture): the human can
+      still run such a command themselves outside the client, or the
+      operator drops `--policy` for interactive use. Plain-word false
+      positives remain (`echo about git push` denies via adjacency);
+    - **confinement-escape shapes provable from args alone** — `..`
+     segments in file-tool `path` args and `run_shell` `workdir`, and
+     traversal-shaped words (`..`, `../x`, `a/../b`) in a `run_shell`
+     command. *Honest boundary:* absolute paths are NOT hard-denied —
+     the daemon's configured roots are not knowable client-side, so
+     they fall to rule matching (a relative-rooted rule prefix never
+     matches them ⇒ ask); regex `..` in search/glob patterns is not
+     scanned (it is grammar, not a path);
+   - **sandbox-mode escalation** — the closed vocabulary:
+     `danger-full-access` as a literal substring of any arg value,
+     `sandbox`/`sandbox_mode`/`sandboxPermissions` override KEYS at any
+     nesting depth, and `--sandbox…`-shaped flags or a `sandbox=`
+     prefix in a `run_shell` command. Per-call sandbox override does
+     not exist on the tool surface; requesting it is an escape attempt.
+   - **infra-lifecycle** (P3.5 parity with the opencode floor) —
+     `apt`/`apt-get` with a subcommand in the closed install-class set
+     (`install`, `reinstall`, `upgrade`, `full-upgrade`, `remove`,
+     `purge`, `autoremove` — read-only `list`/`search`/`policy`/`show`
+     and the distinct `apt-cache`/`apt-key` argv0s stay
+     rule-eligible); the user/group management family (`usermod`,
+     `useradd`, `groupadd`, `groupmod`, `groupdel`, `userdel`,
+     `deluser`) wherever a standalone word appears (basename-aware —
+     path-qualified and sudo-wrapped forms trip); ssh host-key bypass
+     option values (`StrictHostKeyChecking=no`,
+     `StrictHostKeyChecking=accept-new`,
+     `UserKnownHostsFile=/dev/null` — the union of the opencode rule
+     and the mission text; detached `-o VALUE`, attached `-oVALUE`, or
+     bare); and `scp` ANY invocation. *Honest over-approximation
+     (accepted, deny direction):* word-anywhere tripwires with no
+     inspector carve-outs — prose mentions deny too (`echo about
+     useradd`, `echo scp is how files moved`), and the matches are
+     whole-word anchored, never substring (`userslist`,
+     `delusernotes`, `scpnotes.txt` do not trip);
+   - **system-temp write authoring** (P3.5 parity) — a `run_shell`
+     redirection operator (`>`, `>>`, `2>`, `2>>`, `&>`, `&>>`, `>&`,
+     `>|`, `>>|` — attached or detached target) or a `tee` targeting
+     an ABSOLUTE path under `/tmp`, `/var/tmp`, or `/dev/shm` (the
+     closed client-side system-temp floor; opencode's system-tmp-access
+     rule). Reads of the roots (`ls /tmp`) and relative targets
+     (`> out.txt`, `tee out.txt`) are NOT this class — relative writes
+     fall to the daemon-side sandbox/roots (workspace-write writable
+     roots deliberately include the OS temp dir), and a relative
+     redirection still denies via the plain-word gate, just without
+     this class's reason. Process substitution is out of scope (the
+     plain-word gate owns the words). Lexical-split caveat: operators
+     that themselves carry `&` or `|` (`>&`, `>|`, `>>|`) over-split
+     and deny via the plain-word gate with the generic reason — same
+     deny outcome, generic reason;
+   - **fail-closed args rule** — for the known-risky tools
+     (`run_shell`, `read`, `write`, `edit`) an args object that does
+     not parse into the tool's known shape (missing/ mistyped required
+     key, unknown key) DENIES: uncertainty denies, never allows.
+2. **allow-rules** — first matching `[[allow]]` entry wins.
+3. **default ASK** — anything unmatched falls through to the
+   interactive/`--json` responder exactly as with no `--policy`. The
+   engine never auto-approves something unmatched.
+*Honest limits (documented in `policy/decide.go`):* the hard-deny
+classes are **closed-class lexical tripwires, not proofs**. The
+policy engine denies a closed vocabulary of shapes it can identify;
+it cannot prove a command string will not invoke git (or anything
+else) through arbitrary intermediaries — `make`, scripts, compiled
+helpers. All command-text analysis is LEXICAL (whitespace fields, no
+quoting/expansion semantics), conservative in the DENY direction —
+e.g. `echo "a && b"` splits lexically and its quoted tail denies
+(uncertainty ⇒ deny), and the plain-word provability gate widens
+that direction further (any word carrying
+quotes/substitution/metacharacters — even a benign `$(date)` —
+denies the whole call). That is the accepted cost of a
+lexically-provable boundary: provable words get exact-match scans;
+everything else denies. **The daemon's sandbox
+(`--sandbox read-only|workspace-write`) is the actual security
+boundary** for filesystem/network effects; the approval policy is
+defense-in-depth in front of it, and the classes are client-side
+tripwires in front of the daemon's own guards — not the enforced
+boundary. Running `--policy` with `--sandbox off` means auto-approve
+of whatever the model writes — an explicit operator risk decision.
+No per-project policy discovery: the flag is explicit by design
+(auto-discovery is a footgun).
+
+**Resume (P4 — real over the wire):** `--resume` resumes the prior
+session through the daemon's `session/resume` method — the EXISTING
+log is opened without truncating (torn tail recovered, `seq`
+continues), so a second daemon lifetime on the same `--session-dir`
+continues the SAME durable stream. Two forms: bare `--resume` uses the
+last-session pointer file under the session dir; `--resume <sessionId>`
+targets an explicit id (and re-points the pointer). The resume is
+announced on stderr with the derived title, recovered event count, and
+replay-derived token totals; any fold-visible unsettled jobs are
+REPORTED (never silently re-dispatched). A missing pointer is a usage
+error (exit 2) before any wire traffic; an unknown id is the daemon's
+typed `not-found` refusal (exit 1). Resuming the id that is the
+daemon's CURRENTLY-ACTIVE session is a typed `session-active` refusal
+(`-32602`) — a second live writer on the open log would corrupt the
+durable stream (it cannot hit this client's flow: every client run
+spawns a fresh daemon lifetime). `session/create` with an existing
+id still truncates — the client never fakes resume through create.
+Discovery: the daemon's `session/list` method enumerates resumable
+top-level sessions (`{sessionId, title, events, lastActivity}`,
+newest first) over the same wire; see
+`docs/native-engine/host-protocol.md` §4e for the full lifecycle
+contract (resume-not-fork, supersede semantics, derivation rules,
+same-id-active / child-session refusals).
+
+### `vh-mockllm` — scriptable mock LLM server (experimental)
+
+`vh-mockllm` (same experimental branch) is a standalone mock LLM
+endpoint for testing the engine END-TO-END without a real provider:
+one deterministic, file-scripted scenario serves BOTH wire dialects
+the adapters speak. It inherits the proven mock-server patterns
+(healthz readiness, per-path counters, reset) engine-grade in Go:
+
+```sh
+vh-mockllm [--addr 127.0.0.1:8099] --script scenarios/X.json \
+           [--journal requests.jsonl]     # --script REQUIRED; bad script = exit 2
+```
+
+- **Script**: JSON array of steps consumed FIFO globally (ordering is
+  the test author's contract). Step classes: `{"text":"..."}` success
+  text; `{"tool_calls":[{"id","name","args":{...}}]}` tool calls
+  (args object; OpenAI wire gets string-encoded `arguments`, Anthropic
+  wire gets `tool_use` blocks with `input` objects — both dialects
+  correct from one script); `{"fault":{"status":500,"body":"...",
+  "retry_after_ms":2000}}` error status + `Retry-After` (seconds
+  form); `{"empty":true}` 200-with-no-content (the retryable
+  empty-response class). Malformed/ambiguous scripts fail closed at
+  startup (exit 2). **Script exhausted → 500 naming the scenario file
+  and step count** (a test bug, never a silent loop). Response ids are
+  deterministic (`mock-chatcmpl-N` / `mock-msg-N`).
+- **Endpoints**: `POST /v1/chat/completions` (Authorization presence
+  required), `POST /v1/messages` (x-api-key presence required; 401
+  before any step is consumed), `GET /healthz`, `GET /count`
+  (LLM-path → POST count), `GET|POST /reset` (clears counters — NOT
+  the script cursor, NOT the journal), `GET /journal?since=N`
+  (method, path, auth-header PRESENCE ONLY, full request body JSON).
+- **Redaction discipline**: the auth-header VALUE is never recorded —
+  not in `/journal`, not in the `--journal` disk mirror.
+
+### `vh-mockmcp` — scriptable mock MCP server (experimental)
+
+`vh-mockmcp` (same experimental branch) is the MCP-host testing
+twin of `vh-mockllm`: a standalone mock MCP server speaking JSON-RPC
+2.0 over BOTH transport shapes the host supports, with a canned tool
+set and fault-injection flags for the fail-closed proofs. It is the
+server the docker battery's `mcp` scenario runs against.
+
+```sh
+vh-mockmcp [--stdio]                            # default: NDJSON on stdin/stdout
+vh-mockmcp --http HOST:PORT [--sse] [faults]    # Streamable-HTTP; port 0 prints
+                                                # "listening <addr>" on stderr
+```
+
+- **Canned tools (deterministic)**: `echo {text}` → text block
+  `echo: <text>`; `slow {ms}` → sleeps (capped 120s) then confirms —
+  the timeout proof; `fail {message}` → `isError:true` result — the
+  typed tool-error proof; `--env-tool` adds `env {name}` returning
+  the subprocess env value or `(unset)` — the env-scrub proof;
+  `--bad-schema-tool` adds `weird` whose `inputSchema` is a BARE
+  STRING (`{"type":"string"}`) — the unmappable-schema skip proof.
+- **Protocol**: `initialize` (negotiates `2025-06-18`) →
+  `notifications/initialized` (accepted, no response) → `tools/list`
+  → `tools/call` (`{name, arguments}` → content blocks). Unknown
+  method → `-32601`; unknown tool / bad args → `-32602`.
+- **Faults**: `--garbage` = EVERY response is garbage (invalid JSON
+  line over stdio / HTTP 500 + junk) — pointed at by a host, the
+  server DEGRADES at initialize; `--call-garbage` = garbage
+  `tools/call` responses only (initialize/tools/list stay healthy) —
+  the call-level fail-closed proof (error, no hang, no crash);
+  `--sse` = frame HTTP responses as `text/event-stream` with a
+  leading heartbeat comment (exercises the host's hand-rolled SSE
+  parsing); `--require-session` = assign `Mcp-Session-Id` on
+  initialize and REQUIRE it afterwards (400 without — the real-server
+  session discipline, added after a live endpoint rejected a
+  sessionless follow-up).
+- **HTTP endpoints**: POST any path except `GET /healthz` (the mock
+  accepts both the root and `/mcp`-style paths).
+
+### Docker self-test battery (`docker/selftest/`)
+
+The engine's self-test battery runs the REAL daemon + client + mock
+end-to-end INSIDE docker — never on the host:
+
+```sh
+./docker/selftest/run.sh    # operator form
+vh-agent-harness exec bash docker/selftest/run.sh    # agent form
+# equivalent: vh-agent-harness exec docker build -f docker/selftest/Dockerfile -t vh-selftest .
+#             vh-agent-harness exec docker run --rm --security-opt seccomp=unconfined vh-selftest
+```
+
+`run.sh` builds the image (multi-stage `golang:1.25-bookworm` →
+`debian:bookworm-slim`; the worktree-root `.dockerignore` keeps the
+context to go.mod/go.sum/cmd/internal + the battery itself) and runs
+`battery.sh`, which drives 16 scenarios — greeting, tool round-trip,
+policy parse/load, empty-response retry, sandbox denial, retry ladder,
+subagent recursion, spill paging, Anthropic dialect, verify
+determinism, approval flow, resume-restart, compaction, job tailing,
+skills (the P7 three-tier delivery over a fixture catalog, including
+the replay-after-mutation crux) — asserting on client output,
+`--verify-log` on every produced log, and the mock's `/count` +
+`/journal`. The final line is `SELFTEST: N/M scenarios passed`
+(exit 1 on any failure).
+
+`--security-opt seccomp=unconfined` is required because Docker's
+DEFAULT seccomp profile blocks the landlock syscalls; the flag lifts
+only Docker's profile — the engine's own trampoline (Landlock +
+seccomp) then enforces confinement, which is exactly what the
+sandbox_denial scenario proves (a read-only `run_shell` write is
+kernel-denied inside the container). The approval_flow scenario (P3.5)
+exercises the FULL approval waterfall over the real binaries: the
+daemon started with `--ask-tools run_shell` ask-routes the calls,
+`approval/request` rides the wire, the client's `--policy` engine
+answers (a broad `run_shell` allow auto-allows the benign call —
+which then EXECUTES — while `git push` under the SAME broad rule
+HARD-DENIES via the git-mutation class with a typed denial: the
+executor never ran). The timeout/disconnect deny directions stay
+covered at the bridge seam (`internal/protocol/disconnect_test.go`).
+
 ## Private redlines (`redlines guidance`, `redlines scan`)
 
 `vh-agent-harness redlines guidance` is the **agent's local context-loading
