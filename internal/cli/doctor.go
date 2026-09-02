@@ -20,6 +20,7 @@ import (
 	"github.com/vhqtvn/vh-agent-harness/internal/managedfile"
 	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
+	"github.com/vhqtvn/vh-agent-harness/internal/permconfig"
 	"github.com/vhqtvn/vh-agent-harness/internal/schema"
 	"github.com/vhqtvn/vh-agent-harness/internal/substrate"
 )
@@ -78,6 +79,7 @@ var doctorCmd = &cobra.Command{
   shipped-pilots  shipped default-on overlay pilot enablement    INFO if advisory orphan (deselected pilot with stale files); PASS otherwise; SKIP not installed
   closeout-reach  ledger reconciles with branch reachability     WARN if committed entry post_commit_head unreachable from any branch; INFO if unledgered branch commits; SKIP greenfield
   redlines        private-redlines registry hygiene (applicability-gated) FAIL if sensitive registry tracked/unignored; WARN if unreadable/insecure-mode; PASS with opaque binding ids; OMITTED (no section) when no registry
+  dead-grants     per-agent grants reachable past the shell-guard engine   FAIL if a dead allow/ask grant exists (an ask is an interaction promise that can never fire); INFO if only redundant dead deny grants; SKIP no opencode.jsonc — Grants denied only by project-owned forbidden-pattern rules are out of scope and not counted here.
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -513,6 +515,25 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 		applyTier(rrr.tier, &problems, &warns)
 	}
 
+	// Check #27 — dead-grants (inter-layer permission-grant liveness; TrueAI
+	// defect 1a). Lints the LIVE opencode.jsonc for per-agent permission.bash
+	// grants that shell-guard hard-denies BEFORE OpenCode consults the per-agent
+	// table, using the shared permconfig engine model (CommandGroups compiled
+	// exactly as ALLOWED_PATTERNS + the evaluate() branch structure; NEVER the
+	// under-approximating internal/execro classifier). Severity is the
+	// OPERATOR-CONFIRMED O2 ACTION-KEYED mapping: a dead `allow` or `ask` grant
+	// FAILs (an allow is a capability that does not exist; an ask is an
+	// interaction promise that can never fire); dead `deny` grants are
+	// non-failing INFO (redundant — the engine already denies); zero findings is
+	// a quiet PASS. The update path WARNs on the same findings without blocking
+	// (warnIfDeadGrants), so repair stays available; this check is the
+	// enforcing surface. Additive-only placement: the fenced checkArmedSchema
+	// body and its runDoctor block (#2) are untouched.
+	fmt.Fprintln(out, "  dead-grants:")
+	dgr := checkDeadGrants(abs)
+	fmt.Fprintln(out, "    "+dgr.String())
+	applyTier(dgr.tier, &problems, &warns)
+
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)
 	if problems > 0 {
@@ -909,6 +930,86 @@ func checkArmedSchema(target string) checkResult {
 type schemaPath struct {
 	path      string
 	validator schema.Validator
+}
+
+// checkDeadGrants is the 27th doctor check (TrueAI defect 1a, PR A): the
+// inter-layer permission-grant liveness lint over the LIVE opencode.jsonc. A
+// dead grant is a permission.bash entry whose configured action can never take
+// effect because shell-guard (the engine hook) hard-denies every command the
+// pattern matches BEFORE OpenCode consults the per-agent permission table —
+// engine-over-table precedence is intentional defense-in-depth and is not
+// changed; this check surfaces the grants that precedence dead-letters.
+//
+// Comparison source is the shared permconfig model (internal/permconfig):
+// CommandGroups compiled exactly as the engine compiles ALLOWED_PATTERNS plus
+// the evaluate() branch structure, honoring the card's modeling caveats —
+// ordinary vh-agent-harness self-forms are reachable except git/gate-wrapper
+// forms; git verbs outside git_readonly are table-rescuable (engine ask);
+// forbidden-pattern/RF-B structural denies are out of scope.
+//
+// Severity is the OPERATOR-CONFIRMED O2 ACTION-KEYED mapping (2026-08-28):
+//   - dead allow OR dead ask grant  -> FAIL (nonzero, G0c-blocking)
+//   - only dead deny grants         -> INFO (redundant, non-failing)
+//   - zero findings                 -> quiet PASS
+//
+// Missing opencode.jsonc is SKIP (managed-drift owns reporting the absence —
+// mirrors checkOverlayPermissionState). A present-but-unparseable config is a
+// FAIL: the emitter's output is always parseable, so this means corruption.
+// The FAIL/WARN wording follows the operator-confirmed remediation-text
+// contract (see permconfig.DeadGrantRemediation): it names ONLY remove /
+// downgrade / route-through-vh-agent-harness-exec, never engine-allowlist
+// addition via overlay, and attributes findings to the CONFIGURING table
+// (agent + pattern + line), never to an actively-executing agent.
+func checkDeadGrants(target string) checkResult {
+	const name = "dead-grants"
+	data, err := os.ReadFile(filepath.Join(target, "opencode.jsonc"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return checkResult{name: name, tier: tierSkip,
+				detail: "no opencode.jsonc (managed-drift reports absence)"}
+		}
+		return checkResult{name: name, tier: tierFail,
+			detail: fmt.Sprintf("read opencode.jsonc: %v", err)}
+	}
+	findings, lintErr := permconfig.LintDeadGrantsInConfig(data)
+	if lintErr != nil {
+		return checkResult{name: name, tier: tierFail, detail: lintErr.Error()}
+	}
+
+	var actable, redundant []permconfig.DeadGrantFinding
+	for _, f := range findings {
+		if f.EntryValue == string(permconfig.Allow) || f.EntryValue == string(permconfig.Ask) {
+			actable = append(actable, f)
+		} else {
+			redundant = append(redundant, f)
+		}
+	}
+
+	if len(actable) > 0 {
+		var parts []string
+		for _, f := range actable {
+			if f.SourceLine > 0 {
+				parts = append(parts, fmt.Sprintf("%s (opencode.jsonc:%d)", f, f.SourceLine))
+			} else {
+				parts = append(parts, f.String())
+			}
+		}
+		detail := fmt.Sprintf("dead allow/ask grant(s): %s. %s.", strings.Join(parts, "; "), permconfig.DeadGrantRemediation)
+		if len(redundant) > 0 {
+			detail += fmt.Sprintf(" (%d additional redundant dead deny grant(s) reported as INFO once these are repaired) Grants denied only by project-owned forbidden-pattern rules are out of scope and not counted here.", len(redundant))
+		}
+		return checkResult{name: name, tier: tierFail, detail: detail}
+	}
+	if len(redundant) > 0 {
+		var parts []string
+		for _, f := range redundant {
+			parts = append(parts, f.String())
+		}
+		return checkResult{name: name, tier: tierInfo,
+			detail: fmt.Sprintf("redundant deny grant(s) — the engine already denies these commands before the table is consulted, so the deny entry never fires: %s. Remove them for clarity if desired. Grants denied only by project-owned forbidden-pattern rules are out of scope and not counted here.", strings.Join(parts, "; "))}
+	}
+	return checkResult{name: name, tier: tierPass,
+		detail: "no dead-lettered permission grants (every per-agent grant is engine-reachable or table-rescuable)"}
 }
 
 // additionalSchemaPaths lists the non-core-platform_armed schema'd authorities

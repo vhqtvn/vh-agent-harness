@@ -224,6 +224,19 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 		warnIfAllowedCommandsCustomized(target, ps.staging)
 	}
 
+	// Inter-layer dead-grant warning (TrueAI defect 1a, PR A): lint the STAGED
+	// (post-emission) opencode.jsonc for per-agent grants that shell-guard
+	// hard-denies BEFORE OpenCode consults the per-agent permission table, and
+	// surface each as a NON-BLOCKING stderr warning. This deliberately runs for
+	// BOTH dry-run and live applies (a dry-run previews the warning), and it
+	// NEVER converts emission into a hard error — install/update/accept-platform
+	// must remain available as repair paths (the enforcing surface is the doctor
+	// dead-grants check, which FAILs on dead allow/ask grants). The staged bytes
+	// are the authoritative input: they include core tables, overlay
+	// permission-pack agents, and transform-contributed ExtraBash exactly as
+	// they were emitted by permconfig.EmitWithExtra inside renderSeamStaging.
+	warnIfDeadGrants(ps.staging)
+
 	// Lineage (S1) records the INSTALL answers (project_name/slug) for the
 	// answer-digest drift check; the S3 profile (features/overlays) is a separate
 	// authority and must NOT enter the install-answer digest (else install→update
@@ -1196,25 +1209,71 @@ func isAllowedCommandsCustomized(target, staging string) bool {
 	return !bytes.Equal(staged, live)
 }
 
-// seamClassifierWithOverlays builds the seam classifier for one apply: the core
-// ownership defaults extended with overlay_extension rules for every path the
-// active overlays rendered, then resolved against the project's S2 raise-only
-// overrides (Slice 5.1). When overlayFiles and overrides are both empty this is
-// equivalent to the memoized core-only classifier. A downgrade override (or any
-// other D2-A violation: unknown path, invalid class, off-lattice class) makes
-// ownership.Resolve return a joined error; this function surfaces it so
-// seamApply aborts before any write touches the live tree.
+// warnIfDeadGrants lints the STAGED (post-emission) opencode.jsonc for
+// dead-lettered per-agent permission grants (TrueAI defect 1a) and prints a
+// NON-BLOCKING stderr warning when any are found. A dead grant is a
+// permission.bash entry whose action can never take effect because shell-guard
+// (the engine hook) hard-denies every command the pattern matches BEFORE
+// OpenCode consults the per-agent permission table — engine-over-table
+// precedence is intentional and unchanged; this warning only surfaces the
+// grants that precedence silently dead-letters.
+//
+// The warning is advisory by contract (the O2 action-keyed severity lives in
+// doctor: dead allow/ask = FAIL, dead deny = INFO): emission itself never
+// fails here, so install/update stay available as repair paths. Wording
+// follows the operator-confirmed remediation-text contract — it names ONLY
+// remove-the-grant / downgrade-the-grant / route-through-vh-agent-harness-exec,
+// never engine-allowlist addition via overlay (no allow-side project seam
+// exists), and it attributes findings to the CONFIGURING table (agent +
+// pattern + line), never to an actively-executing agent.
+func warnIfDeadGrants(staging string) {
+	data, err := os.ReadFile(filepath.Join(staging, opencodeJSONCRel))
+	if err != nil {
+		return // emission failures surface through the render path itself
+	}
+	findings, err := permconfig.LintDeadGrantsInConfig(data)
+	if err != nil || len(findings) == 0 {
+		return
+	}
+	var lines []string
+	for _, f := range findings {
+		if f.SourceLine > 0 {
+			lines = append(lines, fmt.Sprintf("- %s (opencode.jsonc:%d)", f, f.SourceLine))
+		} else {
+			lines = append(lines, fmt.Sprintf("- %s", f))
+		}
+	}
+	fmt.Fprintf(os.Stderr, `
+vh-agent-harness WARNING: %d dead-lettered permission grant(s) in the emitted permission tables.
+  shell-guard denies these commands BEFORE per-agent permission tables are
+  evaluated, so the configured action can never take effect:
+    %s
+  %s.
+  update/install are NOT blocked; vh-agent-harness doctor reports dead
+  allow/ask grants as FAIL (an ask is an interaction promise that can never fire).
+
+`, len(findings), strings.Join(lines, "\n    "), permconfig.DeadGrantRemediation)
+}
+
 // seamClassifierWithOverlays builds the apply-time Classifier from the
-// selection-aware core ownership map plus overlay_extension rules. The inactive
-// set is the set of LIVE (suffix-stripped) core paths owned by capabilities NOT
-// in the resolved selection — those source files are skipped at render time, so
-// they must be excluded from the active ownership map (a prior-version file on
-// disk is residue, not a managed path). A nil/empty inactive set means no
-// capability owns core outputs OR every CoreOutputs-declaring capability is
-// selected — the map is byte-identical to the unconditional all-known walk.
-// Pass nil when the caller intentionally needs the ALL-KNOWN view (e.g.
-// pruneClassifier, which is about overlay orphan deletion-safety, not capability
-// residue).
+// selection-aware core ownership map plus overlay_extension rules for every
+// path the active overlays rendered, resolved against the project's S2
+// raise-only overrides (Slice 5.1). When overlayFiles and overrides are both
+// empty this is equivalent to the memoized core-only classifier. A downgrade
+// override (or any other D2-A violation: unknown path, invalid class,
+// off-lattice class) makes ownership.Resolve return a joined error; this
+// function surfaces it so seamApply aborts before any write touches the live
+// tree.
+//
+// The inactive set is the set of LIVE (suffix-stripped) core paths owned by
+// capabilities NOT in the resolved selection — those source files are skipped
+// at render time, so they must be excluded from the active ownership map (a
+// prior-version file on disk is residue, not a managed path). A nil/empty
+// inactive set means no capability owns core outputs OR every
+// CoreOutputs-declaring capability is selected — the map is byte-identical to
+// the unconditional all-known walk. Pass nil when the caller intentionally
+// needs the ALL-KNOWN view (e.g. pruneClassifier, which is about overlay
+// orphan deletion-safety, not capability residue).
 func seamClassifierWithOverlays(overlayFiles []string, overrides ownership.Overrides, inactive map[string]bool) (*substrate.Classifier, error) {
 	defaults, err := corpus.CoreOwnershipDefaultsWithExclusion(inactive)
 	if err != nil {

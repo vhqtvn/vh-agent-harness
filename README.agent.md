@@ -1195,7 +1195,38 @@ export default function transform({ context }) {
   staged-errata-content, behavioral-closure, dev-stale-embed, f1-envelope,
   f1-f2-consistency, f2-pairs, head-progress, complexity-advisory,
   recurrence-state, exec-sandbox-floor, shipped-pilots, closeout-reach,
-  rewrite-parity). The `head-progress` check reads the commit-gate's
+  rewrite-parity, dead-grants). The `dead-grants` check is the inter-layer
+  permission-grant liveness lint: it parses the live `opencode.jsonc` and
+  cross-checks every per-agent `permission.bash` grant against the
+  shell-guard engine's reachable forms (the shared `internal/permconfig`
+  model: the command groups compiled exactly as `ALLOWED_PATTERNS` plus the
+  evaluate() branch structure). Grants denied only by project-owned
+  forbidden-pattern rules are out of scope and not counted here. A grant is
+  DEAD when the engine hard-denies
+  every command the pattern matches BEFORE OpenCode consults the per-agent
+  table — the plugin throws on deny, so the table entry can never take effect.
+  Engine-over-table precedence is intentional and unchanged; the check only
+  surfaces dead-lettered grants. Severity is action-keyed: a dead `allow` OR
+  `ask` grant FAILs doctor (an allow promises a capability that does not
+  exist; an ask promises an interaction that can never fire) — a FAILing
+  doctor is nonzero and blocks release G0c, including for adopters whose
+  already-ineffective grants become visible on upgrade; dead `deny` grants
+  are non-failing INFO (redundant — the engine already denies); a clean table
+  is a quiet PASS. `vh-agent-harness update` (and `install`) WARN on the same
+  findings — naming the agent, the pattern, the configured action, and the
+  source line — without blocking: emission never fails on dead grants, so
+  update stays available as the repair path. Repair means one of: remove the
+  grant, downgrade the grant, or route the command through
+  `vh-agent-harness exec ...` where the verb family is supported. There is
+  deliberately no allow-side project seam: `ALLOWED_PATTERNS` is closed over
+  the generated tables, so an "add a pattern to the engine allowlist via
+  overlay" remedy does not exist (only `forbidden-patterns.project.js` is
+  project-extensible, and it is deny-side). Reachable-by-design classes the
+  check never flags: git verbs outside `git_readonly` (the engine routes them
+  to ask, so the table can rescue), ordinary `vh-agent-harness <verb>`
+  self-forms (the harness auto-allow branch), and the static
+  `bash -n`/`cmp`/`accept-platform`/`diff` gate-inspection forms. The
+  `head-progress` check reads the commit-gate's
   durable closeout ledger (`.git/commit-gate/closeouts.log`) and WARNs when the
   last N (default 3, env `COMMIT_GATE_STALE_HEAD_THRESHOLD`) successful closeouts
   all recorded the same `post_commit_head` — a flatline signalling commits may
