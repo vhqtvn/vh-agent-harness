@@ -10,7 +10,6 @@
 .local/coordinator/
 .local/config/
 .local/ssh/
-.local/demo-server/
 
 # --- Local operator coordination / task registry (private) ---
 .local/{{COORDINATOR_DIR}}/

@@ -27,7 +27,6 @@ When relevant, also read:
 - `docs/coordination/BLOCKER_POLICY.md`
 - `.github/copilot-instructions.md`
 - `docs/deployment/`
-- `.local/demo-server/AGENTS.md`
 - `docs/ai/deployment-workflow.md`
 - `.local/deployments/AGENTS.md`
 
