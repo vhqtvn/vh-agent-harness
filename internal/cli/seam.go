@@ -237,6 +237,15 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	// they were emitted by permconfig.EmitWithExtra inside renderSeamStaging.
 	warnIfDeadGrants(ps.staging)
 
+	// Prospective capability-coherence warning (task
+	// git-routing-capability-coherence, O2): lint the STAGED opencode.jsonc
+	// (the exact bytes this update proposes to write) against the resolved
+	// core/gated-commit selection, mirroring warnIfDeadGrants — runs for BOTH
+	// dry-run and live (a dry-run previews the warning), NEVER a hard error.
+	// Catches selected-but-missing-agent-block / missing-caller-edge /
+	// unselected-residue states in the emitted output before they ship.
+	warnIfGatedCommitIncoherent(target, ps.staging)
+
 	// Lineage (S1) records the INSTALL answers (project_name/slug) for the
 	// answer-digest drift check; the S3 profile (features/overlays) is a separate
 	// authority and must NOT enter the install-answer digest (else install→update
@@ -289,6 +298,14 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	// gone or source file gone) whose destination is still on disk is a definite
 	// preserved orphan.
 	report.Orphans = renderstate.Compare(prior, ps.skillRecords, overlaySkillChecker, target, os.Stderr)
+
+	// Preserved-wording update note (F3 H1 resolution, task
+	// git-routing-capability-coherence): when this apply PRESERVES an
+	// adopter-edited routing doc (ActionManagedDiverged — never clobbered),
+	// call out that this release's routing guidance became capability-
+	// conditional so the operator re-adopts the new wording deliberately.
+	// Runs on the report (plan outcomes on dry-run, executed outcomes live).
+	warnIfRoutingWordingPreserved(report)
 
 	// Dry-run: substrate.Apply wrote nothing (it returned the plan only). Skip
 	// every side-effecting post-apply step too — the proposal ledger append, the

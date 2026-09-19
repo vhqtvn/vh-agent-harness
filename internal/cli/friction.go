@@ -49,14 +49,18 @@ package cli
 //     are the real friction-time authorities, so the footer points there.)
 //   - the git-mutation Go backstop (denyExecGitMutationPayload) passes ""
 //     because its reason ALREADY names the canonical authority
-//     (commit-gate.sh / the committer agent / git-execution-routing.md).
-//     Pointing that path at forbidden-patterns*.js would mislead the agent: no
-//     forbidden-patterns rule fired (the Go backstop runs BEFORE the JS gate),
-//     and the sanctioned alternative for git mutations is the commit-gate, not
-//     a forbidden-patterns rule's `why`. The footer's value-add there is the
-//     never-auto-retry directive; the authority pointer is already in the
-//     reason, so it is not re-stated (an empty authority omits the second
-//     bullet rather than emit a wrong/redundant one).
+//     (commit-gate.sh / the committer agent / git-execution-routing.md) AND,
+//     since the capability-coherence task, the capability-conditional
+//     recovery sentence for profiles where core/gated-commit is not selected
+//     (preserve the work / report the missing route / request activation or
+//     operator handling). Pointing that path at forbidden-patterns*.js would
+//     mislead the agent: no forbidden-patterns rule fired (the Go backstop
+//     runs BEFORE the JS gate), and the sanctioned alternative for git
+//     mutations is the commit-gate, not a forbidden-patterns rule's `why`.
+//     The footer's value-add there is the never-auto-retry directive; the
+//     authority pointer is already in the reason, so it is not re-stated (an
+//     empty authority omits the second bullet rather than emit a wrong/redundant
+//     one).
 func execDenyFooter(authority string) string {
 	s := "\n" +
 		"- This denial is final: do not retry the command, paraphrase it, or route it " +

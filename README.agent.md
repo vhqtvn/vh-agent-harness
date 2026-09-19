@@ -111,7 +111,12 @@ never hand-edit the sidecar), `AGENTS.core.md` (managed compose source), or
 anything under `.opencode/` that is `platform_managed` — unless you intend to
 keep the edit (see golden rule #2: a hand-edited managed file is preserved, not
 overwritten, and `origin-hashes.json` is how the platform remembers your edit is
-yours).
+yours). One deliberate exception to "preserved, not overwritten": in repos that
+adopted the core/mission split (a `.vh-agent-harness/AGENTS.mission.md` exists),
+the root `AGENTS.md` is a GENERATED artifact — `update` re-composes it from
+`AGENTS.core.md` + `AGENTS.mission.md` unconditionally, so hand edits to the
+root file are discarded by design (doctor's `agents-composition` check WARNs on
+divergence; edit the sources, not the composition).
 
 ### `vh-harness-profile.yml` field contract
 
@@ -181,6 +186,51 @@ capability or provide an accessible `path:`/`url:` they can perceive
 directly). This prevents the failure mode where a caller holds a screenshot,
 self-refuses "I can't read the image," and does not know the specialist
 exists.
+
+#### Gated-commit capability condition (git routing guidance)
+
+`core/gated-commit` is the one capability whose WORKFLOW GUIDANCE (routing
+doc, AGENTS core, agent prompts, command footers, denial messages) ships
+unconditionally while its PERMISSION WIRING (the `committer` /
+`commit-message` / `commit-reviewer` agent blocks and every `committer` task
+edge in `opencode.jsonc`) is emitted only when the capability is selected.
+The guidance is therefore capability-conditional on every surface:
+
+- **Selected** (`supervised`, or `capabilities: [core/gated-commit]`): the
+  reviewed committer route applies unchanged — delegate commits to
+  `committer` through the gated-commit protocol.
+- **Not selected** (e.g. `minimal`): the committer agents are NOT wired —
+  delegation denies. Guidance and every denial message then instruct the
+  agent to STOP (never probe the route, never fall back to raw git — the
+  raw-git denial is unconditional on every profile), PRESERVE the work
+  uncommitted, REPORT "gated-commit capability not selected; automated
+  committing unavailable" in the closeout, and REQUEST separately-authorized
+  activation (`capabilities: [core/gated-commit]` in
+  `vh-harness-profile.yml` — narrower than switching to `supervised`) or
+  operator handling. The full contract lives in
+  `.opencode/docs/git-execution-routing.md` → "Capability condition".
+
+Two advisory diagnostics make the selection-to-wiring state visible (never
+blocking):
+
+- `doctor` → `capability-coherence` (LIVE files on disk): PASS for
+  coherently-unselected (healthy, no nag) and for selected-and-wired; WARN
+  when the capability is selected but an agent block or a required caller
+  task edge is missing from the live `opencode.jsonc`; INFO for hand-wired
+  residue without selection or an unreadable config. Findings carry an
+  unconditional restart caveat — doctor observes files, not the running
+  opencode process; if a session predates the config, restart it to load the
+  new permissions.
+- `install` / `update --dry-run` (PROSPECTIVE): the same check lints the
+  STAGED `opencode.jsonc` this update proposes to write, warning on
+  selected-but-missing wiring or unselected residue in the emitted output —
+  catching emitter regressions before they land. Dry-run remains a pure
+  preview (no writes).
+- If an update PRESERVES your locally-edited
+  `.opencode/docs/git-execution-routing.md` (managed-diverged — never
+  clobbered), a stderr note calls out that the routing guidance changed to
+  the capability-conditional model so you can re-adopt the new wording
+  deliberately.
 
 #### Media-perception model seed
 

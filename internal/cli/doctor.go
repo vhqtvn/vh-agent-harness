@@ -58,6 +58,7 @@ var doctorCmd = &cobra.Command{
   managed-drift   every platform_managed file matches re-rendered bytes  FAIL if drifted/missing
   agents-composition root AGENTS.md matches composed core+mission body  WARN if drifted/absent (SKIP when no mission source)
   overlay-perm    active overlay permission-packs resolved in opencode.jsonc FAIL if resolver not run
+  capability-coherence gated-commit selection vs live wiring coherent      WARN if selected-but-unwired; INFO residue/unreadable (advisory only; NEVER FAIL)
   environment     node on PATH + shell-guard eval.js present             FAIL if missing
   config-refs     {file:...} refs resolve; empty agent-model files       FAIL if missing ref / WARN if empty
   gitignore       harness-written dirs (.opencode/state…, __pycache__) ignored WARN if not ignored
@@ -183,6 +184,17 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	or := checkOverlayPermissionState(abs)
 	fmt.Fprintln(out, "    "+or.String())
 	applyTier(or.tier, &problems, &warns)
+
+	// 4b. Capability-coherence (advisory, task git-routing-capability-coherence):
+	//     compares the resolved core/gated-commit selection against the LIVE
+	//     rendered opencode.jsonc wiring (agent blocks + required caller task
+	//     edges). Distinguishes coherently-unselected (healthy, no nag) from
+	//     selected-but-missing-wiring. tierInfo/tierWarn ONLY — never tierFail;
+	//     the enforcing authority is the opencode permission table itself.
+	fmt.Fprintln(out, "  capability-coherence:")
+	cr2 := checkCapabilityCoherence(abs)
+	fmt.Fprintln(out, "    "+cr2.String())
+	applyTier(cr2.tier, &problems, &warns)
 
 	// 5. Environment (shell-guard readiness: node + eval.js bridge).
 	fmt.Fprintln(out, "  environment:")

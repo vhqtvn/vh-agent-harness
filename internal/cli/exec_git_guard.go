@@ -47,6 +47,11 @@ func denyExecGitMutationPayload(args []string) (bool, string) {
 		return true, "Git mutations must go through the commit-gate wrapper. " +
 			"Only the committer agent (C) may execute git writes, and only " +
 			"through `.opencode/scripts/commit-gate.sh`. " +
+			"On profiles without `core/gated-commit` selected the committer " +
+			"agent is not wired: do not probe the route — preserve the work, " +
+			"report the missing route, and request separately-authorized " +
+			"activation (`capabilities: [core/gated-commit]` in " +
+			"`.vh-agent-harness/vh-harness-profile.yml`) or operator handling. " +
 			"See .opencode/docs/git-execution-routing.md. " +
 			"(Wrapped `vh-agent-harness exec git …` routed verb '" + verb +
 			"' past a global flag.)"
