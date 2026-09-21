@@ -33,4 +33,4 @@ When updating the backlog:
 - prefer a new task ID over overloading unrelated history
 - keep `Now` / `Next` / `Later` focused on active work; archive older `done` / `cancelled` rows via `.opencode/scripts/normalize-backlog.js` instead of letting active sections become historical dumps
 
-Follow `.opencode/docs/git-execution-routing.md` for all git operations.
+Follow `.opencode/docs/git-execution-routing.md` for all git operations. On profiles where `core/gated-commit` is not selected the committer route is unwired: preserve the work, report the missing route, and request separately-authorized activation or operator handling — never raw git.
