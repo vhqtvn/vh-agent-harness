@@ -1,0 +1,4 @@
+[
+  {"tool_calls": [{"id": "call-bg-1", "name": "run_shell", "args": {"command": "for i in 1 2 3 4 5; do echo \"tick $i\"; sleep 0.4; done", "background": true, "timeout_ms": 30000}}]},
+  {"text": "job tailing complete"}
+]

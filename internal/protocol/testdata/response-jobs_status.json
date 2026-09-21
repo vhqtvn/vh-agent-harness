@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":8,"result":{"jobs":[{"jobId":"background-1","kind":"background","state":"settled","result":"completed"},{"jobId":"ingest-2","kind":"ingest","state":"running"}]}}
