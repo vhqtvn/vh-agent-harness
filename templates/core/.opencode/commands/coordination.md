@@ -13,8 +13,6 @@ Read these files in order:
 - `docs/coordination/TASK_MODES.md`
 - `docs/coordination/REPORT_ENVELOPES.md`
 - `docs/coordination/RUNTIME_MODEL.md`
-- `docs/coordination/ROLES.md`
-- `docs/coordination/LANES.yaml`
 - `docs/coordination/CONFLICT_MATRIX.yaml`
 - `docs/planning/current-index.md`
 - `docs/planning/backlog.md`
