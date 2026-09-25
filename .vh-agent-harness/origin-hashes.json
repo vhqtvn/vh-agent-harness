@@ -81,7 +81,7 @@
     ".opencode/plugins/pause-new-work.js": "sha256:3aec6dae8676e7eca78baf4883aafc9c3a265a217021cc4c580d4f50c89187f9",
     ".opencode/plugins/session-state.js": "sha256:47344e8103af85a3975620cd4f2beb06527426f9192d81abb45f70f903224baa",
     ".opencode/plugins/shell-guard-core.js": "sha256:8a216ae957faac79439a82a6ae32eebea1d104d49440b10df614dfc96f56fce6",
-    ".opencode/plugins/shell-guard.js": "sha256:01d978f60ef4311a1f66fe51696bd359e76bfda70b3e6f73cd75e514ff0cd34c",
+    ".opencode/plugins/shell-guard.js": "sha256:fe78a801ed3fb36c3fb2ae29fa8803f897cd03d9bcb778d0664d230bc4881e28",
     ".opencode/plugins/shell-guard/eval.js": "sha256:7e5713329a5ecd3b83e5bb2fee2bdff1d1b7f8a08ed1da67826fb08cffa85058",
     ".opencode/repo-configs/allowed-commands.js": "sha256:3015bf336fdcbc7a84d4ad721f412518d74c86a29ef4b04cb57c48b846e47212",
     ".opencode/repo-configs/forbidden-patterns.core.js": "sha256:296ac9620bc2a02f55017502d559accd7aa77495e8f6092297ab4df9b07a4986",

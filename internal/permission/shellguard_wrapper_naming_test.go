@@ -19,7 +19,14 @@ package permission
 //     sessionID only and no session→agent resolution may be inferred),
 //   - the no-match control: a denied command with no matching configured
 //     grant keeps the plain engine deny message (no suffix),
-//   - fail-open: no/broken opencode.jsonc → no suffix, deny unchanged.
+//   - fail-open: no/broken opencode.jsonc → no suffix, deny unchanged,
+//   - JSONC parity: a hand-edited config (// and /* */ comments, trailing
+//     commas) yields the SAME suffix as its JSON twin (string-aware
+//     stripping — a // inside a string value is not a comment), while a
+//     document still unparseable after JSONC normalization stays fail-open,
+//   - matcher shapes: exact no-star grants are listed; non-trailing `*`
+//     shapes (interior/leading) never match and are never listed; the bare
+//     "*" catch-all is never listed.
 //
 // The WASM parser is NOT needed for these commands (evaluate's fallback
 // tokenizer handles them; the live-bridge suite covers the parser paths), so
@@ -302,5 +309,161 @@ func TestWrapperGrantNaming_FailOpenOnNonJSONConfig(t *testing.T) {
 	}
 	if strings.Contains(msg, "Matching configured grants") {
 		t.Errorf("broken opencode.jsonc must not produce a naming suffix; got:\n%s", msg)
+	}
+}
+
+// TestWrapperGrantNaming_FailOpenOnUnparseableJSONC: JSONC that is STILL
+// unparseable after comment/trailing-comma normalization (here: an object
+// that never closes) keeps the intentional fail-open contract — no suffix,
+// deny stands. The deterministic-JSONC outcome replaces the old
+// fail-open-on-comment behavior ONLY for documents that normalize to valid
+// JSON; genuinely malformed input is unchanged.
+func TestWrapperGrantNaming_FailOpenOnUnparseableJSONC(t *testing.T) {
+	cfg := `{
+    // a comment is stripped, but the object below never closes:
+    "permission": {
+        "bash": {
+            "pytest *": "allow",
+`
+	driver := wrapperNamingScratch(t, cfg)
+	msg := runWrapperDriver(t, driver, "pytest -x foo")
+	if msg == "" {
+		t.Fatalf("pytest must still be denied with an unparseable JSONC config; handler returned regularly")
+	}
+	if strings.Contains(msg, "Matching configured grants") {
+		t.Errorf("unparseable-after-normalization opencode.jsonc must not produce a naming suffix; got:\n%s", msg)
+	}
+}
+
+// wrapperNamingJSONCConfig is the JSONC twin of wrapperNamingConfig: same
+// grants, plus // line comments, a /* block */ comment, trailing commas, and
+// grant keys whose STRING VALUES contain " // " (a URL-shaped token) and an
+// ESCAPED QUOTE followed by " // " text. A naive line-comment stripper would
+// truncate the URL key mid-string, and one that mishandles escapes would end
+// string mode at the escaped quote and strip the rest as a comment — either
+// way the parse breaks and the reader fail-opens; a string-aware,
+// escape-aware one (the contract) leaves both keys intact.
+const wrapperNamingJSONCConfig = `{
+    // agent blocks carry the same grants as the JSON twin
+    "agent": {
+        "build": {
+            "permission": {
+                "bash": {
+                    "*": "ask",
+                    "ls *": "allow",
+                    /* block comment pins the block stripper */
+                    "pytest *": "allow",
+                }
+            }
+        },
+        "researcher": {
+            "permission": {
+                "bash": {
+                    "*": "deny",
+                    "docker *": "allow",
+                    "pytest *": "ask",
+                    "echo see https://example.com/x // not a comment *": "allow",
+                    "echo \"quoted\" // still not a comment *": "allow",
+                }
+            }
+        },
+    },
+    "permission": {
+        "bash": {
+            "*": "deny",
+            "terraform *": "allow",
+        }
+    },
+}
+`
+
+// TestWrapperGrantNaming_JSONCConfigNamesSameGrants: a hand-edited JSONC
+// config (comments + trailing commas) produces the IDENTICAL naming suffix
+// its JSON twin produces — no silent JSON/JSONC divergence. The suffix being
+// present at all proves string-aware comment stripping (the URL-shaped key
+// survives; a naive stripper would have broken the parse and fail-opened),
+// and the identical listing proves parse-level parity.
+func TestWrapperGrantNaming_JSONCConfigNamesSameGrants(t *testing.T) {
+	driver := wrapperNamingScratch(t, wrapperNamingJSONCConfig)
+	msg := runWrapperDriver(t, driver, "pytest -x foo")
+	if msg == "" {
+		t.Fatalf("pytest -x foo must be denied (throw); handler returned normally")
+	}
+	const header = "Denied before per-agent grants are evaluated. Matching configured grants that cannot rescue this command:"
+	if !strings.Contains(msg, header) {
+		t.Errorf("JSONC deny message missing the naming header; got:\n%s", msg)
+	}
+	// IDENTICAL to the JSON twin's listing (TestWrapperGrantNaming_Deny-
+	// ListsMatchingConfiguredGrants) — the JSON/JSONC parity pin.
+	wantList := `agent "build" pattern "pytest *" (allow); agent "researcher" pattern "pytest *" (ask)`
+	if !strings.Contains(msg, wantList) {
+		t.Errorf("JSONC deny message must list the same grants as the JSON twin %q; got:\n%s", wantList, msg)
+	}
+	// Non-matching grants — including the URL-shaped string-aware key and the
+	// escaped-quote key — must not be listed (neither matches `pytest -x foo`).
+	for _, absent := range []string{`"docker *"`, `"terraform *"`, `"ls *"`, "example.com", "still not a comment"} {
+		if strings.Contains(msg, absent) {
+			t.Errorf("JSONC deny message lists non-matching grant %s; got:\n%s", absent, msg)
+		}
+	}
+	if !strings.Contains(msg, "Commands outside the read-only inspection surface") {
+		t.Errorf("JSONC deny message must retain the engine reason; got:\n%s", msg)
+	}
+}
+
+// TestWrapperGrantNaming_ExactNoStarGrantListed: an exact token-sequence
+// grant with NO wildcard (an emitted-table shape: `uuidgen`, the gate
+// `…commit-gate.sh status` probe) is matched by token equality and listed
+// when the exact command is denied. The bare "*" catch-all in the same block
+// must NOT be listed.
+func TestWrapperGrantNaming_ExactNoStarGrantListed(t *testing.T) {
+	cfg := `{
+    "permission": {
+        "bash": {
+            "*": "ask",
+            "terraform apply": "allow"
+        }
+    }
+}
+`
+	driver := wrapperNamingScratch(t, cfg)
+	msg := runWrapperDriver(t, driver, "terraform apply")
+	if msg == "" {
+		t.Fatalf("terraform apply must be denied; handler returned regularly")
+	}
+	if !strings.Contains(msg, `agent "default" pattern "terraform apply" (allow)`) {
+		t.Errorf("exact no-star grant must be listed; got:\n%s", msg)
+	}
+	if strings.Contains(msg, `pattern "*"`) {
+		t.Errorf(`bare "*" catch-all must never be listed; got:\n%s`, msg)
+	}
+}
+
+// TestWrapperGrantNaming_NonTrailingStarNeverListed: shapes with a `*`
+// anywhere other than the trailing position (leading `*pytest *`, interior
+// `cat *=x *`) are outside the token-prefix model — the `*` is a literal
+// token character, real command tokens never contain one, so such grants can
+// never match and are never listed. The deny itself stands (documented
+// limitation at the read site: message-only impact).
+func TestWrapperGrantNaming_NonTrailingStarNeverListed(t *testing.T) {
+	cfg := `{
+    "permission": {
+        "bash": {
+            "*pytest *": "allow",
+            "cat *=x *": "ask"
+        }
+    }
+}
+`
+	driver := wrapperNamingScratch(t, cfg)
+	msg := runWrapperDriver(t, driver, "pytest -x foo")
+	if msg == "" {
+		t.Fatalf("pytest -x foo must be denied; handler returned regularly")
+	}
+	if strings.Contains(msg, "Matching configured grants") {
+		t.Errorf("non-trailing-star grants must never be listed; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "Commands outside the read-only inspection surface") {
+		t.Errorf("plain engine deny must stand; got:\n%s", msg)
 	}
 }
