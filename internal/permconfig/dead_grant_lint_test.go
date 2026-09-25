@@ -20,6 +20,11 @@ package permconfig
 //     ExtraBash visibility).
 //   - TestDeadGrantLint_WordingContract: negative assertions enforcing the
 //     operator-confirmed remediation-text contract.
+//   - TestDeadGrantLint_EngineParityByClass: per-class parity fixtures for
+//     every evaluate() branch in shell-guard-core.js (the doc table in
+//     dead_grant_lint.go), pinning the lint's verdict for the classes the
+//     fixtures above miss — including the intentional under-approximations
+//     (caveats d/e/f), which MUST stay not-flagged.
 // ---------------------------------------------------------------------------
 
 import (
@@ -155,6 +160,135 @@ func TestDeadGrantLint_Fixtures(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDeadGrantLint_EngineParityByClass pins the lint's verdict for every
+// evaluate() grammar class in templates/core/.opencode/plugins/
+// shell-guard-core.js, per the PER-CLASS PARITY TABLE in dead_grant_lint.go
+// (enumerated from the current engine file — never from memory). The earlier
+// fixtures cover the mirrored core classes and the static-inspection
+// carve-outs; this table covers the classes they miss. Every
+// under-approximation row (caveats d/e/f and the caveat-c pattern-side rows)
+// asserts NOT-flagged — the miss is advisory-only (B3): the lint fails silent
+// on engine denies it does not model, never false-loud. No fixture outcome
+// here is (or may become) a gate.
+func TestDeadGrantLint_EngineParityByClass(t *testing.T) {
+	cases := []struct {
+		pattern     string
+		wantDead    bool
+		wantClass   string
+		branch      string // evaluate() branch (parity-table row)
+		disposition string
+	}{
+		// 05 harness-git deny — MIRRORED (anchor; deeper forms in Fixtures).
+		{pattern: "vh-agent-harness git status *", wantDead: true, wantClass: DenyClassHarnessGit,
+			branch: "05 vh-agent-harness git deny", disposition: "mirrored"},
+		// 06 gate-wrapper deny — MIRRORED (anchor; carve-outs in Fixtures).
+		{pattern: "vh-agent-harness exec .opencode/scripts/commit-gate.sh acquire *", wantDead: true, wantClass: DenyClassGateWrapper,
+			branch: "06 gate-wrapper deny", disposition: "mirrored"},
+		// 03 forbidden-pattern scan overlap: `apt install` hits the
+		// apt-install-ad-hoc forbidden pattern (the engine's first-firing
+		// deny) AND fails the allowlist — flagged with the non-allowlist
+		// class; the dead verdict is identical either way.
+		{pattern: "apt install foo *", wantDead: true, wantClass: DenyClassNonAllowlisted,
+			branch: "03 forbidden-pattern scan (+final deny)", disposition: "mirrored-dead; class label names the structural non-membership (caveat c overlap)"},
+		// 18 final non-git deny — MIRRORED anchor for a plain non-allowlisted
+		// verb with no forbidden-pattern overlap.
+		{pattern: "column *", wantDead: true, wantClass: DenyClassNonAllowlisted,
+			branch: "18 final non-git deny", disposition: "mirrored (no forbidden-pattern overlap; the deny is the final branch)"},
+		// 02 RF-B file-authoring deny — under-approximated (caveat c): the
+		// redirection-carrying pattern intersects `echo *` and reads as
+		// reachable while the engine denies every match.
+		{pattern: "echo hi > out.md", wantDead: false,
+			branch: "02 RF-B file-authoring deny", disposition: "under-approximated (caveat c): must stay not-flagged"},
+		// 04 env-prefix-before-exec deny — under-approximated (caveat d).
+		{pattern: "FOO=1 vh-agent-harness exec *", wantDead: false,
+			branch: "04 env-prefix-before-exec deny", disposition: "under-approximated (caveat d): engine denies every match; lint reads reachable"},
+		// 04 contrast rows: the deny's prefix shape is EXACTLY
+		// `vh-agent-harness exec` — env-prefixed exec-ro / other self-forms
+		// are genuinely engine-reachable.
+		{pattern: "FOO=1 vh-agent-harness exec-ro *", wantDead: false,
+			branch: "04 env-prefix-before-exec deny (prefix-shape contrast)", disposition: "engine-reachable: exec-ro is outside the deny prefix"},
+		{pattern: "FOO=1 vh-agent-harness update *", wantDead: false,
+			branch: "04 env-prefix-before-exec deny (prefix-shape contrast)", disposition: "engine-reachable: non-exec self-form is outside the deny prefix"},
+		// 07 F1 wrapped-git-mutation deny — under-approximated (caveat e).
+		{pattern: "vh-agent-harness exec git push *", wantDead: false,
+			branch: "07 wrapped-git-mutation deny", disposition: "under-approximated (caveat e): engine denies every match; lint reads reachable"},
+		{pattern: "vh-agent-harness exec --workdir=x git commit *", wantDead: false,
+			branch: "07 wrapped-git-mutation deny (wrapper-flag form)", disposition: "under-approximated (caveat e): wrapper flags precede the payload; lint reads reachable"},
+		// 07 contrast: a NON-mutation wrapped verb passes the engine's
+		// mutation-only guard and hits the harness auto-allow — reachable.
+		{pattern: "vh-agent-harness exec git log *", wantDead: false,
+			branch: "07 wrapped-git-mutation deny (mutation-only contrast)", disposition: "engine-reachable: mutation guard plugs the mutation hole only"},
+		// 11 git walker relative-`-C` deny — under-approximated (caveat f).
+		{pattern: "git -C sub diff *", wantDead: false,
+			branch: "11 git walker relative -C deny", disposition: "under-approximated (caveat f): engine denies every match; git umbrella reads table-rescuable"},
+		// 11 contrast: an absolute `-C` payload is not walker-denied — the
+		// allowlist sees the original tokens and the git ask branch keeps the
+		// grant table-rescuable.
+		{pattern: "git -C /abs/repo diff *", wantDead: false,
+			branch: "11 git walker relative -C deny (absolute contrast)", disposition: "engine-reachable: absolute -C prompts (ask), table-rescuable"},
+		// 12 git walker infoOnly auto-allow — reachable.
+		{pattern: "git --help *", wantDead: false,
+			branch: "12 git walker infoOnly auto-allow", disposition: "mirrored-as-reachable (git umbrella, caveat b)"},
+		// 13 git walker mutation-slip deny (verb past global flags) —
+		// under-approximated under the caveat (b)/(c) umbrella.
+		{pattern: "git --no-pager push *", wantDead: false,
+			branch: "13 git walker mutation-slip deny", disposition: "under-approximated (caveat b/c): mutation verbs out of scope"},
+		// 14 git walker fullyStrippable — the stripped form matches
+		// `git diff *`; genuinely reachable.
+		{pattern: "git --no-pager diff *", wantDead: false,
+			branch: "14 git walker fullyStrippable strip", disposition: "mirrored-as-reachable (git umbrella, caveat b)"},
+		// Rows 15 (original-token pass → ask), 16 (allowlist pass), and 17
+		// (git ask pass-through) have no dedicated rows here: they are the
+		// Fixtures table's core coverage (git describe/diff/ls/grep/jq rows).
+	}
+
+	const fixtureAgent = "parity-agent"
+	for _, c := range cases {
+		c := c
+		t.Run(c.branch+": "+c.pattern, func(t *testing.T) {
+			r := LocationRule{Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, HasGate: false, HarnessPolicy: HarnessPolicyDeny,
+				ExtraBash: []BashEntry{{Pattern: c.pattern, Decision: Allow}}}
+			findings := LintDeadGrantsForAgent(map[string]LocationRule{fixtureAgent: r}, fixtureAgent)
+			if c.wantDead {
+				found := false
+				for _, f := range findings {
+					if f.Pattern == c.pattern {
+						found = true
+						if f.DenyClass != c.wantClass {
+							t.Errorf("deny class = %q; want %q (%s)", f.DenyClass, c.wantClass, c.disposition)
+						}
+					}
+				}
+				if !found {
+					t.Fatalf("pattern %q must be flagged dead [%s — %s]; got findings %v", c.pattern, c.branch, c.disposition, findings)
+				}
+				return
+			}
+			for _, f := range findings {
+				if f.Pattern == c.pattern {
+					t.Errorf("pattern %q must NOT be flagged [%s — %s]; got finding: %s", c.pattern, c.branch, c.disposition, f)
+				}
+			}
+		})
+	}
+
+	// 01 empty-command guard — mirrored-by-skip at the pattern grammar level:
+	// the "*" wildcard and empty/whitespace pattern keys are skipped by the
+	// config view (lintBashEntries), matching the engine's N/A grant-side row.
+	t.Run("01 empty/null guard: wildcard and empty patterns skipped", func(t *testing.T) {
+		cfg := []byte(`{
+  "permission": { "bash": { "*": "allow", "": "ask", "  ": "allow" } }
+}`)
+		findings, err := LintDeadGrantsInConfig(cfg)
+		if err != nil {
+			t.Fatalf("LintDeadGrantsInConfig: %v", err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("wildcard/empty/whitespace pattern keys must be skipped (mirrored-by-skip); got %v", findings)
+		}
+	})
 }
 
 // TestDeadGrantLint_BareSed pins the deliberate false-positive-avoidance
