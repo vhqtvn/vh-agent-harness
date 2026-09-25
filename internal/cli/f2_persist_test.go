@@ -693,3 +693,142 @@ func TestPersistF2CanonicalSidecar_NonTransientLocatorAccepted(t *testing.T) {
 		t.Fatalf("durable-locator sidecar was not written: %v", statErr)
 	}
 }
+
+// TestPersistF2CanonicalSidecar_MediaAttachmentTransientLocatorRejectedPreWrite
+// is the integration crux for the media-attachment extension of the
+// transient-locator admission gate: an ingest carrying an otherwise-valid media
+// attachment whose Locator.Value OR Provenance.SourceLocator is rooted under
+// tmp/agent-runs/ is refused BEFORE the sidecar file is created — at the same
+// persistence boundary that gates the four canonical envelope locator fields.
+// The outcome is NotAttempted (pre-write content rejection), and the error
+// names the offending locator field + value.
+func TestPersistF2CanonicalSidecar_MediaAttachmentTransientLocatorRejectedPreWrite(t *testing.T) {
+	transient := "tmp/agent-runs/percept/chart-001.png"
+	cases := []struct {
+		name      string
+		mutate    func(att *F2MediaAttachment)
+		wantField string // substring of the refusal naming the offending field
+	}{
+		{
+			name: "media locator.value under tmp/agent-runs/",
+			mutate: func(att *F2MediaAttachment) {
+				att.Locator.Value = transient
+			},
+			wantField: "locator.value",
+		},
+		{
+			name: "media provenance.source_locator under tmp/agent-runs/",
+			mutate: func(att *F2MediaAttachment) {
+				att.Provenance.SourceLocator = "tmp/agent-runs/percept/chart-001-src.png"
+			},
+			wantField: "provenance.source_locator",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ingest := pbIngestWithAttachment(t) // valid attachment, valid binding
+			tc.mutate(&ingest.MediaAttachments[0])
+
+			outcome, err := PersistF2CanonicalSidecar(ingest, dir, fixedTime)
+			if outcome != F2PersistNotAttempted {
+				t.Fatalf("media transient-locator persist outcome = %s, want not_attempted (pre-write rejection)", outcome)
+			}
+			if err == nil {
+				t.Fatal("media transient-locator persist returned nil error (expected a refusal)")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "tmp/agent-runs") {
+				t.Fatalf("refusal does not name the disposable root:\n%s", msg)
+			}
+			if !strings.Contains(msg, tc.wantField) {
+				t.Fatalf("refusal does not name the offending field %q:\n%s", tc.wantField, msg)
+			}
+
+			// CRUX: no file was created (refused pre-write).
+			path := F2CanonicalSidecarPath(dir, ingest.SynthesisCycleID)
+			if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+				t.Fatalf("media transient-locator persist created a file at %q (must refuse pre-write)", path)
+			}
+		})
+	}
+}
+
+// TestPersistF2Pair_MediaAttachmentTransientLocatorRejectedCreatesNeitherMember
+// is the pair-entrypoint counterpart of the media pre-write crux above: an
+// ingest carrying an otherwise-valid media attachment with a transient locator
+// field is refused before EITHER pair member (JSON sidecar, MD projection) is
+// created — closing the reviewer-noted pair-level integration gap (both persist
+// entrypoints converge on the same admission decision for media locators).
+func TestPersistF2Pair_MediaAttachmentTransientLocatorRejectedCreatesNeitherMember(t *testing.T) {
+	transient := "tmp/agent-runs/percept/chart-001.png"
+	cases := []struct {
+		name   string
+		mutate func(att *F2MediaAttachment)
+	}{
+		{
+			name: "media locator.value under tmp/agent-runs/",
+			mutate: func(att *F2MediaAttachment) {
+				att.Locator.Value = transient
+			},
+		},
+		{
+			name: "media provenance.source_locator under tmp/agent-runs/",
+			mutate: func(att *F2MediaAttachment) {
+				att.Provenance.SourceLocator = "tmp/agent-runs/percept/chart-001-src.png"
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ingest := pbIngestWithAttachment(t)
+			tc.mutate(&ingest.MediaAttachments[0])
+
+			outcome, err := PersistF2Pair(ingest, dir, fixedTime)
+			if outcome != F2PairNotAttempted {
+				t.Fatalf("media transient-locator pair outcome = %s, want not_attempted (pre-write rejection)", outcome)
+			}
+			if err == nil {
+				t.Fatal("media transient-locator pair returned nil error (expected a refusal)")
+			}
+			if !strings.Contains(err.Error(), "tmp/agent-runs") {
+				t.Fatalf("pair refusal does not name the disposable root:\n%s", err.Error())
+			}
+
+			// CRUX: NEITHER the canonical sidecar NOR the MD projection was created.
+			canonPath := F2CanonicalSidecarPath(dir, ingest.SynthesisCycleID)
+			mdPath := F2MarkdownProjectionPath(dir, ingest.SynthesisCycleID)
+			if _, statErr := os.Stat(canonPath); !os.IsNotExist(statErr) {
+				t.Fatalf("media transient-locator pair created the canonical sidecar at %q (must refuse pre-write)", canonPath)
+			}
+			if _, statErr := os.Stat(mdPath); !os.IsNotExist(statErr) {
+				t.Fatalf("media transient-locator pair created the MD projection at %q (must refuse pre-write)", mdPath)
+			}
+		})
+	}
+}
+
+// TestPersistF2CanonicalSidecar_MediaAttachmentDurableLocatorAccepted proves
+// the media-attachment extension does NOT over-reject: the same attachment with
+// BOTH locator fields under durable roots persists normally (outcome written,
+// file exists). This is the positive counterpart of the pre-write rejection
+// crux above.
+func TestPersistF2CanonicalSidecar_MediaAttachmentDurableLocatorAccepted(t *testing.T) {
+	dir := t.TempDir()
+	ingest := pbIngestWithAttachment(t)
+	ingest.MediaAttachments[0].Locator.Value = "evidence/charts/chart-001.png"
+	ingest.MediaAttachments[0].Provenance.SourceLocator = "evidence/charts/chart-001-src.png"
+
+	outcome, err := PersistF2CanonicalSidecar(ingest, dir, fixedTime)
+	if err != nil {
+		t.Fatalf("durable media-locator persist failed (gate over-rejected): %v", err)
+	}
+	if outcome != F2PersistWritten {
+		t.Fatalf("durable media-locator persist outcome = %s, want written", outcome)
+	}
+	path := F2CanonicalSidecarPath(dir, ingest.SynthesisCycleID)
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("durable media-locator sidecar was not written: %v", statErr)
+	}
+}
