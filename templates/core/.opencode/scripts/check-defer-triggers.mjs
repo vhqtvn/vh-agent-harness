@@ -1295,8 +1295,10 @@ function mainRelease(options) {
     //    self-heals the current stale state with NO manifest write. kind
     //    (root|tag) stays operator-attested (a genuine first-release vs
     //    incremental-arc judgment); for kind=root no value is derived (whole
-    //    history is in scope regardless). This preserves INVARIANT #2 (the
-    //    evaluator is read-only — it writes nothing).
+    //    history is in scope regardless). This preserves INVARIANT #2 (no
+    //    protected-state writes: the evaluator never writes .git/ or tracked
+    //    files; its transient per-git-call capture scratch lives under repo
+    //    tmp/ with best-effort cleanup).
     const advisories = [];
     if (obj.release_base.kind === "tag") {
         // When --release-version is supplied (CI post-tag recheck), exclude

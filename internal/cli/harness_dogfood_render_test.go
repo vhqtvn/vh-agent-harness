@@ -368,14 +368,17 @@ func assertG6GateContent(t *testing.T, label, got string) {
 }
 
 // TestHarnessDogfood_ReleaseReadinessCarriesG7Gate is the deterministic content
-// contract for the G7 release gate (release-time DEFER enforcement, advisory
-// surface). Like G6, the G7 section is deterministic prose a regression can
-// silently delete — so this test pins its presence in BOTH the AUTHORITATIVE
-// overlay source AND its 1:1 RENDERED MIRROR. It also re-asserts that G6 was
-// NOT weakened when G7 was added (the two gates are independent and both must
-// survive). If G7 drifts out of either surface, OR G6 drifts out as a side
-// effect of a G7 edit, this test fails before a release can ship with an
-// unaddressed DEFER.
+// contract for the G7 release gate section (release-time DEFER enforcement).
+// Since the O3 phase-honest correction (2026-09-26, task card
+// release-readiness-g7-invocation-surface), G7 is DOCUMENTARY at the readiness
+// phase: the agent does NOT execute the release-mode evaluator (whose
+// freshness handshake is satisfiable only at HEAD=M, post-manifest-commit —
+// never at the readiness phase's HEAD=N), emits NO G7 verdict, and the final
+// defer-gate verification lives post-M at the release wrapper (authoritative),
+// the releaser's Step 3.3 item 4 re-verification, and CI. This test pins that
+// contract in BOTH the AUTHORITATIVE overlay source AND its 1:1 RENDERED
+// MIRROR. It also re-asserts that G6 was NOT weakened by the G7 rework (the
+// two gates are independent and both must survive).
 func TestHarnessDogfood_ReleaseReadinessCarriesG7Gate(t *testing.T) {
 	root := findModuleRoot(t)
 	relPaths := []string{
@@ -397,39 +400,59 @@ func TestHarnessDogfood_ReleaseReadinessCarriesG7Gate(t *testing.T) {
 	}
 }
 
-// assertG7GateContent asserts the distinctive G7 tokens are present in one
-// readiness agent body. Each needle is content the pre-G7 readiness agent did
-// NOT carry, so a regression that drops the G7 section (or weakens it to
-// advisory-only without the authoritative-wrapper pairing) fails here.
+// assertG7GateContent asserts the distinctive phase-honest G7 tokens are
+// present in one readiness agent body, and that the removed executable-G7
+// machinery stays absent. Each positive needle is content the pre-O3
+// readiness agent did NOT carry; each negative needle is content it DID carry
+// before the O3 correction removed it (a regression that re-introduces the
+// structurally-impossible G7 step fails here).
 func assertG7GateContent(t *testing.T, label, got string) {
 	t.Helper()
 	checks := []struct{ name, needle string }{
-		{"G7 section header", "### G7 — release-time DEFER enforcement gate (advisory)"},
-		{"G7 blocker id G7_ReleaseDeferGate", "G7_ReleaseDeferGate"},
+		{"G7 section header (phase-honest)", "### G7 — release-time DEFER enforcement gate (advisory, phase-honest)"},
 		{"checklist header bumped to G0–G7", "G0–G7"},
 		{"source:review-defer candidate selection", "source:review-defer"},
-		// Widened provenance scope (option b): the release-readiness G7 gate now
-		// dispositions EVERY firing card the release-prep enumerator surfaces, not
-		// just source:review-defer. The pre-widening policy did NOT enumerate
-		// source:external-study at all (it was the un-anticipated provenance in the
-		// v0.19.0 incident), so pinning "source:external-study" here fails on any
-		// regression that re-narrows the scope. See decision memo
+		// Widened provenance scope (option b): the release manifest
+		// dispositions EVERY firing card the release-prep enumerator surfaces,
+		// not just source:review-defer. The pre-widening policy did NOT
+		// enumerate source:external-study at all (it was the un-anticipated
+		// provenance in the v0.19.0 incident), so pinning
+		// "source:external-study" here fails on any regression that
+		// re-narrows the scope. See decision memo
 		// researches/decisions/2026-08-02-defer-liveness-provenance-scope-divergence.md.
 		{"external-study release-relevant (widened scope)", "source:external-study"},
-		{"deterministic evaluator invocation", "check-defer-triggers.mjs --mode=release"},
+		{"deterministic evaluator named (descriptive only)", "check-defer-triggers.mjs --mode=release"},
 		{"wrapper authority wording (scripts/release-tag.sh)", "scripts/release-tag.sh"},
-		{"advisory scope fence (G7 is ADVISORY)", "G7 itself is ADVISORY"},
+		{"phase matrix: no final G7 verdict at the readiness phase", "No final G7 verdict exists at this phase"},
+		{"agent does not execute the evaluator", "does NOT execute the evaluator"},
+		{"final controls named (releaser Step 3.3 item 4)", "releaser Step 3.3 item 4"},
+		{"write posture honest (no protected-state writes)", "no protected-state writes"},
+		{"write posture honest (transient scratch under repo tmp/)", "transient per-git-call scratch lives under repo"},
+		{"advisory parent-orchestrator release-prep note", "MAY run the release-prep enumerator"},
+		{"advisory never a prerequisite, never a gate", "never a readiness-agent prerequisite, never a gate"},
 		{"wrapper-authoritative restatement", "AUTHORITATIVE"},
-		{"ready:no + null-handoff behavior (scoped to G7)", "G7 blocker forces"},
-		{"evaluator-error blocker class", "evaluator-error class"},
+		{"evaluator-error refusal class (post-M surfaces)", "evaluator-error"},
 		{"absent/empty tasks-dir pass policy", "Absence policy"},
-		{"delegated owner entry for G7", `"for": "G7_ReleaseDeferGate"`},
-		{"blockers id enum includes G7", "G6_Skill_Pilot_Evidence | G7_ReleaseDeferGate"},
-		{"self-check reminder for G7", "G7 ran the deterministic release-DEFER evaluator"},
 	}
 	for _, c := range checks {
 		if !strings.Contains(got, c.needle) {
-			t.Errorf("%s: missing %s — %q (G7 gate content drifted out of the readiness agent)", label, c.name, c.needle)
+			t.Errorf("%s: missing %s — %q (phase-honest G7 content drifted out of the readiness agent)", label, c.name, c.needle)
+		}
+	}
+	// Negative contract (O3): the removed executable G7 machinery must stay
+	// out. Each absent needle is content the pre-O3 readiness agent carried —
+	// a regression that restores it re-introduces the chronology defect (a
+	// release-mode run at HEAD=N deterministically classifies evaluator-error
+	// and used to force ready:no on every ceremony).
+	absent := []struct{ name, needle string }{
+		{"bare-node release-mode invocation", "node .opencode/scripts/check-defer-triggers.mjs --mode=release"},
+		{"G7 verdict id machinery (G7 emits no verdict)", "G7_ReleaseDeferGate"},
+		{"G7-emitted blocker rule", "G7 blocker forces"},
+		{"stale activation ref (concept retired v0.13.0)", "(after activation)"},
+	}
+	for _, c := range absent {
+		if strings.Contains(got, c.needle) {
+			t.Errorf("%s: stale %s present — %q must be absent (O3 phase-honest G7 contract)", label, c.name, c.needle)
 		}
 	}
 }
@@ -477,8 +500,13 @@ func assertManifestAuthorityContent(t *testing.T, label, got string) {
 		{"wrapper override flag release-version", "--override-release-version"},
 		{"wrapper override flag manifest-sha", "--override-manifest-sha"},
 		{"release-version evaluator flag", "--release-version"},
-		{"accepted_overrides envelope field", "accepted_overrides"},
-		{"disclose_ids envelope field", "disclose_ids"},
+		// (O3 phase-honest note, 2026-09-26): the evaluator-envelope field
+		// needles that used to live here ("accepted_overrides",
+		// "disclose_ids") pinned the readiness agent's envelope-PARSING step —
+		// removed with the executable G7 prescription, since the agent no
+		// longer runs the evaluator or parses its envelope. The envelope
+		// fields remain real evaluator outputs consumed by the post-M
+		// surfaces (wrapper, releaser Step 3.3 item 4, CI).
 		// N -> R -> M ceremony topology (corrects the stale P -> M model that
 		// omitted the readiness-artifact commit R). Each needle is absent from
 		// the pre-correction readiness reporter, so a regression that drops the

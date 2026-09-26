@@ -88,7 +88,7 @@
     ".opencode/repo-configs/forbidden-patterns.js": "sha256:5004de7a26a895aee7c12708f56c654e59cff4694dfc4592eed424c674e68d7c",
     ".opencode/repo-configs/repo-mail-egress-gate.js": "sha256:921c7ca0b8e5245503bd0111a03d70d7d2ded13d5627d0b759af673ff994f6a5",
     ".opencode/scripts/approve-plan.js": "sha256:900dcdc03514178945c19acb609e391994a8ec1231ec6ae3c4166f5337491941",
-    ".opencode/scripts/check-defer-triggers.mjs": "sha256:9c58acdfd9806cbeae84310f7864f6fd9a69faec709be536ccf324cb9ebe3edf",
+    ".opencode/scripts/check-defer-triggers.mjs": "sha256:6cbada6ed7c2f7dfd42f43f7755e60183c71a4c467a99e4a2a0f9bc6f86046f7",
     ".opencode/scripts/check-s2-holds.mjs": "sha256:f0ede75ca887e96669bcd78c9894ceaf26c356d7bf1df42fed95bf412e0d78a8",
     ".opencode/scripts/commit-gate.sh": "sha256:1c08f9aaa7c09bae1d0332037bbaf123770a81560602e3f635b94070453f6a28",
     ".opencode/scripts/complexity-signal-lib.js": "sha256:8a5b125cb66b87f9fb20652302625615e5d4ea1d87bd52680cec516428023643",
