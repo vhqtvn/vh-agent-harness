@@ -2,13 +2,19 @@ package cli
 
 import (
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
+	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/overlay"
+	"github.com/vhqtvn/vh-agent-harness/internal/renderstate"
+	"github.com/vhqtvn/vh-agent-harness/internal/runshape"
 )
 
 // ── greenfield bootstrap: behavior contract ──────────────────────────────────
@@ -365,12 +371,38 @@ func TestInstall_ConflictingSelectorsRejected(t *testing.T) {
 }
 
 // TestInstall_PreviewApplyParity proves --dry-run and apply resolve from ONE
-// effective profile: the preview writes nothing, and the planned per-path
-// outcome set equals the applied one (same paths, same actions) on two
-// identical greenfield targets.
+// effective profile and agree at three levels on two identical greenfield
+// targets:
+//
+//  1. the preview writes NOTHING (pure plan; target stays empty);
+//  2. the preview's operator-visible PLAN — the path→action set parsed from
+//     the "Would SEED/RECONCILE/OVERWRITE" sections — equals the file set the
+//     live apply lands, modulo exactly the post-apply side effects the dry
+//     run skips by contract (lineage, run-shape seed, origin-hashes sidecar,
+//     rendered-outputs manifest, materialized context docs, empty agent-model
+//     seeds; the AGENTS.md compose output needs no modulo entry — root
+//     AGENTS.md is a plan-listed rendered file, and compose is a no-op on a
+//     greenfield target with no AGENTS.mission.md). Same paths, same write
+//     actions: nothing planned-but-missing, nothing applied-but-unplanned.
+//     On a greenfield target every planned action must be a WRITE (seed,
+//     armed reconcile, or overwrite-of-absent) — a preserve/conflict action
+//     would contradict the empty target;
+//  3. the applied tree is a FIXPOINT of the plan: a second --dry-run over the
+//     applied target reports zero Would-OVERWRITE, zero consumer-edited
+//     managed PRESERVEs, and zero conflicts. Overwrite catches bit-rot on
+//     origin-clean files; PRESERVE (consumer-edited managed) catches drift on
+//     authored files (they route there, not to overwrite, once they diverge
+//     from their just-recorded origin hash); on a tree the same apply just
+//     wrote, BOTH must be empty — so the applied BYTES equal the planned
+//     bytes for every managed path (level 2 proves path parity; this level
+//     proves byte parity — a hand-corrupted managed file keeps the path set
+//     identical but reappears here).
+//
+// The applied profile equals the frozen recipe bytes end-to-end.
 func TestInstall_PreviewApplyParity(t *testing.T) {
 	previewRoot, applyRoot := t.TempDir(), t.TempDir()
 
+	// ── preview: plan only, nothing written ──────────────────────────────
 	installFl = newInstallFlags()
 	installFl.target = previewRoot
 	installFl.dryRun = true
@@ -389,22 +421,81 @@ func TestInstall_PreviewApplyParity(t *testing.T) {
 			t.Errorf("dry-run must not write %s", absent)
 		}
 	}
+	prev := walkTreePaths(t, previewRoot)
+	if len(prev) != 0 {
+		t.Errorf("preview target must stay empty; found %v", prev)
+	}
 
+	// ── apply on an identical greenfield target ─────────────────────────
 	if _, err := installIntoWithSelector(t, applyRoot, false, false, ""); err != nil {
 		t.Fatalf("apply install: %v", err)
 	}
 
-	// The preview's "Would SEED/OVERWRITE" path set equals the applied tree's
-	// harness-managed files. Compare the file TREES (paths) between the two
-	// targets for the .opencode + .vh-agent-harness roots.
-	prev := walkTreePaths(t, previewRoot)
-	if len(prev) != 0 {
-		t.Errorf("preview target must stay empty; found %v", prev)
+	// ── level 2: plan path/action set == applied file set ───────────────
+	plan := parseDryRunPlanSections(t, previewOut)
+	if len(plan) == 0 {
+		t.Fatalf("preview plan parsed to an empty action set; output:\n%s", previewOut)
+	}
+	for p, action := range plan {
+		if !strings.Contains(action, "SEED") &&
+			!strings.Contains(action, "RECONCILE") &&
+			!strings.Contains(action, "OVERWRITE") {
+			t.Errorf("greenfield plan action for %s must be a write (SEED/RECONCILE/OVERWRITE); got %q", p, action)
+		}
 	}
 	applied := walkTreePaths(t, applyRoot)
 	if len(applied) == 0 {
 		t.Fatal("apply target must have the rendered tree")
 	}
+	appliedSet := make(map[string]bool, len(applied))
+	for _, p := range applied {
+		appliedSet[p] = true
+	}
+	// sideEffects enumerates the post-apply writes the dry-run plan skips BY
+	// CONTRACT (the plan header itself names lineage, run-shape seed, and
+	// AGENTS.md compose; the rest are binary-owned records). Derived from the
+	// same path helpers the live apply writes through, so this set tracks the
+	// code: adding a new post-apply side-effect file MUST update it here, and
+	// a silent extra write fails this test loudly instead of passing.
+	rel := func(abs string) string {
+		t.Helper()
+		r, err := filepath.Rel(applyRoot, abs)
+		if err != nil {
+			t.Fatalf("rel %s: %v", abs, err)
+		}
+		return filepath.ToSlash(r)
+	}
+	sideEffects := map[string]bool{
+		rel(lineage.FilePath(applyRoot)):               true,
+		rel(originhash.FilePath(applyRoot)):            true,
+		rel(renderstate.FilePath(applyRoot)):           true,
+		path.Join(runshape.DirName, runshape.FileName): true,
+	}
+	for _, key := range contextDocKeys {
+		sideEffects[path.Join(runshape.DirName, contextDocsSubdir, key+".md")] = true
+	}
+	// Every planned path landed as a file in the applied tree.
+	for p, action := range plan {
+		if !appliedSet[p] {
+			t.Errorf("planned path %s (%s) is MISSING from the applied tree", p, action)
+		}
+	}
+	// Every applied file is either planned or a known post-apply side effect.
+	for _, p := range applied {
+		if _, ok := plan[p]; ok {
+			continue
+		}
+		if sideEffects[p] {
+			continue
+		}
+		// Empty .local/config/agent-model/<agent> seeds for every {file:} ref
+		// in the rendered opencode.jsonc (operator-managed, gitignored).
+		if strings.HasPrefix(p, ".local/config/agent-model/") {
+			continue
+		}
+		t.Errorf("applied tree contains %s, which the preview plan does not list and which is not a known post-apply side effect", p)
+	}
+
 	// The applied profile equals the frozen recipe (the same bytes the preview
 	// planned to seed — asserted by the source line above and here end-to-end).
 	recipe, err := bootstrapRecipeBytes()
@@ -418,6 +509,80 @@ func TestInstall_PreviewApplyParity(t *testing.T) {
 	if string(live) != string(recipe) {
 		t.Errorf("applied profile must equal the frozen recipe bytes")
 	}
+
+	// ── level 3: the applied tree is a fixpoint of the plan ─────────────
+	installFl = newInstallFlags()
+	installFl.target = applyRoot
+	installFl.dryRun = true
+	cmd2, buf2 := newOutCmd()
+	if err := runInstall(cmd2, []string{}); err != nil {
+		t.Fatalf("second dry-run over the applied tree: %v (out=%q)", err, buf2.String())
+	}
+	secondOut := buf2.String()
+	if !strings.Contains(secondOut, "selection (source: existing live profile (preserved)") {
+		t.Errorf("second dry-run must resolve from the preserved live profile (one profile authority); got:\n%s", secondOut)
+	}
+	if strings.Contains(secondOut, "Would OVERWRITE") {
+		t.Errorf("applied tree must be a FIXPOINT of the plan — no managed file should reappear as Would OVERWRITE; got:\n%s", secondOut)
+	}
+	// Authored managed files that drift post-apply route to PRESERVE
+	// (consumer-edited managed), not OVERWRITE (origin-hash ownership
+	// transfer) — on a tree the SAME apply just wrote, no file can honestly
+	// claim consumer edits, so this section must be empty too.
+	if strings.Contains(secondOut, "Would PRESERVE (consumer-edited managed)") {
+		t.Errorf("applied tree must be a FIXPOINT of the plan — no managed file should diverge from its just-recorded origin hash; got:\n%s", secondOut)
+	}
+	if strings.Contains(secondOut, "CONFLICT") {
+		t.Errorf("applied tree must leave no armed conflicts behind; got:\n%s", secondOut)
+	}
+}
+
+// dryRunSectionRe matches a plan section header: an action label ("Would
+// SEED", "Would PRESERVE", "CONFLICT", ...) followed by free prose — which may
+// itself contain parentheses and em dashes — then a declared path count in
+// parentheses and a trailing colon, at column 0. The anchored tail makes the
+// captured count the LAST "(N):" in the line, so prose parentheses never
+// confuse it.
+var dryRunSectionRe = regexp.MustCompile(`^((?:Would [A-Z]+|CONFLICT).*?)\s*\((\d+)\):$`)
+
+// parseDryRunPlanSections extracts the operator-visible path→action mapping
+// from a --dry-run plan. Each section header declares its path count; exactly
+// that many two-space-indented path lines follow. The declared count — not
+// indentation alone — is what delimits paths from the indented advisory prose
+// printed after them (e.g. the OVERWRITE remediation block), so a malformed
+// plan (count/lines mismatch) fails the test instead of silently mis-parsing.
+func parseDryRunPlanSections(t *testing.T, out string) map[string]string {
+	t.Helper()
+	plan := map[string]string{}
+	lines := strings.Split(out, "\n")
+	for i := 0; i < len(lines); i++ {
+		m := dryRunSectionRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		action := m[1]
+		count, err := strconv.Atoi(m[2])
+		if err != nil {
+			t.Fatalf("plan section header %q carries a non-numeric count: %v", lines[i], err)
+		}
+		got := 0
+		for j := i + 1; j < len(lines) && got < count; j++ {
+			l := lines[j]
+			if !strings.HasPrefix(l, "  ") || strings.TrimSpace(l) == "" {
+				break
+			}
+			p := strings.TrimSpace(l)
+			if _, dup := plan[p]; dup {
+				t.Errorf("plan lists path %s in more than one section", p)
+			}
+			plan[p] = action
+			got++
+		}
+		if got != count {
+			t.Fatalf("plan section %q declared %d path(s) but only %d well-formed indented line(s) followed; plan output:\n%s", lines[i], count, got, out)
+		}
+	}
+	return plan
 }
 
 // walkTreePaths lists all file paths under root (relative), sorted.
