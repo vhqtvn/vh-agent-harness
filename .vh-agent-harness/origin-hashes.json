@@ -157,7 +157,7 @@
     ".vh-agent-harness/AGENTS.core.md": "sha256:b6b56f128c091d42087d3be4a69681b6a268ea16855e1271c2a857aba6d2b606",
     ".vh-agent-harness/config-transform.core.mjs": "sha256:ba1868f1c5e98a32e1394d2a972df50ef1104de19360335abe81ae8dcd609283",
     "docs/ai/f2-rendering-family.md": "sha256:1be7ec5f7bd33955856200d13c3f9fd634a07bbf75159c492c13610657b614bb",
-    "docs/ai/shell-execution.md": "sha256:45c7a576bd671c6bc43a78dbd5fdbc16e16223ffe64597f61ffd5fc8f6f809d5",
+    "docs/ai/shell-execution.md": "sha256:152b7574d605c8af7f59d7b7179afd0f612923d588d406e4371ad379d65ade85",
     "docs/ai/stream-stall-recovery.md": "sha256:34f22c074a869865c316fbba6798efee74bbfb2fabb13b94437e151a4b5a261f",
     "docs/coordination/AGENTS.md": "sha256:c73fed94bb05931457cb2e70219f7c12be9ae450cdc99b69c5250870d57149a6",
     "docs/coordination/AUTHORITY_CLASSES.md": "sha256:898c31c9527a7db0d652177e67c6dbc55f4a7ef4bb25d07eb06cbbcfe967d4a4",

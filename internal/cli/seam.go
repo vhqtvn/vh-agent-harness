@@ -702,7 +702,7 @@ func coordinatorDirOrDefault(answers map[string]string) string {
 
 // defaultRunShapeSeed is the minimal, schema-valid run-shape the seam seeds on
 // first install. host-shell is the safe no-container default (the web-less
-// example in the run-shape spec §6a); the project edits it to docker_compose
+// example in the run-shape spec §6a); the project edits it to docker-compose
 // when it adopts a container runtime. Every lifecycle point is an explicit
 // no-op (absent = no-op already, but spelling them out documents the surface).
 const defaultRunShapeSeed = `run_shape_version: "0.1"
@@ -710,7 +710,7 @@ const defaultRunShapeSeed = `run_shape_version: "0.1"
 # ` + "`vh-agent-harness update`" + ` never overwrites this file. See the run-shape spec.
 runtime:
   backend: host-shell
-# services: {}      # none for host-shell; declare for docker_compose
+# services: {}      # none for host-shell; declare for docker-compose
 # lifecycle: {}     # hooks are scripts/ pointers; absent = no-op
 # runners: {}
 # verbs: {}

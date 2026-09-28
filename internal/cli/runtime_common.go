@@ -114,9 +114,10 @@ func selectBackend(cfg runtimeConfig, projectDir string) (runtime.Backend, error
 }
 
 // normalizeDockerBackend collapses the two documented spellings of the docker
-// backend onto the internal token. The run-shape schema enum is `docker-compose`
-// (hyphen); the legacy manifest + backend.Name() use `docker_compose`
-// (underscore). Both are accepted on read; neither is ever written back.
+// backend onto the internal token. The run-shape schema validates BOTH
+// `docker-compose` (hyphen, the documented public enum) and `docker_compose`
+// (underscore, the legacy manifest spelling); backend.Name() reports the
+// underscore token. Both are accepted on read; neither is ever written back.
 func normalizeDockerBackend(b string) string {
 	if b == "docker-compose" {
 		return "docker_compose"

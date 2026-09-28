@@ -193,9 +193,9 @@ func nextSteps(st harnessState) []string {
 			"`vh-agent-harness update` after editing.")
 		if st.RuntimeBackend == "host-shell" || st.RuntimeBackend == "" {
 			steps = append(steps, "Runtime is host-shell (commands run on the host). To run in a container or via "+
-				"your own wrapper, edit .vh-agent-harness/run-shape.yml: `backend: docker_compose` (set compose_file/"+
-				"default_service) OR `backend: proxy` + `proxy_command: [\"./dev.sh\", \"exec\"]` to delegate to an "+
-				"existing script.")
+				"your own wrapper, edit .vh-agent-harness/run-shape.yml: `backend: docker-compose` "+
+				"(docker_compose also accepted; set compose_file/default_service) OR `backend: proxy` + "+
+				"`proxy_command: [\"./dev.sh\", \"exec\"]` to delegate to an existing script.")
 		}
 		steps = append(steps,
 			"Project deny-rules go in .opencode/repo-configs/forbidden-patterns.project.js "+

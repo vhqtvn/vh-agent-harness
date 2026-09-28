@@ -20,9 +20,9 @@ Pick the narrowest verb that fits the work:
 
 | Verb | What runs where | Safety boundary |
 |------|-----------------|-----------------|
-| `vh-agent-harness exec` | Inside the project runtime backend (host under `host-shell`; inside the container under `proxy`/`docker_compose`) | Genuine mutation allowed; only forbidden patterns and the commit-gate are blocked |
+| `vh-agent-harness exec` | Inside the project runtime backend (host under `host-shell`; inside the container under `proxy`/`docker-compose`) | Genuine mutation allowed; only forbidden patterns and the commit-gate are blocked |
 | `vh-agent-harness exec-ro` | Read-only intent, classified host-side BEFORE backend dispatch | Prompt-free allowlisted classifier; default-deny of anything not proven read-only; a DENY is final — never rerun the denied command through another verb |
-| `vh-agent-harness exec-sandbox` | Host-local kernel sandbox (Landlock + seccomp) for arbitrary read-code | Writes outside `./tmp/` and network are physically impossible under a strict mode floor; host-local only — does not follow a command into `proxy`/`docker_compose` backends |
+| `vh-agent-harness exec-sandbox` | Host-local kernel sandbox (Landlock + seccomp) for arbitrary read-code | Writes outside `./tmp/` and network are physically impossible under a strict mode floor; host-local only — does not follow a command into `proxy`/`docker-compose` backends |
 | `vh-agent-harness shell` | Interactive shell in the runtime | Not for agents — use only when a human explicitly asks for interactive use |
 
 Command hygiene that keeps you on the sanctioned path:
