@@ -5,7 +5,9 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -458,7 +460,13 @@ func readProfileSelection(target string) []resolver.CapabilityID {
 //     re-building the catalog.
 //   - selected: the resolved capability set. The caller needs it to compile
 //     the CoreSelectionPlan.
-func resolveCapabilityAnswers(target string) (answers map[string]string, renderPacks []string, catalog *resolver.Catalog, selected *resolver.CapabilitySet, err error) {
+//
+// bootstrap is the optional greenfield install recipe (nil for every recurring
+// render): while no live profile exists it supplies the selection/overlays/
+// features the seeded profile will carry, so install renders — including
+// --dry-run previews — exactly what the first update will re-render from the
+// seeded live profile (preview/apply parity).
+func resolveCapabilityAnswers(target string, bootstrap []byte) (answers map[string]string, renderPacks []string, catalog *resolver.Catalog, selected *resolver.CapabilitySet, err error) {
 	contribs, derr := discoverPackContributions(target)
 	if derr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("seam: %w", derr)
@@ -483,12 +491,12 @@ func resolveCapabilityAnswers(target string) (answers map[string]string, renderP
 
 	// Selection = preset(profile) ∪ explicit(capabilities:) ∪ capabilities
 	// implied by overlays:-listed packs that declare a manifest.
-	explicit := readProfileSelection(target) // preset(profile) ∪ capabilities:
-	// activeOverlays re-reads + re-parses the profile YAML, so read it ONCE and
-	// reuse for both the overlay-implied capability path and the explicit
-	// render-packs list below (no behavior change; just avoids the double
-	// disk read).
-	activeList := activeOverlays(target)
+	explicit := readProfileSelectionWithBootstrap(target, bootstrap) // preset(profile) ∪ capabilities:
+	// activeOverlaysWithBootstrap re-reads + re-parses the profile YAML, so
+	// read it ONCE and reuse for both the overlay-implied capability path and
+	// the explicit render-packs list below (no behavior change; just avoids
+	// the double disk read).
+	activeList := activeOverlaysWithBootstrap(target, bootstrap)
 	overlayImplied := make([]resolver.CapabilityID, 0)
 	for _, name := range activeList {
 		if id, ok := packToID[name]; ok {
@@ -541,7 +549,7 @@ func resolveCapabilityAnswers(target string) (answers map[string]string, renderP
 	// the same `seen` dedup. An explicit `false` disables the DEFAULT but is
 	// NOT a global veto — an explicit overlays: entry is already in `seen` and
 	// therefore survives the opt-out (the explicit list was processed first).
-	for _, name := range featureActivatedPacks(reconciledFeatures(target)) {
+	for _, name := range featureActivatedPacks(reconciledFeaturesWithBootstrap(target, bootstrap)) {
 		if !seen[name] {
 			seen[name] = true
 			packs = append(packs, name)
@@ -575,7 +583,7 @@ func resolveCapabilityAnswers(target string) (answers map[string]string, renderP
 // operator must fix regardless (render aborts with the same error), so a
 // degraded `overlay list` is still directionally honest.
 func renderPackSet(target string) (packs []string, ok bool) {
-	_, renderPacks, _, _, err := resolveCapabilityAnswers(target)
+	_, renderPacks, _, _, err := resolveCapabilityAnswers(target, nil)
 	if err != nil {
 		return nil, false
 	}
@@ -692,6 +700,218 @@ func discoverPackContributions(target string) ([]resolver.PackContribution, erro
 		})
 	}
 	return contribs, nil
+}
+
+// --- greenfield bootstrap (frozen install-only recipe) -----------------------
+//
+// The bootstrap selection is INSTALL-ONLY and GREENFIELD-ONLY. It exists so a
+// fresh `vh-agent-harness install` (no selector, or --full) can seed the FULL
+// shipped surface (supervised preset + every shipped core capability + every
+// shipped overlay pack) without widening the embedded core default — the core
+// default doubles as the RECONCILIATION baseline, and reconciliation UNIONs
+// default arrays into existing live profiles (internal/schema
+// harness_profile.go), so a default flip there would backfill every existing
+// install. The frozen recipe therefore lives outside templates/core, embedded
+// binary-only under corpus.InstallFS, and reaches a target ONLY as the staged
+// bytes the armed-seed apply writes on a greenfield install.
+//
+// MECHANISM (preview/apply parity): a bootstrap blob is threaded through the
+// seam (seamApply → prepareSeamStaging → renderSeamStaging → the reader cores
+// below). While the target has NO live profile, every greenfield-fallback
+// reader treats the bootstrap bytes as if they were the live profile — the
+// exact bytes apply is about to seed. Staged content, capability selection,
+// overlay rendering, and --dry-run preview therefore all resolve from ONE
+// effective profile. The moment a live profile exists (any update, doctor,
+// accept-platform), the bootstrap is ignored entirely: bootstrap selection
+// never leaks into recurring reconciliation.
+//
+// FUTURE-INVENTORY POLICY: every shipped overlay/capability requires an
+// explicit default-in/default-out decision in the inventory ledger
+// (internal/cli/bootstrap_inventory_test.go) at introduction time; the frozen
+// recipe enumerates the `in` set. See templates/install/full-harness-profile.yml.
+
+// bootstrapRecipeBytes returns the FROZEN full-install recipe from
+// corpus.InstallFS, schema-validated. It is the greenfield default for a
+// no-selector or --full install. The recipe is versioned with the binary: a
+// shipped pack is distributed to fresh installs by adding it here AND to the
+// inventory ledger in the same change.
+func bootstrapRecipeBytes() ([]byte, error) {
+	raw, err := fs.ReadFile(corpus.InstallFS, path.Join(corpus.InstallDir, "full-harness-profile.yml"))
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap recipe: read embedded templates/install/full-harness-profile.yml: %w", err)
+	}
+	if errs := validateBootstrapProfile(raw); len(errs) > 0 {
+		return nil, fmt.Errorf("bootstrap recipe: embedded full-harness-profile.yml is schema-invalid: %v", errs)
+	}
+	return raw, nil
+}
+
+// corpusDefaultProfileBytes returns the embedded platform-default (minimal)
+// profile bytes — the historical greenfield seed and the reconciliation
+// baseline. Used directly for `install --minimal` and as the base for
+// `install --profile <preset>` seeding.
+func corpusDefaultProfileBytes() ([]byte, error) {
+	sub, err := fs.Sub(corpus.CoreFS, corpus.CoreDir)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap default: embed sub %q: %w", corpus.CoreDir, err)
+	}
+	raw, err := fs.ReadFile(sub, harnessProfileName)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap default: read embedded %s: %w", harnessProfileName, err)
+	}
+	return raw, nil
+}
+
+// profileLineRe matches the leading `profile:` key line in a profile document.
+// First-match replacement keeps `install --profile <preset>` seeds
+// byte-identical to the historical default except for the one preset line, so
+// armed-file reconciliation sees the most conservative possible diff.
+var profileLineRe = regexp.MustCompile(`(?m)^profile:[^\n]*$`)
+
+// presetProfileBytes returns the embedded platform default with its
+// `profile:` line swapped to preset (e.g. `supervised`). The result is
+// schema-validated before return; an unknown preset fails there. Used for
+// greenfield `install --profile <preset>` seeding.
+func presetProfileBytes(preset string) ([]byte, error) {
+	raw, err := corpusDefaultProfileBytes()
+	if err != nil {
+		return nil, err
+	}
+	if !profileLineRe.Match(raw) {
+		return nil, fmt.Errorf("bootstrap preset: embedded default has no `profile:` line to swap")
+	}
+	out := profileLineRe.ReplaceAll(raw, []byte("profile: "+preset))
+	if errs := validateBootstrapProfile(out); len(errs) > 0 {
+		return nil, fmt.Errorf("bootstrap preset %q: resulting profile is schema-invalid: %v", preset, errs)
+	}
+	return out, nil
+}
+
+// validateBootstrapProfile runs the schema envelope check on a candidate
+// bootstrap blob. Install resolves and validates ALL bootstrap bytes BEFORE
+// any write (fail-closed usage errors), so the reader cores below can trust a
+// bootstrap they are handed.
+func validateBootstrapProfile(raw []byte) []schema.FieldError {
+	return (schema.HarnessProfile{}).Validate(raw)
+}
+
+// parseBootstrapSelection projects a validated bootstrap blob onto the summary
+// install reports (preset, explicit capabilities, explicit overlays). Pure;
+// split from the accessors so tests and the install report share one parser.
+func parseBootstrapSelection(raw []byte) (profile string, capabilities, overlays []string) {
+	var d struct {
+		Profile      string   `yaml:"profile"`
+		Capabilities []string `yaml:"capabilities"`
+		Overlays     []string `yaml:"overlays"`
+	}
+	if err := yaml.Unmarshal(raw, &d); err != nil {
+		return "", nil, nil
+	}
+	return strings.TrimSpace(d.Profile), d.Capabilities, d.Overlays
+}
+
+// readProfileAnswersWithBootstrap is readProfileAnswers with an optional
+// greenfield bootstrap: while the live profile is ABSENT, the bootstrap bytes
+// (validated) are projected exactly as the live profile would be — otherwise
+// the corpus default. A present live profile always wins and the bootstrap is
+// ignored (greenfield-only by construction).
+func readProfileAnswersWithBootstrap(target string, bootstrap []byte) map[string]string {
+	raw, err := os.ReadFile(filepath.Join(target, harnessProfileName))
+	if err == nil {
+		// Live profile present: historical behavior, bootstrap ignored.
+		if errs := (schema.HarnessProfile{}).Validate(raw); len(errs) > 0 {
+			return map[string]string{}
+		}
+		return projectProfileAnswers(raw)
+	}
+	if len(bootstrap) > 0 {
+		if errs := validateBootstrapProfile(bootstrap); len(errs) > 0 {
+			return map[string]string{} // defensive; install pre-validates
+		}
+		return projectProfileAnswers(bootstrap)
+	}
+	return corpusDefaultProfileAnswers()
+}
+
+// readProfileSelectionWithBootstrap is readProfileSelection with an optional
+// greenfield bootstrap: while the live profile is ABSENT, the selection is
+// preset ∪ explicit capabilities parsed from the bootstrap bytes — the exact
+// selection the seeded profile will drive on every subsequent render.
+func readProfileSelectionWithBootstrap(target string, bootstrap []byte) []resolver.CapabilityID {
+	raw, err := os.ReadFile(filepath.Join(target, harnessProfileName))
+	if err == nil {
+		if errs := (schema.HarnessProfile{}).Validate(raw); len(errs) > 0 {
+			return nil // malformed; baseline-only (doctor reports the schema error)
+		}
+		profile, caps := parseProfileSelection(raw)
+		return unionCapabilities(presetCapabilities(profile), caps)
+	}
+	if len(bootstrap) > 0 {
+		profile, caps := parseProfileSelection(bootstrap)
+		return unionCapabilities(presetCapabilities(profile), caps)
+	}
+	return corpusDefaultProfileSelection()
+}
+
+// activeOverlaysWithBootstrap is activeOverlays with an optional greenfield
+// bootstrap: while the live profile is ABSENT, the explicit overlays list is
+// parsed from the bootstrap bytes (so a full-recipe install actually RENDERS
+// the recipe's overlay packs on the first pass). Historical default when no
+// bootstrap is supplied (nil — the embedded default declares none).
+func activeOverlaysWithBootstrap(target string, bootstrap []byte) []string {
+	raw, err := os.ReadFile(filepath.Join(target, harnessProfileName))
+	if err == nil {
+		if errs := (schema.HarnessProfile{}).Validate(raw); len(errs) > 0 {
+			return nil
+		}
+		var d struct {
+			Overlays []string `yaml:"overlays"`
+		}
+		if err := yaml.Unmarshal(raw, &d); err != nil {
+			return nil
+		}
+		return d.Overlays
+	}
+	if len(bootstrap) > 0 {
+		var d struct {
+			Overlays []string `yaml:"overlays"`
+		}
+		if err := yaml.Unmarshal(bootstrap, &d); err != nil {
+			return nil
+		}
+		return d.Overlays
+	}
+	return nil
+}
+
+// reconciledFeaturesWithBootstrap is reconciledFeatures with an optional
+// greenfield bootstrap: while the live profile is ABSENT, the bootstrap's
+// features map is project-wins merged over the platform default — exactly the
+// merge a live profile carrying the same bytes would produce.
+func reconciledFeaturesWithBootstrap(target string, bootstrap []byte) map[string]bool {
+	merged := corpusDefaultFeatures()
+	raw, err := os.ReadFile(filepath.Join(target, harnessProfileName))
+	var live []byte
+	if err == nil {
+		live = raw
+	} else if len(bootstrap) > 0 {
+		live = bootstrap
+	} else {
+		return merged // greenfield, no bootstrap; platform default verbatim
+	}
+	if errs := (schema.HarnessProfile{}).Validate(live); len(errs) > 0 {
+		return merged // malformed; platform default verbatim
+	}
+	var d struct {
+		Features map[string]bool `yaml:"features"`
+	}
+	if err := yaml.Unmarshal(live, &d); err != nil {
+		return merged
+	}
+	for k, v := range d.Features {
+		merged[k] = v // project-wins per key
+	}
+	return merged
 }
 
 // --- modules: deprecation (Phase 5) ------------------------------------------

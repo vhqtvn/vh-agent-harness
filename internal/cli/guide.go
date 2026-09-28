@@ -114,9 +114,13 @@ func nextSteps(st harnessState) []string {
 				"then fill `mission_summary`/`architecture_summary` (and `db_user`/`db_name` if used). " +
 				"Those seeds are written ONCE, so filling the config first avoids blank sections.",
 			"Preview first (optional): `vh-agent-harness install --name <ProjectName> --slug <project-slug> --dry-run` " +
-				"shows the per-file plan without writing anything.",
+				"shows the per-file plan and the effective selection without writing anything.",
 			"Install the harness here: `vh-agent-harness install --name <ProjectName> --slug <project-slug>` " +
-				"(seeds .vh-agent-harness/ config, the .opencode/ agent corpus, and a default host-shell run-shape).",
+				"(seeds .vh-agent-harness/ config, the .opencode/ agent corpus, and a default host-shell run-shape). " +
+				"A GREENFIELD install with no selector seeds the FULL surface by default: the supervised preset, " +
+				"every shipped core capability, and every shipped overlay pack. Want the lean shape instead? " +
+				"Install with `--minimal` (8-agent baseline); `--profile <preset>` seeds a specific preset. " +
+				"Selectors are greenfield-only and rejected on an existing install.",
 			"Then run `vh-agent-harness guide` again for configuration steps.",
 		}
 	case phaseAdoptable:

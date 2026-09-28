@@ -235,7 +235,8 @@ func checkCapabilityCoherence(target string) checkResult {
 	// Selection: the SAME full resolution the render uses (preset ∪ explicit
 	// capabilities ∪ overlay-pack manifest contributions), so an overlay that
 	// pulls core/gated-commit in via its hard-dep closure is honored here too.
-	_, _, catalog, selected, err := resolveCapabilityAnswers(target)
+	// Doctor always reflects the LIVE profile — no bootstrap (nil).
+	_, _, catalog, selected, err := resolveCapabilityAnswers(target, nil)
 	if err != nil {
 		return checkResult{name: name, tier: tierSkip,
 			detail: "capability selection unresolvable (" + err.Error() + "); coherence unknown"}
@@ -296,8 +297,11 @@ func checkCapabilityCoherence(target string) checkResult {
 // dry-run previews the warning), mirroring warnIfDeadGrants. It NEVER converts
 // emission into a hard error: install/update must remain available as repair
 // paths. Silent on coherent states (no nag on healthy minimal/supervised).
-func warnIfGatedCommitIncoherent(target, staging string) {
-	_, _, catalog, selected, err := resolveCapabilityAnswers(target)
+// bootstrap is the greenfield install recipe (nil on recurring renders); it is
+// threaded so a bootstrap install lints against the selection that drove the
+// render rather than the minimal corpus default.
+func warnIfGatedCommitIncoherent(target, staging string, bootstrap []byte) {
+	_, _, catalog, selected, err := resolveCapabilityAnswers(target, bootstrap)
 	if err != nil {
 		return // selection unresolvable: render paths surface resolution errors
 	}

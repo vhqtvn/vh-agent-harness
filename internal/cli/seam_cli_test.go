@@ -16,7 +16,11 @@ import (
 
 // seamInstallInto runs the seam install path (runInstall) into root, the same
 // path the CLI `vh-agent-harness install` verb uses. It is the canonical fixture helper
-// for the seam verbs (doctor/update/reconcile).
+// for the seam verbs (doctor/update/reconcile). The bare invocation carries NO
+// selector, so on a greenfield target it installs the FROZEN FULL recipe
+// (supervised + every shipped capability + every shipped overlay) — the
+// greenfield default since the bootstrap rework. Tests that need the
+// historical minimal shape use seamInstallMinimalInto (explicit --minimal).
 func seamInstallInto(t *testing.T, root string) {
 	t.Helper()
 	installFl = newInstallFlags()
@@ -24,6 +28,37 @@ func seamInstallInto(t *testing.T, root string) {
 	cmd, buf := newOutCmd()
 	if err := runInstall(cmd, []string{}); err != nil {
 		t.Fatalf("seam install into %s: %v (out=%q)", root, err, buf.String())
+	}
+}
+
+// seamInstallMinimalInto runs the install path with the EXPLICIT --minimal
+// selector: the historical minimal seed (8-agent baseline + default-on shipped
+// pilots, no capability clusters, no explicit overlays). Tests that pin
+// capability/overlay dormancy (e.g. release stays unrendered) install minimal
+// so residue from the full default cannot blur the assertion.
+func seamInstallMinimalInto(t *testing.T, root string) {
+	t.Helper()
+	installFl = newInstallFlags()
+	installFl.target = root
+	installFl.minimal = true
+	cmd, buf := newOutCmd()
+	if err := runInstall(cmd, []string{}); err != nil {
+		t.Fatalf("seam install --minimal into %s: %v (out=%q)", root, err, buf.String())
+	}
+}
+
+// seamInstallPresetInto runs the install path with the EXPLICIT --profile
+// <preset> selector (greenfield seeding of the embedded default carrying that
+// preset). Used by fixtures that need a specific preset's shape from the first
+// render on (no full-recipe residue).
+func seamInstallPresetInto(t *testing.T, root, preset string) {
+	t.Helper()
+	installFl = newInstallFlags()
+	installFl.target = root
+	installFl.profile = preset
+	cmd, buf := newOutCmd()
+	if err := runInstall(cmd, []string{}); err != nil {
+		t.Fatalf("seam install --profile %s into %s: %v (out=%q)", preset, root, err, buf.String())
 	}
 }
 
@@ -123,10 +158,12 @@ func TestSeamUpdate_FailClosedOnBadOverlay(t *testing.T) {
 // <target>/.opencode (where a directory is expected) so every .opencode/* live
 // write fails inside Apply, while the .vh-agent-harness/* writes (under a
 // different top-level dir) succeed — a genuine partial application. Install
-// MUST NOT hard-error (Apply returns nil; partial application is not a hard
-// failure), MUST NOT write lineage, and MUST surface the incomplete-generation
-// state to the operator. (The manifest non-persistence half of the provenance
-// contract is covered by TestSeamOrphan_ManifestGated_OnNonSkillWriteFailure.)
+// returns a NON-NIL error (the bootstrap agent-UX contract: a live install that
+// applied incompletely must exit non-zero, never read as success), MUST NOT
+// write lineage, and MUST surface the incomplete-generation state plus the
+// failed paths to the operator. (The manifest non-persistence half of the
+// provenance contract is covered by
+// TestSeamOrphan_ManifestGated_OnNonSkillWriteFailure.)
 func TestSeamInstall_PartialWriteFailure_LineageNotAdvanced(t *testing.T) {
 	target := t.TempDir()
 	// Deterministically block every write under .opencode/: a regular file
@@ -144,10 +181,14 @@ func TestSeamInstall_PartialWriteFailure_LineageNotAdvanced(t *testing.T) {
 		runErr = runInstall(cmd, []string{})
 		out = buf.String()
 	})
-	// Install MUST NOT hard-error: a partial application is a distinct,
-	// recoverable state from a hard walk/plan failure; Apply returns nil.
-	if runErr != nil {
-		t.Fatalf("install must NOT hard-error on partial write failure (Apply returns nil); got %v", runErr)
+	// Install MUST return an error (non-zero exit): a partial live application
+	// is a distinct, recoverable state — the report is still printed in full
+	// before the error — but an automated operator must not read it as success.
+	if runErr == nil {
+		t.Fatalf("install must return an error (non-zero exit) on partial write failure; got nil")
+	}
+	if !strings.Contains(runErr.Error(), "incompletely") {
+		t.Errorf("install error must name the incomplete application; got %v", runErr)
 	}
 	// Lineage MUST NOT advance: no lineage.yml written on a partially-failed
 	// first install (there is no prior lineage to preserve — there must simply
@@ -800,7 +841,7 @@ func TestMigration_AllowedCommandsCustomized(t *testing.T) {
 	}
 	renderer := substrate.EmbedFSRenderer{Source: sub}
 	answers := mergeRenderAnswers(installRenderAnswers(root), readProfileAnswers(root))
-	if _, _, _, err := renderSeamStaging(staging, renderer, answers, root); err != nil {
+	if _, _, _, err := renderSeamStaging(staging, renderer, answers, root, nil); err != nil {
 		t.Fatalf("render staging: %v", err)
 	}
 	if isAllowedCommandsCustomized(root, staging) {

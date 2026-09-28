@@ -235,7 +235,7 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 	// the signal a consumer needs to know the tokens are unresolved.)
 	warnUnresolvedProjectConfigTokens(os.Stderr, abs)
 
-	report, err := seamApply(abs, answers, updateDryRun)
+	report, err := seamApply(abs, answers, updateDryRun, nil)
 	if err != nil {
 		return err
 	}

@@ -463,7 +463,11 @@ func seamAcceptPlatformBatchOut(t *testing.T, root string, all, staleOnly bool, 
 // healthy majority.
 func TestAcceptPlatform_All_RecoversStallAndSkipsConverged(t *testing.T) {
 	root := t.TempDir()
-	seamInstallInto(t, root)
+	// Explicit --minimal install so media-perception/worker-read-only are
+	// genuinely DESELECTED capabilities (the residue-exclusion crux below needs
+	// them deselected; the bare no-selector default now installs the frozen FULL
+	// recipe, which selects them).
+	seamInstallMinimalInto(t, root)
 
 	// Consumer-edit exactly one managed path so it becomes a real stall; the
 	// rest of the managed set stays converged.

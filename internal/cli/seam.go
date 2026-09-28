@@ -126,6 +126,11 @@ type seamStaging struct {
 // regenerated set (F3↔F6 coordination hook). It is the shared front-half of
 // seamApply and acceptPlatform.
 //
+// bootstrap is the optional greenfield install recipe (nil for every recurring
+// render). While the target has no live profile it drives the profile-derived
+// render answers AND (inside renderSeamStaging) the staged profile bytes, so
+// install previews and applies resolve from ONE effective profile.
+//
 // The returned cleanup removes the staging dir and MUST be called by the caller
 // (typically via defer). On error the cleanup is already invoked and noop is
 // returned, so a caller may unconditionally defer a returned cleanup only on the
@@ -137,7 +142,7 @@ type seamStaging struct {
 // update produce: core corpus + active overlays, overlay merges, permission
 // emission, allowed-commands.js generation. accept-platform reuses it so the
 // bytes it writes are EXACTLY what the next `update` would write.
-func prepareSeamStaging(target string, answers map[string]string) (*seamStaging, func(), error) {
+func prepareSeamStaging(target string, answers map[string]string, bootstrap []byte) (*seamStaging, func(), error) {
 	noop := func() {}
 	sub, err := coreSubFSImpl()
 	if err != nil {
@@ -146,8 +151,10 @@ func prepareSeamStaging(target string, answers map[string]string) (*seamStaging,
 
 	// Merge the live profile's feature/overlay answers over the caller answers.
 	// Profile wins for the keys it owns (features.*, overlays); project_name /
-	// project_slug come from the caller and are never overwritten.
-	renderAnswers := mergeRenderAnswers(answers, readProfileAnswers(target))
+	// project_slug come from the caller and are never overwritten. On a
+	// bootstrap (greenfield install) run the bootstrap bytes supply the
+	// profile-side answers until the live profile is seeded.
+	renderAnswers := mergeRenderAnswers(answers, readProfileAnswersWithBootstrap(target, bootstrap))
 
 	staging, err := os.MkdirTemp("", "harness-seam-staging-*")
 	if err != nil {
@@ -160,7 +167,7 @@ func prepareSeamStaging(target string, answers map[string]string) (*seamStaging,
 	// profile) and perform the overlay merges (opencode-append deep-merge,
 	// callable-graph append). Returns the LIVE .opencode-relative paths the
 	// overlays contributed so the classifier can mark them overlay_extension.
-	overlayFiles, skillRecords, inactiveLive, err := renderSeamStaging(staging, renderer, renderAnswers, target)
+	overlayFiles, skillRecords, inactiveLive, err := renderSeamStaging(staging, renderer, renderAnswers, target, bootstrap)
 	if err != nil {
 		cleanup()
 		return nil, noop, err
@@ -203,8 +210,14 @@ func prepareSeamStaging(target string, answers map[string]string) (*seamStaging,
 	return ps, cleanup, nil
 }
 
-func seamApply(target string, answers map[string]string, dryRun bool) (*substrate.ApplyReport, error) {
-	ps, cleanup, err := prepareSeamStaging(target, answers)
+// seamApply renders, classifies, and applies the embedded core corpus into
+// target (see prepareSeamStaging). bootstrap is the optional greenfield
+// install-only recipe: non-nil ONLY from the install verb on a target with no
+// live profile. It is ignored whenever a live profile exists, so recurring
+// reconciliation (update/doctor/accept-platform) is untouched by bootstrap
+// selection.
+func seamApply(target string, answers map[string]string, dryRun bool, bootstrap []byte) (*substrate.ApplyReport, error) {
+	ps, cleanup, err := prepareSeamStaging(target, answers, bootstrap)
 	if err != nil {
 		return nil, err
 	}
@@ -243,8 +256,10 @@ func seamApply(target string, answers map[string]string, dryRun bool) (*substrat
 	// core/gated-commit selection, mirroring warnIfDeadGrants — runs for BOTH
 	// dry-run and live (a dry-run previews the warning), NEVER a hard error.
 	// Catches selected-but-missing-agent-block / missing-caller-edge /
-	// unselected-residue states in the emitted output before they ship.
-	warnIfGatedCommitIncoherent(target, ps.staging)
+	// unselected-residue states in the emitted output before they ship. The
+	// bootstrap blob is threaded so a greenfield full install lints against
+	// the selection that actually drove the render.
+	warnIfGatedCommitIncoherent(target, ps.staging, bootstrap)
 
 	// Lineage (S1) records the INSTALL answers (project_name/slug) for the
 	// answer-digest drift check; the S3 profile (features/overlays) is a separate
@@ -738,6 +753,11 @@ func seedRunShapeDefault(target string) error {
 // render like-for-like (an overlay project's drift check must compare against an
 // overlay-merged baseline, not core-only).
 //
+// bootstrap is the optional greenfield install recipe (nil on every recurring
+// path): it drives the capability selection, the explicit overlay list, and the
+// staged profile bytes while the target has no live profile — the ONE
+// effective-profile path behind install preview/apply parity.
+//
 // Unknown pack names in the profile are skipped with a stderr notice rather than
 // aborting the apply (a stale profile entry should not block install). Returns
 // the sorted LIVE .opencode-relative paths contributed by overlays and the
@@ -746,7 +766,7 @@ func seedRunShapeDefault(target string) error {
 // gated on the generation fully applying — see the manifest persist block in
 // seamApply). Non-skill overlay units (agents/commands, permission packs) are
 // NOT recorded: v1 orphan detection is overlay-skill-scoped only.
-func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswers map[string]string, target string) ([]string, []renderstate.Record, map[string]bool, error) {
+func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswers map[string]string, target string, bootstrap []byte) ([]string, []renderstate.Record, map[string]bool, error) {
 	// Fold in the project.config.json-sourced tokens (mission/architecture/db).
 	// project.config.json is project_owned and read LIVE from the target so the
 	// seeded CLAUDE.md/Makefile resolve {{MISSION_SUMMARY}} etc. The config keys
@@ -761,7 +781,7 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// re-render, and inventory all see the same capability gates. If only
 	// seamApply resolved capabilities, doctor would re-render without them and
 	// false-flag drift on every gated agent block.
-	capAnswers, renderPacks, capCatalog, capSelected, err := resolveCapabilityAnswers(target)
+	capAnswers, renderPacks, capCatalog, capSelected, err := resolveCapabilityAnswers(target, bootstrap)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("seam: %w", err)
 	}
@@ -800,6 +820,26 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 		ExcludeLivePaths: corePlan.InactiveLivePaths,
 	}); err != nil {
 		return nil, nil, nil, fmt.Errorf("seam: render into staging: %w", err)
+	}
+	// Greenfield bootstrap seeding parity: when a bootstrap recipe drives this
+	// render and the target has NO live profile, REPLACE the staged platform
+	// default profile with the bootstrap bytes so the armed-seed apply seeds
+	// exactly the selection that drove this render (one effective profile for
+	// staged content, capability selection, overlay rendering, and preview).
+	// The overwrite is conditional on live-profile absence — an install over an
+	// existing tree keeps its historical reconcile semantics untouched, and no
+	// bootstrap bytes are ever written to the LIVE tree before apply validates
+	// the whole plan.
+	if len(bootstrap) > 0 {
+		if _, statErr := os.Stat(filepath.Join(target, harnessProfileName)); os.IsNotExist(statErr) {
+			stagedProfile := filepath.Join(staging, filepath.FromSlash(harnessProfileName))
+			if err := os.MkdirAll(filepath.Dir(stagedProfile), 0o755); err != nil {
+				return nil, nil, nil, fmt.Errorf("seam: stage bootstrap profile dir: %w", err)
+			}
+			if err := os.WriteFile(stagedProfile, bootstrap, 0o644); err != nil {
+				return nil, nil, nil, fmt.Errorf("seam: stage bootstrap profile: %w", err)
+			}
+		}
 	}
 	// Phase 5 modules deprecation: warn (to the swappable profileDeprecationSink)
 	// when the LIVE profile still carries a non-empty `modules:` list. Because it

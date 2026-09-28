@@ -373,7 +373,7 @@ func TestCoherence_ProspectiveWarningFiresOnIncoherentStaging(t *testing.T) {
 		t.Fatalf("write staged config: %v", err)
 	}
 	stderr := captureStderr(t, func() {
-		warnIfGatedCommitIncoherent(root, staging)
+		warnIfGatedCommitIncoherent(root, staging, nil)
 	})
 	for _, want := range []string{"PROSPECTIVE", "core/gated-commit", "committer", "restart opencode"} {
 		if !strings.Contains(stderr, want) {
@@ -415,7 +415,7 @@ func TestCoherence_ProspectiveWarningFiresOnIncoherentStaging(t *testing.T) {
 		t.Fatalf("write staged config 2: %v", err)
 	}
 	stderr2 := captureStderr(t, func() {
-		warnIfGatedCommitIncoherent(root2, staging2)
+		warnIfGatedCommitIncoherent(root2, staging2, nil)
 	})
 	for _, want := range []string{"PROSPECTIVE", "NOT selected", "committer", "emitter/template regression"} {
 		if !strings.Contains(stderr2, want) {

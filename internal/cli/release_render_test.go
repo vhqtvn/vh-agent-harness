@@ -341,7 +341,7 @@ func TestSeamRender_ReleaseViaOverlaysConvergesWithCapabilities(t *testing.T) {
 // pack leaks into every render.
 func TestSeamRender_ReleaseUnselectedRendersNeitherPackNorClosure(t *testing.T) {
 	root := t.TempDir()
-	seamInstallInto(t, root)
+	seamInstallMinimalInto(t, root)
 	writeProfile(t, root, "profile: minimal\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\n")
 	if _, err := seamUpdateOut(t, root); err != nil {
 		t.Fatalf("update with minimal profile: %v", err)
@@ -365,7 +365,10 @@ func TestSeamRender_ReleaseUnselectedRendersNeitherPackNorClosure(t *testing.T) 
 // release pack to the embedded tree must not break existing supervised repos.
 func TestSeamRender_SupervisedKeepsReleaseDormant(t *testing.T) {
 	root := t.TempDir()
-	seamInstallInto(t, root)
+	// Seed supervised from the first render on (explicit --profile selector), so
+	// no full-recipe residue can blur the dormancy assertions. The bare default
+	// now installs the frozen FULL recipe, which deliberately selects release.
+	seamInstallPresetInto(t, root, "supervised")
 	writeProfile(t, root, "profile: supervised\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\n")
 	if _, err := seamUpdateOut(t, root); err != nil {
 		t.Fatalf("update with profile:supervised: %v", err)

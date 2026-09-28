@@ -817,6 +817,15 @@ develop the harness.
 - **Keep `templates/core/` domain-free.** No brand/domain literals; use
   `{{PROJECT_NAME}}` / `{{PROJECT_SLUG}}` / `{{COORDINATOR_DIR}}` tokens. Project
   specifics belong in overlays, never in core.
+- **Future shipped surface requires an explicit default-in/default-out
+  decision.** A new overlay pack or core capability ships ONLY together with a
+  ledger entry in `internal/cli/bootstrap_inventory_test.go` (decision `in` or
+  `out`); an `in` decision also adds the item to the frozen greenfield recipe
+  `templates/install/full-harness-profile.yml` in the same change. The
+  inventory coverage test fails until the decision exists. NEVER widen the
+  `templates/core` minimal default to distribute new surface — reconciliation
+  unions it into every existing install. Never select discovered directories
+  at runtime.
 - **The binary/command is `vh-agent-harness`**, never the generic `harness`. The
   concept word "harness" stays in prose; only the binary identity is full.
 - **`go test ./...`, `gofmt`, and `go vet` must pass** before commit.

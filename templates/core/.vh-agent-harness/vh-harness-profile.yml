@@ -9,6 +9,15 @@
 # This is the platform DEFAULT (v1): the minimal core corpus. Overlays widen
 # modules/overlays/features in later slices; the schema
 # (internal/schema/harness_profile.go) is the contract.
+#
+# DUAL-PURPOSE SEPARATION: this file is the RECONCILIATION BASELINE only — the
+# arrays here are unioned into EXISTING live profiles on every update, so they
+# must stay minimal (widening them would backfill every installed harness).
+# The greenfield full-install selection lives SEPARATELY in the frozen,
+# install-only recipe at templates/install/full-harness-profile.yml
+# (corpus.InstallFS; never rendered, never reconciled). Do not widen this
+# default to distribute new surface — record a default-in/default-out decision
+# in the bootstrap inventory ledger instead (see the recipe's header comment).
 profile: minimal
 features:
   backlog: true

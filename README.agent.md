@@ -27,7 +27,8 @@ ambiguous/unsafe plan aborts before writing.
 
 ## Phases `guide` reports
 
-- **greenfield** — no harness here. → `install --name <Name> --slug <slug>`.
+- **greenfield** — no harness here. → `install --name <Name> --slug <slug>`
+  (seeds the FULL surface by default; `--minimal` for the lean shape).
 - **adoptable** — an existing `.opencode` not yet managed by vh-agent-harness.
   → `install` adopts it; managed files are refreshed, your project-owned files
   preserved. Preview with `--dry-run` first.
@@ -93,7 +94,7 @@ real target locations.
 | `.vh-agent-harness/project.config.json` | Fill `project.mission_summary` + `architecture_summary` (and `db_user`/`db_name` if used). Resolved into the seeded `CLAUDE.md`/`Makefile` at install — **create + fill it BEFORE `install`** (those seeds are written once). A field that does NOT apply (e.g. `db_user`/`db_name` when there is no database) may be set to a blessed N/A sentinel — `none` / `n/a` / `null` / `na` (case-insensitive; string form only — write `"null"`, not bare JSON `null`): it renders empty and silences the `token(s) UNRESOLVED` warning for that field. |
 | `.vh-agent-harness/AGENTS.mission.md` | Write the project's domain mission/architecture/rules; composed into root `AGENTS.md` on `update`. |
 | `.vh-agent-harness/vh-harness-profile.yml` | (armed, seeded) Select features + `overlays: [<pack>]` (S3). |
-| `.vh-agent-harness/run-shape.yml` | (seeded host-shell) Set runtime `backend:` (`host-shell`/`docker_compose`/`proxy`) + `compose_file`/`default_service` or `proxy_command`; lifecycle hooks/verbs (S4). |
+| `.vh-agent-harness/run-shape.yml` | (seeded host-shell) Set runtime `backend:` (`host-shell`/`docker-compose`/`proxy`) + `compose_file`/`default_service` or `proxy_command`; lifecycle hooks/verbs (S4). |
 | `.vh-agent-harness/harness-ownership.yml` | (optional; not seeded) Raise-only ownership overrides — create only to take a managed file to `project_owned`. |
 | `.vh-agent-harness/product-prefixes.json` | (optional; not seeded) Declare the product-code surface (directory prefixes) for the coordination cross-boundary-slice hint. Absent or malformed → monorepo default `apps/` + `packages/`; create only for a non-monorepo layout (e.g. `src/`). Read at runtime by `coordination-hints-lib.js` (not the render seam). |
 | `.vh-agent-harness/overlays/<pack>/` | Project overlay: `agents/`, `commands/`, `skills/`, `opencode-append.jsonc`, `permission-pack.jsonc`, `callable-graph-snippet.md`. |
@@ -415,6 +416,52 @@ other four (`release`, `auto-classifier-pilot`, `repo-mail`,
 renders nothing of them). A project-local pack of the same name still shadows
 the embed wholly.
 
+### Greenfield bootstrap default (frozen full recipe)
+
+A **greenfield** `install` (no live `.vh-agent-harness/vh-harness-profile.yml`)
+with NO selector seeds the **frozen full recipe** — `supervised` preset + every
+shipped core capability + every shipped overlay pack, explicitly enumerated —
+embedded binary-only at `templates/install/full-harness-profile.yml`
+(`corpus.InstallFS`; never rendered as a repo file, never reconciled). `--full`
+pins the same recipe explicitly; `--minimal` seeds the historical minimal
+default; `--profile <preset>` seeds the default carrying that preset.
+
+Properties (load-bearing):
+
+- **Existing installs are never touched.** The recipe lives OUTSIDE
+  `templates/core` because recurring reconciliation UNIONs the core default's
+  arrays into every existing live profile — a widened default would backfill
+  installed harnesses. Bootstrap selection flows only through the greenfield
+  install path and never leaks into `update`/`doctor`. (The first `update`
+  after a full install normalizes the seeded file to canonical YAML form —
+  the SELECTION is preserved exactly; only comments/serialization change,
+  which is standard armed-file reconcile behavior for any profile that
+  differs from the platform default.)
+- **Selectors are greenfield-only.** `--full` / `--minimal` /
+  `--profile <preset>` against a target with an existing live profile are
+  rejected as usage errors BEFORE any write. A no-selector install over an
+  existing install keeps the historical reconcile semantics (live selection
+  preserved).
+- **Preview/apply parity.** One effective profile drives staged profile bytes,
+  capability selection, overlay rendering, and the `--dry-run` preview; the
+  preview reports the same effective selection apply seeds.
+- **Incomplete install exits non-zero.** A live install whose generation
+  applied partially reports the failed writes and exits 1 (lineage not
+  advanced). `update` keeps its own exit contract.
+- **Replay + selection report.** Install prints the effective selection with
+  its source and a shell-safe `replay:` command preserving target and identity
+  flags; a default-full replay is pinned to `--full`.
+
+**Future-inventory policy (maintainers):** every overlay pack or core
+capability shipped in the binary requires an explicit **default-in /
+default-out** decision at introduction time, recorded in the inventory ledger
+in `internal/cli/bootstrap_inventory_test.go`; an `in` decision adds the item
+to the frozen recipe in the same change. The inventory coverage test fails
+(`make check`) until the decision exists, and a deliberate `out` decision
+PASSES — the ledger is a genuine decision surface, not a forever-full
+assertion. Never widen the `templates/core` minimal default to distribute new
+surface.
+
 ### Auto-classifier configuration
 
 The `auto-classifier-pilot` overlay renders 5 plugins (the `auto-tool-gate`
@@ -722,7 +769,14 @@ export default function transform({ context }) {
 ### Setup & configuration
 
 - **Install / adopt:** `vh-agent-harness install --name <Name> --slug <slug>`
-  (run with `--dry-run` first). Then `vh-agent-harness guide` for config steps.
+  (run with `--dry-run` first). On a GREENFIELD target a no-selector install
+  seeds the frozen FULL recipe (supervised preset + every shipped core
+  capability + every shipped overlay pack — see "Greenfield bootstrap
+  default" below); `--minimal` seeds the historical 8-agent baseline,
+  `--profile <preset>` seeds a specific preset. Selectors are mutually
+  exclusive and REJECTED on an existing install (edit
+  `vh-harness-profile.yml` + `update` instead). Then `vh-agent-harness guide`
+  for config steps.
 - **Add domain agents/commands/skills:** `vh-agent-harness overlay new <pack>
   --agent <n> [--command <n>] [--skill <n>]` scaffolds the pack and wires it into
   `vh-harness-profile.yml` in one command (see "Scaffolding an overlay pack"

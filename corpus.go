@@ -64,17 +64,38 @@ const OverlaysDir = "templates/overlays"
 
 // OverlaysFS is the read-only embedded overlay packs tree. Callers read from
 // the OverlaysDir sub-directory. internal/overlay lists/opens packs from here.
-// Currently embeds six shipped packs — `auto-classifier-pilot` (opt-in
+// Currently embeds seven shipped packs — `auto-classifier-pilot` (opt-in
 // auto-classifier safety pilot), `release` (Phase-3 capability-installer
-// reference), `repo-mail` (repo-mail egress-gate wiring overlay), and three
+// reference), `repo-mail` (repo-mail egress-gate wiring overlay),
+// `frontend-ui-pilot` (frontend-UI perception/integration pilot), and three
 // skills-only overlay pilots (`contract-invariant-audit-pilot`,
 // `formal-verification-pilot`, `resolve-first-pilot`) that are strictly
 // INFORMS-only (no agent/command/permission/gate) — plus the retained .gitkeep;
 // KnownPacks() returns the sorted directory list and OpenPack(<name>) opens any
-// of them.
+// of them. Every pack added here requires an explicit default-in/default-out
+// decision in the bootstrap inventory ledger (see templates/install/
+// full-harness-profile.yml and internal/cli/bootstrap_inventory_test.go).
 //
 //go:embed all:templates/overlays
 var OverlaysFS embed.FS
+
+// InstallDir is the embed.FS sub-directory holding the INSTALL-ONLY bootstrap
+// recipe (full-harness-profile.yml). These files are BINARY-ONLY: they are NOT
+// under templates/core, so the substrate seam never renders them into a target
+// repo. `vh-agent-harness install` (greenfield, no selector or --full) seeds
+// the recipe's bytes at the target's .vh-agent-harness/vh-harness-profile.yml
+// through the normal armed-seed apply path. This is deliberately SEPARATE from
+// the minimal platform default in templates/core: recurring reconciliation
+// unions default arrays into existing live profiles, so the greenfield full
+// selection must live outside the reconciliation baseline to avoid backfilling
+// existing installs.
+const InstallDir = "templates/install"
+
+// InstallFS is the read-only install-bootstrap tree. The install verb reads
+// the frozen full recipe from the InstallDir sub-directory.
+//
+//go:embed all:templates/install
+var InstallFS embed.FS
 
 // ExamplesDir is the embed.FS sub-directory holding configuration DOCS/TEMPLATES
 // for every project-configurable file, mirroring the real target path of each

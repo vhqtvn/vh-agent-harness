@@ -186,7 +186,7 @@ func runAcceptPlatform(cmd *cobra.Command, args []string) (err error) {
 	// install identity (project_name/slug) so the render is faithful to the
 	// original install (same as update).
 	answers := installRenderAnswers(abs)
-	ps, cleanup, perr := prepareSeamStaging(abs, answers)
+	ps, cleanup, perr := prepareSeamStaging(abs, answers, nil)
 	if perr != nil {
 		return fmt.Errorf("accept-platform: %w", perr)
 	}
