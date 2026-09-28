@@ -31,7 +31,7 @@ export const server = async ({ client, directory }) => {
 - Never commit \`./tmp/\` contents or ad hoc scratch files.
 - Clean up temporary scripts/logs/downloads when the task completes.
 
-Reference: docs/ai/codebase-operational-primitives.md (canonical source)`,
+Reference: docs/ai/codebase-operational-primitives.md (when one exists; do not fail when absent)`,
             );
         },
     };

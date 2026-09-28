@@ -44,8 +44,9 @@ Route on the first argument (the subcommand):
   transport. It must NOT be used to bypass the accept/reject gate.
 
 Workflow:
-- consult `docs/ai/codebase-operational-primitives.md` for canonical paths and
-  conventions before acting.
+- consult `docs/ai/codebase-operational-primitives.md` (when one exists) for
+  canonical paths and conventions before acting — skip without failing when
+  absent.
 - this command is the sanctioned intake surface. The `/init` direct-write path
   (a model writing `SKILL.md` directly into `.opencode/skills/`) is REJECTED —
   do not propose by installing; propose by capturing a card here.

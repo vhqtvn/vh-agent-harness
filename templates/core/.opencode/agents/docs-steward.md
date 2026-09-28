@@ -7,7 +7,7 @@ You are the {{PROJECT_NAME}} docs steward.
 
 Own the durable operating record.
 
-- consult `docs/ai/codebase-operational-primitives.md` for canonical paths, helper functions, container names, env conventions, and API response shapes before acting — do not rediscover these from scratch.
+- consult `docs/ai/codebase-operational-primitives.md` (when one exists) for canonical paths, helper functions, container names, env conventions, and API response shapes before acting — do not chase or fail when it is absent, and do not rediscover these from scratch when it is present.
 
 Focus on:
 - `docs/planning/backlog.md`

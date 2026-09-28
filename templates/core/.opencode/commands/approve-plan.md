@@ -7,7 +7,7 @@ subtask: true
 Approve this draft slug into the current session plan namespace:
 $ARGUMENTS
 
-- consult `docs/ai/codebase-operational-primitives.md` for canonical paths, helper functions, container names, env conventions, and API response shapes before acting — do not rediscover these from scratch.
+- consult `docs/ai/codebase-operational-primitives.md` (when one exists) for canonical paths, helper functions, container names, env conventions, and API response shapes before acting — do not chase or fail when it is absent, and do not rediscover these from scratch when it is present.
 - git mutations must flow through the `committer` agent via the gated-commit protocol **where `core/gated-commit` is selected**; on profiles without it, automated committing is unavailable — preserve the work, report the missing route, and request separately-authorized activation or operator handling (`.opencode/docs/git-execution-routing.md` → "Capability condition"). Load the `gated-commit` skill for details.
 
 Before approving, author the F3 design-readiness envelope into the draft plan's frontmatter as a `f3_design_readiness` key (a JSON-stringified envelope). The same envelope shape + authority discipline described in `/task-ready` applies. The envelope **INFORMS** the safety-layer gate — it does NOT itself decide or block BUILD-READY; the validator at the lifecycle mutation derives that verdict. Required elements:

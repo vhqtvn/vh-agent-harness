@@ -14,7 +14,7 @@ Subagents do not automatically inherit the top-level `instructions` array — re
 - `AGENTS.md` — repo-wide rules, including the "Shell, container, and workspace hygiene" and "Demo API authentication and routes" sections.
 - `docs/ai/shell-execution.md` — the `vh-agent-harness exec` golden rule and the `Forbidden patterns` table backed by `shell-guard`.
 - `docs/ai/deployment-workflow.md` — project VPS release flow, if present.
-- `docs/ai/codebase-operational-primitives.md` — canonical paths, helper functions, container names, env conventions, and API response shapes.
+- `docs/ai/codebase-operational-primitives.md` (when one exists) — canonical paths, helper functions, container names, env conventions, and API response shapes; skip without failing when absent.
 
 If your mission text and these docs disagree, surface the conflict to the operator instead of silently picking one.
 
