@@ -20,7 +20,7 @@ var logsCmd = &cobra.Command{
 	Short: "Show harness runtime logs",
 	Long: `Tail or snapshot logs from the runtime backend.
 
-docker_compose: ` + "`docker compose logs [--follow] [service]`" + `.
+docker-compose: ` + "`docker compose logs [--follow] [service]`" + `.
 bare: returns an error (no managed services to log).
 
 Without a service argument, logs for all services are shown.`,
@@ -39,7 +39,7 @@ var psCmd = &cobra.Command{
 	Short: "Show harness runtime service status",
 	Long: `List runtime services and their status.
 
-docker_compose: ` + "`docker compose ps`" + `.
+docker-compose: ` + "`docker compose ps`" + `.
 bare: returns an error (no managed services to list).`,
 	Args: cobra.NoArgs,
 	RunE: runPs,

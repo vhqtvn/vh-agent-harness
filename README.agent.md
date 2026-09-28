@@ -824,7 +824,7 @@ export default function transform({ context }) {
   exec-ro is a HOST-SIDE INTENT CLASSIFIER that runs BEFORE backend dispatch: it
   classifies the command against the host repo path, then delegates to the
   selected runtime backend. It is NOT proof that the backend payload is
-  OS-sandboxed or on read-only mounts — under proxy/docker_compose the classified
+  OS-sandboxed or on read-only mounts — under proxy/docker-compose the classified
   command runs in-container against the container's filesystem view. This is a
   general read-only execution gate enforced INSIDE the Go binary (a separate,
   narrower gate than `exec`). It is allowlisted in `opencode.jsonc` as
@@ -856,7 +856,7 @@ export default function transform({ context }) {
     per-binary safe-flag allowlist is deferred and the OS-level exec-sandbox is
     the authoritative layer for the long tail of unknown flags ON THE HOST-SHELL
     BACKEND — exec-sandbox is host-local-only and does not follow the payload
-    into a proxy/docker_compose container. The `readonly`
+    into a proxy/docker-compose container. The `readonly`
     group entry itself is left as `find *` / `sort *` / `sed -n *` on purpose:
     it also feeds the shell-guard L2 permission.bash emission for ALL agents,
     and widening it would emit a broader prompt-free rule for every agent and
@@ -875,7 +875,7 @@ export default function transform({ context }) {
     a per-verb safe-flag allowlist is deferred and the OS-level exec-sandbox is
     the authoritative layer for the long tail of unknown flags ON THE HOST-SHELL
     BACKEND (exec-sandbox is host-local-only and does not follow the payload into
-    a proxy/docker_compose container) — including diff/log textconv, which is
+    a proxy/docker-compose container) — including diff/log textconv, which is
     default-on when configured via gitattributes and is therefore a residual the
     flag-level denylist cannot fully close).
   - **Shell metacharacters are refused** (conservative deny-on-unparseable): any
@@ -909,7 +909,7 @@ export default function transform({ context }) {
   another verb. For separately identified, explicitly granted host-local
   read-code work, use `vh-agent-harness exec-sandbox` when the calling role has
   the grant AND the applicable mode-floor (`exec_sandbox.min_mode`) supplies the
-  required containment; it does NOT follow a command into `proxy`/`docker_compose`
+  required containment; it does NOT follow a command into `proxy`/`docker-compose`
   backends. Use `exec` for genuine mutation, anything with shell plumbing, or
   runtime/backend execution.
 - **Run a command under a kernel-enforced HOST-LOCAL Linux sandbox:** `vh-agent-harness exec-sandbox [--sandbox=off|best-effort|strict] [--net=deny|allow|ask] -- <cmd>`. An optional **mode floor** (`exec_sandbox.min_mode` in `run-shape.yml`) can clamp the effective mode UP so a caller can never run below the configured minimum (see "Mode floor" below).
@@ -917,7 +917,7 @@ export default function transform({ context }) {
   **Two execution planes (read this).** The exec commands look like one family
   but sit on two disjoint planes. `exec` and `exec-ro` dispatch through
   `resolveBackend()` and are runtime-backend-aware: under `host-shell` they run
-  on the host; under `proxy`/`docker_compose` they run INSIDE the container.
+  on the host; under `proxy`/`docker-compose` they run INSIDE the container.
   `exec-sandbox` is a HOST-LOCAL Landlock+seccomp trampoline that NEVER calls
   `resolveBackend` and always runs on the host. The Landlock/seccomp
   restrictions apply only to the host process tree directly launched by the
@@ -1061,7 +1061,7 @@ export default function transform({ context }) {
   command cannot write outside the repo/tmp contract or make unauthorized network
   connections. Compose with exec-ro on the host-shell backend: exec-ro is the
   fast pre-filter; exec-sandbox is the authoritative backstop — but ONLY for
-  host-local execution. Under proxy/docker_compose, exec-ro's classified command
+  host-local execution. Under proxy/docker-compose, exec-ro's classified command
   runs in-container and exec-sandbox cannot follow it; use backend-native
   container security for in-container containment.
 

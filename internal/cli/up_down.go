@@ -18,7 +18,7 @@ var upCmd = &cobra.Command{
 	Short: "Start the harness runtime backend",
 	Long: `Start the runtime backend declared by the manifest (manifest.runtime.backend).
 
-docker_compose: runs ` + "`docker compose up -d`" + ` after a daemon-reachability preflight.
+docker-compose: runs ` + "`docker compose up -d`" + ` after a daemon-reachability preflight.
 If the daemon/compose is unavailable, the command fails with guidance and does
 NOT silently fall back to the bare backend.
 
@@ -33,7 +33,7 @@ var downCmd = &cobra.Command{
 	Short: "Stop the harness runtime backend",
 	Long: `Stop the runtime backend declared by the manifest.
 
-docker_compose: runs ` + "`docker compose down`" + ` after a daemon-reachability preflight.
+docker-compose: runs ` + "`docker compose down`" + ` after a daemon-reachability preflight.
 bare: prints a no-isolation warning and does nothing.`,
 	Args: cobra.NoArgs,
 	RunE: runDown,

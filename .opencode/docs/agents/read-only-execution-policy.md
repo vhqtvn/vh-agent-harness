@@ -139,10 +139,10 @@ DENY is final — never rewrite or rerun the denied command through another verb
 3. **Explicitly granted host-local read-code:** use
    `vh-agent-harness exec-sandbox` only when the calling role has that grant AND
    the applicable `exec_sandbox.min_mode` supplies the required containment.
-   `exec-sandbox` is host-local only — it does NOT follow a command into `proxy`
-   or `docker_compose` backends; preserved/upgrade run-shapes may lack the floor
-   entirely, in which case this rung is unavailable.
-4. **`proxy`/`docker_compose` backend work:** do not use `exec-sandbox`; it is
+    `exec-sandbox` is host-local only — it does NOT follow a command into `proxy`
+    or `docker-compose` backends; preserved/upgrade run-shapes may lack the floor
+    entirely, in which case this rung is unavailable.
+ 4. **`proxy`/`docker-compose` backend work:** do not use `exec-sandbox`; it is
    host-local only. Use backend-native containment or the authorized runtime
    path, or request handoff.
 5. **Genuine mutation:** use an authorized editable role and the appropriate

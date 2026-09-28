@@ -43,7 +43,7 @@ Checks (PASS/FAIL/WARN/SKIP), exit non-zero if any check FAILs:
   eval.js        .opencode/plugins/shell-guard/eval.js present       FAIL if absent
   node_modules   .opencode/node_modules present                      WARN if absent
   lineage        .vh-agent-harness/lineage.yml present + parseable    FAIL if leaked
-  runtime        backend reachable (docker_compose probes daemon)    WARN if unreachable
+  runtime        backend reachable (docker-compose probes daemon)    WARN if unreachable
   managed-drift  no platform-managed drift vs the re-rendered corpus  FAIL if drift present
 
 On a seam install (lineage present) the lineage/runtime/drift checks run against

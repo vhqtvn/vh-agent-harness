@@ -64,7 +64,7 @@ func denyFooter(repoRoot string) string {
 		"consider a separate explicit 'vh-agent-harness exec-sandbox' invocation — " +
 		"when the calling role has the grant AND the applicable mode-floor supplies " +
 		"the required containment (active floor: " + floor + ").\n" +
-		"- exec-sandbox does NOT follow a command into proxy or docker_compose backends.\n" +
+		"- exec-sandbox does NOT follow a command into proxy or docker-compose backends.\n" +
 		"- For backend-executed work, use backend-native containment or hand off to an authorized role.\n" +
 		"- For genuinely mutating work, use the proper executable/editing role — " +
 		"do not disguise mutation as read-only.\n" +

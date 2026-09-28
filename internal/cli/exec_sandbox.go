@@ -38,7 +38,7 @@ var execSandboxCmd = &cobra.Command{
 	SilenceUsage: true,
 	Long: `exec-sandbox is a HOST-LOCAL Linux sandbox front door. It does NOT resolve
 or dispatch through the configured runtime backend (host-shell / proxy /
-docker_compose) — it always runs on the host. The Landlock (filesystem
+docker-compose) — it always runs on the host. The Landlock (filesystem
 integrity) + pure-Go seccomp-BPF (network + high-risk syscall hardening)
 restrictions apply to the host process tree directly launched by the
 sandbox trampoline. They do NOT become Docker, proxy, or remote-backend
@@ -53,7 +53,7 @@ It composes two pure-Go, unprivileged, kernel-enforcing primitives in a
 two-stage re-exec trampoline. It is layered WITH exec-ro — it does NOT
 replace it — but it is NOT the authoritative OS layer behind exec-ro across
 all backends: exec-ro classifies the command host-side and then dispatches
-through the runtime backend (under proxy/docker_compose the classified
+through the runtime backend (under proxy/docker-compose the classified
 command runs in-container), while exec-sandbox is host-local-only and never
 reaches the backend. Use exec-sandbox when you want kernel-enforced
 host-local write/network containment.
