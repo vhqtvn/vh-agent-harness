@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -67,6 +68,38 @@ exec_sandbox:
 		if !fields[want] {
 			t.Fatalf("missing expected error field %q in %+v", want, errs)
 		}
+	}
+}
+
+func TestRunShapeValidateBackendEnum(t *testing.T) {
+	// Both documented spellings of the docker backend validate: `docker-compose`
+	// (hyphen, the canonical public enum) and `docker_compose` (underscore, the
+	// legacy manifest spelling; internal/cli normalizeDockerBackend collapses
+	// both onto the internal token at runtime). Every other enum member too.
+	for _, be := range []string{"bare", "host-shell", "proxy", "docker-compose", "docker_compose"} {
+		raw := []byte("runtime:\n  backend: " + be + "\n")
+		if errs := (RunShape{}).Validate(raw); len(errs) != 0 {
+			t.Fatalf("backend=%q: expected no errors, got %+v", be, errs)
+		}
+	}
+
+	// A third, bogus form is rejected with a message listing BOTH valid
+	// spellings, canonical hyphen first.
+	errs := (RunShape{}).Validate([]byte("runtime:\n  backend: dockercompose\n"))
+	if len(errs) != 1 {
+		t.Fatalf("bogus backend: expected exactly 1 error, got %+v", errs)
+	}
+	e := errs[0]
+	if e.Field != "runtime.backend" {
+		t.Fatalf("bogus backend: field = %q, want runtime.backend", e.Field)
+	}
+	hyphen := strings.Index(e.Message, "docker-compose")
+	underscore := strings.Index(e.Message, "docker_compose")
+	if hyphen < 0 || underscore < 0 {
+		t.Fatalf("bogus backend: message %q must list both spellings (docker-compose, docker_compose)", e.Message)
+	}
+	if hyphen > underscore {
+		t.Fatalf("bogus backend: canonical hyphen spelling must come first in %q", e.Message)
 	}
 }
 

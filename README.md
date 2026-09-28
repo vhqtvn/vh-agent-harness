@@ -39,7 +39,7 @@ Add `--json` for machine-readable output.
 - **Ownership classes** decide what a re-render may touch: `platform_managed`
   (force-overwritten), `platform_armed` (schema-reconciled), `project_owned`
   (seeded once, then preserved forever), `overlay_extension`, `external_generated`.
-- **Runtime backend abstraction** (`host-shell`, `docker_compose`, `bare`,
+- **Runtime backend abstraction** (`host-shell`, `docker-compose`, `bare`,
   `proxy`) selected by `.vh-agent-harness/run-shape.yml`; `exec`/`shell` run the
   shell-guard permission gate first.
 - **Lineage-governed, repo-relative state**: `.vh-agent-harness/lineage.yml` is
