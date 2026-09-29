@@ -2,6 +2,7 @@ package jsonc
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -122,5 +123,98 @@ func TestParse_FullJSONCDocument(t *testing.T) {
 	bash := perm["bash"].(map[string]any)
 	if bash["*"] != "deny" || bash["ls *"] != "allow" {
 		t.Fatalf("bash block wrong: %v", bash)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Shared stripper-parity fixture corpus (testdata/stripper-parity-fixtures.
+// json). This corpus is the single source of truth for the Go↔JS stripper
+// twin-parity obligation: internal/permission's scratch-install parity test
+// (TestWrapperGrantNaming_JSONCStripperTwinParity) drives the corpus plugin's
+// JS twins (templates/core/.opencode/plugins/shell-guard.js
+// stripJSONCComments/stripJSONCTrailingCommas, feeding parseJSONCTolerant)
+// over the SAME fixtures and asserts byte-identical normalization against
+// Normalize — so a semantic change on either side trips a test instead of
+// silently re-diverging the twin.
+// ---------------------------------------------------------------------------
+
+// stripperParityFixture is one shared-corpus row. Parses records whether the
+// fixture is expected to normalize to valid JSON (the malformed-input rows
+// pin the fail-closed direction: the stripper passes them through verbatim
+// and encoding/json still rejects them — never silently repaired).
+type stripperParityFixture struct {
+	Name   string `json:"name"`
+	Input  string `json:"input"`
+	Parses bool   `json:"parses"`
+}
+
+func loadStripperParityFixtures(t *testing.T) []stripperParityFixture {
+	t.Helper()
+	data, err := os.ReadFile("testdata/stripper-parity-fixtures.json")
+	if err != nil {
+		t.Fatalf("read shared fixture corpus: %v", err)
+	}
+	var fixtures []stripperParityFixture
+	if err := json.Unmarshal(data, &fixtures); err != nil {
+		t.Fatalf("parse shared fixture corpus: %v", err)
+	}
+	if len(fixtures) == 0 {
+		t.Fatalf("shared fixture corpus must not be empty")
+	}
+	return fixtures
+}
+
+// TestNormalize_SharedFixtureCorpus: every shared-corpus fixture normalizes
+// exactly as its Parses flag predicts — valid-JSONC rows become parseable
+// JSON; malformed rows stay unparseable after normalization (fail-closed).
+func TestNormalize_SharedFixtureCorpus(t *testing.T) {
+	for _, f := range loadStripperParityFixtures(t) {
+		f := f
+		t.Run(f.Name, func(t *testing.T) {
+			out := Normalize([]byte(f.Input))
+			err := json.Unmarshal(out, new(any))
+			if f.Parses && err != nil {
+				t.Fatalf("fixture must normalize to valid JSON: %v\ninput:  %q\noutput: %q", err, f.Input, string(out))
+			}
+			if !f.Parses && err == nil {
+				t.Fatalf("fixture marked parses=false must stay unparseable after normalization (fail-closed); got valid JSON: %q", string(out))
+			}
+		})
+	}
+}
+
+// TestNormalize_CRLFAndEOFEdges pins EXACT normalized output for the two
+// stripper edge fixtures left unpinned by the ad36dfa review advisory (folded
+// here, and mirrored into the shared corpus by name so the JS twin is held
+// to the same bytes by the parity test):
+//   - crlf-line-comment: a // line comment ending in CRLF — the \r is INSIDE
+//     the comment and is stripped with it; only the \n survives (line
+//     structure stays stable for diagnostics).
+//   - eof-line-comment-no-newline: a // line comment terminated by EOF with
+//     no trailing newline — the comment simply ends with the input; the
+//     preceding newline survives.
+func TestNormalize_CRLFAndEOFEdges(t *testing.T) {
+	want := map[string]string{
+		"crlf-line-comment":           "{\"a\": 1, \n \"b\": 2}",
+		"eof-line-comment-no-newline": "{\"a\": 1}\n",
+	}
+	seen := map[string]bool{}
+	for _, f := range loadStripperParityFixtures(t) {
+		wantOut, ok := want[f.Name]
+		if !ok {
+			continue
+		}
+		f, wantOut := f, wantOut
+		seen[f.Name] = true
+		t.Run(f.Name, func(t *testing.T) {
+			if got := string(Normalize([]byte(f.Input))); got != wantOut {
+				t.Fatalf("Normalize = %q; want %q", got, wantOut)
+			}
+		})
+	}
+	for name := range want {
+		if !seen[name] {
+			t.Errorf("advisory edge fixture %q is missing from the shared corpus — the exact pin no longer tests anything", name)
+		}
 	}
 }

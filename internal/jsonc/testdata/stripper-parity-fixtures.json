@@ -1,0 +1,92 @@
+[
+  {
+    "name": "plain-json",
+    "input": "{\"a\": 1, \"b\": [1, 2]}",
+    "parses": true
+  },
+  {
+    "name": "line-comment-preserves-newline",
+    "input": "{\"a\": 1 // trailing\n, \"b\": 2}",
+    "parses": true
+  },
+  {
+    "name": "block-comment-inline",
+    "input": "{\"a\": /* inline block */ 1, \"b\": 2}",
+    "parses": true
+  },
+  {
+    "name": "string-with-double-slash-url",
+    "input": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"agent\": {}\n}",
+    "parses": true
+  },
+  {
+    "name": "string-with-block-comment-opener",
+    "input": "{\"x\": \"a /* not a comment */ b\", \"y\": 2}",
+    "parses": true
+  },
+  {
+    "name": "escaped-quote-then-comment-text",
+    "input": "{\"echo \\\"quoted\\\" // still not a comment *\": \"allow\"}",
+    "parses": true
+  },
+  {
+    "name": "escaped-backslash-before-close",
+    "input": "{\"a\": \"c:\\\\\", \"b\": \"d\\\"e\"}",
+    "parses": true
+  },
+  {
+    "name": "object-trailing-comma",
+    "input": "{\"a\": 1, \"b\": 2,}",
+    "parses": true
+  },
+  {
+    "name": "array-trailing-comma",
+    "input": "[\"a\", \"b\",]",
+    "parses": true
+  },
+  {
+    "name": "nested-trailing-commas",
+    "input": "{\"a\": [1, 2,], \"b\": {\"c\": 3,},}",
+    "parses": true
+  },
+  {
+    "name": "comma-inside-string",
+    "input": "{\"a\": \"hello, world\", \"b\": 2,}",
+    "parses": true
+  },
+  {
+    "name": "trailing-comma-crlf-before-brace",
+    "input": "{\"a\": 1,\r\n}",
+    "parses": true
+  },
+  {
+    "name": "crlf-line-comment",
+    "input": "{\"a\": 1, // c\r\n \"b\": 2,}",
+    "parses": true
+  },
+  {
+    "name": "eof-line-comment-no-newline",
+    "input": "{\"a\": 1}\n// eof comment",
+    "parses": true
+  },
+  {
+    "name": "eof-block-comment-unterminated",
+    "input": "{\"a\": 1} /* never closed",
+    "parses": true
+  },
+  {
+    "name": "full-jsonc-document",
+    "input": "{\n  // top-level comment\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"permission\": {\n    \"bash\": {\n      \"*\": \"deny\", // wildcard\n      \"ls *\": \"allow\",\n    },\n  },\n}",
+    "parses": true
+  },
+  {
+    "name": "unicode-string-values",
+    "input": "{\"k\": \"héllo // ✓\", \"j\": \"/* ✓ */\"}",
+    "parses": true
+  },
+  {
+    "name": "unterminated-string-keeps-everything",
+    "input": "{\"a\": \"unterminated // not a comment",
+    "parses": false
+  }
+]

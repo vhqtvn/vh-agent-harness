@@ -40,18 +40,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vhqtvn/vh-agent-harness/internal/jsonc"
 )
 
-// wrapperNamingScratch stages a scratch install with the wrapper + core +
-// repo-configs and an opencode.jsonc whose grants exercise the naming, then
-// writes the driver. Returns the driver path (run: node <driver> "<command>").
-func wrapperNamingScratch(t *testing.T, opencodeJSONC string) string {
+// stageWrapperScratch stages a scratch install with the wrapper + core +
+// repo-configs from the corpus templates and returns the scratch root (which
+// contains the .opencode/ tree). Node itself is required (skip otherwise).
+func stageWrapperScratch(t *testing.T) string {
 	t.Helper()
-	nodeBin, err := exec.LookPath("node")
-	if err != nil {
+	if _, err := exec.LookPath("node"); err != nil {
 		t.Skipf("node not available: %v", err)
 	}
-	_ = nodeBin
 
 	modRoot := findModuleRoot(t)
 	tmplOpencode := filepath.Join(modRoot, "templates", "core", ".opencode")
@@ -88,6 +88,15 @@ func wrapperNamingScratch(t *testing.T, opencodeJSONC string) string {
 			t.Fatalf("write %s: %v", dst, err)
 		}
 	}
+	return scratch
+}
+
+// wrapperNamingScratch stages a scratch install with the wrapper + core +
+// repo-configs and an opencode.jsonc whose grants exercise the naming, then
+// writes the driver. Returns the driver path (run: node <driver> "<command>").
+func wrapperNamingScratch(t *testing.T, opencodeJSONC string) string {
+	t.Helper()
+	scratch := stageWrapperScratch(t)
 	if opencodeJSONC != "" {
 		if err := os.WriteFile(filepath.Join(scratch, "opencode.jsonc"), []byte(opencodeJSONC), 0o644); err != nil {
 			t.Fatalf("write opencode.jsonc: %v", err)
@@ -465,5 +474,101 @@ func TestWrapperGrantNaming_NonTrailingStarNeverListed(t *testing.T) {
 	}
 	if !strings.Contains(msg, "Commands outside the read-only inspection surface") {
 		t.Errorf("plain engine deny must stand; got:\n%s", msg)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Go↔JS JSONC stripper-twin parity (card jsonc-stripper-twin-parity). The
+// corpus plugin carries JS twins of internal/jsonc's strippers
+// (stripJSONCComments/stripJSONCTrailingCommas in shell-guard.js, feeding
+// parseJSONCTolerant — see the wrapper's JSONC reader contract). They are
+// module-internal, so this drives them through a scratch-only re-export: the
+// corpus file is copied verbatim into the scratch install by
+// stageWrapperScratch and ONE export line is appended to the COPY (the corpus
+// template itself is never touched). The appended export binds to the same
+// function declarations, so a corpus rename/removal of the strippers fails
+// the driver import loudly — the parity obligation trips instead of silently
+// testing nothing.
+//
+// The fixture corpus is shared with internal/jsonc (its testdata file is the
+// single source of truth; the Go side also pins it there, including the two
+// ad36dfa advisory EOF/CRLF edges). Parity is asserted on the FULL pipeline
+// both readers run: stripJSONCTrailingCommas ∘ stripJSONCComments ≡
+// jsonc.Normalize, byte for byte, across the corpus.
+// ---------------------------------------------------------------------------
+
+func TestWrapperGrantNaming_JSONCStripperTwinParity(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skipf("node not available: %v", err)
+	}
+	fixturesPath := filepath.Join(findModuleRoot(t), "internal", "jsonc", "testdata", "stripper-parity-fixtures.json")
+	fixturesAbs, err := filepath.Abs(fixturesPath)
+	if err != nil {
+		t.Fatalf("abs fixtures path: %v", err)
+	}
+	data, err := os.ReadFile(fixturesPath)
+	if err != nil {
+		t.Fatalf("read shared fixture corpus: %v", err)
+	}
+	var corpus []struct {
+		Name  string `json:"name"`
+		Input string `json:"input"`
+	}
+	if err := json.Unmarshal(data, &corpus); err != nil {
+		t.Fatalf("parse shared fixture corpus: %v", err)
+	}
+	if len(corpus) == 0 {
+		t.Fatalf("shared fixture corpus must not be empty")
+	}
+
+	scratch := stageWrapperScratch(t)
+	sgPath := filepath.Join(scratch, ".opencode", "plugins", "shell-guard.js")
+	src, err := os.ReadFile(sgPath)
+	if err != nil {
+		t.Fatalf("read scratch shell-guard.js: %v", err)
+	}
+	appendExport := "\n// scratch-only test re-export (the corpus template is never modified)\nexport { stripJSONCComments, stripJSONCTrailingCommas };\n"
+	if err := os.WriteFile(sgPath, append(src, []byte(appendExport)...), 0o644); err != nil {
+		t.Fatalf("append scratch re-export: %v", err)
+	}
+
+	driver := `
+import { readFileSync } from "node:fs";
+import { stripJSONCComments, stripJSONCTrailingCommas } from "./.opencode/plugins/shell-guard.js";
+const fixtures = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const out = fixtures.map((f) => stripJSONCTrailingCommas(stripJSONCComments(f.input)));
+process.stdout.write(JSON.stringify(out));
+`
+	driverPath := filepath.Join(scratch, "stripper-parity-driver.mjs")
+	if err := os.WriteFile(driverPath, []byte(driver), 0o644); err != nil {
+		t.Fatalf("write driver: %v", err)
+	}
+
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatalf("node disappeared: %v", err)
+	}
+	out, err := exec.Command(nodeBin, driverPath, fixturesAbs).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("stripper parity driver failed: %v\nstderr:\n%s", err, ee.Stderr)
+		}
+		t.Fatalf("run stripper parity driver: %v", err)
+	}
+	var jsOut []string
+	if err := json.Unmarshal(out, &jsOut); err != nil {
+		t.Fatalf("parse driver output %q: %v", string(out), err)
+	}
+	if len(jsOut) != len(corpus) {
+		t.Fatalf("driver returned %d outputs; want %d (corpus length)", len(jsOut), len(corpus))
+	}
+	for i, f := range corpus {
+		i, f := i, f
+		t.Run(f.Name, func(t *testing.T) {
+			want := string(jsonc.Normalize([]byte(f.Input)))
+			if jsOut[i] != want {
+				t.Fatalf("JS stripper twin diverged from internal/jsonc:\ninput:        %q\ngo (Normalize): %q\njs (strippers): %q", f.Input, want, jsOut[i])
+			}
+		})
 	}
 }
