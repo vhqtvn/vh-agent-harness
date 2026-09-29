@@ -380,9 +380,15 @@ func TestInstall_ConflictingSelectorsRejected(t *testing.T) {
 //     live apply lands, modulo exactly the post-apply side effects the dry
 //     run skips by contract (lineage, run-shape seed, origin-hashes sidecar,
 //     rendered-outputs manifest, materialized context docs, empty agent-model
-//     seeds; the AGENTS.md compose output needs no modulo entry — root
-//     AGENTS.md is a plan-listed rendered file, and compose is a no-op on a
-//     greenfield target with no AGENTS.mission.md). Same paths, same write
+//     seeds; root AGENTS.md needs no unconditional modulo entry —
+//     composeAgentsMd (seam.go) runs only when a target-side
+//     .vh-agent-harness/AGENTS.mission.md exists, the sole compose input the
+//     corpus does not already supply (compose also no-ops without
+//     AGENTS.core.md, which always ships); the corpus ships no mission and
+//     overlay packs render only under .opencode/ so no pack can supply one,
+//     so compose is a no-op on this greenfield target; the conditional
+//     sideEffects entry below mirrors that gate and covers a future corpus
+//     mission automatically). Same paths, same write
 //     actions: nothing planned-but-missing, nothing applied-but-unplanned.
 //     On a greenfield target every planned action must be a WRITE (seed,
 //     armed reconcile, or overwrite-of-absent) — a preserve/conflict action
@@ -473,6 +479,16 @@ func TestInstall_PreviewApplyParity(t *testing.T) {
 	}
 	for _, key := range contextDocKeys {
 		sideEffects[path.Join(runshape.DirName, contextDocsSubdir, key+".md")] = true
+	}
+	// composeAgentsMd's mission opt-in is the only one of its gate
+	// conditions that can differ on a greenfield target (AGENTS.core.md
+	// always ships), so mirror it here: this self-disarms while the corpus
+	// ships no AGENTS.mission.md and auto-covers root AGENTS.md the day one
+	// lands. (proposals.jsonl is the opposite, deliberate call: never written
+	// on greenfield, so an unexpected write must stay LOUD below rather than
+	// being pre-armed.)
+	if _, err := os.Stat(filepath.Join(applyRoot, runshape.DirName, "AGENTS.mission.md")); err == nil {
+		sideEffects["AGENTS.md"] = true
 	}
 	// Every planned path landed as a file in the applied tree.
 	for p, action := range plan {
