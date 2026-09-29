@@ -186,6 +186,19 @@ func TestDeadGrantLint_EngineParityByClass(t *testing.T) {
 		// 06 gate-wrapper deny — MIRRORED (anchor; carve-outs in Fixtures).
 		{pattern: "vh-agent-harness exec .opencode/scripts/commit-gate.sh acquire *", wantDead: true, wantClass: DenyClassGateWrapper,
 			branch: "06 gate-wrapper deny", disposition: "mirrored"},
+		// 06 over-carve-out breadth — the row-06 "known breadth" documented
+		// in dead_grant_lint.go, machine-pinned here: the engine grammar
+		// admits exactly ONE operand after `bash -n` (ending in
+		// commit-gate.sh, command ends there — isStaticGateInspection-
+		// InDevShExec), so an extra operand falls OUT of the engine's
+		// carve-out and the gate-wrapper deny fires; the lint's
+		// isStaticGateInspectionShape carves out ANY `exec bash -n` prefix.
+		// The divergence points fail-open (more carve-out = fewer flags —
+		// a missed advisory, never a false positive), and tightening the
+		// recognizer is a pinned non-goal. This row trips if that breadth
+		// is ever narrowed silently.
+		{pattern: "vh-agent-harness exec bash -n .opencode/scripts/commit-gate.sh extra-arg", wantDead: false,
+			branch: "06 gate-wrapper deny (over-carve-out breadth)", disposition: "fail-open breadth: engine requires exactly one operand after bash -n and denies the excess; lint carves out the whole prefix — must stay not-flagged"},
 		// 03 forbidden-pattern scan overlap: `apt install` hits the
 		// apt-install-ad-hoc forbidden pattern (the engine's first-firing
 		// deny) AND fails the allowlist — flagged with the non-allowlist
