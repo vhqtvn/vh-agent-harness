@@ -50,8 +50,8 @@ the read-only execution DECISION LADDER so an agent knows what to do next:
   2. exec-sandbox for explicitly-granted, host-local read-code / complex
      read-only work under a mode-floor (exec_sandbox.min_mode) — but ONLY when
      the calling role has the grant AND the applicable floor supplies the
-      required containment. exec-sandbox does NOT follow a command into proxy or
-      docker-compose backends (it is host-local only).
+     required containment. exec-sandbox does NOT follow a command into proxy or
+     docker-compose backends (it is host-local only).
   3. full vh-agent-harness exec (or the bare command) when runtime/backend
      execution or mutation authority is genuinely needed.
 

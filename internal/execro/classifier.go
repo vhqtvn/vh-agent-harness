@@ -37,7 +37,7 @@ type Verdict struct {
 // full read-only execution ladder (exec-ro → exec-sandbox → full exec) with
 // the two load-bearing caveats:
 //   - exec-sandbox is HOST-LOCAL only — it does NOT follow a command into
-//     proxy/docker_compose backends.
+//     proxy or docker-compose backends.
 //   - exec-sandbox requires an applicable mode-floor (exec_sandbox.min_mode)
 //     supplied by the project's run-shape.yml; preserved/upgrade run-shapes
 //     may lack it.

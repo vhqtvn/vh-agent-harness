@@ -70,7 +70,7 @@
     ".opencode/docs/agents/callable-graph.md": "sha256:e4c5eacd5b44eec1b609181d7ab9e968e52a88267535a5e33e8dcc3035482bf6",
     ".opencode/docs/agents/commit-reviewer-modes.md": "sha256:a85eb2edd5c7c889225a22ac7085cf4ce352cfa5eb2e8761c384f8c4c0228ac6",
     ".opencode/docs/agents/permission-templates.md": "sha256:9d9c2cbd2d2f350126ca62c8e6c0d26c27f47ddfdb3b4e2bf98a5bec42eae89b",
-    ".opencode/docs/agents/read-only-execution-policy.md": "sha256:57e436a8b93c9f33bb826eae343b6a15af8184289f164c22b21609861a4ffbb7",
+    ".opencode/docs/agents/read-only-execution-policy.md": "sha256:efd0c5899fdcc8ea424d0107f13e352bac9409fac7ae195053674f3c8e8a439f",
     ".opencode/docs/compaction-prevention-policy.md": "sha256:a762731122ada14c8eb6d0488402bc7fb12d5b97f4f4094527fe8caa4954ba57",
     ".opencode/docs/git-execution-routing.md": "sha256:1e6117d2237504035b66f9f4dc4cd777a8ada25e8eeb3f9b688cfe2fe250fb1f",
     ".opencode/package.json": "sha256:b5a27ffed644142e732a29fce22a6faa4827dca3e6ab8c8812ab4cb94329d7d9",

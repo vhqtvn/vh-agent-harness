@@ -22,7 +22,7 @@ var (
 //
 // exec-sandbox is a HOST-LOCAL Linux sandbox front door. It does NOT resolve or
 // dispatch through the configured runtime backend (host-shell / proxy /
-// docker_compose) — it always runs on the host. It composes Landlock
+// docker-compose) — it always runs on the host. It composes Landlock
 // (filesystem integrity) with pure-Go seccomp-BPF (network + syscall
 // hardening) in a two-stage re-exec trampoline. The Landlock/seccomp
 // restrictions apply only to the host process tree directly launched by the
