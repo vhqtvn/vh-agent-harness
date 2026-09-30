@@ -51,6 +51,10 @@ const harnessDogfoodManifestYAML = "id: project/harness-dogfood\nprovides:\n  - 
 
 // harnessDogfoodAppendJSONC mirrors the real pack's opencode-append.jsonc
 // agent block. The {file:...} prompt form is the A-F1 contract under test.
+// It also mirrors the pack's local `agent.researcher.steps: 50` override (the
+// dogfood repo's researcher headroom; the core template default stays 30) so
+// the render seam can pin its propagation — see
+// TestSeamRender_LocalResearcherStepsOverride in capability_render_test.go.
 const harnessDogfoodAppendJSONC = `{
   "agent": {
     "harness-release-readiness": {
@@ -63,6 +67,9 @@ const harnessDogfoodAppendJSONC = `{
         "task": { "__placeholder__": "deny" },
         "edit": "deny"
       }
+    },
+    "researcher": {
+      "steps": 50
     }
   }
 }

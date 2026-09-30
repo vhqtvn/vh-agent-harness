@@ -33,6 +33,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -782,4 +784,246 @@ func TestSeamRender_WorkerReadOnly_Unselected(t *testing.T) {
 			t.Errorf("%s -> worker-read-only task edge must NOT render when core/worker-read-only is unselected", caller)
 		}
 	}
+}
+
+// --- local researcher steps override (harness-dogfood append) ---------------
+
+// coreTemplateSteps pins every `steps` value the core template ships for the
+// agents that carry one, under the repo-like profile this slice renders
+// (supervised preset + core/media-perception + core/worker-read-only — the
+// dogfood repo's own vh-harness-profile.yml shape). researcher is deliberately
+// EXCLUDED here: it is the one value the local overlay overrides, so each test
+// phase asserts it explicitly (30 baseline, 50 overridden).
+var coreTemplateSteps = map[string]int{
+	"coordination":        50,
+	"project-coordinator": 50,
+	"planner":             50,
+	"solution-brief":      60,
+	"debate":              40,
+	"debate-proposer":     20,
+	"debate-critic":       20,
+	"debate-synth":        20,
+	"repo-explorer":       30,
+	"media-perception":    30,
+	"worker-read-only":    30,
+}
+
+// stepsUncappedAgents is every agent that must carry NO `steps` key (absent
+// key = engine-unlimited). releaser and harness-release-readiness render only
+// in the overlay phase (via the harness-dogfood → core/release closure); in
+// the baseline phase they have no block at all, and a missing block also
+// yields a nil steps pointer, so one list serves both phases.
+var stepsUncappedAgents = []string{
+	"plan",
+	"build",
+	"docs-steward",
+	"commit-message",
+	"commit-reviewer",
+	"commit-reviewer-a",
+	"commit-reviewer-b",
+	"commit-reviewer-c",
+	"commit-reviewer-d",
+	"committer",
+	"ship-review",
+	"releaser",
+	"harness-release-readiness",
+}
+
+// parseRenderedAgentSteps reads the rendered opencode.jsonc and returns, per
+// agent, a pointer to its `steps` value. A nil pointer means the key is ABSENT
+// (engine semantics: unlimited) — deliberately distinct from a present value,
+// so the uncapped contract asserts key absence, not falsiness.
+func parseRenderedAgentSteps(t *testing.T, root string) map[string]*int {
+	t.Helper()
+	cfg, err := os.ReadFile(filepath.Join(root, "opencode.jsonc"))
+	if err != nil {
+		t.Fatalf("read opencode.jsonc: %v", err)
+	}
+	var doc struct {
+		Agent map[string]struct {
+			Steps *int `json:"steps"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(cfg, &doc); err != nil {
+		t.Fatalf("unmarshal opencode.jsonc: %v\n--- cfg ---\n%s", err, cfg)
+	}
+	out := make(map[string]*int, len(doc.Agent))
+	for name, a := range doc.Agent {
+		out[name] = a.Steps
+	}
+	return out
+}
+
+// stepsValue renders a *int for failure messages ("absent" for nil).
+func stepsValue(p *int) string {
+	if p == nil {
+		return "absent"
+	}
+	return strconv.Itoa(*p)
+}
+
+// assertCoreStepsContractExceptResearcher asserts every non-researcher capped
+// agent carries its core-template steps value and every uncapped agent has NO
+// steps key. researcher is asserted by the caller because it differs per phase.
+func assertCoreStepsContractExceptResearcher(t *testing.T, steps map[string]*int, phase string) {
+	t.Helper()
+	for _, name := range capRenderSortedKeysSteps(coreTemplateSteps) {
+		want := coreTemplateSteps[name]
+		if got := steps[name]; got == nil || *got != want {
+			t.Errorf("%s: agent %q steps = %s, want %d (core-template value must be unchanged)", phase, name, stepsValue(got), want)
+		}
+	}
+	for _, name := range stepsUncappedAgents {
+		if got := steps[name]; got != nil {
+			t.Errorf("%s: agent %q must have NO steps key (uncapped by design); got %d", phase, name, *got)
+		}
+	}
+}
+
+// capRenderSortedKeysSteps returns coreTemplateSteps' keys in sorted order for
+// deterministic failure iteration.
+func capRenderSortedKeysSteps(m map[string]int) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// assertResearcherCoreSiblings pins that the researcher block keeps its
+// core-template sibling fields under the overlay override: the append's scalar
+// deep-merge must override ONLY `steps`, never replace the block. Also pins
+// the capability-gated task edges (media-perception allow; worker-read-only
+// deliberately absent — researcher is not a declared caller) so the override
+// provably coexists with permconfig's authoritative permission emission.
+func assertResearcherCoreSiblings(t *testing.T, root, phase string) {
+	t.Helper()
+	cfg, err := os.ReadFile(filepath.Join(root, "opencode.jsonc"))
+	if err != nil {
+		t.Fatalf("read opencode.jsonc: %v", err)
+	}
+	// Decode the agent map as RawMessage so sibling agents with structurally
+	// different blocks (e.g. harness-release-readiness's OBJECT-form edit from
+	// its editOverrides) cannot break the shared decode; only researcher's
+	// bytes are unmarshaled into the detailed shape below.
+	var doc struct {
+		Agent map[string]json.RawMessage `json:"agent"`
+	}
+	if err := json.Unmarshal(cfg, &doc); err != nil {
+		t.Fatalf("unmarshal opencode.jsonc: %v\n--- cfg ---\n%s", err, cfg)
+	}
+	raw, ok := doc.Agent["researcher"]
+	if !ok {
+		t.Fatalf("%s: researcher agent block missing from rendered config", phase)
+	}
+	var res struct {
+		Description string  `json:"description"`
+		Mode        string  `json:"mode"`
+		Color       string  `json:"color"`
+		Prompt      string  `json:"prompt"`
+		Temperature float64 `json:"temperature"`
+		Permission  struct {
+			Edit     map[string]string `json:"edit"`
+			Webfetch string            `json:"webfetch"`
+			Task     map[string]string `json:"task"`
+		} `json:"permission"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		t.Fatalf("%s: unmarshal researcher block: %v\n--- researcher ---\n%s", phase, err, raw)
+	}
+	const wantDesc = "Read-only researcher for durable source packets, option comparisons, and contradiction audit"
+	if res.Description != wantDesc {
+		t.Errorf("%s: researcher.description = %q, want core-template %q", phase, res.Description, wantDesc)
+	}
+	if res.Mode != "subagent" {
+		t.Errorf("%s: researcher.mode = %q, want %q", phase, res.Mode, "subagent")
+	}
+	if res.Color != "warning" {
+		t.Errorf("%s: researcher.color = %q, want %q", phase, res.Color, "warning")
+	}
+	if want := "{file:.opencode/agents/researcher.md}"; res.Prompt != want {
+		t.Errorf("%s: researcher.prompt = %q, want %q", phase, res.Prompt, want)
+	}
+	if res.Temperature != 0.1 {
+		t.Errorf("%s: researcher.temperature = %v, want 0.1", phase, res.Temperature)
+	}
+	// edit: the emitter canonicalizes researcher (a Level-B read-only
+	// specialist) to OBJECT form — broad deny plus the repo-tmp/** carve-out.
+	// That emitted shape is the sibling that must survive the overlay merge.
+	if res.Permission.Edit["*"] != "deny" {
+		t.Errorf("%s: researcher.permission.edit[\"*\"] = %q, want %q", phase, res.Permission.Edit["*"], "deny")
+	}
+	if res.Permission.Edit["tmp/**"] != "allow" {
+		t.Errorf("%s: researcher.permission.edit[tmp/**] = %q, want %q (Level-B read-only tmp carve-out)", phase, res.Permission.Edit["tmp/**"], "allow")
+	}
+	if res.Permission.Webfetch != "allow" {
+		t.Errorf("%s: researcher.permission.webfetch = %q, want %q", phase, res.Permission.Webfetch, "allow")
+	}
+	if res.Permission.Task["*"] != "deny" {
+		t.Errorf("%s: researcher.permission.task[\"*\"] = %q, want %q", phase, res.Permission.Task["*"], "deny")
+	}
+	if res.Permission.Task["media-perception"] != "allow" {
+		t.Errorf("%s: researcher.permission.task[media-perception] = %q, want %q (capability selected)", phase, res.Permission.Task["media-perception"], "allow")
+	}
+	if _, present := res.Permission.Task["worker-read-only"]; present {
+		t.Errorf("%s: researcher.permission.task must NOT carry worker-read-only (researcher is not a declared caller)", phase)
+	}
+}
+
+// TestSeamRender_LocalResearcherStepsOverride is the render-propagation
+// regression for the dogfood repo's local researcher headroom: the
+// harness-dogfood overlay's `agent.researcher.steps: 50` append must land in
+// the rendered opencode.jsonc while (a) the core-template default stays 30 in
+// a no-overlay render of the SAME embedded corpus, (b) researcher's sibling
+// fields survive the scalar deep-merge, (c) every other capped agent keeps its
+// core value, and (d) every uncapped agent's steps key stays absent — the
+// overlay must not silently widen into other agents.
+//
+// The profile mirrors this repo's own vh-harness-profile.yml shape (supervised
+// + core/media-perception + core/worker-read-only; the auto-classifier-pilot
+// overlay is omitted because it carries no steps surface). HONEST scope: this
+// proves CONFIG PROPAGATION only — that the override value reaches the
+// rendered config with siblings intact. It does not prove improved research
+// outcomes or calibrated thresholds.
+func TestSeamRender_LocalResearcherStepsOverride(t *testing.T) {
+	const baselineProfile = "profile: supervised\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\ncapabilities:\n  - core/media-perception\n  - core/worker-read-only\n"
+	const overrideProfile = "profile: supervised\nfeatures:\n  backlog: true\noverlays: [harness-dogfood]\npolicy_packs: []\ncapabilities:\n  - core/media-perception\n  - core/worker-read-only\n"
+
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	// --- Phase 1: baseline, NO overlay — the core-template steps contract ---
+	writeProfile(t, root, baselineProfile)
+	if _, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("baseline update (no overlay): %v", err)
+	}
+	steps := parseRenderedAgentSteps(t, root)
+	if got := steps["researcher"]; got == nil || *got != 30 {
+		t.Errorf("baseline: researcher.steps = %s, want 30 (core-template default before any override)", stepsValue(got))
+	}
+	assertCoreStepsContractExceptResearcher(t, steps, "baseline")
+	assertResearcherCoreSiblings(t, root, "baseline")
+
+	// --- Phase 2: overlay opted in — researcher 50, everything else pinned ---
+	writeHarnessDogfoodPack(t, root)
+	writeProfile(t, root, overrideProfile)
+	if _, err := seamUpdateOut(t, root); err != nil {
+		t.Fatalf("override update (overlays:[harness-dogfood]): %v", err)
+	}
+	// The overlay closure adds releaser + harness-release-readiness; both must
+	// actually render before their uncapped assertion can mean "block present,
+	// steps key absent" rather than "no block at all".
+	rendered := parseRenderedAgents(t, root)
+	for _, name := range []string{"releaser", "harness-release-readiness", "researcher"} {
+		if !rendered[name] {
+			t.Fatalf("override: agent %q must render (overlay/closure/baseline roster); rendered=%v", name, capRenderSortedKeys(rendered))
+		}
+	}
+	steps = parseRenderedAgentSteps(t, root)
+	if got := steps["researcher"]; got == nil || *got != 50 {
+		t.Errorf("override: researcher.steps = %s, want 50 (local harness-dogfood override must propagate to the rendered config)", stepsValue(got))
+	}
+	assertCoreStepsContractExceptResearcher(t, steps, "override")
+	assertResearcherCoreSiblings(t, root, "override")
 }

@@ -2167,7 +2167,7 @@
                 "webfetch": "allow"
             },
             "prompt": "{file:.opencode/agents/researcher.md}",
-            "steps": 30,
+            "steps": 50,
             "temperature": 0.1
         },
         "ship-review": {

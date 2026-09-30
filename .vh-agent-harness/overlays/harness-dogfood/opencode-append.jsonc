@@ -26,6 +26,18 @@
         "task": { "__placeholder__": "deny" },
         "edit": "deny"
       }
+    },
+    // Local researcher step headroom (dogfood-only override, 2026-10-01):
+    // sequential source-gathering / contradiction-audit dispatches can exceed
+    // the core 30-iteration fence; 50 keeps a finite assistant-loop backstop.
+    // A steps value is an iteration fence, not a spend, wall-clock, or
+    // permission limit. The core template default deliberately stays 30 —
+    // this override rests on local evidence only. Lineage: trueai 6/8 →
+    // silent ~10x retune 2026-05-03 (3f6d0696, no recorded rationale) →
+    // frozen into corpus (07b05c7). Deep-merge note: this scalar override
+    // preserves researcher's sibling fields; it adds no other agent keys.
+    "researcher": {
+      "steps": 50
     }
   }
 }
