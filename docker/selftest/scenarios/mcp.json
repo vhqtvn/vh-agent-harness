@@ -1,0 +1,11 @@
+[
+  {"tool_calls":[
+    {"id":"mcp1","name":"mcp_localmock_echo","args":{"text":"stdio-payload"}},
+    {"id":"mcp2","name":"mcp_remotemock_echo","args":{"text":"http-payload"}}
+  ]},
+  {"tool_calls":[
+    {"id":"mcp3","name":"mcp_deadmock"},
+    {"id":"mcp4","name":"mcp_garbagemock_echo","args":{"text":"x"}}
+  ]},
+  {"text":"mcp round trip complete"}
+]

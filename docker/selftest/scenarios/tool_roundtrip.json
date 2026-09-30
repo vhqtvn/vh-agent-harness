@@ -1,0 +1,4 @@
+[
+  {"tool_calls": [{"id": "call-echo-1", "name": "echo", "args": {"text": "round-trip-payload"}}]},
+  {"text": "tool round trip complete"}
+]

@@ -426,24 +426,44 @@ func TestFindMinMode(t *testing.T) {
 	if _, err := LoadMinMode(dirRepo); err == nil {
 		t.Fatalf("LoadMinMode(directory at floor path): expected fail-closed error, got nil")
 	}
+}
 
-	// FAIL-CLOSED: an unreadable floor path (stat error other than not-exist).
-	// chmod the PARENT dir (.vh-agent-harness/) to 0000 so os.Stat itself is
-	// denied (non-traversable), directly exercising FindMinMode's default
-	// stat-error switch branch — the load-bearing D1 fail-closed arm. Skip under
-	// root (root bypasses DAC permissions, so the test would not trigger).
-	if os.Geteuid() != 0 {
-		permRepo := t.TempDir()
-		writeRawRunShape(t, permRepo, "exec_sandbox:\n  min_mode: strict\n")
-		permParent := filepath.Join(permRepo, DirName)
-		if err := os.Chmod(permParent, 0o000); err != nil {
-			t.Fatalf("chmod parent: %v", err)
-		}
-		// Restore before TempDir's own cleanup removes the tree (LIFO: this runs
-		// first, so the dir is traversable again for removal).
-		t.Cleanup(func() { _ = os.Chmod(permParent, 0o755) })
-		if _, _, err := FindMinMode(permRepo); err == nil {
-			t.Fatalf("FindMinMode(unreadable parent dir): expected fail-closed error from the default stat-error branch, got nil")
-		}
+// requireNonRoot skips the test when running as root (euid 0): root's
+// DAC_OVERRIDE ignores directory permission bits, so the chmod-0000
+// untraversable-parent injection cannot make os.Stat fail (the stat
+// succeeds and the fail-closed assertion mis-fires).
+// Same canonical helper shape as internal/session, internal/renderstate,
+// internal/cli, and internal/substrate (package-local on purpose: Go test
+// packages cannot share helpers without an import).
+func requireNonRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: DAC_OVERRIDE bypasses permission bits; cannot inject stat-failure EACCES")
+	}
+}
+
+// TestFindMinMode_UnreadableParentDirFailsClosed locks the D1 fail-closed arm:
+// an unreadable floor path (stat error other than not-exist). chmod the PARENT
+// dir (.vh-agent-harness/) to 0000 so os.Stat itself is denied (non-traversable),
+// directly exercising FindMinMode's default stat-error switch branch.
+//
+// This arm was formerly the tail of TestFindMinMode behind an
+// `if os.Geteuid() != 0` branch-gate with no else — under root the whole
+// injection was silently skipped while the test still reported PASS (the
+// false-green class: coverage loss was invisible). Extracted here so the
+// root-skip is an explicit, visible t.Skip via the canonical helper.
+func TestFindMinMode_UnreadableParentDirFailsClosed(t *testing.T) {
+	requireNonRoot(t)
+	permRepo := t.TempDir()
+	writeRawRunShape(t, permRepo, "exec_sandbox:\n  min_mode: strict\n")
+	permParent := filepath.Join(permRepo, DirName)
+	if err := os.Chmod(permParent, 0o000); err != nil {
+		t.Fatalf("chmod parent: %v", err)
+	}
+	// Restore before TempDir's own cleanup removes the tree (LIFO: this runs
+	// first, so the dir is traversable again for removal).
+	t.Cleanup(func() { _ = os.Chmod(permParent, 0o755) })
+	if _, _, err := FindMinMode(permRepo); err == nil {
+		t.Fatalf("FindMinMode(unreadable parent dir): expected fail-closed error from the default stat-error branch, got nil")
 	}
 }

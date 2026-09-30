@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":3,"result":{"content":"done","toolCalls":[{"id":"call-1","name":"read_file"}],"results":[{"callId":"call-1","name":"read_file","content":"42 files","isError":false}]}}

@@ -1121,15 +1121,33 @@ func TestApply_OriginHashPartialFailureSelfHealsOnRetry(t *testing.T) {
 // choice — the feature's core guarantee — is to PRESERVE (ActionManagedDiverged),
 // NOT fall through to overwrite, which would silently clobber a possible edit.
 //
-// This test relies on OS permission bits to enforce the read failure and SKIPS
-// under root / permissive filesystems (where reads succeed regardless of mode).
-// The DETERMINISTIC coverage of the same safety path — proving read-failure is
+// This test relies on OS permission bits to enforce the read failure and
+// skips when the bits cannot bind: under root via requireNonRoot (DAC_OVERRIDE
+// ignores the mode bits), and under a permissive filesystem via the post-chmod
+// read probe below (some mounts honor neither). The DETERMINISTIC coverage of
+// the same safety path — proving read-failure is
 // distinct from absent and unedited WITHOUT depending on OS perms — lives in
 // TestApply_OriginHashUnreadableLiveFile_Deterministic, which injects a known
 // read failure through the readLiveFile seam. Keep both: this one proves the
 // real-filesystem path works on platforms that honor the bits; the deterministic
 // one guarantees the behavior is observed in every CI environment.
+//
+// requireNonRoot skips the test when running as root (euid 0): root's
+// DAC_OVERRIDE ignores file permission bits, so the chmod-0200
+// write-but-not-read injection cannot make the live-file read fail (the
+// read succeeds and the preserved/diverged assertion mis-fires).
+// Same canonical helper shape as internal/session, internal/renderstate,
+// internal/cli, and internal/redlines (package-local on purpose: Go test
+// packages cannot share helpers without an import).
+func requireNonRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: DAC_OVERRIDE bypasses permission bits; cannot inject unreadable-live-file failure")
+	}
+}
+
 func TestApply_OriginHashUnreadableLiveFileIsPreserved(t *testing.T) {
+	requireNonRoot(t)
 	live := t.TempDir()
 	r := FixtureRenderer{TemplateRoot: corpusRoot}
 	const rel = ".vh-agent-harness/AGENTS.core.md" // authored platform_managed
@@ -1154,8 +1172,10 @@ func TestApply_OriginHashUnreadableLiveFileIsPreserved(t *testing.T) {
 	if err := os.Chmod(livePath, 0o200); err != nil {
 		t.Fatalf("chmod 0200: %v", err)
 	}
-	// Self-check: if reads still succeed (root, or a permissive filesystem), the
-	// write-but-not-read scenario is not enforceable here — skip, do not pass.
+	// Self-check (permissive-filesystem arm, uid-independent): if reads still
+	// succeed despite the mode bits — root is already skipped above by
+	// requireNonRoot, so this fires only on filesystems that honor neither —
+	// the write-but-not-read scenario is not enforceable here — skip, do not pass.
 	if _, rerr := os.ReadFile(livePath); rerr == nil {
 		t.Skip("cannot enforce write-but-not-read permissions on this platform/filesystem (reads succeed)")
 	}

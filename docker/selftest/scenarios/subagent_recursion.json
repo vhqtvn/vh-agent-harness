@@ -1,0 +1,5 @@
+[
+  {"tool_calls": [{"id": "call-spawn-1", "name": "subagent_spawn", "args": {"prompt": "compute the thing", "mode": "oneshot"}}]},
+  {"text": "child report: computed answer"},
+  {"text": "root done after subagent"}
+]

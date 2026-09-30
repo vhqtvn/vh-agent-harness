@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":12,"result":{"name":"nightly-digest","kind":"digest","at":"2026-08-21T00:00:00Z","every":3600000000000,"payload":{"job":"digest"},"nextRun":"2026-08-21T00:00:00Z"}}
