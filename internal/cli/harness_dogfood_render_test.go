@@ -25,9 +25,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/vhqtvn/vh-agent-harness/internal/jsonc"
 	"github.com/vhqtvn/vh-agent-harness/internal/overlay"
 	"github.com/vhqtvn/vh-agent-harness/internal/resolver"
 )
@@ -55,10 +57,13 @@ const harnessDogfoodManifestYAML = "id: project/harness-dogfood\nprovides:\n  - 
 // dogfood repo's researcher headroom; the core template default stays 30) so
 // the render seam can pin its propagation — see
 // TestSeamRender_LocalResearcherStepsOverride in capability_render_test.go.
+// The mirror is pinned 1:1 (parsed-block equality) against the REAL pack file
+// by TestHarnessDogfood_ResearcherStepsOverrideLiveSurfaces below, so a change
+// to either surface must land in both — the fixture cannot silently drift.
 const harnessDogfoodAppendJSONC = `{
   "agent": {
     "harness-release-readiness": {
-      "description": "Harness release-readiness reporter (dogfood).",
+      "description": "Harness release-readiness reporter (dogfood) — read-only orchestrator ABOVE the existing tag-driven releaser; answers 'is vh-agent-harness ready to hand off to releaser?' via a G0–G7 evidence checklist. Never tags/commits/pushes; edits ONLY the release-readiness-pass artifact at .vh-agent-harness/release-readiness-pass.json.",
       "mode": "subagent",
       "color": "accent",
       "prompt": "{file:.opencode/agents/harness-release-readiness.md}",
@@ -671,5 +676,80 @@ func assertReadinessArtifactCapabilityContent(t *testing.T, label, got string) {
 		if !strings.Contains(got, c.needle) {
 			t.Errorf("%s: missing %s — %q (readiness-artifact capability drifted out of the readiness agent)", label, c.name, c.needle)
 		}
+	}
+}
+
+// TestHarnessDogfood_ResearcherStepsOverrideLiveSurfaces is the two-surface
+// LIVENESS pin for the dogfood repo's local researcher headroom
+// (`agent.researcher.steps: 50`). TestSeamRender_LocalResearcherStepsOverride
+// (capability_render_test.go) proves CONFIG PROPAGATION in a hermetic temp
+// root; this test pins the value on BOTH real committed surfaces so a silent
+// revert fails CI even if the seam path itself stays green:
+//
+//  1. the REAL pack file
+//     .vh-agent-harness/overlays/harness-dogfood/opencode-append.jsonc (the
+//     authoritative overlay source — NOT the fixture mirror above) must parse
+//     (JSONC-aware) to agent.researcher.steps == 50;
+//  2. the LIVE rendered opencode.jsonc at the repo root (the surface the
+//     running opencode session actually consumes) must carry
+//     agent.researcher.steps == 50, and every OTHER agent must still match the
+//     core tier contract (coreTemplateSteps values, uncapped agents
+//     key-absent) — reusing assertCoreStepsContractExceptResearcher makes the
+//     no-silent-widening clause fall out for free.
+//
+// It also closes the old mirror-fidelity advisory (F4): the parsed agent
+// block of the fixture constant harnessDogfoodAppendJSONC must be
+// reflect.DeepEqual to the real pack's parsed agent block, so the hermetic
+// seam tests can never silently diverge from the real pack they mirror.
+//
+// Path/skip behavior: this follows the G6/G7 both-surface precedent in this
+// file — findModuleRoot locates the repo root deterministically (go.mod is
+// committed) and a moved/missing surface FAILS the test loudly rather than
+// skipping. A liveness tripwire that skips when files move would catch
+// nothing. HONEST scope: this pins CONFIG LIVENESS only, never research
+// outcomes.
+func TestHarnessDogfood_ResearcherStepsOverrideLiveSurfaces(t *testing.T) {
+	root := findModuleRoot(t)
+
+	// --- Surface 1: the REAL pack append (authoritative overlay source) ---
+	packRel := filepath.Join(".vh-agent-harness", "overlays", "harness-dogfood", "opencode-append.jsonc")
+	packBytes, err := os.ReadFile(filepath.Join(root, packRel))
+	if err != nil {
+		t.Fatalf("read real harness-dogfood append %s: %v", packRel, err)
+	}
+	// The real file is JSONC with comments — normalize before unmarshaling.
+	var packDoc struct {
+		Agent map[string]struct {
+			Steps *int `json:"steps"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(jsonc.Normalize(packBytes), &packDoc); err != nil {
+		t.Fatalf("unmarshal real pack append %s (after JSONC normalize): %v\n--- pack ---\n%s", packRel, err, packBytes)
+	}
+	if got := packDoc.Agent["researcher"].Steps; got == nil || *got != 50 {
+		t.Errorf("real pack append %s: agent.researcher.steps = %s, want 50 (a direct pack edit dropping the override fails here)", packRel, stepsValue(got))
+	}
+
+	// --- Surface 2: the LIVE rendered opencode.jsonc (repo root) ---
+	liveSteps := parseRenderedAgentSteps(t, root)
+	if got := liveSteps["researcher"]; got == nil || *got != 50 {
+		t.Errorf("live rendered opencode.jsonc: agent.researcher.steps = %s, want 50 (the override must reach the live config; a stale render or silent revert fails here)", stepsValue(got))
+	}
+	// Cheap no-silent-widening clause: every other capped agent keeps its
+	// core-template value and every uncapped agent's steps key stays absent
+	// in the live config too, not just in the hermetic seam render.
+	assertCoreStepsContractExceptResearcher(t, liveSteps, "live")
+
+	// --- Mirror fidelity (old advisory F4): fixture ≡ real pack, parsed ---
+	fixtureDoc, err := jsonc.Parse([]byte(harnessDogfoodAppendJSONC))
+	if err != nil {
+		t.Fatalf("parse harnessDogfoodAppendJSONC fixture: %v", err)
+	}
+	realDoc, err := jsonc.Parse(packBytes)
+	if err != nil {
+		t.Fatalf("parse real pack append %s: %v", packRel, err)
+	}
+	if !reflect.DeepEqual(fixtureDoc["agent"], realDoc["agent"]) {
+		t.Errorf("fixture harnessDogfoodAppendJSONC agent block must be parsed-equal to the real pack's agent block (mirror fidelity); the hermetic seam tests pin a fixture that drifted from %s", packRel)
 	}
 }

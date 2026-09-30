@@ -794,6 +794,16 @@ func TestSeamRender_WorkerReadOnly_Unselected(t *testing.T) {
 // dogfood repo's own vh-harness-profile.yml shape). researcher is deliberately
 // EXCLUDED here: it is the one value the local overlay overrides, so each test
 // phase asserts it explicitly (30 baseline, 50 overridden).
+//
+// INTENTIONAL COUPLING — do not "clean up" the duplication below. This map
+// deliberately DUPLICATES the `steps` literals shipped by
+// templates/core/opencode.jsonc.tmpl instead of deriving them by parsing that
+// template. The duplication IS the regression pin (the tripwire): any change
+// to a template `steps` value REQUIREs updating this map in the SAME commit,
+// and a missed update fails assertCoreStepsContractExceptResearcher here.
+// (Deriving the map from the template was considered and rejected: a parsed
+// map would assert the template against itself — a tautology that catches
+// no regression at all.)
 var coreTemplateSteps = map[string]int{
 	"coordination":        50,
 	"project-coordinator": 50,
