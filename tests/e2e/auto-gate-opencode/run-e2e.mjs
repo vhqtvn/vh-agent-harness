@@ -118,8 +118,19 @@ const TEST_DIR = "/opt/test";
 const AGENT_PORT = 8080;
 const CLASSIFIER_PORT = 8081;
 const CLASSIFIER2_PORT = 8082;
+const CLASSIFIER3_PORT = 8083;
 const PROMPT_TEXT = "Read /workspace/target.txt";
 const TARGET_CONTENT = "readable-target-content";
+// Blocked-Write denial-path case (surfaced deny string on a rejected Write).
+const WRITE_TARGET_PATH = "/workspace/write-target.txt";
+const WRITE_TARGET_ORIGINAL = "write-target-original-content";
+const WRITE_SENTINEL = "written-target-content-SENTINEL";
+// Contract-row sentinels (single-line, quote-free so JSON escaping cannot
+// break the secondBody substring matches).
+const R1_REASON = "[Rule-X] deletes protected branch";
+const CRED_TOKEN = "eyJleGFtcGxl.qm9o.signature";
+const SK_SENTINEL = "sk-abcdefghijklmnopqrstuvwxyz123456";
+const END_SENTINEL = "END-SENTINEL";
 
 // ── serve-mode constants ──────────────────────────────────────────────────
 const SERVE_PORT = 3000;
@@ -179,6 +190,13 @@ function writeOpencodeJson() {
     // NEVER fires for a pre-allowed read. Setting permission.read:"ask"
     // appends {read,*,ask} AFTER the default, so findLast picks "ask" and
     // the event fires.
+    //
+    // permission.edit:"ask" is the same shape for the blocked-Write
+    // denial-path case. NOTE: the `write` tool routes under the EDIT
+    // permission type upstream (tool/write.ts declares `permission: "edit"`),
+    // so the ask-rule must be keyed `edit`, not `write` — without it the
+    // default agent pre-allows the write and no permission.asked event fires
+    // (verified against the upstream clone inside the e2e image).
     const opencodeJson = {
         $schema: "https://opencode.ai/config.json",
         model: "mock/mock-model",
@@ -201,7 +219,7 @@ function writeOpencodeJson() {
                 },
             },
         },
-        permission: { read: "ask" },
+        permission: { read: "ask", edit: "ask" },
     };
     fs.writeFileSync(
         path.join(WORKSPACE, "opencode.json"),
@@ -262,36 +280,52 @@ function writeLlmConfig() {
     );
 }
 
-function writeLlmConfigTiered() {
-    // auto-gate-llm.json — TWO-LEAF tiered classifier config (live-tiered mode).
+function writeLlmConfigTiered(opts = {}) {
+    // auto-gate-llm.json — TIERED classifier config (live-tiered mode).
     //
     // Each leaf points at an INDEPENDENT classifier mock instance so the
-    // consensus path dispatches 2 parallel decideLive calls. Leaf A uses the
-    // primary classifier mock (:CLASSIFIER_PORT), leaf B uses the secondary
-    // classifier mock (:CLASSIFIER2_PORT). Each mock reads its own verdict
-    // control file, so the per-leaf verdict is independently controllable.
-    // The mock approach: 2 classifier instances on 2 ports, each with its own
-    // verdict control file (/tmp/classifier-verdict + /tmp/classifier-verdict-2).
-    // This gives clean per-leaf verdict differentiation for Cases E/F/G.
+    // consensus path dispatches parallel decideLive calls. Leaf A uses the
+    // primary classifier mock (:CLASSIFIER_PORT), leaf B the secondary
+    // (:CLASSIFIER2_PORT), leaf C (optional) the tertiary
+    // (:CLASSIFIER3_PORT). Each mock reads its own verdict control file, so
+    // the per-leaf verdict is independently controllable.
+    //
+    // opts (all optional):
+    //   leafCount   — 2 (default) or 3 leaves. 3 leaves requires the third
+    //                 classifier mock (mixed judgment+infra rows).
+    //   timeoutMs / maxRetries / retryDelayMs — per-leaf timing overrides
+    //                 (defaults keep the historical values; the HANG case
+    //                 shortens timeoutMs and disables retries so the true
+    //                 AbortError path fires fast and deterministically).
+    const {
+        leafCount = 2,
+        timeoutMs = 5000,
+        maxRetries = 1,
+        retryDelayMs = 200,
+    } = opts;
+    const leafSpecs = [
+        {
+            endpoint: `http://127.0.0.1:${CLASSIFIER_PORT}/v1/chat/completions`,
+            model: "mock-classifier-a",
+        },
+        {
+            endpoint: `http://127.0.0.1:${CLASSIFIER2_PORT}/v1/chat/completions`,
+            model: "mock-classifier-b",
+        },
+        {
+            endpoint: `http://127.0.0.1:${CLASSIFIER3_PORT}/v1/chat/completions`,
+            model: "mock-classifier-c",
+        },
+    ].slice(0, leafCount);
     const llmConfig = {
-        leaves: [
-            {
-                modelEndpoint: `http://127.0.0.1:${CLASSIFIER_PORT}/v1/chat/completions`,
-                model: "mock-classifier-a",
-                apiKeyEnv: "AUTO_GATE_API_KEY",
-                timeoutMs: 5000,
-                maxRetries: 1,
-                retryDelayMs: 200,
-            },
-            {
-                modelEndpoint: `http://127.0.0.1:${CLASSIFIER2_PORT}/v1/chat/completions`,
-                model: "mock-classifier-b",
-                apiKeyEnv: "AUTO_GATE_API_KEY",
-                timeoutMs: 5000,
-                maxRetries: 1,
-                retryDelayMs: 200,
-            },
-        ],
+        leaves: leafSpecs.map((spec) => ({
+            modelEndpoint: spec.endpoint,
+            model: spec.model,
+            apiKeyEnv: "AUTO_GATE_API_KEY",
+            timeoutMs,
+            maxRetries,
+            retryDelayMs,
+        })),
     };
     fs.writeFileSync(
         path.join(WORKSPACE, ".opencode", "repo-configs", "auto-gate-llm.json"),
@@ -381,6 +415,49 @@ async function getClassifier2Count() {
     }
 }
 
+// ── classifier3-mock helpers (live-tiered leaf C — mixed 3-leaf rows) ────
+//
+// The third classifier mock (:CLASSIFIER3_PORT) mirrors the first two but
+// reads /tmp/classifier-verdict-3 on each POST. Used for the mixed
+// judgment+infra 3-leaf row so one deny string can carry BOTH a
+// deny(judgment; ...) stamp and a fail(unavailable...) stamp.
+
+function setClassifierVerdict3(text) {
+    fs.writeFileSync("/tmp/classifier-verdict-3", text);
+}
+
+async function resetClassifier3Count() {
+    try {
+        await fetch(
+            `http://127.0.0.1:${CLASSIFIER3_PORT}/reset-classifier-count`,
+        );
+    } catch {
+        // best effort
+    }
+}
+
+async function getClassifier3Count() {
+    try {
+        const r = await fetch(
+            `http://127.0.0.1:${CLASSIFIER3_PORT}/count/classifier`,
+        );
+        if (!r.ok) return 0;
+        const data = await r.json();
+        return data.count || 0;
+    } catch {
+        return 0;
+    }
+}
+
+// ── agent-tool control (blocked-Write case) ───────────────────────────────
+//
+// The agent mock emits a tool_call for the tool named in /tmp/agent-tool.
+// Default "read"; the blocked-Write denial-path case flips it to "write".
+
+function setAgentTool(tool) {
+    fs.writeFileSync("/tmp/agent-tool", tool === "write" ? "write" : "read");
+}
+
 // ── per-call-gate proof helpers (agent-model call count + body capture) ────
 //
 // The reject→per-call-gate fix (commit db032750) changed the plugin's deny
@@ -451,18 +528,32 @@ async function getAgentBodies() {
 // NOT carry the read file content. For an ALLOW case (negative control): the
 // 2nd body must carry the read file content.
 //
+// opts.notSubstrings (block cases): additional strings the 2nd body must NOT
+// contain (default: none beyond TARGET_CONTENT). Pass null to disable the
+// TARGET_CONTENT negative entirely (the blocked-Write case relies on the
+// default negative — trivially satisfied there since no read happens — and
+// proves write-did-not-execute via the on-disk fileUnchanged check instead,
+// because the write tool-call args legitimately appear in the 2nd request's
+// conversation history).
+//
 // Returns { agentModelCalls, continued, feedbackOk, secondBody }.
 async function checkPerCallGate(label, opts) {
     const { expectBlock, reasonSubstring } = opts;
+    const notSubstrings =
+        opts.notSubstrings === undefined
+            ? []
+            : opts.notSubstrings || [];
+    const negatives = opts.notSubstrings === null ? [] : [TARGET_CONTENT, ...notSubstrings];
     const agentModelCalls = await waitForAgentCalls(2);
     const bodies = await getAgentBodies();
     const secondBody = bodies.length >= 2 ? JSON.stringify(bodies[1]) : "";
     const continued = agentModelCalls >= 2;
     let feedbackOk;
     if (expectBlock) {
-        feedbackOk =
-            secondBody.includes(reasonSubstring) &&
-            !secondBody.includes(TARGET_CONTENT);
+        feedbackOk = secondBody.includes(reasonSubstring);
+        for (const neg of negatives) {
+            feedbackOk = feedbackOk && !secondBody.includes(neg);
+        }
     } else {
         feedbackOk = secondBody.includes(TARGET_CONTENT);
     }
@@ -529,22 +620,56 @@ async function waitForServe(maxAttempts = 90) {
 
 // Run one serve-mode case: create session, prompt_async, poll messages.
 // Returns { messagesJson, sessionID }.
+//
+// opts (all optional unless noted):
+//   stubVerdict, label, mode        — as before.
+//   classifierVerdict / 2 / 3       — per-leaf verdict control files.
+//   tiered                          — writeLlmConfigTiered() overrides
+//                                     ({leafCount, timeoutMs, maxRetries,
+//                                     retryDelayMs}).
+//   noLeaves                        — write the SINGLE-LEAF llm config (no
+//                                     `leaves` key) while mode=live-tiered
+//                                     (misconfigured-no-leaves row R12).
+//   agentTool                       — "read" (default) | "write" (flips the
+//                                     agent mock's emitted tool call).
+//   promptText                      — override the session prompt text.
 async function runServeCase(opts) {
-    const { stubVerdict, label, mode = "enforce", classifierVerdict, classifierVerdict2 } = opts;
+    const {
+        stubVerdict,
+        label,
+        mode = "enforce",
+        classifierVerdict,
+        classifierVerdict2,
+        classifierVerdict3,
+        tiered,
+        noLeaves = false,
+        agentTool = "read",
+        promptText = PROMPT_TEXT,
+    } = opts;
 
     writeGateConfig(stubVerdict, mode);
     resetAgentCounter();
+    setAgentTool(agentTool);
     if (mode === "live") {
         writeLlmConfig();
         setClassifierVerdict(classifierVerdict);
         await resetClassifierCount();
     }
     if (mode === "live-tiered") {
-        writeLlmConfigTiered();
+        if (noLeaves) {
+            // Misconfigured tier: single-leaf shape (no `leaves` key) so the
+            // live-tiered validator fail-closes with the constant
+            // "live-tiered misconfigured: no leaves" string (row R12).
+            writeLlmConfig();
+        } else {
+            writeLlmConfigTiered(tiered || {});
+        }
         setClassifierVerdict(classifierVerdict || "<block>no</block>");
         setClassifierVerdict2(classifierVerdict2 || "<block>no</block>");
+        setClassifierVerdict3(classifierVerdict3 || "<block>no</block>");
         await resetClassifierCount();
         await resetClassifier2Count();
+        await resetClassifier3Count();
     }
 
     // Create a fresh session for this case.
@@ -562,7 +687,7 @@ async function runServeCase(opts) {
     const promptResp = await serveFetch(
         "POST",
         `/session/${sessionID}/prompt_async`,
-        { parts: [{ type: "text", text: PROMPT_TEXT }] },
+        { parts: [{ type: "text", text: promptText }] },
     );
     if (!promptResp.ok && promptResp.status !== 204) {
         throw new Error(
@@ -769,9 +894,14 @@ async function main() {
                 AGENT_PORT: String(AGENT_PORT),
                 CLASSIFIER_PORT: String(CLASSIFIER_PORT),
                 CLASSIFIER2_PORT: String(CLASSIFIER2_PORT),
+                CLASSIFIER3_PORT: String(CLASSIFIER3_PORT),
                 VERDICT_FILE: "/tmp/classifier-verdict",
                 VERDICT_FILE_2: "/tmp/classifier-verdict-2",
+                VERDICT_FILE_3: "/tmp/classifier-verdict-3",
                 READ_PATH: path.join(WORKSPACE, "target.txt"),
+                AGENT_TOOL_FILE: "/tmp/agent-tool",
+                WRITE_PATH: WRITE_TARGET_PATH,
+                WRITE_CONTENT: WRITE_SENTINEL,
             },
             stdio: ["ignore", "pipe", "pipe"],
         });
@@ -785,6 +915,7 @@ async function main() {
         await waitForHealth(AGENT_PORT, "agent mock");
         await waitForHealth(CLASSIFIER_PORT, "classifier mock");
         await waitForHealth(CLASSIFIER2_PORT, "classifier2 mock");
+        await waitForHealth(CLASSIFIER3_PORT, "classifier3 mock");
 
         // ── CASE A: ALLOW proof ────────────────────────────────────────
         // stubVerdict="allow", NO --dangerously-skip-permissions.
@@ -1260,12 +1391,15 @@ async function main() {
         const serveF_classifierCount = await getClassifierCount();
         const serveF_classifier2Count = await getClassifier2Count();
         // Per-call-gate proof (CONSENSUS BLOCK — disagreement): turn continued
-        // + model received the consensus denial reason. The plugin synthesizes
-        // "[auto-gate] blocked by consensus: <audit>" (plugin line ~1349), so
-        // the stable substring is "blocked by consensus".
+        // + model received the consensus denial reason. The surfaced deny
+        // string keeps the historical aggregate prefix ("[auto-gate] blocked
+        // by consensus: tier-aggregate: deny (reason=disagreement ...)") and
+        // appends per-leaf stamps, so leaf-B's parsed reason must reach the
+        // model as `deny(judgment; reason=[test-block] classifier-B blocked)`.
         const serveF_gate = await checkPerCallGate("serve-F", {
             expectBlock: true,
-            reasonSubstring: "blocked by consensus",
+            reasonSubstring:
+                "leaf#1=deny(judgment; reason=[test-block] classifier-B blocked)",
         });
         const serveF_pass =
             serveF_eventSeen &&
@@ -1295,8 +1429,17 @@ async function main() {
 
         // ── CASE serve-G: CONSENSUS INCOMPLETE proof (one leaf errors) ───
         // Leaf A allows, leaf B errors (mock returns HTTP 500). decideLive
-        // catches the error and returns {status:"deny"} → normalized to FAIL.
-        // Aggregate: deny + incomplete → reply reject → read BLOCKED.
+        // catches the transport error and returns {status:"deny",
+        // kind:"error"} with typed provenance — normalizeLeafOutcome maps a
+        // kind:"error" deny to FAIL (NOT DENY), so the aggregate is
+        // deny + INCOMPLETE (reason=incomplete), and leaf-B's surfaced stamp
+        // is fail(unavailable/...; no safety judgment was obtained). The
+        // mock's raw error text ("mock classifier error mode") must NEVER
+        // reach the surfaced string.
+        // (Truth fix: pre-provenance code conflated infra errors with
+        // judgments — an errored leaf normalized to DENY, so this case
+        // surfaced reason=disagreement and the old comment here wrongly
+        // claimed "normalized to FAIL".)
         log("========== CASE serve-G (CONSENSUS INCOMPLETE proof) ==========");
         const stderrMarkerG = serveStderrBuf.length;
         const serveG = await runServeCase({
@@ -1318,12 +1461,23 @@ async function main() {
         const serveG_classifierCount = await getClassifierCount();
         const serveG_classifier2Count = await getClassifier2Count();
         // Per-call-gate proof (CONSENSUS BLOCK — incomplete): turn continued +
-        // model received the consensus denial reason. Same synthesized reason
-        // shape as serve-F ("[auto-gate] blocked by consensus: <audit>").
+        // model received the consensus denial reason. The surfaced deny string
+        // must carry the typed-infra leaf stamp AND the truthful aggregate
+        // label (reason=incomplete), and must NOT leak the mock's raw error
+        // body text.
         const serveG_gate = await checkPerCallGate("serve-G", {
             expectBlock: true,
-            reasonSubstring: "blocked by consensus",
+            reasonSubstring: "fail(unavailable",
+            notSubstrings: ["mock classifier error mode"],
         });
+        const serveG_incomplete =
+            serveG_gate.secondBody.includes("reason=incomplete");
+        const serveG_noRawError =
+            !serveG_gate.secondBody.includes("mock classifier error mode") &&
+            !serveStderrG.includes("mock classifier error mode");
+        log(
+            `Case serve-G: incompleteLabel=${serveG_incomplete} noRawError=${serveG_noRawError}`,
+        );
         const serveG_pass =
             serveG_eventSeen &&
             !serveAnalysisG.hasContent &&
@@ -1331,7 +1485,9 @@ async function main() {
             serveG_classifierCount > 0 &&
             serveG_classifier2Count > 0 &&
             serveG_gate.continued &&
-            serveG_gate.feedbackOk;
+            serveG_gate.feedbackOk &&
+            serveG_incomplete &&
+            serveG_noRawError;
         log(
             `Case serve-G: eventSeen=${serveG_eventSeen} content=${serveAnalysisG.hasContent} rejection=${serveAnalysisG.hasRejection} classifierCalls=${serveG_classifierCount} classifier2Calls=${serveG_classifier2Count} agentCalls=${serveG_gate.agentModelCalls} feedbackOk=${serveG_gate.feedbackOk} → ${serveG_pass ? "PASS" : "FAIL"}`,
         );
@@ -1350,7 +1506,341 @@ async function main() {
                 .forEach((l) => log(`  err> ${l}`));
         }
 
+        // ── DENIAL-PATH ROW CASES (O2 safe-feedback contract) ─────────────
+        //
+        // Each row pins ONE admission/fallback-table row of the surfaced deny
+        // string. Baseline (tiered rows): leaf A (:8081) = allow, leaf B
+        // (:8082) = the row's verdict — the serve-F scaffold. Single-leaf
+        // `live` rows (H*) pin the D1 same-pipeline fix. All assertions ride
+        // checkPerCallGate on the 2nd agent-model request body (the
+        // model-visible surface), with companion stderr negatives where the
+        // contract demands them. These are SERVE-ONLY (run-mode reply race —
+        // see D3 in the contract evidence).
+        async function runDenialRowCase(opts) {
+            const {
+                label,
+                mode = "live-tiered",
+                reasonSubstring,
+                notSubstrings,
+                stderrNegatives = [],
+                extraChecks,
+                ...caseOpts
+            } = opts;
+            const marker = serveStderrBuf.length;
+            const run = await runServeCase({ label, mode, ...caseOpts });
+            const analysis = analyzeServeCase(label, run.messagesJson);
+            const stderrSlice = serveStderrBuf.slice(marker);
+            // The upstream `write` TOOL asks under the EDIT permission type
+            // (tool/write.ts: permission: "edit"), so a write-flavored case
+            // still surfaces as type=edit in the plugin's audit line.
+            const expectType =
+                caseOpts.agentTool === "write" ? "edit" : "read";
+            const eventSeen = new RegExp(
+                `\\[auto-gate\\] permission\\.asked type=${expectType} mode=${mode}`,
+            ).test(stderrSlice);
+            const gate = await checkPerCallGate(label, {
+                expectBlock: true,
+                reasonSubstring,
+                notSubstrings,
+            });
+            const stderrNegOk = stderrNegatives.every(
+                (neg) => !stderrSlice.includes(neg),
+            );
+            const extras = Object.assign(
+                {},
+                (await (extraChecks && extraChecks({ gate, stderrSlice, run }))) ||
+                    {},
+            );
+            const extrasOk = Object.values(extras).every(Boolean);
+            const pass =
+                eventSeen &&
+                !analysis.hasContent &&
+                analysis.hasRejection &&
+                gate.continued &&
+                gate.feedbackOk &&
+                stderrNegOk &&
+                extrasOk;
+            log(
+                `Case ${label}: eventSeen=${eventSeen} content=${analysis.hasContent} rejection=${analysis.hasRejection} agentCalls=${gate.agentModelCalls} feedbackOk=${gate.feedbackOk} stderrNegOk=${stderrNegOk} extras=${JSON.stringify(extras)} → ${pass ? "PASS" : "FAIL"}`,
+            );
+            if (!pass) {
+                log(`--- [${label}] messages JSON (first 2000 chars) ---`);
+                log(run.messagesJson.slice(0, 2000));
+                log(`--- [${label}] serve stderr excerpt ---`);
+                stderrSlice
+                    .split("\n")
+                    .filter((l) =>
+                        /auto-gate|permission|reject|error|warn|live|tier|classifier/i.test(
+                            l,
+                        ),
+                    )
+                    .slice(0, 40)
+                    .forEach((l) => log(`  err> ${l}`));
+                log(`--- [${label}] 2nd agent body (last 1200 chars) ---`);
+                log(gate.secondBody.slice(-1200));
+            }
+            return { pass, gate, stderrSlice };
+        }
+        const LEAF_B_URL = `http://127.0.0.1:${CLASSIFIER2_PORT}/v1/chat/completions`;
+
+        // R1 — parsed benign reason admitted (admit-verbatim), aggregate keeps
+        // its truthful disagreement label.
+        const rowR1 = await runDenialRowCase({
+            label: "serve-R1",
+            classifierVerdict2: `<block>yes</block><reason>${R1_REASON}</reason>`,
+            reasonSubstring: `deny(judgment; reason=${R1_REASON})`,
+            extraChecks: ({ gate }) => ({
+                disagreement: gate.secondBody.includes("reason=disagreement"),
+            }),
+        });
+
+        // R2 — empty reason -> named fallback <none>, never an empty reason=.
+        const rowR2 = await runDenialRowCase({
+            label: "serve-R2",
+            classifierVerdict2: "<block>yes</block>",
+            reasonSubstring: "reason=<none>",
+        });
+
+        // R3 — redaction-only reason -> named fallback <suppressed>; the
+        // sentinel must not survive into EITHER sink.
+        const rowR3 = await runDenialRowCase({
+            label: "serve-R3",
+            classifierVerdict2: `<block>yes</block><reason>${SK_SENTINEL}</reason>`,
+            reasonSubstring: "reason=<suppressed>",
+            notSubstrings: [SK_SENTINEL],
+            stderrNegatives: [SK_SENTINEL],
+        });
+
+        // R4 — multiline reason -> admit-sanitized single line (literal
+        // backslash-n between the fragments; a raw U+000A is forbidden).
+        const rowR4 = await runDenialRowCase({
+            label: "serve-R4",
+            classifierVerdict2:
+                "<block>yes</block><reason>line one\nline two</reason>",
+            reasonSubstring: "line one",
+            extraChecks: ({ gate, stderrSlice }) => ({
+                // The JSON-escaped body must contain the ESCAPED two-char
+                // sequence (backslash-n), i.e. `\\n` in the JSON text.
+                escapedNewline: gate.secondBody.includes(
+                    "line one\\\\nline two",
+                ),
+                // ...and must NOT contain the JSON escape of a RAW newline
+                // (a bare `\n` in the JSON text right after "line one").
+                noRawNewline: !gate.secondBody.includes("line one\\nline two"),
+                // stderr leaf line stays single-line (both fragments on one line).
+                stderrSingleLine: stderrSlice
+                    .split("\n")
+                    .some(
+                        (l) =>
+                            l.includes("line one") && l.includes("line two"),
+                    ),
+            }),
+        });
+
+        // R5 — oversized reason -> admit-truncated at 240 chars with the
+        // …[truncated] marker; the tail sentinel must not survive either sink.
+        const oversizedReason = "oversized-reason-".repeat(60) + END_SENTINEL;
+        const rowR5 = await runDenialRowCase({
+            label: "serve-R5",
+            classifierVerdict2: `<block>yes</block><reason>${oversizedReason}</reason>`,
+            reasonSubstring: "[truncated]",
+            notSubstrings: [END_SENTINEL],
+            stderrNegatives: [END_SENTINEL],
+        });
+
+        // R6 — config-known endpoint echo -> admit-sanitized ([suppressed]);
+        // the full leaf-B URL from the tiered llm config must not survive.
+        const rowR6 = await runDenialRowCase({
+            label: "serve-R6",
+            classifierVerdict2: `<block>yes</block><reason>echo ${LEAF_B_URL} denied</reason>`,
+            reasonSubstring: "[suppressed]",
+            notSubstrings: [LEAF_B_URL],
+            stderrNegatives: [LEAF_B_URL],
+        });
+
+        // R7 — credential in reason -> admit-sanitized (Bearer [redacted]);
+        // the token must not survive either sink.
+        const rowR7 = await runDenialRowCase({
+            label: "serve-R7",
+            classifierVerdict2: `<block>yes</block><reason>uses Bearer ${CRED_TOKEN} here</reason>`,
+            reasonSubstring: "Bearer [redacted]",
+            notSubstrings: [CRED_TOKEN],
+            stderrNegatives: [CRED_TOKEN],
+        });
+
+        // R8 — parse-error (200 content with no <block> tag) -> named
+        // fallback fail(parse-error; ...); the raw classifier payload must
+        // never surface.
+        const rowR8 = await runDenialRowCase({
+            label: "serve-R8",
+            classifierVerdict2: "unparseable",
+            reasonSubstring: "fail(parse-error; no parseable verdict returned)",
+            notSubstrings: ["mock unparseable classifier payload"],
+            extraChecks: ({ gate }) => ({
+                incomplete: gate.secondBody.includes("reason=incomplete"),
+            }),
+        });
+
+        // R9' — true timeout path: the mock holds the socket open (hang) and
+        // the leaf's own AbortError fires -> fail(unavailable/timeout; ...).
+        // Short timeout + no retries keeps the case fast and deterministic.
+        const rowR9T = await runDenialRowCase({
+            label: "serve-R9-timeout",
+            classifierVerdict2: "hang",
+            tiered: { timeoutMs: 2000, maxRetries: 0, retryDelayMs: 100 },
+            reasonSubstring: "fail(unavailable/timeout",
+            notSubstrings: ["AbortError"],
+            extraChecks: ({ gate }) => ({
+                wording: gate.secondBody.includes(
+                    "no safety judgment was obtained",
+                ),
+                incomplete: gate.secondBody.includes("reason=incomplete"),
+            }),
+        });
+
+        // R12 — misconfigured tier (no leaves key) -> unchanged constant
+        // fail-closed string (regression pin; passes pre-fix by design).
+        const rowR12 = await runDenialRowCase({
+            label: "serve-R12",
+            noLeaves: true,
+            reasonSubstring:
+                "[auto-gate] fail-closed: live-tiered misconfigured: no leaves",
+        });
+
+        // Mixed 3-leaf row — one deny string carries BOTH a judgment stamp
+        // (leaf#1) and a typed-infra stamp (leaf#2) with stable ordinals, and
+        // the aggregate reports incomplete.
+        const rowMix3 = await runDenialRowCase({
+            label: "serve-mixed3",
+            tiered: { leafCount: 3 },
+            classifierVerdict2:
+                "<block>yes</block><reason>[Rule-B] mixed-tier leaf blocked</reason>",
+            classifierVerdict3: "error",
+            reasonSubstring:
+                "leaf#1=deny(judgment; reason=[Rule-B] mixed-tier leaf blocked)",
+            notSubstrings: ["mock classifier error mode"],
+            extraChecks: ({ gate }) => ({
+                allowStamp: gate.secondBody.includes("leaf#0=allow"),
+                failStamp: gate.secondBody.includes("leaf#2=fail(unavailable"),
+                incomplete: gate.secondBody.includes("reason=incomplete"),
+            }),
+        });
+
+        // ── D1 rows: single-leaf `live` mode rides the SAME pipeline ─────
+        //
+        // Pre-fix, this site forwarded the RAW classifier reason (and on infra
+        // failure the raw error audit) into the v2 message AND logged the raw
+        // audit to stderr. Post-fix BOTH sinks carry the sanitized stamp
+        // ("[auto-gate] blocked by live classifier: <stampBody>" for the
+        // model; "[auto-gate] live deny-detail <stampBody>" for the operator)
+        // — one build, two sinks, so the sentinel negatives apply to the
+        // stderr slice as well as the 2nd request body.
+
+        // H1 — live + credential in reason.
+        const rowH1 = await runDenialRowCase({
+            label: "serve-H1",
+            mode: "live",
+            classifierVerdict: `<block>yes</block><reason>uses Bearer ${CRED_TOKEN} here</reason>`,
+            reasonSubstring: "blocked by live classifier: deny(judgment;",
+            notSubstrings: [CRED_TOKEN],
+            stderrNegatives: [CRED_TOKEN],
+            extraChecks: ({ gate }) => ({
+                redacted: gate.secondBody.includes("Bearer [redacted]"),
+            }),
+        });
+
+        // H2 — live + infra error (HTTP 500) -> fail(unavailable/...), not
+        // the raw evaluator-error audit (absent from BOTH sinks).
+        const rowH2 = await runDenialRowCase({
+            label: "serve-H2",
+            mode: "live",
+            classifierVerdict: "error",
+            reasonSubstring: "fail(unavailable",
+            notSubstrings: ["non-2xx response"],
+            stderrNegatives: ["non-2xx response"],
+            extraChecks: ({ gate }) => ({
+                wording: gate.secondBody.includes(
+                    "no safety judgment was obtained",
+                ),
+            }),
+        });
+
+        // H3 — live + parse-error -> fail(parse-error; ...).
+        const rowH3 = await runDenialRowCase({
+            label: "serve-H3",
+            mode: "live",
+            classifierVerdict: "unparseable",
+            reasonSubstring: "fail(parse-error; no parseable verdict returned)",
+            notSubstrings: ["mock unparseable classifier payload"],
+            stderrNegatives: ["mock unparseable classifier payload"],
+        });
+
+        // H4 — live + known-endpoint echo -> [suppressed] (both sinks).
+        const rowH4 = await runDenialRowCase({
+            label: "serve-H4",
+            mode: "live",
+            classifierVerdict: `<block>yes</block><reason>echo http://127.0.0.1:${CLASSIFIER_PORT}/v1/chat/completions denied</reason>`,
+            reasonSubstring: "[suppressed]",
+            notSubstrings: [
+                `http://127.0.0.1:${CLASSIFIER_PORT}/v1/chat/completions`,
+            ],
+            stderrNegatives: [
+                `http://127.0.0.1:${CLASSIFIER_PORT}/v1/chat/completions`,
+            ],
+        });
+
+        // H5 — live + empty reason -> reason=<none>.
+        const rowH5 = await runDenialRowCase({
+            label: "serve-H5",
+            mode: "live",
+            classifierVerdict: "<block>yes</block>",
+            reasonSubstring:
+                "blocked by live classifier: deny(judgment; reason=<none>)",
+        });
+
+        // ── Blocked-Write denial path (the incident surface) ──────────────
+        //
+        // The agent mock emits a WRITE tool call (control file) against
+        // /workspace/write-target.txt. The tiered consensus denies it; the
+        // surfaced deny string must reach the 2nd model request AND the write
+        // must remain UNEXECUTED (target file unchanged on disk).
+        fs.writeFileSync(WRITE_TARGET_PATH, WRITE_TARGET_ORIGINAL);
+        const rowWrite = await runDenialRowCase({
+            label: "serve-write",
+            agentTool: "write",
+            promptText: "Write the deploy note",
+            classifierVerdict2:
+                "<block>yes</block><reason>[Rule-W] write blocked to protect deploy target</reason>",
+            reasonSubstring:
+                "deny(judgment; reason=[Rule-W] write blocked to protect deploy target)",
+            extraChecks: () => ({
+                fileUnchanged:
+                    fs.readFileSync(WRITE_TARGET_PATH, "utf8") ===
+                    WRITE_TARGET_ORIGINAL,
+            }),
+        });
+        setAgentTool("read"); // restore for any later cases
+
         // ── FULL SUMMARY ───────────────────────────────────────────────
+        const denialRows = {
+            "R1 verbatim reason": rowR1,
+            "R2 empty -> <none>": rowR2,
+            "R3 redaction-only -> <suppressed>": rowR3,
+            "R4 multiline escaped": rowR4,
+            "R5 oversized truncated": rowR5,
+            "R6 endpoint echo suppressed": rowR6,
+            "R7 credential redacted": rowR7,
+            "R8 parse-error fallback": rowR8,
+            "R9' timeout fallback": rowR9T,
+            "R12 no-leaves fail-closed": rowR12,
+            "Mixed 3-leaf stamps": rowMix3,
+            "H1 live credential sanitized": rowH1,
+            "H2 live infra fail stamp": rowH2,
+            "H3 live parse-error stamp": rowH3,
+            "H4 live endpoint suppressed": rowH4,
+            "H5 live empty -> <none>": rowH5,
+            "Blocked-Write surfaced deny": rowWrite,
+        };
         log("========== FULL SUMMARY ==========");
         log(`Run   Case A (ALLOW proof):       ${caseA_pass ? "PASS" : "FAIL"}`);
         log(`Run   Case B (BLOCK proof):       ${caseB_pass ? "PASS" : "FAIL"}`);
@@ -1362,22 +1852,30 @@ async function main() {
         log(`Serve Case D (LIVE BLOCK proof):  ${serveD_pass ? "PASS" : "FAIL"}`);
         log(`Serve Case E (CONSENSUS ALLOW):   ${serveE_pass ? "PASS" : "FAIL"}`);
         log(`Serve Case F (CONSENSUS BLOCK):   ${serveF_pass ? "PASS" : "FAIL"}`);
-        log(`Serve Case G (CONSENSUS INCMPLT): ${serveG_pass ? "PASS" : "FAIL"}`);
+        log(`Serve Case G (R9 INCOMPLETE):     ${serveG_pass ? "PASS" : "FAIL"}`);
+        for (const [name, row] of Object.entries(denialRows)) {
+            log(`Denial row ${name}: ${row.pass ? "PASS" : "FAIL"}`);
+        }
         // The suite PASSES if: enforce A/B pass (run + serve) + serve-live C/D
         // pass (deterministic proof of the full live chain) + serve-consensus
         // E/F/G pass (deterministic proof of the tiered consensus chain) +
-        // run-live C/D are not FAIL (PASS or RACE_LOSS both acceptable). A
-        // run-live RACE_LOSS proves the live chain ran (event + classifier +
-        // correct decision); the serve-live cases prove it resolves
-        // deterministically. There are NO run-consensus cases because the
-        // multi-leaf HTTP path loses the run-mode race WORSE than single-leaf.
+        // EVERY denial-path row passes (O2 safe-feedback contract: R1-R9',
+        // R12, mixed 3-leaf, single-leaf-live D1 rows, and the blocked-Write
+        // surfaced-deny proof) + run-live C/D are not FAIL (PASS or RACE_LOSS
+        // both acceptable). A run-live RACE_LOSS proves the live chain ran
+        // (event + classifier + correct decision); the serve-live cases prove
+        // it resolves deterministically. There are NO run-consensus cases
+        // because the multi-leaf HTTP path loses the run-mode race WORSE than
+        // single-leaf.
         const liveRunOk =
             caseC_status !== "FAIL" && caseD_status !== "FAIL";
+        const denialRowsOk = Object.values(denialRows).every((r) => r.pass);
         const allPass =
             caseA_pass && caseB_pass &&
             serveA_pass && serveB_pass &&
             serveC_pass && serveD_pass &&
             serveE_pass && serveF_pass && serveG_pass &&
+            denialRowsOk &&
             liveRunOk;
         log(`Overall: ${allPass ? "PASS" : "FAIL"}`);
 

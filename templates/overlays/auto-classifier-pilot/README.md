@@ -755,13 +755,14 @@ The flow (proven by three shipped OpenCode reference implementations: ACP agent,
          headers: { "Content-Type": "application/json" },
      });
      ```
-     This hits `POST /permission/{requestID}/reply` (the same route the TUI's
-     RejectPrompt uses with feedback) → `Permission.reply({message})` → resolves
-     the Deferred with a `CorrectedError` carrying the feedback. The **reason
-     is threaded from every deny path**: the stub verdict reason (`enforce`),
-     the parsed `<reason>` (`live`), the aggregate audit (`live-tiered`), or a
-     fail-closed message (`onUncertain`). See "Per-call gate" below for why
-     this matters.
+      This hits `POST /permission/{requestID}/reply` (the same route the TUI's
+      RejectPrompt uses with feedback) → `Permission.reply({message})` → resolves
+      the Deferred with a `CorrectedError` carrying the feedback. The **reason
+      is threaded from every deny path**: the stub verdict reason (`enforce`),
+      the sanitized classifier stamp (`live`), the unchanged aggregate audit
+      plus sanitized per-leaf stamps (`live-tiered`), or a
+      fail-closed message (`onUncertain`). See "Per-call gate" and "Surfaced
+      deny-string grammar" below for the exact shapes and why this matters.
 5. `"once"` approves this call only; `"always"` persists the pattern into
    OpenCode's in-memory allowlist (future matching calls never prompt —
    self-tightening); `"reject"` denies.
@@ -799,6 +800,69 @@ The v1 route (`POST /session/:id/permissions/:permissionID`) only forwards
 switching the error class to `CorrectedError` and keeping the turn alive. This
 is what makes the gate **per-call**: block the one call, tell the model why, let
 it retry differently.
+
+### Surfaced deny-string grammar (safe feedback)
+
+The reject `message` is the only string the MODEL ever sees from the gate, so
+it is assembled under a typed, sanitized grammar — an attributed reason when
+one exists, a NAMED fallback when it does not, and never raw classifier
+output, raw error text, or an invented policy explanation. Enforcement
+posture is unchanged: deny is still deny.
+
+**`live-tiered`** — the historical aggregate segment is byte-identical
+(compat anchor for existing log scrapes) and per-leaf stamps append after
+`" | "` with config-array ordinals:
+
+```
+[auto-gate] blocked by consensus: tier-aggregate: deny (reason=unanimous-deny leaves=2 denies=2 tier=consensus) | leaf#0=deny(judgment; reason=[Irreversible] force push to protected ref) leaf#1=fail(unavailable/timeout; no safety judgment was obtained)
+```
+
+**`live`** (single leaf) — the same grammar minus leaf stamps:
+
+```
+[auto-gate] blocked by live classifier: deny(judgment; reason=<admitted>)
+[auto-gate] blocked by live classifier: fail(unavailable/http-500; no safety judgment was obtained)
+```
+
+Stamp kinds and their admission rules:
+
+| Stamp | When | Admission rule for the reason text |
+| --- | --- | --- |
+| `allow` | leaf returned a valid `<block>no</block>` | n/a (no reason exists on allow) |
+| `deny(judgment; reason=…)` | a valid `<block>yes</block>` verdict was parsed | the `<reason>` rides the `admitReason` pipeline (below), unconditional — no "looks safe" bypass |
+| `deny(judgment; reason=<none>)` | judgment deny with empty/whitespace-only reason | named fallback — an unusable reason is NAMED, never an empty `reason=` |
+| `deny(judgment; reason=<suppressed>)` | post-sanitization remainder is only `[redacted]`/`[suppressed]` tokens | named fallback |
+| `fail(parse-error; no parseable verdict returned)` | response carried no anchored `<block>` tag | named fallback; raw classifier payload never surfaces |
+| `fail(unavailable[/subkind]; no safety judgment was obtained)` | leaf infrastructure failure (throw/timeout/HTTP/config/key) | named fallback; `subkind` is derived only from executor-side error TAGS (`timeout`, `http-<code>`, `transport`, `malformed`, `missing-key`, `missing-endpoint`, `missing-model`), never from message text |
+
+The `admitReason` pipeline (in `auto-gate-scrub.js`, the single source of
+truth for egress scrubbing) runs in a fixed, load-bearing order:
+
+1. **Control normalization** — strip control characters and trim (the
+   newline/tab ESCAPING runs last, after truncation, so the later matchers see
+   raw text and the output is guaranteed single-line).
+2. **Known-value suppression** — every exact-string occurrence of a
+   config-known value (leaf/top-level `modelEndpoint`, `model`, literal
+   `apiKey`, resolved env endpoint/key values) becomes `[suppressed]`.
+3. **Credential scrub** — the shared heuristic scrubber verbatim
+   (`Bearer …` → `Bearer [redacted]`, key=value, secret flags, high-entropy
+   blobs).
+4. **Length truncation, then escaping** — scrub-before-truncate, so a secret
+   split at the 240-char boundary cannot survive; truncated reasons end with
+   `…[truncated]`; newlines/tabs/backslashes are escaped as the final step.
+
+The whole assembly is capped (2000 chars) and built ONCE per deny for BOTH
+sinks — the v2 model-visible message and the stderr per-leaf line carry the
+same stamp strings, never divergent copies.
+
+> **Truth fix (behavior change).** Before typed provenance, an
+> infrastructure-errored leaf normalized to DENY, so two timed-out leaves
+> surfaced `reason=unanimous-deny` — a **false safety-judgment claim**. Leaf
+> results now carry `kind` (`judgment` | `error` | `unparseable`) from the
+> executor's control flow; infra failures aggregate as `reason=incomplete`
+> and surface `fail(unavailable…)` stamps. `fail-closed` enforcement is
+> unchanged — deny is still deny — only the truthfulness of the surfaced
+> label changed.
 
 ### Cascade caveat (parallel tool calls)
 
@@ -1053,10 +1117,11 @@ allow a call that another classifier would block.
 ### Unanimous-allow policy
 
 The aggregate is computed by the behavior-frozen aggregation core
-(`auto-gate-tiered.js`, 47 passing unit tests of its own). The policy is:
+(`auto-gate-tiered.js`, with its own unit-test suite — run it via
+`vh-agent-harness exec node --test` on the module). The policy is:
 
 - **ALLOW × N (≥1 leaf, all allow)** → **allow** (the ONLY grant path).
-- **Any DENY** → **deny**. If at least one leaf also ALLOWed → `disagreement: true`.
+- **Any judgment DENY** → **deny**. If at least one leaf also ALLOWed → `disagreement: true`.
 - **Any FAIL** (a leaf threw, timed out, returned an unparseable verdict, or hit
   a non-2xx) → **deny** with `incomplete: true`. The dominant reason is
   incompleteness, so `disagreement` is `false` even if both ALLOW and DENY are
@@ -1064,10 +1129,15 @@ The aggregate is computed by the behavior-frozen aggregation core
 - **Empty / malformed / missing leaves** → **deny** (fail-closed via `onUncertain`).
 - **Unknown leaf outcome** → treated as **FAIL** → deny.
 
-Each leaf's `decideLive` outcome (shape `{status, audit, reason, latencyMs,
-retries}`) is normalized by `normalizeLeafOutcome` — `{status:"allow"}` → ALLOW,
-`{status:"deny"}` → DENY, anything else → FAIL. No adapter is needed because the
-live path already returns exactly this shape.
+Each leaf's `decideLive` outcome (shape `{status, kind, subkind, audit, reason,
+latencyMs, retries}`) is normalized by `normalizeLeafOutcome` using the TYPED
+provenance — `{status:"allow"}` → ALLOW; `{status:"deny", kind:"judgment"}` →
+DENY; `{status:"deny", kind:"error"|"unparseable"}` or a KINDLESS deny → FAIL.
+The kind originates in `decidePermission`'s decision matrix (the executor's
+control flow), never from classifier prose, so an infrastructure failure can
+never masquerade as a judgment deny in the aggregate (see "Surfaced deny-string
+grammar" above). No adapter is needed because the live path already returns
+exactly this shape.
 
 ### Shared transcript, per-leaf endpoints
 
@@ -1130,9 +1200,12 @@ dropped; if that leaves zero valid leaves, the dispatch fail-closes.
 The aggregate audit line is **constant-shaped**: `tierId` + integer leaf counts
 + normalized-outcome enums only. Leaf endpoint/model/apiKeyEnv VALUES are
 **never** interpolated into any log line. The per-leaf summary logged alongside
-carries only the normalized outcome enum + integer retries/latency. All
-tool-call-derived content continues to pass through the existing
-`scrubTruncate`/`scrubCredentials` egress discipline.
+carries the SAME sanitized leaf stamps the model-visible deny message carries
+(one build, two sinks — see "Surfaced deny-string grammar") plus integer
+retries/latency; a judgment stamp's reason text rides the `admitReason`
+pipeline (known-value suppression + credential scrub + truncation), and infra
+stamps are fixed-wording fallbacks. All tool-call-derived content continues to
+pass through the existing `scrubTruncate`/`scrubCredentials` egress discipline.
 
 ## Where the plugin renders
 

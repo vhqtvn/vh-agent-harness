@@ -1,12 +1,19 @@
-// mock-llm-server.js — dual-port OpenAI-compatible mock for the real-runtime e2e.
+// mock-llm-server.js — multi-port OpenAI-compatible mock for the real-runtime e2e.
 //
-// PURPOSE: serves TWO endpoints inside the single container:
+// PURPOSE: serves FOUR endpoints inside the single container:
 //   :8080  AGENT model endpoint   — drives the opencode agent loop
-//   :8081  CLASSIFIER endpoint    — drives the auto-gate plugin's classifyLive
+//   :8081  CLASSIFIER endpoint    — drives leaf A of the auto-gate plugin
+//   :8082  CLASSIFIER2 endpoint   — drives leaf B (tiered consensus)
+//   :8083  CLASSIFIER3 endpoint   — drives leaf C (3-leaf mixed rows)
 //
 // AGENT (:8080, POST /v1/chat/completions) — STATEFUL per process:
-//   1st request → emits a tool_call so opencode executes the `read` tool,
-//                  which triggers the permission.asked bus event our plugin
+//   1st request → emits a tool_call so opencode executes the tool named by the
+//                  AGENT TOOL control file (/tmp/agent-tool):
+//                    "read"  (default) → executes the `read` tool (READ_PATH)
+//                    "write"          → executes the `write` tool (WRITE_PATH +
+//                                        WRITE_CONTENT) — for the blocked-Write
+//                                        denial-path proof
+//                  either triggers the permission.asked bus event our plugin
 //                  hooks.
 //   2nd request → short text "Done." (finish_reason=stop) so the session
 //                  reaches idle and `opencode run` exits cleanly.
@@ -22,10 +29,19 @@
 //                          model; an allow case's 2nd request carries the read
 //                          result (file content).
 //
-// CLASSIFIER (:8081, POST /v1/chat/completions) — reads a control file:
-//   /tmp/classifier-verdict  →  supports TWO shapes:
-//     KEYWORD   : "allow"  → returns <block>no</block>
-//                 "block"  → returns <block>yes</block><reason>scope creep</reason>
+// CLASSIFIER (:8081/:8082/:8083, POST /v1/chat/completions) — each reads its
+// OWN control file and supports these shapes:
+//     KEYWORD   : "allow"       → returns <block>no</block>
+//                 "block"       → returns <block>yes</block><reason>scope creep</reason>
+//                 "error"       → HTTP 500 (simulates a leaf transport/server
+//                                 failure for the consensus INCOMPLETE case)
+//                 "unparseable" → HTTP 200 with content that has NO <block>
+//                                 tag (exercises the parse-error deny path —
+//                                 PASSTHROUGH cannot express this because it
+//                                 requires a leading "<block>")
+//                 "hang"        → NEVER responds (socket held open; the leaf's
+//                                 own timeoutMs AbortError fires — the true
+//                                 timeout path)
 //     PASSTHROUGH: any string starting with "<block>" is returned VERBATIM as the
 //                 verdict content. This lets the live-mode cases inject an exact
 //                 verdict (e.g. "<block>yes</block><reason>[test-block] ...</reason>")
@@ -47,9 +63,17 @@ import fs from "node:fs";
 const AGENT_PORT = parseInt(process.env.AGENT_PORT || "8080", 10);
 const CLASSIFIER_PORT = parseInt(process.env.CLASSIFIER_PORT || "8081", 10);
 const CLASSIFIER2_PORT = parseInt(process.env.CLASSIFIER2_PORT || "8082", 10);
+const CLASSIFIER3_PORT = parseInt(process.env.CLASSIFIER3_PORT || "8083", 10);
 const VERDICT_FILE = process.env.VERDICT_FILE || "/tmp/classifier-verdict";
 const VERDICT_FILE_2 = process.env.VERDICT_FILE_2 || "/tmp/classifier-verdict-2";
+const VERDICT_FILE_3 = process.env.VERDICT_FILE_3 || "/tmp/classifier-verdict-3";
 const READ_PATH = process.env.READ_PATH || "/workspace/target.txt";
+// Agent tool control: "read" (default) or "write". The driver flips this to
+// "write" for the blocked-Write denial-path case and back afterwards.
+const AGENT_TOOL_FILE = process.env.AGENT_TOOL_FILE || "/tmp/agent-tool";
+const WRITE_PATH = process.env.WRITE_PATH || "/workspace/write-target.txt";
+const WRITE_CONTENT =
+    process.env.WRITE_CONTENT || "written-target-content-SENTINEL";
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -83,9 +107,28 @@ function genId(prefix) {
 }
 
 // ── agent tool-call response (streaming SSE) ─────────────────────────────
-// Emits an OpenAI-style tool_call delta for the `read` tool.
+// Emits an OpenAI-style tool_call delta for the requested tool (`read` by
+// default; `write` when the AGENT TOOL control file says so — used by the
+// blocked-Write denial-path case). `argsJson` is the JSON string of the tool
+// arguments.
 
-function writeAgentToolCallStream(res) {
+function readAgentTool() {
+    try {
+        const v = fs.readFileSync(AGENT_TOOL_FILE, "utf8").trim();
+        return v === "write" ? "write" : "read";
+    } catch {
+        return "read"; // fail-safe default
+    }
+}
+
+function agentToolArgs(tool) {
+    if (tool === "write") {
+        return JSON.stringify({ filePath: WRITE_PATH, content: WRITE_CONTENT });
+    }
+    return JSON.stringify({ filePath: READ_PATH });
+}
+
+function writeAgentToolCallStream(res, tool, argsJson) {
     res.writeHead(200, {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -106,14 +149,14 @@ function writeAgentToolCallStream(res) {
                     index: 0,
                     id: "call_1",
                     type: "function",
-                    function: { name: "read", arguments: "" },
+                    function: { name: tool, arguments: "" },
                 }],
             },
             finish_reason: null,
         }],
     }) + "\n\n");
 
-    // chunk 2: tool_call arguments (the full filePath)
+    // chunk 2: tool_call arguments (full JSON args for the tool)
     res.write("data: " + JSON.stringify({
         ...base,
         choices: [{
@@ -122,7 +165,7 @@ function writeAgentToolCallStream(res) {
                 tool_calls: [{
                     index: 0,
                     function: {
-                        arguments: JSON.stringify({ filePath: READ_PATH }),
+                        arguments: argsJson,
                     },
                 }],
             },
@@ -142,7 +185,7 @@ function writeAgentToolCallStream(res) {
 
 // ── agent tool-call response (non-streaming JSON) ────────────────────────
 
-function sendAgentToolCallJson(res) {
+function sendAgentToolCallJson(res, tool, argsJson) {
     sendJson(res, 200, {
         id: genId("chatcmpl"),
         object: "chat.completion",
@@ -155,8 +198,8 @@ function sendAgentToolCallJson(res) {
                     id: "call_1",
                     type: "function",
                     function: {
-                        name: "read",
-                        arguments: JSON.stringify({ filePath: READ_PATH }),
+                        name: tool,
+                        arguments: argsJson,
                     },
                 }],
             },
@@ -263,13 +306,15 @@ const agentServer = http.createServer(async (req, res) => {
 
         if (hasTools) {
             // Agent call (has tool definitions). Stateful:
-            //   1st → tool_call so opencode executes the read tool
+            //   1st → tool_call so opencode executes the control-file tool
             //   2nd+ → short text so the session reaches idle
             agentCallCount += 1;
             agentBodies.push(body);
             if (agentCallCount === 1) {
-                if (wantsStream) writeAgentToolCallStream(res);
-                else sendAgentToolCallJson(res);
+                const tool = readAgentTool();
+                const argsJson = agentToolArgs(tool);
+                if (wantsStream) writeAgentToolCallStream(res, tool, argsJson);
+                else sendAgentToolCallJson(res, tool, argsJson);
             } else {
                 if (wantsStream) writeAgentTextStream(res);
                 else sendAgentTextJson(res);
@@ -288,15 +333,20 @@ const agentServer = http.createServer(async (req, res) => {
 // ── classifier server factory ─────────────────────────────────────────────
 //
 // A classifier server reads its OWN verdict control file and serves an
-// OpenAI-compatible chat completion. Two instances run on two ports so the
-// Phase 2 live-tiered consensus cases can give leaf-A and leaf-B DIFFERENT
-// verdicts deterministically (each leaf points at its own endpoint/port).
+// OpenAI-compatible chat completion. Three instances run on three ports so the
+// Phase 2 live-tiered consensus cases can give each leaf a DIFFERENT verdict
+// deterministically (each leaf points at its own endpoint/port).
 //
 // VERDICT CONTROL FILE — supports these shapes:
-//   KEYWORD    : "allow"  → <block>no</block>
-//                "block"  → <block>yes</block><reason>scope creep</reason>
-//                "error"  → HTTP 500 (simulates a leaf transport/server failure
-//                            for the consensus INCOMPLETE case)
+//   KEYWORD    : "allow"       → <block>no</block>
+//                "block"       → <block>yes</block><reason>scope creep</reason>
+//                "error"       → HTTP 500 (simulates a leaf transport/server
+//                                failure for the consensus INCOMPLETE case)
+//                "unparseable" → HTTP 200 with NO <block> tag in the content
+//                                (exercises the parse-error deny path)
+//                "hang"        → NEVER responds (socket held open; the leaf's
+//                                timeoutMs AbortError fires — the true timeout
+//                                path)
 //   PASSTHROUGH: any string starting with "<block>" is returned VERBATIM.
 //
 // COUNTER endpoints (per-port, same path on each instance):
@@ -311,6 +361,12 @@ function readVerdictFile(file) {
     }
 }
 
+// UNPARSEABLE_PAYLOAD — 200-content with NO anchored <block> tag. The text is
+// a distinctive sentinel so the e2e can ALSO assert the raw classifier output
+// never egresses into the surfaced deny string.
+const UNPARSEABLE_PAYLOAD =
+    "mock unparseable classifier payload with no verdict tag";
+
 function verdictContent(verdict) {
     // PASSTHROUGH: if the control file already carries a <block> tag, return it
     // verbatim. This lets the live-mode cases inject an EXACT verdict text
@@ -320,6 +376,9 @@ function verdictContent(verdict) {
     }
     if (verdict === "block") {
         return "<block>yes</block><reason>scope creep</reason>";
+    }
+    if (verdict === "unparseable") {
+        return UNPARSEABLE_PAYLOAD;
     }
     return "<block>no</block>";
 }
@@ -362,9 +421,17 @@ function makeClassifierServer(port, verdictFile) {
                 });
                 return;
             }
+            // HANG mode: consume the request then NEVER respond. The leaf's
+            // own AbortController (timeoutMs) fires client-side — the true
+            // timeout path. The socket is simply left open.
+            if (verdict === "hang") {
+                await readJsonBody(req);
+                console.error(`[mock-classifier:${port}] POST call=${callCount} -> HANG (no response; leaf timeout fires)`);
+                return;
+            }
             const content = verdictContent(verdict);
             const body = await readJsonBody(req);
-            console.error(`[mock-classifier:${port}] POST call=${callCount} verdict=${verdict} stream=${body.stream === true}`);
+            console.error(`[mock-classifier:${port}] POST call=${callCount} verdict=${verdict === content ? verdict : verdict + "(passthrough)"} stream=${body.stream === true}`);
             if (body.stream === true) {
                 res.writeHead(200, {
                     "Content-Type": "text/event-stream",
@@ -405,8 +472,10 @@ function makeClassifierServer(port, verdictFile) {
 
 const classifier1 = makeClassifierServer(CLASSIFIER_PORT, VERDICT_FILE);
 const classifier2 = makeClassifierServer(CLASSIFIER2_PORT, VERDICT_FILE_2);
+const classifier3 = makeClassifierServer(CLASSIFIER3_PORT, VERDICT_FILE_3);
 const classifierServer = classifier1.server;
 const classifierServer2 = classifier2.server;
+const classifierServer3 = classifier3.server;
 
 // ── start all servers ────────────────────────────────────────────────────
 
@@ -419,18 +488,20 @@ classifierServer.listen(CLASSIFIER_PORT, () => {
 classifierServer2.listen(CLASSIFIER2_PORT, () => {
     console.log(`[mock-llm] classifier2 server on :${CLASSIFIER2_PORT}`);
 });
+classifierServer3.listen(CLASSIFIER3_PORT, () => {
+    console.log(`[mock-llm] classifier3 server on :${CLASSIFIER3_PORT}`);
+});
 
-process.on("SIGTERM", () => {
-    agentServer.close(() =>
-        classifierServer.close(() =>
-            classifierServer2.close(() => process.exit(0)),
-        ),
-    );
-});
-process.on("SIGINT", () => {
-    agentServer.close(() =>
-        classifierServer.close(() =>
-            classifierServer2.close(() => process.exit(0)),
-        ),
-    );
-});
+function shutdown() {
+    // Close listening sockets; a hung HANG-mode socket may keep a close
+    // callback pending — closeIdleConnections() drops those, and the driver's
+    // SIGKILL backstop covers anything left. Exit immediately after
+    // unregistering (no need to wait for close callbacks).
+    for (const s of [agentServer, classifierServer, classifierServer2, classifierServer3]) {
+        if (typeof s.closeIdleConnections === "function") s.closeIdleConnections();
+        s.close();
+    }
+    process.exit(0);
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);

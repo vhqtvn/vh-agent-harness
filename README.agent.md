@@ -518,6 +518,37 @@ For the complete reference (all modes, fail-closed behavior, prompt
 composition, per-call gate flow), run
 `vh-agent-harness overlay docs auto-classifier-pilot`.
 
+#### Surfaced deny string (safe feedback)
+
+When the gate denies a call in `live` or `live-tiered` mode, the reject message
+is the only string the model sees — it carries an ATTRIBUTED, SANITIZED reason
+or a NAMED fallback, never raw classifier output or raw error text:
+
+```
+[auto-gate] blocked by consensus: tier-aggregate: deny (reason=disagreement leaves=2 allows=1 denies=1 tier=consensus) | leaf#0=allow leaf#1=deny(judgment; reason=[Rule] the echoed reason, sanitized)
+[auto-gate] blocked by live classifier: fail(unavailable/timeout; no safety judgment was obtained)
+```
+
+- The historical aggregate segment (`blocked by consensus: tier-aggregate:
+  ...`) is byte-identical to the old shape — per-leaf stamps APPEND after
+  `" | "`, so existing log scrapes keep matching.
+- Stamp kinds: `allow`; `deny(judgment; reason=…)` (a valid block verdict was
+  parsed; the `<reason>` rides a fixed sanitize pipeline — control-char
+  normalization to one line, config-known-value suppression `[suppressed]`,
+  credential scrub `[redacted]`, then truncation at 240 chars with
+  `…[truncated]`); `fail(parse-error; no parseable verdict returned)`; and
+  `fail(unavailable[/subkind]; no safety judgment was obtained)` where
+  `subkind` ∈ `timeout|http-<code>|transport|malformed|missing-key|
+  missing-endpoint|missing-model` comes only from executor-side error tags.
+- Unusable reasons get NAMED fallbacks (`reason=<none>`, `reason=<suppressed>`)
+  — never an empty `reason=`, never an invented policy explanation.
+- Failure semantics are TYPED and truthful: an infrastructure-errored leaf
+  (timeout/HTTP/transport/config/key) is a `fail(...)` stamp that aggregates as
+  `reason=incomplete` — it can never surface as `unanimous-deny`, which would
+  falsely claim a safety judgment. Fail-closed enforcement is unchanged: deny
+  is still deny.
+
+
 #### CI gate & credential hygiene (never-commit paths)
 
 The auto-gate config surface has two never-commit file classes the seed
