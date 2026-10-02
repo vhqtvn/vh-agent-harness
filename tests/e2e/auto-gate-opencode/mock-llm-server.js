@@ -74,6 +74,21 @@ const AGENT_TOOL_FILE = process.env.AGENT_TOOL_FILE || "/tmp/agent-tool";
 const WRITE_PATH = process.env.WRITE_PATH || "/workspace/write-target.txt";
 const WRITE_CONTENT =
     process.env.WRITE_CONTENT || "written-target-content-SENTINEL";
+// Optional per-case Write payload control file. When non-empty, its contents
+// replace WRITE_CONTENT for the agent's write tool_call args. Used by the
+// serve-write-corpus case to emulate a long agent-authored guidance-prose
+// Write (the v0.27.0 incident shape) without hardcoding kilobytes of text.
+const WRITE_CONTENT_FILE = process.env.WRITE_CONTENT_FILE || "/tmp/write-content";
+
+function effectiveWriteContent() {
+    try {
+        const v = fs.readFileSync(WRITE_CONTENT_FILE, "utf8");
+        if (v.length > 0) return v;
+    } catch {
+        // no control file — fall through to the sentinel default
+    }
+    return WRITE_CONTENT;
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -123,7 +138,7 @@ function readAgentTool() {
 
 function agentToolArgs(tool) {
     if (tool === "write") {
-        return JSON.stringify({ filePath: WRITE_PATH, content: WRITE_CONTENT });
+        return JSON.stringify({ filePath: WRITE_PATH, content: effectiveWriteContent() });
     }
     return JSON.stringify({ filePath: READ_PATH });
 }
@@ -385,6 +400,13 @@ function verdictContent(verdict) {
 
 function makeClassifierServer(port, verdictFile) {
     let callCount = 0;
+    // Capture of the system-prompt text and the user-role transcript from the
+    // most recent POST, so the driver can assert (a) the leaf actually
+    // received the resolved classifier prompt (promptFile fixture marker) and
+    // (b) what transcript evidence the leaf did/didn't see (dispatch marker
+    // present, Write content absent under tool-input redaction).
+    let lastPrompt = "";
+    let lastTranscript = "";
     const server = http.createServer(async (req, res) => {
         req.on("error", () => {});
         res.on("error", () => {});
@@ -394,6 +416,11 @@ function makeClassifierServer(port, verdictFile) {
 
         if (req.method === "GET" && url === "/healthz") {
             sendJson(res, 200, { ok: true, port });
+            return;
+        }
+
+        if (req.method === "GET" && url === "/last-prompt") {
+            sendJson(res, 200, { ok: true, lastPrompt, lastTranscript });
             return;
         }
 
@@ -431,6 +458,12 @@ function makeClassifierServer(port, verdictFile) {
             }
             const content = verdictContent(verdict);
             const body = await readJsonBody(req);
+            if (Array.isArray(body.messages)) {
+                const sys = body.messages.find((m) => m && m.role === "system");
+                if (sys && typeof sys.content === "string") lastPrompt = sys.content;
+                const usr = body.messages.find((m) => m && m.role === "user");
+                if (usr && typeof usr.content === "string") lastTranscript = usr.content;
+            }
             console.error(`[mock-classifier:${port}] POST call=${callCount} verdict=${verdict === content ? verdict : verdict + "(passthrough)"} stream=${body.stream === true}`);
             if (body.stream === true) {
                 res.writeHead(200, {

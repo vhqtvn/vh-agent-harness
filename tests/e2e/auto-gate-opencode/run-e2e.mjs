@@ -291,8 +291,11 @@ function writeLlmConfigTiered(opts = {}) {
     // the per-leaf verdict is independently controllable.
     //
     // opts (all optional):
-    //   leafCount   — 2 (default) or 3 leaves. 3 leaves requires the third
-    //                 classifier mock (mixed judgment+infra rows).
+    //   leafCount   — 1, 2 (default) or 3 leaves. 1 leaf reproduces the
+    //                 single-leaf tier shape (serve-write-corpus row — the
+    //                 v0.27.0 incident topology: unanimous-deny with
+    //                 leaves=1). 3 leaves requires the third classifier mock
+    //                 (mixed judgment+infra rows).
     //   timeoutMs / maxRetries / retryDelayMs — per-leaf timing overrides
     //                 (defaults keep the historical values; the HANG case
     //                 shortens timeoutMs and disables retries so the true
@@ -446,6 +449,85 @@ async function getClassifier3Count() {
         return data.count || 0;
     } catch {
         return 0;
+    }
+}
+
+// ── classifier last-request capture (leaf-side evidence) ─────────────────
+//
+// The classifier mock records the system prompt AND the user-role transcript
+// of its most recent POST. The serve-write-corpus row uses this to pin the
+// leaf-side delivery contract: (a) the leaf received the RESOLVED classifier
+// prompt (the promptFile fixture marker), (b) the dispatched task text WAS
+// serialized into the leaf transcript (the scope evidence the classifier
+// needs to judge scope at all), and (c) the Write tool INPUT was NOT
+// serialized (tool-input redaction allowlist) — the leaf never sees file
+// content, so a deny can never be grounded in what the prose says.
+
+async function getLastClassifierRequest() {
+    try {
+        const r = await fetch(
+            `http://127.0.0.1:${CLASSIFIER_PORT}/last-prompt`,
+        );
+        if (!r.ok) return { lastPrompt: "", lastTranscript: "" };
+        const data = await r.json();
+        return {
+            lastPrompt: data.lastPrompt || "",
+            lastTranscript: data.lastTranscript || "",
+        };
+    } catch {
+        return { lastPrompt: "", lastTranscript: "" };
+    }
+}
+
+// ── write-payload control (corpus-prose case) ─────────────────────────────
+//
+// The agent mock reads /tmp/write-content and, when non-empty, uses it as the
+// Write tool_call content. The corpus row emulates the incident shape: a long
+// (~16k chars) agent-authored guidance-prose document write, dispatched by
+// the session prompt. The prose is synthesized domain-free guidance text with
+// a distinctive sentinel for transcript-absence assertions.
+
+const WRITE_CONTENT_FILE = "/tmp/write-content";
+const CORPUS_SENTINEL = "corpus-guidance-prose-SENTINEL";
+
+function buildCorpusProse(targetChars) {
+    const header =
+        "# Migration Note (next release)\n\n" +
+        "## Purpose\n\nThis note documents the migration steps an upgrading " +
+        "operator should follow. It is guidance prose: text a human (or an " +
+        "agent acting for one) reads BEFORE running any command. Nothing in " +
+        "this document executes; it carries instructions, rationale, and " +
+        "rollback guidance for the release ceremony.\n\n" +
+        `<!-- ${CORPUS_SENTINEL} -->\n\n`;
+    const section = (i) =>
+        `## Section ${i}: operator guidance\n\n` +
+        "Read this section before touching the environment. The steps below " +
+        "describe what to inspect, what to back up, and what to verify. They " +
+        "are advisory: the operator decides, the document only explains. " +
+        "Where a command is quoted, it is quoted as DOCUMENTATION, not as " +
+        "something this document does. Follow the repo rules for every " +
+        "actual action; when in doubt, stop and ask the operator.\n\n" +
+        "Rollback guidance: if a step fails, restore the prior state and " +
+        "re-run verification before proceeding. Do not improvise recovery " +
+        "paths that are not written here. Keep the audit trail intact so a " +
+        "reviewer can reconstruct what happened and why.\n\n";
+    let body = "";
+    let i = 1;
+    while (header.length + body.length < targetChars) {
+        body += section(i++);
+    }
+    return (header + body).slice(0, targetChars);
+}
+
+function setWriteContent(text) {
+    fs.writeFileSync(WRITE_CONTENT_FILE, text);
+}
+
+function clearWriteContent() {
+    try {
+        fs.rmSync(WRITE_CONTENT_FILE);
+    } catch {
+        // already absent
     }
 }
 
@@ -1821,6 +1903,74 @@ async function main() {
         });
         setAgentTool("read"); // restore for any later cases
 
+        // ── Corpus-prose Write, single-leaf unanimous deny (incident row) ──
+        //
+        // Reproduces the v0.27.0 incident TOPOLOGY deterministically: a
+        // single-leaf live-tiered tier (leafCount=1) receiving a long
+        // (~16k chars) agent-authored GUIDANCE-PROSE Write dispatched by the
+        // session prompt, and denying it. The mock verdict is FIXED — a real
+        // live-LLM false-positive is not deterministically reproducible — so
+        // this row proves the OBSERVABILITY contract, not the judgment:
+        //   1. The surfaced deny carries the per-leaf reason (leaf#0=deny(
+        //      judgment; reason=…)) attached to the unanimous-deny aggregate
+        //      (leaves=1 denies=1) — the exact string the incident lacked.
+        //   2. The write remains UNEXECUTED (file unchanged on disk).
+        //   3. Leaf-side delivery: the classifier received the RESOLVED
+        //      prompt (fixture marker) and the dispatched task text WAS in
+        //      the transcript, while the Write CONTENT was NOT serialized
+        //      (tool-input redaction) — pinning what the leaf can and cannot
+        //      ground a deny on.
+        fs.writeFileSync(WRITE_TARGET_PATH, WRITE_TARGET_ORIGINAL);
+        setWriteContent(buildCorpusProse(16_000));
+        const CORPUS_PROMPT =
+            "Write the operator-sanctioned migration note into the docs corpus now";
+        const CORPUS_DENY_REASON =
+            "[Rule-C] delayed effects: guidance prose will steer later runs";
+        const rowWriteCorpus = await runDenialRowCase({
+            label: "serve-write-corpus",
+            agentTool: "write",
+            tiered: { leafCount: 1 },
+            promptText: CORPUS_PROMPT,
+            classifierVerdict: `<block>yes</block><reason>${CORPUS_DENY_REASON}</reason>`,
+            reasonSubstring: `deny(judgment; reason=${CORPUS_DENY_REASON})`,
+            extraChecks: async ({ gate, stderrSlice }) => {
+                const leafReq = await getLastClassifierRequest();
+                return {
+                    fileUnchanged:
+                        fs.readFileSync(WRITE_TARGET_PATH, "utf8") ===
+                        WRITE_TARGET_ORIGINAL,
+                    aggregateUnanimous: gate.secondBody.includes(
+                        "unanimous-deny leaves=1 denies=1 tier=consensus",
+                    ),
+                    leafStampAttached: gate.secondBody.includes(
+                        ` | leaf#0=deny(judgment; reason=${CORPUS_DENY_REASON}`,
+                    ),
+                    stderrLeafStamp: stderrSlice.includes(
+                        `leaf#0=deny(judgment; reason=${CORPUS_DENY_REASON}`,
+                    ),
+                    // stderr sink carries the aggregate audit and the
+                    // per-leaf stamps as separate audit lines (one build,
+                    // two sinks) — pin BOTH so the stderr side proves
+                    // aggregate + attributed reason, not stamp presence
+                    // alone.
+                    stderrAggregate: stderrSlice.includes(
+                        "tier-aggregate: deny (reason=unanimous-deny " +
+                            "leaves=1 denies=1 tier=consensus)",
+                    ),
+                    leafGotResolvedPrompt:
+                        leafReq.lastPrompt.includes("auto-classifier gate"),
+                    dispatchInTranscript:
+                        leafReq.lastTranscript.includes(
+                            "operator-sanctioned migration note",
+                        ),
+                    writeContentNotSerialized:
+                        !leafReq.lastTranscript.includes(CORPUS_SENTINEL),
+                };
+            },
+        });
+        clearWriteContent();
+        setAgentTool("read"); // restore for any later cases
+
         // ── FULL SUMMARY ───────────────────────────────────────────────
         const denialRows = {
             "R1 verbatim reason": rowR1,
@@ -1840,6 +1990,7 @@ async function main() {
             "H4 live endpoint suppressed": rowH4,
             "H5 live empty -> <none>": rowH5,
             "Blocked-Write surfaced deny": rowWrite,
+            "Corpus-write unanimous-deny surfaced": rowWriteCorpus,
         };
         log("========== FULL SUMMARY ==========");
         log(`Run   Case A (ALLOW proof):       ${caseA_pass ? "PASS" : "FAIL"}`);
@@ -1860,12 +2011,14 @@ async function main() {
         // pass (deterministic proof of the full live chain) + serve-consensus
         // E/F/G pass (deterministic proof of the tiered consensus chain) +
         // EVERY denial-path row passes (O2 safe-feedback contract: R1-R9',
-        // R12, mixed 3-leaf, single-leaf-live D1 rows, and the blocked-Write
-        // surfaced-deny proof) + run-live C/D are not FAIL (PASS or RACE_LOSS
-        // both acceptable). A run-live RACE_LOSS proves the live chain ran
-        // (event + classifier + correct decision); the serve-live cases prove
-        // it resolves deterministically. There are NO run-consensus cases
-        // because the multi-leaf HTTP path loses the run-mode race WORSE than
+        // R12, mixed 3-leaf, single-leaf-live D1 rows, the blocked-Write
+        // surfaced-deny proof, and the corpus-write single-leaf unanimous-deny
+        // row — per-leaf reason surfaced + leaf-side delivery contract) +
+        // run-live C/D are not FAIL (PASS or RACE_LOSS both acceptable). A
+        // run-live RACE_LOSS proves the live chain ran (event + classifier +
+        // correct decision); the serve-live cases prove it resolves
+        // deterministically. There are NO run-consensus cases because the
+        // multi-leaf HTTP path loses the run-mode race WORSE than
         // single-leaf.
         const liveRunOk =
             caseC_status !== "FAIL" && caseD_status !== "FAIL";

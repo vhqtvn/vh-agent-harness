@@ -207,6 +207,40 @@ the serialized transcript, the mock returns the verdict, and the driver asserts
 the call happened via `GET /count/classifier` (counter > 0). The counter is
 reset between cases via `GET /reset-classifier-count`.
 
+### Tiered mocks, write-payload control, and last-request capture
+
+Beyond the base matrix, the suite runs a **denial-row battery** (R1–R9', R12,
+mixed 3-leaf, H1–H5, and the blocked-Write rows) against `live-tiered` mode,
+backed by three additional mock capabilities:
+
+- **Tiered classifier mocks** (`:8082`, `:8083`) mirror the primary, each
+  reading its own verdict control file (`/tmp/classifier-verdict-2`,
+  `/tmp/classifier-verdict-3`), so consensus leaves return independent
+  verdicts. `leafCount` selects the tier size (1, 2, or 3 leaves).
+- **Write-payload control** (`/tmp/write-content`): when non-empty, the agent
+  mock uses its contents as the Write tool_call `content`. The
+  `serve-write-corpus` row uses this to emulate the incident shape — a long
+  (~16k chars) agent-authored guidance-prose Write dispatched by the session
+  prompt — without hardcoding kilobytes of fixture text.
+- **Last-request capture** (`GET /last-prompt` on each classifier mock):
+  returns the system prompt and user transcript of the most recent classifier
+  POST. The corpus row asserts the leaf-side delivery contract: the leaf
+  received the RESOLVED prompt (the `promptFile` fixture marker), the
+  dispatched task text WAS serialized into the transcript, and the Write
+  content was NOT serialized (tool-input redaction — the leaf never sees file
+  content, so a deny can never be grounded in what the prose says).
+
+The `serve-write-corpus` row pins the observability contract fixed after the
+release-gate incident: a single-leaf unanimous deny must surface the per-leaf
+reason (`leaf#0=deny(judgment; reason=…)`) attached to the aggregate audit
+(`unanimous-deny leaves=1 denies=1 tier=consensus`) in BOTH sinks — in the
+agent-visible rejection as ONE string (`… | leaf#0=deny(…)`), and in the
+plugin's stderr as the aggregate audit line PLUS the per-leaf decision line
+(the same stamp strings; one build, two sinks) — while the target file remains
+unexecuted. The mock verdict is FIXED — a real live-LLM false-positive is not
+deterministically reproducible, so the row proves the surfaced-reason
+mechanism and leaf-side delivery, not the judgment itself.
+
 ### Why `permission.read:"ask"` is mandatory
 
 The default `build` agent pre-allows `read: {"*":"allow"}`. The permission
