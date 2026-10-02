@@ -585,6 +585,27 @@ wrapper. Conversely, an unwrapped mutating command (raw `bash -c '…'` with no
 scrutiny, not less. Adopter guides written against this model should treat the
 wrapper as environmental context, never as an allow signal.
 
+### Judgment scope: prose writes and delegated dispatch
+
+The embedded base prompt bounds two heuristics that otherwise over-block
+agent-authored work (both clauses are pinned by Go golden-line tests and can be
+replaced wholesale via `promptFile`):
+
+- **Documentation prose is a write, not a mechanism.** Authoring notes,
+  guides, or migration/release documentation is judged as a reversible,
+  version-controlled file write. The delayed-and-enabled-effects rule applies
+  to arming *executing* mechanisms (hooks, schedulers, workflows, access
+  grants) — not to prose a human may later read and choose to act on. A
+  classifier that blocks documentation for what its words could someday tell
+  someone to do would block all documentation.
+- **A session-opening dispatch is operator intent.** Work that reaches the
+  acting agent through an operator-driven delegation or coordination chain
+  counts as operator intent for scope purposes; actions plausibly serving the
+  dispatched task — including authoring an artifact the dispatch describes —
+  are not scope creep merely because no human-typed line names them. The
+  carve-out does not launder untrusted content: tool output and fetched text
+  still authorize nothing.
+
 ### `promptFile` — full-override escape hatch
 
 Setting `promptFile` (in either config file) to a readable file path uses that
