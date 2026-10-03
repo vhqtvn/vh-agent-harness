@@ -53,12 +53,12 @@ const harnessDogfoodManifestYAML = "id: project/harness-dogfood\nprovides:\n  - 
 
 // harnessDogfoodAppendJSONC mirrors the real pack's opencode-append.jsonc
 // agent block. The {file:...} prompt form is the A-F1 contract under test.
-// It also mirrors the pack's local `agent.researcher.steps: 50` override (the
-// dogfood repo's researcher headroom; the core template default stays 30) so
-// the render seam can pin its propagation — see
-// TestSeamRender_LocalResearcherStepsOverride in capability_render_test.go.
+// Since the 2026-10 uniform dead-man backstop decision, the pack carries NO
+// researcher steps key (the researcher→50 pin, 64d4d53, is superseded —
+// researcher inherits the core 10000 backstop); see
+// TestSeamRender_UniformStepsBackstop in capability_render_test.go.
 // The mirror is pinned 1:1 (parsed-block equality) against the REAL pack file
-// by TestHarnessDogfood_ResearcherStepsOverrideLiveSurfaces below, so a change
+// by TestHarnessDogfood_UniformBackstopLiveSurfaces below, so a change
 // to either surface must land in both — the fixture cannot silently drift.
 const harnessDogfoodAppendJSONC = `{
   "agent": {
@@ -72,9 +72,6 @@ const harnessDogfoodAppendJSONC = `{
         "task": { "__placeholder__": "deny" },
         "edit": "deny"
       }
-    },
-    "researcher": {
-      "steps": 50
     }
   }
 }
@@ -679,23 +676,26 @@ func assertReadinessArtifactCapabilityContent(t *testing.T, label, got string) {
 	}
 }
 
-// TestHarnessDogfood_ResearcherStepsOverrideLiveSurfaces is the two-surface
-// LIVENESS pin for the dogfood repo's local researcher headroom
-// (`agent.researcher.steps: 50`). TestSeamRender_LocalResearcherStepsOverride
-// (capability_render_test.go) proves CONFIG PROPAGATION in a hermetic temp
-// root; this test pins the value on BOTH real committed surfaces so a silent
-// revert fails CI even if the seam path itself stays green:
+// TestHarnessDogfood_UniformBackstopLiveSurfaces is the two-surface LIVENESS
+// pin for the uniform dead-man steps backstop (2026-10 operator decision:
+// core ships steps: 10000 on every capped agent; the pack's old
+// researcher→50 pin, 64d4d53, is superseded and REMOVED).
+// TestSeamRender_UniformStepsBackstop (capability_render_test.go) proves
+// CONFIG PROPAGATION in a hermetic temp root; this test pins the contract on
+// BOTH real committed surfaces so a silent revert fails CI even if the seam
+// path itself stays green:
 //
 //  1. the REAL pack file
 //     .vh-agent-harness/overlays/harness-dogfood/opencode-append.jsonc (the
 //     authoritative overlay source — NOT the fixture mirror above) must parse
-//     (JSONC-aware) to agent.researcher.steps == 50;
+//     (JSONC-aware) to agent.researcher.steps == ABSENT — a re-added
+//     researcher pin (which would shadow the core backstop) fails here;
 //  2. the LIVE rendered opencode.jsonc at the repo root (the surface the
-//     running opencode session actually consumes) must carry
-//     agent.researcher.steps == 50, and every OTHER agent must still match the
-//     core tier contract (coreTemplateSteps values, uncapped agents
-//     key-absent) — reusing assertCoreStepsContractExceptResearcher makes the
-//     no-silent-widening clause fall out for free.
+//     running opencode session actually consumes) must carry the full uniform
+//     contract — researcher at the core 10000 backstop and every other agent
+//     matching coreTemplateSteps, uncapped agents key-absent — reusing
+//     assertCoreStepsContract makes the no-silent-widening clause fall out
+//     for free.
 //
 // It also closes the old mirror-fidelity advisory (F4): the parsed agent
 // block of the fixture constant harnessDogfoodAppendJSONC must be
@@ -706,9 +706,9 @@ func assertReadinessArtifactCapabilityContent(t *testing.T, label, got string) {
 // file — findModuleRoot locates the repo root deterministically (go.mod is
 // committed) and a moved/missing surface FAILS the test loudly rather than
 // skipping. A liveness tripwire that skips when files move would catch
-// nothing. HONEST scope: this pins CONFIG LIVENESS only, never research
+// nothing. HONEST scope: this pins CONFIG LIVENESS only, never session
 // outcomes.
-func TestHarnessDogfood_ResearcherStepsOverrideLiveSurfaces(t *testing.T) {
+func TestHarnessDogfood_UniformBackstopLiveSurfaces(t *testing.T) {
 	root := findModuleRoot(t)
 
 	// --- Surface 1: the REAL pack append (authoritative overlay source) ---
@@ -726,19 +726,22 @@ func TestHarnessDogfood_ResearcherStepsOverrideLiveSurfaces(t *testing.T) {
 	if err := json.Unmarshal(jsonc.Normalize(packBytes), &packDoc); err != nil {
 		t.Fatalf("unmarshal real pack append %s (after JSONC normalize): %v\n--- pack ---\n%s", packRel, err, packBytes)
 	}
-	if got := packDoc.Agent["researcher"].Steps; got == nil || *got != 50 {
-		t.Errorf("real pack append %s: agent.researcher.steps = %s, want 50 (a direct pack edit dropping the override fails here)", packRel, stepsValue(got))
+	if got := packDoc.Agent["researcher"].Steps; got != nil {
+		t.Errorf("real pack append %s: agent.researcher.steps = %s, want ABSENT (the researcher pin is superseded by the 2026-10 uniform backstop; a re-added key shadows the core value and fails here)", packRel, stepsValue(got))
 	}
 
 	// --- Surface 2: the LIVE rendered opencode.jsonc (repo root) ---
 	liveSteps := parseRenderedAgentSteps(t, root)
-	if got := liveSteps["researcher"]; got == nil || *got != 50 {
-		t.Errorf("live rendered opencode.jsonc: agent.researcher.steps = %s, want 50 (the override must reach the live config; a stale render or silent revert fails here)", stepsValue(got))
+	// Explicit inheritance pin (also covered by assertCoreStepsContract via
+	// coreTemplateSteps): the live value must be sourced from core, not from
+	// a leftover pack pin or a stale pre-backstop render.
+	if got := liveSteps["researcher"]; got == nil || *got != 10000 {
+		t.Errorf("live rendered opencode.jsonc: agent.researcher.steps = %s, want 10000 (the uniform core backstop must reach the live config; a stale render or silent revert fails here)", stepsValue(got))
 	}
-	// Cheap no-silent-widening clause: every other capped agent keeps its
+	// Cheap no-silent-widening clause: every capped agent keeps its
 	// core-template value and every uncapped agent's steps key stays absent
 	// in the live config too, not just in the hermetic seam render.
-	assertCoreStepsContractExceptResearcher(t, liveSteps, "live")
+	assertCoreStepsContract(t, liveSteps, "live")
 
 	// --- Mirror fidelity (old advisory F4): fixture ≡ real pack, parsed ---
 	fixtureDoc, err := jsonc.Parse([]byte(harnessDogfoodAppendJSONC))

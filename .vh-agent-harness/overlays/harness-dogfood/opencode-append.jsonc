@@ -15,6 +15,18 @@
   // (internal/cli/ref_validate.go, anchored to ^\{file:(.+)\}$) skips bare-path
   // literals entirely, bypassing prompt-file validation — the A-F1 block that
   // bit the release pack. This mirrors the 20 core agents and the release pack.
+  // Steps lineage (recorded 2026-10): operator decision — the core template
+  // now ships a uniform `steps: 10000` dead-man backstop on every capped
+  // agent, replacing the old 50/40/30/20 tier pattern. This supersedes and
+  // REMOVES this pack's local researcher→50 override (64d4d53, 2026-10-01):
+  // researcher inherits the core backstop, so this pack carries NO researcher
+  // steps key (omission inherits core; a re-added key would pin below or
+  // above the backstop). Origin history: trueai 6/8 → silent ~10x retune
+  // 2026-05-03 (3f6d0696, no recorded rationale) → frozen into corpus
+  // (07b05c7). A steps value is an iteration fence, not a spend, wall-clock,
+  // or permission limit; consumers wanting tighter per-agent budgets override
+  // via their own overlay append. Deep-merge note: with no researcher key
+  // here, the merge adds nothing to researcher's core block.
   "agent": {
     "harness-release-readiness": {
       "description": "Harness release-readiness reporter (dogfood) — read-only orchestrator ABOVE the existing tag-driven releaser; answers 'is vh-agent-harness ready to hand off to releaser?' via a G0–G7 evidence checklist. Never tags/commits/pushes; edits ONLY the release-readiness-pass artifact at .vh-agent-harness/release-readiness-pass.json.",
@@ -26,18 +38,6 @@
         "task": { "__placeholder__": "deny" },
         "edit": "deny"
       }
-    },
-    // Local researcher step headroom (dogfood-only override, 2026-10-01):
-    // sequential source-gathering / contradiction-audit dispatches can exceed
-    // the core 30-iteration fence; 50 keeps a finite assistant-loop backstop.
-    // A steps value is an iteration fence, not a spend, wall-clock, or
-    // permission limit. The core template default deliberately stays 30 —
-    // this override rests on local evidence only. Lineage: trueai 6/8 →
-    // silent ~10x retune 2026-05-03 (3f6d0696, no recorded rationale) →
-    // frozen into corpus (07b05c7). Deep-merge note: this scalar override
-    // preserves researcher's sibling fields; it adds no other agent keys.
-    "researcher": {
-      "steps": 50
     }
   }
 }

@@ -786,36 +786,39 @@ func TestSeamRender_WorkerReadOnly_Unselected(t *testing.T) {
 	}
 }
 
-// --- local researcher steps override (harness-dogfood append) ---------------
+// --- uniform dead-man steps backstop (core template) ------------------------
 
 // coreTemplateSteps pins every `steps` value the core template ships for the
 // agents that carry one, under the repo-like profile this slice renders
 // (supervised preset + core/media-perception + core/worker-read-only — the
-// dogfood repo's own vh-harness-profile.yml shape). researcher is deliberately
-// EXCLUDED here: it is the one value the local overlay overrides, so each test
-// phase asserts it explicitly (30 baseline, 50 overridden).
+// dogfood repo's own vh-harness-profile.yml shape). Since the 2026-10 operator
+// decision, every capped agent ships the SAME uniform high dead-man backstop
+// (10000) so overnight/unattended sessions do not die at the old 30–60 tier;
+// smart session-progress detection is the primary fence (designed separately),
+// and consumers wanting tighter budgets override per-agent via overlay append.
 //
 // INTENTIONAL COUPLING — do not "clean up" the duplication below. This map
 // deliberately DUPLICATES the `steps` literals shipped by
 // templates/core/opencode.jsonc.tmpl instead of deriving them by parsing that
 // template. The duplication IS the regression pin (the tripwire): any change
 // to a template `steps` value REQUIREs updating this map in the SAME commit,
-// and a missed update fails assertCoreStepsContractExceptResearcher here.
+// and a missed update fails assertCoreStepsContract here.
 // (Deriving the map from the template was considered and rejected: a parsed
 // map would assert the template against itself — a tautology that catches
 // no regression at all.)
 var coreTemplateSteps = map[string]int{
-	"coordination":        50,
-	"project-coordinator": 50,
-	"planner":             50,
-	"solution-brief":      60,
-	"debate":              40,
-	"debate-proposer":     20,
-	"debate-critic":       20,
-	"debate-synth":        20,
-	"repo-explorer":       30,
-	"media-perception":    30,
-	"worker-read-only":    30,
+	"coordination":        10000,
+	"project-coordinator": 10000,
+	"planner":             10000,
+	"researcher":          10000,
+	"solution-brief":      10000,
+	"debate":              10000,
+	"debate-proposer":     10000,
+	"debate-critic":       10000,
+	"debate-synth":        10000,
+	"repo-explorer":       10000,
+	"media-perception":    10000,
+	"worker-read-only":    10000,
 }
 
 // stepsUncappedAgents is every agent that must carry NO `steps` key (absent
@@ -872,10 +875,10 @@ func stepsValue(p *int) string {
 	return strconv.Itoa(*p)
 }
 
-// assertCoreStepsContractExceptResearcher asserts every non-researcher capped
-// agent carries its core-template steps value and every uncapped agent has NO
-// steps key. researcher is asserted by the caller because it differs per phase.
-func assertCoreStepsContractExceptResearcher(t *testing.T, steps map[string]*int, phase string) {
+// assertCoreStepsContract asserts the uniform dead-man backstop contract:
+// every capped agent carries the core-template steps value (10000 since the
+// 2026-10 operator decision) and every uncapped agent has NO steps key.
+func assertCoreStepsContract(t *testing.T, steps map[string]*int, phase string) {
 	t.Helper()
 	for _, name := range capRenderSortedKeysSteps(coreTemplateSteps) {
 		want := coreTemplateSteps[name]
@@ -902,11 +905,15 @@ func capRenderSortedKeysSteps(m map[string]int) []string {
 }
 
 // assertResearcherCoreSiblings pins that the researcher block keeps its
-// core-template sibling fields under the overlay override: the append's scalar
-// deep-merge must override ONLY `steps`, never replace the block. Also pins
-// the capability-gated task edges (media-perception allow; worker-read-only
-// deliberately absent — researcher is not a declared caller) so the override
-// provably coexists with permconfig's authoritative permission emission.
+// core-template shape when the harness-dogfood overlay is merged in: adding a
+// sibling agent (harness-release-readiness) to the agent map must never
+// replace or degrade researcher's own block — historically this guarded the
+// pack's scalar `steps` override deep-merge; with that override removed
+// (2026-10) it guards the same block-preservation property in the no-override
+// world. Also pins the capability-gated task edges (media-perception allow;
+// worker-read-only deliberately absent — researcher is not a declared caller)
+// so the overlay merge provably coexists with permconfig's authoritative
+// permission emission.
 func assertResearcherCoreSiblings(t *testing.T, root, phase string) {
 	t.Helper()
 	cfg, err := os.ReadFile(filepath.Join(root, "opencode.jsonc"))
@@ -981,45 +988,51 @@ func assertResearcherCoreSiblings(t *testing.T, root, phase string) {
 	}
 }
 
-// TestSeamRender_LocalResearcherStepsOverride is the render-propagation
-// regression for the dogfood repo's local researcher headroom: the
-// harness-dogfood overlay's `agent.researcher.steps: 50` append must land in
-// the rendered opencode.jsonc while (a) the core-template default stays 30 in
-// a no-overlay render of the SAME embedded corpus, (b) researcher's sibling
-// fields survive the scalar deep-merge, (c) every other capped agent keeps its
-// core value, and (d) every uncapped agent's steps key stays absent — the
-// overlay must not silently widen into other agents.
+// TestSeamRender_UniformStepsBackstop is the render-propagation regression for
+// the uniform dead-man steps backstop (2026-10 operator decision): the core
+// template ships `steps: 10000` on every capped agent so overnight/unattended
+// sessions do not die at the old 30–60 tier; a smart session-progress
+// detector is the primary fence and is designed separately. Consumers wanting
+// tighter budgets override per-agent via overlay append — the harness-dogfood
+// pack itself no longer overrides researcher (its 50-pin, 64d4d53, is
+// superseded), so researcher inherits the core backstop.
+//
+// Phase 1 (baseline, NO overlay) pins the uniform contract: every capped
+// agent renders 10000 (researcher included, via coreTemplateSteps) and every
+// uncapped agent's steps key stays absent.
+// Phase 2 (overlay opted in) pins that the overlay merge preserves sibling
+// blocks: researcher keeps its core-template shape and inherits 10000 from
+// core (the pack carries NO researcher steps key), releaser +
+// harness-release-readiness render uncapped, and the uniform contract holds
+// across the merged roster.
 //
 // The profile mirrors this repo's own vh-harness-profile.yml shape (supervised
 // + core/media-perception + core/worker-read-only; the auto-classifier-pilot
 // overlay is omitted because it carries no steps surface). HONEST scope: this
-// proves CONFIG PROPAGATION only — that the override value reaches the
-// rendered config with siblings intact. It does not prove improved research
-// outcomes or calibrated thresholds.
-func TestSeamRender_LocalResearcherStepsOverride(t *testing.T) {
+// proves CONFIG PROPAGATION only — that the uniform backstop reaches the
+// rendered config with sibling blocks intact. It does not prove improved
+// unattended-session outcomes or that the backstop is well-calibrated.
+func TestSeamRender_UniformStepsBackstop(t *testing.T) {
 	const baselineProfile = "profile: supervised\nfeatures:\n  backlog: true\noverlays: []\npolicy_packs: []\ncapabilities:\n  - core/media-perception\n  - core/worker-read-only\n"
-	const overrideProfile = "profile: supervised\nfeatures:\n  backlog: true\noverlays: [harness-dogfood]\npolicy_packs: []\ncapabilities:\n  - core/media-perception\n  - core/worker-read-only\n"
+	const overlayProfile = "profile: supervised\nfeatures:\n  backlog: true\noverlays: [harness-dogfood]\npolicy_packs: []\ncapabilities:\n  - core/media-perception\n  - core/worker-read-only\n"
 
 	root := t.TempDir()
 	seamInstallInto(t, root)
 
-	// --- Phase 1: baseline, NO overlay — the core-template steps contract ---
+	// --- Phase 1: baseline, NO overlay — the uniform steps contract ---
 	writeProfile(t, root, baselineProfile)
 	if _, err := seamUpdateOut(t, root); err != nil {
 		t.Fatalf("baseline update (no overlay): %v", err)
 	}
 	steps := parseRenderedAgentSteps(t, root)
-	if got := steps["researcher"]; got == nil || *got != 30 {
-		t.Errorf("baseline: researcher.steps = %s, want 30 (core-template default before any override)", stepsValue(got))
-	}
-	assertCoreStepsContractExceptResearcher(t, steps, "baseline")
+	assertCoreStepsContract(t, steps, "baseline")
 	assertResearcherCoreSiblings(t, root, "baseline")
 
-	// --- Phase 2: overlay opted in — researcher 50, everything else pinned ---
+	// --- Phase 2: overlay opted in — no researcher pin, siblings preserved ---
 	writeHarnessDogfoodPack(t, root)
-	writeProfile(t, root, overrideProfile)
+	writeProfile(t, root, overlayProfile)
 	if _, err := seamUpdateOut(t, root); err != nil {
-		t.Fatalf("override update (overlays:[harness-dogfood]): %v", err)
+		t.Fatalf("overlay update (overlays:[harness-dogfood]): %v", err)
 	}
 	// The overlay closure adds releaser + harness-release-readiness; both must
 	// actually render before their uncapped assertion can mean "block present,
@@ -1027,13 +1040,16 @@ func TestSeamRender_LocalResearcherStepsOverride(t *testing.T) {
 	rendered := parseRenderedAgents(t, root)
 	for _, name := range []string{"releaser", "harness-release-readiness", "researcher"} {
 		if !rendered[name] {
-			t.Fatalf("override: agent %q must render (overlay/closure/baseline roster); rendered=%v", name, capRenderSortedKeys(rendered))
+			t.Fatalf("overlay: agent %q must render (overlay/closure/baseline roster); rendered=%v", name, capRenderSortedKeys(rendered))
 		}
 	}
 	steps = parseRenderedAgentSteps(t, root)
-	if got := steps["researcher"]; got == nil || *got != 50 {
-		t.Errorf("override: researcher.steps = %s, want 50 (local harness-dogfood override must propagate to the rendered config)", stepsValue(got))
+	// Explicit inheritance pin (also covered by assertCoreStepsContract via
+	// coreTemplateSteps): the pack carries NO researcher steps key, so the
+	// rendered value must come from core, not from an overlay pin.
+	if got := steps["researcher"]; got == nil || *got != 10000 {
+		t.Errorf("overlay: researcher.steps = %s, want 10000 (inherited from core; the pack must carry no researcher steps key since the 2026-10 uniform backstop)", stepsValue(got))
 	}
-	assertCoreStepsContractExceptResearcher(t, steps, "override")
-	assertResearcherCoreSiblings(t, root, "override")
+	assertCoreStepsContract(t, steps, "overlay")
+	assertResearcherCoreSiblings(t, root, "overlay")
 }

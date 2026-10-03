@@ -248,7 +248,8 @@
             "color": "secondary",
             "prompt": "{file:.opencode/agents/coordination.md}",
             "temperature": 0.1,
-            "steps": 50,
+            // steps: high dead-man backstop so unattended long-running sessions do not die silently; smart progress detection is the primary fence. Override per-agent via an overlay append where a tighter budget is wanted.
+            "steps": 10000,
             "permission": {
                 "edit": "deny",
                 "webfetch": "deny",
@@ -327,7 +328,7 @@
             "prompt": "{file:.opencode/agents/planner.md}",
             "model": "{file:./.local/config/agent-model/planner}",
             "temperature": 0.1,
-            "steps": 50,
+            "steps": 10000,
             "permission": {
                 "edit": "deny",
                 "webfetch": "allow",
@@ -386,7 +387,7 @@
             "color": "warning",
             "prompt": "{file:.opencode/agents/researcher.md}",
             "temperature": 0.1,
-            "steps": 30,
+            "steps": 10000,
             "permission": {
                 "edit": "deny",
                 "webfetch": "allow",
@@ -448,7 +449,7 @@
             "color": "secondary",
             "prompt": "{file:.opencode/agents/project-coordinator.md}",
             "temperature": 0.1,
-            "steps": 50,
+            "steps": 10000,
             "permission": {
                 "edit": "deny",
                 "webfetch": "deny",
@@ -527,7 +528,7 @@
             "prompt": "{file:.opencode/agents/debate.md}",
             "model": "{file:./.local/config/agent-model/debate}",
             "temperature": 0.2,
-            "steps": 40,
+            "steps": 10000,
             "permission": {
                 "edit": "deny",
                 "webfetch": "deny",
@@ -591,7 +592,7 @@
             "prompt": "{file:.opencode/agents/debate-proposer.md}",
             "model": "{file:./.local/config/agent-model/debate-proposer}",
             "temperature": 0.3,
-            "steps": 20,
+            "steps": 10000,
             "permission": {
                 "edit": "deny",
                 "webfetch": "deny",
@@ -652,7 +653,7 @@
             "prompt": "{file:.opencode/agents/debate-critic.md}",
             "model": "{file:./.local/config/agent-model/debate-critic}",
             "temperature": 0.1,
-            "steps": 20,
+            "steps": 10000,
             "permission": {
                 "edit": "deny",
                 "webfetch": "deny",
@@ -713,7 +714,7 @@
             "prompt": "{file:.opencode/agents/debate-synth.md}",
             "model": "{file:./.local/config/agent-model/debate-synth}",
             "temperature": 0.1,
-            "steps": 20,
+            "steps": 10000,
             "permission": {
                 "edit": "deny",
                 "webfetch": "deny",
@@ -773,7 +774,7 @@
             "prompt": "{file:.opencode/agents/solution-brief.md}",
             "model": "{file:./.local/config/agent-model/solution-brief}",
             "temperature": 0.2,
-            "steps": 60,
+            "steps": 10000,
             "permission": {
                 "edit": "deny",
                 "webfetch": "deny",
@@ -837,7 +838,7 @@
             "prompt": "{file:.opencode/agents/repo-explorer.md}",
             "model": "{file:./.local/config/agent-model/repo-explorer}",
             "temperature": 0.1,
-            "steps": 30,
+            "steps": 10000,
             "permission": {
                 "edit": "deny",
                 "webfetch": "deny",
@@ -1429,7 +1430,7 @@
             "prompt": "{file:.opencode/agents/media-perception.md}",
             "model": "{file:./.local/config/agent-model/media-perception}",
             "temperature": 0.1,
-            "steps": 30,
+            "steps": 10000,
             "permission": {
                 "edit": "deny",
                 "webfetch": "deny",
@@ -1491,7 +1492,7 @@
             "prompt": "{file:.opencode/agents/worker-read-only.md}",
             "model": "{file:./.local/config/agent-model/worker-read-only}",
             "temperature": 0.1,
-            "steps": 30,
+            "steps": 10000,
             "permission": {
                 "edit": "deny",
                 "webfetch": "deny",
