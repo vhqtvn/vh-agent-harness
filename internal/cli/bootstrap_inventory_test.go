@@ -52,6 +52,7 @@ var bootstrapOverlayLedger = []bootstrapInventoryDecision{
 	{name: "release", decision: "in", reason: "release ceremony pack; core/release capability"},
 	{name: "repo-mail", decision: "in", reason: "inter-repo communication protocol overlay"},
 	{name: "resolve-first-pilot", decision: "in", reason: "default-on shipped pilot (INFORMS-only)"},
+	{name: "session-progress-pilot", decision: "out", reason: "looping-tool-call detector pilot; deliberately default-out — select explicitly (audit-default, deny-only teeth via tool.execute.before)"},
 }
 
 // bootstrapCapabilityLedger is the decision ledger for shipped CORE

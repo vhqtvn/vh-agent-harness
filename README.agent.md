@@ -343,7 +343,7 @@ not claim it passed from prompt inspection alone.
 
 ### Shipped overlay packs
 
-Besides project packs you author under `.vh-agent-harness/overlays/`, seven
+Besides project packs you author under `.vh-agent-harness/overlays/`, eight
 overlay packs ship **embedded in the binary**, selectable by name with no
 vendoring. Run `vh-agent-harness overlay list` to see every pack (embedded +
 project-local) with its source and selected/available status — the discovery
@@ -406,15 +406,28 @@ nonexistent:
   `overlays: [contract-invariant-audit-pilot]` entry re-adds it even when
   opted out.
 
+- `session-progress-pilot` — a **default-OUT**, audit-default looping-tool-call
+  detector pilot. A single-hook plugin (`tool.execute.before` ONLY) that
+  selectively DENIES one exact repeated tool invocation (identical signature +
+  unchanged adverse outcomes) with a bounded reason — throw-to-deny in
+  `enforce` mode only; `audit` (the default) records would-deny and NEVER
+  throws. Fail-open on every error/timeout/malformed verdict (total slow-path
+  deadline ≤2000 ms incl. retry; no cancellation of SDK/tool requests ever).
+  It is **overlay-only** (no capability-manifest), selected solely via
+  `overlays: [session-progress-pilot]`, and deliberately NOT in the frozen
+  greenfield recipe (the bootstrap-inventory decision is `out`). See
+  "Session-progress configuration" below, or run
+  `vh-agent-harness overlay docs session-progress-pilot`.
+
 Each renders into `.opencode/` on `update` exactly like a project-local pack.
 The three pilots (`formal-verification-pilot`, `resolve-first-pilot`,
 `contract-invariant-audit-pilot`) are **default-on**: a `minimal` profile that
 never names them still renders them because their platform-default feature
 keys are `true`. Disable any pilot by setting its feature key to `false`. The
-other four (`release`, `auto-classifier-pilot`, `repo-mail`,
-`frontend-ui-pilot`) remain opt-in (a `minimal` profile that never names them
-renders nothing of them). A project-local pack of the same name still shadows
-the embed wholly.
+other five (`release`, `auto-classifier-pilot`, `repo-mail`,
+`frontend-ui-pilot`, `session-progress-pilot`) remain opt-in (a `minimal`
+profile that never names them renders nothing of them). A project-local pack
+of the same name still shadows the embed wholly.
 
 ### Greenfield bootstrap default (frozen full recipe)
 
@@ -600,6 +613,63 @@ override — e.g. a developer can flip just `{"mode":"live-tiered"}` locally
 without touching the committed base. `vh-agent-harness doctor` lints the local
 file when present (absent = valid/silent; present-but-invalid = FAIL identifying
 the local layer) and includes it in effective-value resolution.
+
+### Session-progress configuration
+
+`session-progress-pilot` (see "Shipped overlay packs") is configured by ONE
+operator-owned, gitignored-by-convention file:
+`.opencode/repo-configs/session-progress.local.json`. Absent file = safe
+defaults (audit mode, zero behavior change). A present-but-invalid file falls
+back to defaults with one deduplicated stderr notice and NEVER throws. The
+file is re-read per tool call behind an mtime cache — edits apply on the next
+call, no restart. The full field table lives in the pack README
+(`vh-agent-harness overlay docs session-progress-pilot`); the operator-facing
+summary:
+
+- `agents` — `{"*": "audit"}` by default; per-agent `off|audit|enforce`.
+  `enforce` may deny (throw a bounded reason); `audit` records would-deny and
+  never denies; `off` disables observation. With only the `*` key the mode is
+  unambiguous; when any specific agent key exists, a call with UNKNOWN
+  attribution can never be denied (audit ceiling).
+- `judge.*` — the semantic judge is env-referenced only
+  (`SESSION_PROGRESS_JUDGE_MODEL` / `_ENDPOINT` / `_API_KEY`); no secret
+  values in config or diagnostics. Unset env ⇒ semantic judging unavailable ⇒
+  allow (recorded). `timeout_ms` (default 2000, clamped 250–2000 — the
+  ceiling is the pinned ≤2000 ms deadline invariant, configurable down only)
+  is the TOTAL slow-path deadline — bounded history read, judge fetch, and the
+  optional single retry (`retries` 0–1) all share it.
+- `cadence.*` — judge-spend throttling ONLY (never a deny reason):
+  `min_interval_seconds` 60, `min_new_signatures` 8 (the latter counts NEW
+  call observations, NOT distinct signatures — the name is historical).
+- `mechanical.*` — the no-LLM fast path (default `4`th identical invocation
+  within `30`s, lease `20`s, max `1` denied hit), enabled only for tools with
+  a verified safe adapter (`bash` in Phase 1: non-zero `metadata.exit` or
+  tool-error state counts as adverse; completed calls of unadapted tools and
+  successful reads never mechanically deny).
+- `semantic.*` — `looping` verdicts with confidence ≥ `0.90`, ≥1 valid packet
+  evidence ref, AND ≥3 local prior adverse unchanged matches within `90`s may
+  deny (lease `45`s, max `2` hits). `productive`/`stuck`/`drifting` NEVER
+  deny.
+- `polling_exemptions.bgshell_status` — exempts the EXACT documented
+  bgshell-job `status` grammar (`--job`/`--job-dir`, bounded `--lines`);
+  chains, other subcommands, and anything looser are not exempt.
+- `state.*` / `concurrency.*` — per-session ring ≤32 observations /
+  ≤16KiB, ≤128 sessions with lazy 30-min idle eviction; one judge assessment
+  per session, ≤4 globally (busy ⇒ allow). Leases/counters are process
+  memory ONLY — never persisted, never restored from diagnostics.
+- Diagnostics (when `diagnostics.enabled`) land under
+  `tmp/agent-runs/session-progress-pilot/` (`verdicts.jsonl` + one rotation,
+  `status.json`), scrubbed (no raw args, outputs, or credentials),
+  best-effort, never read back for enforcement.
+
+Fail-open inventory (each ⇒ allow): config missing/invalid, `enabled:false`,
+mode `off`, unknown attribution with specific agent keys, oversized/unsupported
+args (never truncated into a colliding signature), spend gate closed, busy
+slots, judge unavailable, history failure, judge timeout/non-2xx/malformed/
+schema-invalid output, verdicts resolving after the deadline, expired or
+capped leases, and any internal error (top-level catch). This is a PILOT: it
+does not make unattended sessions safely bounded — the uniform `steps: 10000`
+backstop remains the only fence, and this pack never changes it.
 
 ## Permission transform (F-intent)
 
