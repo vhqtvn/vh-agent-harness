@@ -395,12 +395,40 @@ function buildTieredDenyMessage(agg, results, knownValues) {
 // ---------------------------------------------------------------------------
 // Hot-config reader.
 //
-// Resolves the operator-owned config file relative to the repo root, the same
-// way shell-guard-core.js derives repoRoot() (from this file's location —
-// .opencode/plugins/auto-tool-gate.js -> two levels up). Never uses
-// process.cwd() (unreliable in the plugin server context). No hardcoded
-// absolute paths.
+// Resolves the operator-owned config file relative to the repo root. Like
+// shell-guard-core.js, derives the root from this file's location (never
+// process.cwd(), which is unreliable in the plugin server context; no
+// hardcoded absolute paths) — but via a MARKER-ANCHORED upward walk so BOTH
+// runtime locations resolve the same root:
+//
+//   - Rendered twin: <repoRoot>/.opencode/plugins/auto-tool-gate.js — the
+//     walk finds a marker exactly two levels up, identical to the legacy
+//     fixed two-up resolution.
+//   - Template twin: templates/overlays/<pack>/plugins/auto-tool-gate.js in
+//     a harness dev checkout — four levels deeper; the walk still finds the
+//     true repo root, so selftest scratch lands under the REPO tmp/ and
+//     NEVER under templates/ (whose subdirectories the Go overlay discovery
+//     treats as shipped packs — leftover scratch there breaks `go test`).
+//
+// Markers: `.opencode` (present at the root of every harness install — the
+// rendered plugin lives under it) or `.git` (plain checkouts; matched as dir
+// OR file so worktrees/submodules qualify). Bounded walk (8 levels) with the
+// legacy two-up fallback when no marker is found, so an exotic no-marker
+// environment keeps the historical rendered-twin behavior.
+const REPO_ROOT_MARKERS = [".opencode", ".git"];
+
 function repoRoot() {
+    let dir = __dirname;
+    for (let i = 0; i < 8; i++) {
+        if (
+            REPO_ROOT_MARKERS.some((m) => fs.existsSync(path.join(dir, m)))
+        ) {
+            return dir;
+        }
+        const parent = path.dirname(dir);
+        if (parent === dir) break; // reached the filesystem root
+        dir = parent;
+    }
     return path.resolve(__dirname, "..", "..");
 }
 
@@ -2205,6 +2233,44 @@ if (__isMain) {
 
     // Ensure the test dir exists for the reader tests below (idempotent).
     fs.mkdirSync(TEST_CONFIG_DIR, { recursive: true });
+
+    // ===== repoRoot() resolution regression (template-twin scratch escape) =====
+    //
+    // repoRoot() must anchor on a REPO MARKER (.opencode / .git) so this
+    // suite's scratch dir resolves under the REPO tmp/ from BOTH runtime
+    // locations: the rendered twin (.opencode/plugins/) AND the template twin
+    // (templates/overlays/<pack>/plugins/ in a harness dev checkout). The
+    // historical bug: a fixed two-up resolution made the template twin land
+    // scratch under templates/overlays/tmp/, which the Go embed + overlay
+    // discovery treat as a shipped pack — breaking `go test ./...` until the
+    // scratch was removed by hand. This test pins the fix.
+    test("repoRoot: scratch dir anchors on a repo-marker root under tmp/ (never templates/)", () => {
+        const root = repoRoot();
+        assert.ok(
+            REPO_ROOT_MARKERS.some((m) => fs.existsSync(path.join(root, m))),
+            `repoRoot()=${root} carries no repo marker (${REPO_ROOT_MARKERS.join(", ")}) — fixed-depth resolution regressed`,
+        );
+        assert.equal(
+            path.dirname(TEST_CONFIG_DIR),
+            path.join(root, "tmp"),
+            "selftest scratch dir must live directly under <repoRoot>/tmp/",
+        );
+        // Twin-conditional escape: when this suite runs as the TEMPLATE twin
+        // (its own directory sits inside a templates/ tree), the scratch MUST
+        // resolve outside that tree. Rendered twins skip this leg (an
+        // adopter repo may legitimately live under a directory named
+        // "templates"; only the plugin's OWN location identifies the twin).
+        const pluginInTemplatesTree = __dirname
+            .split(path.sep)
+            .includes("templates");
+        if (pluginInTemplatesTree) {
+            assert.equal(
+                TEST_CONFIG_DIR.split(path.sep).includes("templates"),
+                false,
+                `template twin: scratch must NOT stay under templates/ (got ${TEST_CONFIG_DIR})`,
+            );
+        }
+    });
 
     // Silence + capture console.error so a missing-file / invalid-JSON audit
     // line does not pollute test output, and so we can assert it fired (or not).
