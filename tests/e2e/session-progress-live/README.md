@@ -29,6 +29,14 @@ Prerequisite: `opencode` on PATH. The plugin/script bytes are copied from
 tokens, so source bytes == rendered bytes; the committed pack test governs
 embed equivalence).
 
+Hermeticity (dual-form judge wiring): every leg injects its judge via ENV —
+the FALLBACK form — and `buildFixture` pins `judge.user_config_path` to a
+nonexistent in-fixture path, so the legs stay hermetic even when the operator
+has a real `~/.config/vh-agent-harness/session-progress-llm.json` (whose
+per-field literal precedence would otherwise override the mock endpoints).
+The legs therefore double as the standing proof that the env fallback path
+still works.
+
 ## Legs
 
 | Leg | Scenario | Receipt (what PROVES it) |

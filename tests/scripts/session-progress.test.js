@@ -54,7 +54,16 @@ function freshRoot() {
 function writeConfig(root, obj) {
     const p = join(root, CONFIG_PATH);
     mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, JSON.stringify(obj));
+    // Hermeticity pin (dual-form judge wiring): every fixture pins
+    // judge.user_config_path to a nonexistent path so no plugin-path test
+    // can ever read the OPERATOR's real user-level
+    // ~/.config/vh-agent-harness/session-progress-llm.json — which would
+    // inject real endpoint/model/key literals, real HTTP, and real LLM spend
+    // into supposedly hermetic tests. Tests exercising the user-file layer
+    // pass their own explicit user_config_path (bypassing this helper).
+    const cfg = JSON.parse(JSON.stringify(obj));
+    cfg.judge = { ...(cfg.judge || {}), user_config_path: join(root, "no-user-judge.json") };
+    writeFileSync(p, JSON.stringify(cfg));
     return p;
 }
 
@@ -1530,6 +1539,255 @@ test("[opt-in pin] no config => hook fully inert (no records, no diagnostics, no
         assert.equal(requests.length, 0, "spend gate closed by design: still zero judge calls");
     } finally {
         clearJudgeEnv();
+        delete process.env.SESSION_PROGRESS_REPO_ROOT;
+        mod.__test.setNow(() => Date.now());
+        server.close();
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+// ===========================================================================
+// [ss5] Judge target dual-form resolution (operator decision 2026-10-05 —
+// literal + user-level file + env fallback, mirroring auto-gate's
+// literal-preferred pattern). Pins: literal-key resolution, user-file
+// resolution, per-field precedence repo-literal > user-file > env, the
+// all-three-required availability rule, and fail-open on missing/garbage
+// user JSON.
+// ===========================================================================
+
+test("[ss5] defaults carry NO literal judge values; empty literals never suppress env fallback", async () => {
+    const cfgmod = await loadConfigModule();
+    const judge = await loadJudge();
+    const cfg = cfgmod.normalizeConfig({});
+    assert.equal(cfg.judge.endpoint, "", "no literal endpoint in shipped defaults");
+    assert.equal(cfg.judge.model, "", "no literal model in shipped defaults");
+    assert.equal(cfg.judge.api_key, "", "no literal api_key in shipped defaults");
+    assert.equal(cfg.judge.user_config_path, "", "no user-config override by default");
+    // The non-empty-guard rule: empty literals are "unspecified" — env still
+    // resolves (auto-gate's dual-form guard, pinned).
+    const t = judge.judgeTarget(cfg, {
+        SESSION_PROGRESS_JUDGE_MODEL: "m",
+        SESSION_PROGRESS_JUDGE_ENDPOINT: "https://x/y",
+        SESSION_PROGRESS_JUDGE_API_KEY: "k",
+    });
+    assert.deepEqual(t, { endpoint: "https://x/y", model: "m", apiKey: "k" });
+});
+
+test("[ss5] literal keys: judgeTarget resolves repo-config literals with NO env", async () => {
+    const cfgmod = await loadConfigModule();
+    const judge = await loadJudge();
+    const cfg = cfgmod.normalizeConfig({
+        judge: { endpoint: "https://literal/v1/chat/completions", model: "lit-model", api_key: "lit-key" },
+    });
+    assert.deepEqual(judge.judgeTarget(cfg, {}), {
+        endpoint: "https://literal/v1/chat/completions",
+        model: "lit-model",
+        apiKey: "lit-key",
+    });
+    // runJudge end-to-end on a literal-only target (env empty).
+    const { server, url, requests } = await startJudgeServer("ok");
+    try {
+        const litCfg = cfgmod.normalizeConfig({
+            judge: {
+                endpoint: url, model: "lit-model", api_key: "lit-key",
+                timeout_ms: 1000,
+            },
+        });
+        const r = await judge.runJudge(litCfg, { observations: [{ id: "1" }] }, { env: {} });
+        assert.equal(r.status, "verdict", "literal-only target drives a real judge call");
+        assert.equal(r.verdict.verdict, "looping");
+        assert.equal(requests.length, 1);
+        assert.equal(requests[0].body.model, "lit-model");
+    } finally {
+        server.close();
+    }
+});
+
+test("[ss5] per-field precedence: repo literal > user file > env (partial layering is legitimate)", async () => {
+    const cfgmod = await loadConfigModule();
+    const judge = await loadJudge();
+    const root = freshRoot();
+    const userPath = join(root, "user-judge.json");
+    writeFileSync(userPath, JSON.stringify({
+        endpoint: "https://userfile/v1/chat/completions",
+        model: "user-model",
+        apiKey: "user-key",
+    }));
+    try {
+        // Repo literal endpoint WINS over the user file; user file fills
+        // model; env supplies the key (neither repo nor user has it).
+        const cfg = cfgmod.normalizeConfig({
+            judge: { endpoint: "https://repo-literal/v1/chat/completions", user_config_path: userPath },
+        });
+        const merged = cfgmod.mergeUserJudgeConfig(cfg, cfgmod.loadUserJudgeConfig(cfg, {}));
+        assert.equal(merged.judge.endpoint, "https://repo-literal/v1/chat/completions", "repo literal wins");
+        assert.equal(merged.judge.model, "user-model", "user file fills the empty repo field");
+        assert.equal(merged.judge.api_key, "user-key", "user file key merged");
+        const t = judge.judgeTarget(merged, {});
+        assert.deepEqual(t, {
+            endpoint: "https://repo-literal/v1/chat/completions",
+            model: "user-model",
+            apiKey: "user-key",
+        });
+
+        // Now a user view without a key: env must supply it — per-field
+        // layering across all three levels, auto-gate style.
+        const partialUser = { endpoint: "https://userfile/v1/chat/completions", model: "user-model", apiKey: "" };
+        const merged2 = cfgmod.mergeUserJudgeConfig(
+            cfgmod.normalizeConfig({ judge: { user_config_path: userPath } }), partialUser);
+        const t2 = judge.judgeTarget(merged2, { SESSION_PROGRESS_JUDGE_API_KEY: "env-key" });
+        assert.deepEqual(t2, {
+            endpoint: "https://userfile/v1/chat/completions",
+            model: "user-model",
+            apiKey: "env-key",
+        }, "endpoint+model from user file, key from env resolves");
+
+        // The partial-source rule: ANY unresolved field => unavailable.
+        const noKey = judge.judgeTarget(merged2, {});
+        assert.equal(noKey, null, "missing key alone makes the judge unavailable (fail-open)");
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test("[ss5] user-level file: auto-gate field aliases accepted (modelEndpoint, api_key)", async () => {
+    const cfgmod = await loadConfigModule();
+    const root = freshRoot();
+    const userPath = join(root, "user-judge.json");
+    writeFileSync(userPath, JSON.stringify({
+        modelEndpoint: "https://alias/v1/chat/completions",
+        model: "alias-model",
+        api_key: "alias-key",
+    }));
+    try {
+        const cfg = cfgmod.normalizeConfig({ judge: { user_config_path: userPath } });
+        const vals = cfgmod.loadUserJudgeConfig(cfg, {});
+        assert.deepEqual(vals, { endpoint: "https://alias/v1/chat/completions", model: "alias-model", apiKey: "alias-key" });
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test("[ss5] missing user file: silent empty values (the normal no-user-config state)", async () => {
+    const cfgmod = await loadConfigModule();
+    cfgmod.__resetConfigCacheForTest();
+    const root = freshRoot(); // no user file anywhere
+    const errs = [];
+    const orig = console.error;
+    console.error = (...a) => errs.push(a.join(" "));
+    try {
+        const cfg = cfgmod.normalizeConfig({ judge: { user_config_path: join(root, "absent.json") } });
+        assert.deepEqual(cfgmod.loadUserJudgeConfig(cfg, {}), { endpoint: "", model: "", apiKey: "" });
+        cfgmod.loadUserJudgeConfig(cfg, {}); // cached path also silent
+        assert.deepEqual(errs, [], "missing user file must be SILENT");
+    } finally {
+        console.error = orig;
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test("[ss5] invalid user JSON: empty values + exactly ONE deduped warn; state transition re-warns; mtime reload works", async () => {
+    const cfgmod = await loadConfigModule();
+    cfgmod.__resetConfigCacheForTest();
+    const root = freshRoot();
+    const userPath = join(root, "user-judge.json");
+    writeFileSync(userPath, "{ not json");
+    const errs = [];
+    const orig = console.error;
+    console.error = (...a) => errs.push(a.join(" "));
+    try {
+        const cfg = () => cfgmod.normalizeConfig({ judge: { user_config_path: userPath } });
+        assert.deepEqual(cfgmod.loadUserJudgeConfig(cfg(), {}), { endpoint: "", model: "", apiKey: "" });
+        cfgmod.loadUserJudgeConfig(cfg(), {});
+        cfgmod.loadUserJudgeConfig(cfg(), {});
+        assert.equal(errs.length, 1, "persistent invalid file warns exactly ONCE");
+        assert.ok(errs[0].includes("judge user config invalid"), "warn names the user config");
+        // Fix the file (new mtime -> reload): values appear, no new warn.
+        writeFileSync(userPath, JSON.stringify({ endpoint: "https://fixed/v1", model: "m2", apiKey: "k2" }));
+        assert.deepEqual(
+            cfgmod.loadUserJudgeConfig(cfg(), {}),
+            { endpoint: "https://fixed/v1", model: "m2", apiKey: "k2" },
+            "mtime change reloads the user file");
+        assert.equal(errs.length, 1, "recovery adds no warn");
+    } finally {
+        console.error = orig;
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test("[ss5] default user path resolves via XDG_CONFIG_HOME; judge.user_config_path override wins", async () => {
+    const cfgmod = await loadConfigModule();
+    const root = freshRoot();
+    const xdg = join(root, "xdg");
+    mkdirSync(join(xdg, "vh-agent-harness"), { recursive: true });
+    const defPath = join(xdg, "vh-agent-harness", "session-progress-llm.json");
+    writeFileSync(defPath, JSON.stringify({ endpoint: "https://xdg/v1", model: "xdg-model", apiKey: "xdg-key" }));
+    try {
+        assert.equal(
+            cfgmod.defaultUserJudgeConfigPath({ XDG_CONFIG_HOME: xdg }),
+            defPath,
+            "default path = <XDG_CONFIG_HOME>/vh-agent-harness/session-progress-llm.json");
+        const noOverride = cfgmod.normalizeConfig({});
+        assert.deepEqual(
+            cfgmod.loadUserJudgeConfig(noOverride, { XDG_CONFIG_HOME: xdg }),
+            { endpoint: "https://xdg/v1", model: "xdg-model", apiKey: "xdg-key" },
+            "default-path load reads the XDG file");
+        const withOverride = cfgmod.normalizeConfig({ judge: { user_config_path: "/elsewhere.json" } });
+        assert.equal(cfgmod.judgeUserConfigPath(withOverride, { XDG_CONFIG_HOME: xdg }), "/elsewhere.json");
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test("[ss5] plugin wiring: the hook merges the user-level file (judge call fired from a user-file target, env unset)", async () => {
+    const mod = await loadPlugin();
+    mod.__test.resetState();
+    const cfgmod = await loadConfigModule();
+    cfgmod.__resetConfigCacheForTest();
+    const root = freshRoot();
+    process.env.SESSION_PROGRESS_REPO_ROOT = root;
+    const { server, url, requests } = await startJudgeServer("ok");
+    // The user-level file supplies the ENTIRE target (env stays unset —
+    // withJudgeEnv is deliberately NOT used).
+    const userPath = join(root, "user-judge.json");
+    writeFileSync(userPath, JSON.stringify({
+        endpoint: url, model: "userfile-model", apiKey: "userfile-key",
+    }));
+    // Repo config: audit + open cadence + the user_config_path override.
+    // Written DIRECTLY (not via writeConfig) so the hermeticity pin does not
+    // clobber the explicit override this test exercises.
+    const p = join(root, CONFIG_PATH);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({
+        agents: { "*": "audit" },
+        cadence: { min_interval_seconds: 1, min_new_signatures: 1 },
+        judge: { timeout_ms: 1500, user_config_path: userPath },
+    }));
+    const parts = [];
+    const client = {
+        session: { messages: async () => ({ data: [{ role: "assistant", agent: "build", parts: parts.slice() }] }) },
+    };
+    const hooks = await mod.server({ client, directory: root });
+    let clock = 0;
+    mod.__test.setNow(() => clock);
+    try {
+        for (let i = 1; i <= 4; i++) {
+            clock += 600;
+            const r = await driveHook(hooks, { args: { command: "make userwired" }, callID: "c" + i });
+            assert.equal(r.threw, null, `audit call ${i} never throws`);
+            parts.push(mkToolPart("c" + i, "bash", errState("exit status 1")));
+        }
+        await new Promise((r) => setTimeout(r, 120));
+        assert.ok(requests.length >= 1, "judge HTTP call fired from the user-file target");
+        assert.equal(requests[0].body.model, "userfile-model", "judge used the user-file model");
+        const verdictsPath = join(root, "tmp", "agent-runs", "session-progress-pilot", "verdicts.jsonl");
+        const rows = fs.readFileSync(verdictsPath, "utf8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+        const assessed = rows.filter((r) => r.kind === "assessment" && r.judge === true);
+        assert.ok(assessed.length >= 1, "an assessment record with judge:true landed");
+        for (const r of rows) {
+            assert.ok(!JSON.stringify(r).includes("userfile-key"), "no literal key leaks into diagnostics");
+        }
+    } finally {
         delete process.env.SESSION_PROGRESS_REPO_ROOT;
         mod.__test.setNow(() => Date.now());
         server.close();

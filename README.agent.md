@@ -636,9 +636,21 @@ summary:
   never denies; `off` disables observation. With only the `*` key the mode is
   unambiguous; when any specific agent key exists, a call with UNKNOWN
   attribution can never be denied (audit ceiling).
-- `judge.*` — the semantic judge is env-referenced only
-  (`SESSION_PROGRESS_JUDGE_MODEL` / `_ENDPOINT` / `_API_KEY`); no secret
-  values in config or diagnostics. Unset env ⇒ semantic judging unavailable ⇒
+- `judge.*` — the semantic judge target resolves via a DUAL form
+  (operator decision 2026-10-05, mirroring auto-gate), PER FIELD,
+  first-non-empty-wins: repo-config literal
+  (`judge.endpoint`/`judge.model`/`judge.api_key`, gitignored repo-local
+  config only) → user-level file
+  (`~/.config/vh-agent-harness/session-progress-llm.json`, schema
+  `{endpoint, model, apiKey}` — auto-gate spellings `modelEndpoint`/`api_key`
+  accepted as aliases; mtime-cached, absent = silent, invalid = one deduped
+  notice) → env vars by NAME (`SESSION_PROGRESS_JUDGE_MODEL` / `_ENDPOINT` /
+  `_API_KEY` — the original fallback, unchanged). Partial per-field mixes are
+  legitimate; all three fields must resolve or the judge is unavailable.
+  TRACKED files carry env var NAMES only — literal secrets live ONLY in the
+  gitignored repo-local config and the user-level file, never in
+  diagnostics. `judge.user_config_path` overrides the user-file path
+  (test/hermeticity seam). Unresolvable ⇒ semantic judging unavailable ⇒
   allow (recorded). `timeout_ms` (default 2000, clamped 250–2000 — the
   ceiling is the pinned ≤2000 ms deadline invariant, configurable down only)
   is the TOTAL slow-path deadline — bounded history read, judge fetch, and the

@@ -305,9 +305,21 @@ function buildFixture(name, agentPort, pluginCfg) {
             },
         },
     }, null, 2));
+    // Hermeticity pin: every leg injects its judge via ENV (the fallback
+    // form). Once an operator has a real user-level
+    // ~/.config/vh-agent-harness/session-progress-llm.json, per-field
+    // literal/user-file precedence would otherwise OVERRIDE the legs' mock
+    // endpoints with the real LLM. Pinning judge.user_config_path to a
+    // nonexistent in-fixture path removes the user layer entirely and proves
+    // the env fallback still works (the legs' raison d'être).
+    const hermeticCfg = JSON.parse(JSON.stringify(pluginCfg));
+    hermeticCfg.judge = {
+        ...(hermeticCfg.judge || {}),
+        user_config_path: path.join(dir, ".opencode", "repo-configs", "no-user-judge.json"),
+    };
     fs.writeFileSync(
         path.join(dir, ".opencode", "repo-configs", "session-progress.local.json"),
-        JSON.stringify(pluginCfg, null, 2));
+        JSON.stringify(hermeticCfg, null, 2));
     return dir;
 }
 

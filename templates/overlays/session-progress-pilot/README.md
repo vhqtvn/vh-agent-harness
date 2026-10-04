@@ -68,17 +68,27 @@ the plugin fully inert):
 
 The file is read on every hook invocation (mtime-cached; edits apply on the
 next tool call, no restart). A present-but-invalid file falls back to defaults
-with one deduplicated stderr notice — it NEVER throws. No secret values in the
-file or in diagnostics; the judge endpoint/model/key are supplied via
-environment variables referenced BY NAME (see `judge.*_env` below).
+with one deduplicated stderr notice — it NEVER throws.
+
+**Secret placement rule (hard):** tracked files — including the pack sources
+and every shipped default — carry env var NAMES only, never literal secret
+values. Literal judge endpoint/model/key values are permitted ONLY in (a) the
+gitignored repo-local `session-progress.local.json` and (b) the user-level
+file `~/.config/vh-agent-harness/session-progress-llm.json` (see
+[Judge target resolution](#judge-target-resolution-dual-form) below).
+Diagnostics never contain credentials in any form.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `enabled` | boolean | `true` | Master toggle. `false` = plugin no-ops (allow everything, no records). |
 | `agents` | object mapping agent name → `off`\|`audit`\|`enforce`, or the single string shorthand | `{"*": "off"}` | Per-agent mode. `*` is the wildcard. Default is **off for everyone** — the plugin is fully inert (nothing observed, recorded, or spent) until an agent is explicitly opted in as `audit`/`enforce`. `enforce` may deny; `audit` records would-deny and never denies; `off` disables observation for that agent. With ONLY the `*` key, no agent attribution is needed (the mode is unambiguous). When any specific agent key is present, a call with UNKNOWN attribution can never be denied (audit ceiling). |
-| `judge.model_env` | string (env var NAME) | `"SESSION_PROGRESS_JUDGE_MODEL"` | Env var holding the judge model ID. Unset → semantic judging unavailable → allow (recorded). |
-| `judge.endpoint_env` | string (env var NAME) | `"SESSION_PROGRESS_JUDGE_ENDPOINT"` | Env var holding an OpenAI-compatible chat-completions URL. Unset → judging unavailable. |
-| `judge.api_key_env` | string (env var NAME) | `"SESSION_PROGRESS_JUDGE_API_KEY"` | Env var holding the API key VALUE — the key never lives in the config file or diagnostics. |
+| `judge.endpoint` | string (literal URL) | `""` | Literal OpenAI-compatible chat-completions URL. Empty = unspecified → next source (user-level file, then env) applies. Gitignored repo-local config only — never commit a literal. |
+| `judge.model` | string (literal model ID) | `""` | Literal judge model ID. Same dual-form/empty-falls-through rule as `judge.endpoint`. |
+| `judge.api_key` | string (literal key VALUE) | `""` | Literal API key value. Gitignored repo-local config only — NEVER in a tracked file or diagnostics. |
+| `judge.model_env` | string (env var NAME) | `"SESSION_PROGRESS_JUDGE_MODEL"` | Fallback: env var holding the judge model ID, used when no literal resolves. Unset → semantic judging unavailable → allow (recorded). |
+| `judge.endpoint_env` | string (env var NAME) | `"SESSION_PROGRESS_JUDGE_ENDPOINT"` | Fallback: env var holding an OpenAI-compatible chat-completions URL. |
+| `judge.api_key_env` | string (env var NAME) | `"SESSION_PROGRESS_JUDGE_API_KEY"` | Fallback: env var holding the API key VALUE. |
+| `judge.user_config_path` | string (path) | `""` | Overrides the user-level judge-file location (empty = `<XDG_CONFIG_HOME or ~/.config>/vh-agent-harness/session-progress-llm.json`). Primarily a test-injection/hermeticity seam. |
 | `judge.timeout_ms` | number | `2000` | TOTAL slow-path deadline (history read + judge fetch + retries all share it). At deadline → allow. Clamped to [250, 2000] — the 2000 ms ceiling is the pinned deadline invariant, configurable down only, never up. |
 | `judge.retries` | number 0..1 | `0` | Extra judge attempts INSIDE the same deadline. Max 1. |
 | `judge.min_looping_confidence` | number 0..1 | `0.90` | Minimum confidence for a `looping` verdict to qualify for denial. |
@@ -103,6 +113,50 @@ environment variables referenced BY NAME (see `judge.*_env` below).
 | `diagnostics.enabled` | boolean | `true` | Enables bounded diagnostic writing (below). |
 
 Unknown fields are ignored. Wrong-typed values fall back to defaults.
+
+### Judge target resolution (dual form)
+
+Operator decision 2026-10-05 (mirrors auto-gate's documented literal-preferred
+dual form). Each of the three judge fields — endpoint, model, api key —
+resolves PER FIELD, first-non-empty-wins, across three sources:
+
+1. **repo-config literal** — `judge.endpoint` / `judge.model` /
+   `judge.api_key` in `session-progress.local.json` (gitignored);
+2. **user-level file** — `<XDG_CONFIG_HOME or ~/.config>/vh-agent-harness/
+   session-progress-llm.json`, schema:
+
+   ```json
+   { "endpoint": "<url>", "model": "<id>", "apiKey": "<key>" }
+   ```
+
+   The auto-gate field spellings are accepted as aliases so a leaf of
+   `auto-gate-llm.json` can be copied shape-for-shape: `modelEndpoint` ~
+   `endpoint`, `api_key` ~ `apiKey`. `model` is identical in both.
+3. **env var** — the value of the env var NAMED by `judge.endpoint_env` /
+   `judge.model_env` / `judge.api_key_env` (the original Phase-1 mechanism,
+   unchanged, still the fallback).
+
+Rules:
+
+- **Per-field layering** (auto-gate's shallow per-field merge): a partial mix
+  is legitimate — e.g. endpoint+model from the user-level file and the key
+  from env. Each field resolves independently; an EMPTY value at a level
+  means "unspecified" and falls through to the next level. An empty literal
+  never suppresses a lower source.
+- **All three required**: if ANY of endpoint/model/key resolves empty, the
+  judge is `unavailable` — semantic judging disabled, the call allows
+  (recorded). There is no partial-judge state.
+- **User-level file lifecycle**: absent = silent (the normal
+  no-user-config state); present-but-invalid (bad JSON / non-object) = empty
+  values + ONE deduplicated stderr notice, then re-warns only on a state
+  transition — exactly the repo config's dedup contract. NEVER throws.
+- **mtime-cached** like the repo config: one `statSync` per unchanged tool
+  call; edits apply on the next call, no restart.
+- **No secrets in tracked files** (hard rule): the pack sources and every
+  shipped default carry env var NAMES only. Literal values belong ONLY in
+  the gitignored repo-local config and the user-level file. `judge.
+   user_config_path` may point anywhere (it is a test/hermeticity seam), but
+  pointing it at a TRACKED file with secrets violates this rule.
 
 ## What is detected
 

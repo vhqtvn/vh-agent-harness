@@ -12,33 +12,52 @@
 //   - Read on every hook invocation behind an mtime cache: an unchanged file
 //     costs one statSync; a changed file re-reads and re-normalizes on the
 //     next tool call. No restart, no plugin reload.
-//   - No secret VALUES anywhere: judge endpoint/model/api-key are env var
-//     NAMES resolved at call time by the judge module.
+//   - Judge target values resolve via a DUAL form (operator decision
+//     2026-10-05, mirroring auto-gate's literal-preferred pattern):
+//     literal VALUES (`judge.endpoint` / `judge.model` / `judge.api_key`)
+//     and a user-level JSON file
+//     (<XDG_CONFIG_HOME|~/.config>/vh-agent-harness/session-progress-llm.json,
+//     schema {endpoint, model, apiKey}) are preferred; env var NAMES
+//     (`judge.*_env`) remain the fallback. Literals belong ONLY in gitignored
+//     repo-local config and the user-level file — TRACKED files (including
+//     these DEFAULTS) stay env-name-only, no literal secrets.
 //   - Every field is normalized/clamped; wrong-typed values fall back to
 //     defaults; unknown fields are ignored. The result is ALWAYS a fully
 //     materialized, valid config (callers never see partial shapes).
 //
 // This module is deliberately I/O-bounded (one stat + at most one read per
-// changed mtime) and never touches the network, the clock, or plugin state.
+// changed mtime, per file — repo config AND user-level judge file) and never
+// touches the network, the clock, or plugin state.
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 // ---------------------------------------------------------------------------
 // Defaults — the shipped, fail-open posture. OFF for everyone (operator
 // decision 2026-10-04: fully opt-in — no observation, no records, no
 // diagnostics, no judge spend until config names an agent or "*" as
-// audit/enforce), semantic judge env-referenced (unset env = unavailable =
-// allow), narrow leases.
+// audit/enforce), semantic judge dual-form with EMPTY literals — the default
+// posture is env-referenced (unset env = unavailable = allow), narrow leases.
+// Judge literals (`endpoint` / `model` / `api_key`) default to EMPTY — the
+// literal sources are the gitignored repo-local config and the user-level
+// file only; tracked files never carry literal secrets. An empty literal
+// means "unspecified" and falls through to the next source (it never
+// suppresses a lower layer — auto-gate's non-empty-guard rule).
 // ---------------------------------------------------------------------------
 
 export const DEFAULTS = Object.freeze({
     enabled: true,
     agents: Object.freeze({ "*": "off" }),
     judge: Object.freeze({
+        endpoint: "",
+        model: "",
+        api_key: "",
         model_env: "SESSION_PROGRESS_JUDGE_MODEL",
         endpoint_env: "SESSION_PROGRESS_JUDGE_ENDPOINT",
         api_key_env: "SESSION_PROGRESS_JUDGE_API_KEY",
+        // Empty = the default user-level path (defaultUserJudgeConfigPath).
+        user_config_path: "",
         timeout_ms: 2000,
         retries: 0,
         min_looping_confidence: 0.9,
@@ -145,9 +164,17 @@ export function normalizeConfig(raw) {
         enabled: boolOr(src.enabled, d.enabled),
         agents: normalizeAgents(src.agents),
         judge: {
+            // Literal judge target values (dual form, literal-preferred). All
+            // three default "" — "unspecified", never a suppressing value.
+            endpoint: strOr(judgeSrc.endpoint, d.judge.endpoint),
+            model: strOr(judgeSrc.model, d.judge.model),
+            api_key: strOr(judgeSrc.api_key, d.judge.api_key),
             model_env: strOr(judgeSrc.model_env, d.judge.model_env),
             endpoint_env: strOr(judgeSrc.endpoint_env, d.judge.endpoint_env),
             api_key_env: strOr(judgeSrc.api_key_env, d.judge.api_key_env),
+            // Optional override of the user-level judge-file path (empty =
+            // the XDG default). Primarily a test-injection seam.
+            user_config_path: strOr(judgeSrc.user_config_path, d.judge.user_config_path),
             // Ceiling pinned at 2000: the deadline is a safety property (the
             // documented "deadline hit (<=2000 ms total incl. retry) -> allow"
             // invariant). Configurable DOWN only, never up.
@@ -311,4 +338,155 @@ export function loadConfig(repoRoot) {
 export function __resetConfigCacheForTest() {
     _cache.clear();
     _warnState.clear();
+    _userJudgeCache.clear();
+}
+
+// ---------------------------------------------------------------------------
+// User-level judge file (operator decision 2026-10-05 — the auto-gate mirror).
+//
+//   <XDG_CONFIG_HOME || ~/.config>/vh-agent-harness/session-progress-llm.json
+//
+// Schema: { "endpoint": "<url>", "model": "<id>", "apiKey": "<key>" }. The
+// auto-gate field spellings are accepted as aliases so an operator can copy a
+// leaf of auto-gate-llm.json shape-for-shape: `modelEndpoint` ~ `endpoint`,
+// `api_key` ~ `apiKey`. Values are LITERALS (this file is user-level,
+// explicitly NOT tracked — the only sanctioned literal-secret homes are this
+// file and the gitignored repo-local config).
+//
+//   - Absent file -> empty values, SILENT (the normal no-user-config state).
+//   - Present-but-invalid (unreadable / bad JSON / non-object) -> empty
+//     values + ONE deduplicated stderr notice, then re-warns only on a state
+//     transition (same dedup contract as the repo config). NEVER throws.
+//   - mtime-cached exactly like the repo config: one statSync per unchanged
+//     call; a changed file re-reads on the next tool call. No restart.
+//
+// Resolution order (per-field, first-non-empty-wins — auto-gate's shallow
+// per-field layering): repo-config literal -> user-file value -> env var
+// (by NAME from `judge.*_env`). A partial mix is therefore legitimate
+// (e.g. endpoint+model from the user file, key from env): each of the three
+// fields resolves independently, and the judge is AVAILABLE only when all
+// three resolve non-empty (see session-progress-judge.js judgeTarget).
+// ---------------------------------------------------------------------------
+
+// judgeUserConfigFileName — the fixed filename inside the user config dir.
+export const judgeUserConfigFileName = "session-progress-llm.json";
+
+// defaultUserJudgeConfigPath — <XDG_CONFIG_HOME || ~/.config>/vh-agent-harness/
+// session-progress-llm.json (same base dir as auto-gate-llm.json). `env` is
+// injectable for tests; defaults to process.env.
+export function defaultUserJudgeConfigPath(env) {
+    const e = env || process.env;
+    const base = typeof e.XDG_CONFIG_HOME === "string" && e.XDG_CONFIG_HOME
+        ? e.XDG_CONFIG_HOME
+        : path.join(os.homedir(), ".config");
+    return path.join(base, "vh-agent-harness", judgeUserConfigFileName);
+}
+
+// normalizeUserJudgeConfig — pure. Any input -> {endpoint, model, apiKey}
+// with "" for every missing/wrong-typed field. Never throws.
+export function normalizeUserJudgeConfig(raw) {
+    const src = isPlainObject(raw) ? raw : {};
+    return {
+        // `endpoint` is primary; `modelEndpoint` is the auto-gate spelling.
+        endpoint: strOr(src.endpoint, strOr(src.modelEndpoint, "")),
+        model: strOr(src.model, ""),
+        // `apiKey` is primary; `api_key` is the repo-config spelling.
+        apiKey: strOr(src.apiKey, strOr(src.api_key, "")),
+    };
+}
+
+const EMPTY_USER_JUDGE = Object.freeze({ endpoint: "", model: "", apiKey: "" });
+
+// readUserJudgeConfig — one uncached read+normalize of the user-level file.
+// Exported for tests. NEVER throws: returns {values, state} where state is
+// "ok" | "missing" | "invalid".
+export function readUserJudgeConfig(filePath) {
+    let raw;
+    try {
+        raw = fs.readFileSync(filePath, "utf8");
+    } catch {
+        return { values: EMPTY_USER_JUDGE, state: "missing" };
+    }
+    try {
+        const parsed = JSON.parse(raw);
+        if (!isPlainObject(parsed)) throw new Error("not a JSON object");
+        return { values: normalizeUserJudgeConfig(parsed), state: "ok" };
+    } catch (e) {
+        return {
+            values: EMPTY_USER_JUDGE,
+            state: "invalid",
+            detail: (e && e.message) || String(e),
+        };
+    }
+}
+
+// _userJudgeCache: path -> {key, values} (the same statKey invalidation as
+// the repo config). _userWarnState: path -> last state string for the
+// deduped warn contract.
+const _userJudgeCache = new Map();
+const _userWarnState = new Map();
+
+function warnUserJudgeOnce(pathStr, state, detail) {
+    const prev = _userWarnState.get(pathStr);
+    if (prev === state) return; // persistent failure: already warned
+    _userWarnState.set(pathStr, state);
+    console.error(
+        `[session-progress] judge user config ${state} at ${pathStr}` +
+            (detail ? ` (${detail})` : "") +
+            `; ignoring user-level judge values (env fallback applies)`,
+    );
+}
+
+// judgeUserConfigPath — the effective user-level file path for a normalized
+// config: the `judge.user_config_path` override, else the XDG default.
+export function judgeUserConfigPath(cfg, env) {
+    const override = cfg && cfg.judge && cfg.judge.user_config_path;
+    if (typeof override === "string" && override.length > 0) return override;
+    return defaultUserJudgeConfigPath(env);
+}
+
+// loadUserJudgeConfig — the plugin's per-call entry for the user-level file.
+// mtime-cached; absent = silent empty values; invalid = empty values + one
+// deduped warn. NEVER throws.
+export function loadUserJudgeConfig(cfg, env) {
+    const filePath = judgeUserConfigPath(cfg, env);
+    let key;
+    try {
+        key = statKey(fs.statSync(filePath));
+    } catch {
+        key = "missing";
+    }
+    const cached = _userJudgeCache.get(filePath);
+    if (cached && cached.key === key) return cached.values;
+    let out;
+    if (key === "missing") {
+        // Absent = the normal no-user-config state: silent empties, no warn.
+        out = EMPTY_USER_JUDGE;
+    } else {
+        const r = readUserJudgeConfig(filePath);
+        out = r.values;
+        // Warn ONLY on invalid files (deduped). A valid file is the normal
+        // configured state — never a warning.
+        if (r.state === "invalid") warnUserJudgeOnce(filePath, "invalid", r.detail);
+    }
+    _userJudgeCache.set(filePath, { key, values: out });
+    return out;
+}
+
+// mergeUserJudgeConfig — pure per-field fill of the judge literal fields from
+// the user-level values. A non-empty repo-config literal wins per field; an
+// empty one ("unspecified") is filled from the user file. Everything else in
+// cfg is passed through unchanged (same references — cheap spread).
+export function mergeUserJudgeConfig(cfg, user) {
+    const j = (cfg && cfg.judge) || {};
+    const u = isPlainObject(user) ? user : {};
+    return {
+        ...cfg,
+        judge: {
+            ...j,
+            endpoint: strOr(j.endpoint, strOr(u.endpoint, "")),
+            model: strOr(j.model, strOr(u.model, "")),
+            api_key: strOr(j.api_key, strOr(u.apiKey, "")),
+        },
+    };
 }

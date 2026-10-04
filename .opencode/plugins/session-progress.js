@@ -39,6 +39,8 @@ import { fileURLToPath } from "node:url";
 
 import {
     loadConfig,
+    loadUserJudgeConfig,
+    mergeUserJudgeConfig,
     needsAgentAttribution,
     resolveModeForAgent,
 } from "../scripts/session-progress-config.js";
@@ -449,7 +451,13 @@ export const server = async ({ client, directory } = {}) => ({
         try {
             const t0 = _now();
             root = repoRoot();
-            const cfg = loadConfig(root);
+            // Dual-form judge wiring (operator decision 2026-10-05): fill the
+            // literal judge target fields from the user-level
+            // session-progress-llm.json (mtime-cached like the repo config;
+            // per-field, a repo-config literal still wins). Env fallback
+            // applies at judgeTarget time for any field neither supplies.
+            const baseCfg = loadConfig(root);
+            const cfg = mergeUserJudgeConfig(baseCfg, loadUserJudgeConfig(baseCfg));
             if (!cfg.enabled) return; // allow: kill switch
 
             const tool = input && typeof input.tool === "string" ? input.tool : null;

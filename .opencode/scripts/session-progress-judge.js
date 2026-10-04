@@ -7,9 +7,15 @@
 //   - The plugin may abort ITS OWN judge fetch (AbortController scoped to
 //     OUR HTTP request). It NEVER aborts the SDK/tool request — no handle to
 //     it exists here and none may be taken.
-//   - Availability is env-referenced: model/endpoint/api-key env var NAMES
-//     come from config; VALUES from process.env at call time. Missing any ->
-//     "unavailable" (semantic judging disabled; allow; recorded explicitly).
+//   - Availability is dual-form (operator decision 2026-10-05, mirroring
+//     auto-gate's literal-preferred pattern), resolved PER FIELD,
+//     first-non-empty-wins: config literal (`judge.endpoint` / `judge.model`
+//     / `judge.api_key` — already merged with the user-level
+//     session-progress-llm.json by the config module) -> env var (NAME from
+//     `judge.*_env`, VALUE from env at call time). Missing any -> {
+//     status: "unavailable" } (semantic judging disabled; allow; recorded).
+//     A partial mix (e.g. endpoint+model literal, key from env) is
+//     legitimate per-field layering — auto-gate's shallow per-field rule.
 //   - STRICT 4-class output schema is validated by policy.validateVerdict.
 //     This module only EXTRACTS a candidate JSON object from the model text;
 //     validation (and the fail-open on invalid) lives in policy so both the
@@ -26,17 +32,27 @@ import { validateVerdict } from "./session-progress-policy.js";
 
 const BODY_BYTE_CAP = 64 * 1024;
 
-// judgeTarget — resolve endpoint/model/key from config env NAMES + env.
-// Returns null when any is missing (=> "unavailable"). Never reads files.
+// judgeTarget — resolve endpoint/model/key PER FIELD via the dual form:
+// a non-empty config LITERAL wins; an empty literal ("unspecified") falls
+// through to the env var (by NAME) value. Returns null when ANY of the three
+// resolves empty (=> "unavailable"). Pure over cfg+env; never reads files
+// (the user-level file has already been merged into cfg.judge literals by
+// the config module's mergeUserJudgeConfig).
+function literalOrEnv(literal, envName, env) {
+    if (typeof literal === "string" && literal.length > 0) return literal;
+    if (typeof envName === "string" && envName.length > 0) {
+        const v = env[envName];
+        if (typeof v === "string" && v.length > 0) return v;
+    }
+    return "";
+}
+
 export function judgeTarget(cfg, env) {
     const e = env || process.env;
     const j = (cfg && cfg.judge) || {};
-    const endpoint = j.endpoint_env ? e[j.endpoint_env] : "";
-    const model = j.model_env ? e[j.model_env] : "";
-    const apiKey = j.api_key_env ? e[j.api_key_env] : "";
-    if (typeof endpoint !== "string" || typeof model !== "string" || typeof apiKey !== "string") {
-        return null;
-    }
+    const endpoint = literalOrEnv(j.endpoint, j.endpoint_env, e);
+    const model = literalOrEnv(j.model, j.model_env, e);
+    const apiKey = literalOrEnv(j.api_key, j.api_key_env, e);
     if (endpoint.length === 0 || model.length === 0 || apiKey.length === 0) return null;
     return { endpoint, model, apiKey };
 }
