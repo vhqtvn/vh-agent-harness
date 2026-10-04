@@ -7,6 +7,7 @@ features:
 overlays:
     - auto-classifier-pilot
     - harness-dogfood
+    - session-progress-pilot
 capabilities:
     - core/media-perception
     - core/worker-read-only
