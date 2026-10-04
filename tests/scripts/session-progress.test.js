@@ -239,6 +239,54 @@ test("[ss2] agents string shorthand and attribution requirements", async () => {
     assert.equal(cfgmod.resolveModeForAgent(specific, "other"), "audit");
 });
 
+// [off-fallback pins] The three config-level OFF fallbacks (post-269d9c9
+// opt-in flip): every invalid/incomplete agents shape MUST normalize to a
+// {"*":"off"} wildcard — the inert fail-open floor. Pinned directly with
+// deepEqual on the OFF outcome (not merely "no throw") because these sites
+// were previously verified statically by review only.
+test("[ss2] agents OFF fallbacks: invalid shorthand, missing/invalid wildcard, defensive resolveModeForAgent", async () => {
+    const cfgmod = await loadConfigModule();
+
+    // (1) Invalid string shorthand -> {"*":"off"} (normalizeAgents string arm).
+    assert.deepEqual(
+        cfgmod.normalizeConfig({ agents: "bogus" }).agents,
+        { "*": "off" },
+        "invalid shorthand string falls back to off",
+    );
+
+    // (2) Object form with missing/invalid wildcard -> wildcard forced "off";
+    // valid specific keys survive but the effective default stays off.
+    assert.deepEqual(
+        cfgmod.normalizeConfig({ agents: {} }).agents,
+        { "*": "off" },
+        "empty agents object forces the off wildcard",
+    );
+    assert.deepEqual(
+        cfgmod.normalizeConfig({ agents: { build: "enforce" } }).agents,
+        { "*": "off", build: "enforce" },
+        "missing wildcard forces off (specific key kept)",
+    );
+    assert.deepEqual(
+        cfgmod.normalizeConfig({ agents: { "*": "wat", build: "enforce" } }).agents,
+        { "*": "off", build: "enforce" },
+        "invalid wildcard value forces off",
+    );
+
+    // (3) Defensive resolveModeForAgent fallback (agents["*"] || "off"):
+    // reachable only with a hand-built/malformed cfg — normalizeConfig always
+    // materializes a valid wildcard — and the guard must still resolve "off".
+    assert.equal(cfgmod.resolveModeForAgent({ agents: {} }, "build"), "off",
+        "missing wildcard in raw cfg resolves off");
+    assert.equal(cfgmod.resolveModeForAgent(null, "build"), "off",
+        "null cfg resolves off");
+    assert.equal(cfgmod.resolveModeForAgent(undefined, "build"), "off",
+        "undefined cfg resolves off");
+    assert.equal(cfgmod.resolveModeForAgent({}, "build"), "off",
+        "cfg without agents key resolves off");
+    assert.equal(cfgmod.resolveModeForAgent({ agents: { build: "enforce" } }, ""),
+        "off", "unattributed call never inherits a specific agent's mode");
+});
+
 test("[ss2] computeSignature: exact, order-insensitive, difference-sensitive", async () => {
     const policy = await loadPolicy();
     const a = policy.computeSignature("bash", { command: "make test", workdir: "x" });
@@ -319,6 +367,15 @@ test("[ss2] hook: allow preserves output.args exactly (never mutated)", async ()
     mod.__test.resetState();
     const root = freshRoot();
     process.env.SESSION_PROGRESS_REPO_ROOT = root;
+    // Explicit audit fixture (post-269d9c9 opt-in flip): without a config
+    // file this test exercised the OFF early-return BEFORE the signature/
+    // observe path, making the args-preservation pin vacuous. The audit
+    // fixture puts the call on the observing path; the ring assertion below
+    // (copied from the [opt-in pin] shape) proves it is not an off-path
+    // early return.
+    const cfgmod = await loadConfigModule();
+    cfgmod.__resetConfigCacheForTest();
+    writeConfig(root, { agents: { "*": "audit" } }); // explicit opt-in
     try {
         const hooks = await mod.server({ client: nullClient(), directory: root });
         const args = { command: "echo hi", workdir: "tmp" };
@@ -327,6 +384,13 @@ test("[ss2] hook: allow preserves output.args exactly (never mutated)", async ()
         assert.equal(r.threw, null);
         assert.equal(r.output.args, args, "same object reference");
         assert.deepEqual(r.output.args, snapshot, "deep-equal content");
+        // Proof of path: the call WAS observed (audit path), not the off
+        // early-return — the no-observation assertion from [opt-in pin],
+        // inverted for the audit fixture.
+        const st = mod.__test.sessions().get("s1");
+        assert.ok(st, "audit fixture: session state exists");
+        assert.equal(st.ring.length, 1,
+            "audit fixture: exactly one observation recorded (observing path, not off)");
     } finally {
         delete process.env.SESSION_PROGRESS_REPO_ROOT;
         rmSync(root, { recursive: true, force: true });
