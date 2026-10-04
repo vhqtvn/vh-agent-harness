@@ -1,6 +1,6 @@
 # vh-agent-harness developer tasks. The repo dogfoods its own harness; `update`
 # regenerates this repo's rendered .opencode/ from templates/core after a build.
-.PHONY: build test test-js fmt vet check install update doctor test-auto-gate-live test-e2e-auto-gate test-e2e-auto-gate-opencode
+.PHONY: build test test-js fmt vet check install update doctor test-auto-gate-live test-e2e-auto-gate test-e2e-auto-gate-opencode test-e2e-session-progress-live
 
 # Version: bare tag on an exact-tag commit (release); <latest-tag>+dev otherwise.
 # Semver build metadata (+dev) sorts equal to the tag, not below — honest "dev build
@@ -57,3 +57,8 @@ test-e2e-auto-gate-opencode: ## Run auto-gate real-runtime e2e (requires Docker;
 		{ echo "[test-e2e-auto-gate-opencode] Docker is not available; install Docker to run this suite."; exit 1; }
 	docker build -t auto-gate-opencode-e2e -f tests/e2e/auto-gate-opencode/Dockerfile .
 	docker run --rm auto-gate-opencode-e2e
+
+test-e2e-session-progress-live: ## Run session-progress live-runtime receipt e2e (host opencode binary; ~4 min; receipts under tmp/)
+	@command -v opencode >/dev/null 2>&1 || \
+		{ echo "[test-e2e-session-progress-live] opencode is not on PATH; install it to run this suite."; exit 1; }
+	node tests/e2e/session-progress-live/run-e2e.mjs
