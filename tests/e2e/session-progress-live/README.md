@@ -38,6 +38,34 @@ embed equivalence).
 | C | **live slow-path audit** — audit + scripted valid-verdict judge | `verdicts.jsonl` `kind:"assessment"` rows with `verdict:"looping"`, `judge:true` + `would-deny` rows; never throws. Label: **scripted-judge, real-seam** — the judge is deterministic/local, the hook seam is real |
 | D | **dead-endpoint fail-open** — enforce, mechanical off, dead judge port | `why:"judge-network"` rows; NO deny under enforce; all turns execute |
 
+### Pinned cardinalities + completion gate (F4 hardening)
+
+Counts are asserted from **parsed** verdict rows (never substrings), pinned
+to the retained receipts (rev `19e6d97`):
+
+- **A**: exactly **1** `action:"deny"` row — mechanical rule, lease-bounded
+  reason (`lease_expires`/`lease_hits`/`lease_max` + "temporarily denied
+  until" text). Structural: the lease is maxHits=1 and cannot re-arm from
+  its own denial.
+- **B**: exactly **6** `why:"judge-timeout"` rows and **zero**
+  `judge-network` rows. Structural: 8 scripted turns − 2 spend-gate skips;
+  every post-gate call is assessed before it executes and each stalled
+  judge burns the full 800 ms deadline, keeping later cadence intervals
+  above the 1 s floor.
+- **D**: exactly **5** `why:"judge-network"` rows and zero deny rows. The
+  count rests on call 4 landing ~0.87 s after the first assessment (inside
+  the 1 s cadence floor → third skip); that margin is ~130 ms, so sustained
+  host jitter could legitimately produce 6 — if that ever flakes, relax to
+  `>=5` and keep the zero-deny/all-executed class guards.
+- **C**: **no exact census** — the mechanical/semantic would-deny split
+  races 1 s lease windows against call gaps that grow with conversation
+  length. Asserted instead: every parsed assessment is `judge:true` +
+  `verdict:"looping"`, ≥1 `would-deny` row, zero hard `action:"deny"` rows,
+  and zero judge failure-class rows.
+- **All legs**: the opencode child must **exit 0**. A SIGKILLed/timed-out
+  child (`status: null`) FAILS the leg — its receipt stays on disk as
+  forensics, never as a pass.
+
 The agent "model" is a deterministic local OpenAI-compatible mock that
 scripts identical failing bash calls (`printf … | tee -a side-effects.txt;
 false`) — no real LLM, no egress beyond 127.0.0.1 (plus whatever the opencode

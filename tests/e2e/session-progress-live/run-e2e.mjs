@@ -33,6 +33,16 @@
 //     every judge call classifies judge-network and the call is ALLOWED
 //     (fail-open); no deny ever throws; all turns execute.
 //
+// Cardinality + completion gating (card defer-session-progress-live-receipts,
+// F4 hardening): per-leg receipt counts are asserted from PARSED verdict
+// rows, pinned to the retained receipts — A: exactly 1 action:"deny" row
+// (mechanical, lease-bounded reason); B: exactly 6 why:"judge-timeout" rows
+// and zero judge-network; D: exactly 5 why:"judge-network" rows and zero
+// deny; C: class invariants only (its mechanical/semantic split races 1 s
+// lease windows against growing call gaps — timing-shaped, not census-stable).
+// EVERY leg requires the opencode child to exit 0: a SIGKILLed/timed-out
+// child (status null) FAILS the leg; its receipt is forensics, never a pass.
+//
 // Run: vh-agent-harness exec node tests/e2e/session-progress-live/run-e2e.mjs
 // Env: LEG=A|B|C|D (single leg), KILL_MS (child kill timer, default 90000),
 //      OPENCODE_DEBUG=1 (child --print-logs + DEBUG level), KEEP=1 (keep
@@ -390,6 +400,30 @@ function readVerdicts(dir) {
     }
 }
 
+// parseVerdictRows — structured per-line parse of a leg's verdicts.jsonl.
+// Cardinality assertions count PARSED rows by their kind/why/action fields,
+// never raw substrings, so a reason string that merely mentions a class can
+// neither satisfy nor trip a count.
+function parseVerdictRows(text) {
+    const rows = [];
+    for (const l of text.split("\n")) {
+        if (!l.trim()) continue;
+        try {
+            const rec = JSON.parse(l);
+            if (rec && typeof rec === "object") rows.push(rec);
+        } catch {
+            /* malformed line — excluded from counts */
+        }
+    }
+    return rows;
+}
+
+function countRows(rows, pred) {
+    let n = 0;
+    for (const r of rows) if (pred(r)) n += 1;
+    return n;
+}
+
 // ── legs ───────────────────────────────────────────────────────────────────
 
 async function caseRun(name, { mode, pluginCfg, judgeEnv = {}, judgeServer }) {
@@ -407,7 +441,8 @@ async function caseRun(name, { mode, pluginCfg, judgeEnv = {}, judgeServer }) {
         const verdicts = readVerdicts(dir);
         return {
             name, secs: r.secs, status: r.status, denyInStdout, denyInModelFeedback,
-            executed, turns: TURNS, verdicts, stdout: r.stdout, stderr: r.stderr,
+            executed, turns: TURNS, verdicts, rows: parseVerdictRows(verdicts),
+            stdout: r.stdout, stderr: r.stderr,
             agentModelCalls: toolBodies.length,
             mockEvents: mock.events(),
             judgeServer,
@@ -576,57 +611,140 @@ if (A) {
     const aChecks = {};
     console.log(`A enforce/loop: status=${A.status} secs=${A.secs} modelCalls=${A.agentModelCalls} executed=${A.executed}/${A.turns}`);
     console.log(`   denyInStdout=${A.denyInStdout} denyReachedModelFeedback=${A.denyInModelFeedback}`);
+    // Cardinality pinned from the retained receipt (rev 19e6d97): exactly
+    // ONE action:"deny" row. Structural: the mechanical lease is
+    // maxHits=1, and a lease cannot re-arm from its own denial — only
+    // fresh executed evidence can arm a new one — which the scripted
+    // 8-turn run does not re-accumulate before it ends.
+    const aDenyRows = A.rows.filter((r) => r.kind === "deny" && r.action === "deny");
+    const aDeny = aDenyRows[0] || null;
+    const aDenyMechanical = !!aDeny && aDeny.rule === "mechanical";
+    const aDenyBounded = !!aDeny &&
+        typeof aDeny.reason === "string" && aDeny.reason.startsWith("[session-progress]") &&
+        aDeny.reason.includes("temporarily denied until") &&
+        typeof aDeny.lease_expires === "string" &&
+        typeof aDeny.lease_hits === "number" && aDeny.lease_hits >= 1 &&
+        typeof aDeny.lease_max === "number" && aDeny.lease_max >= aDeny.lease_hits;
     aChecks.deny_in_stdout = A.denyInStdout;
     aChecks.deny_reached_model = A.denyInModelFeedback;
     aChecks.executed_lt_turns = A.executed < A.turns;
     aChecks.verdicts_deny = A.verdicts.includes('"action":"deny"');
-    aChecks.run_completed = A.status === 0 || A.status === null;
+    aChecks.deny_rows_exactly_one = aDenyRows.length === 1;
+    aChecks.deny_row_mechanical = aDenyMechanical;
+    aChecks.deny_reason_bounded = aDenyBounded;
+    aChecks.run_completed = A.status === 0;
     check(A.denyInStdout, "A: deny reason surfaced in runtime output");
     check(A.denyInModelFeedback, "A: deny reason reached the MODEL as tool-error feedback (next request body)");
     check(A.executed < A.turns, `A: deny prevented >=1 execution (${A.executed}/${A.turns} side effects)`);
     check(A.verdicts.includes('"action":"deny"'), "A: verdicts.jsonl records the deny");
-    check(A.status === 0 || A.status === null, `A: opencode run completed (status ${A.status})`);
+    check(aDenyRows.length === 1, `A: exactly 1 action:"deny" row in verdicts.jsonl (got ${aDenyRows.length})`);
+    check(aDenyMechanical, "A: the deny row is the mechanical rule");
+    check(aDenyBounded, 'A: deny row carries the bounded lease reason (lease fields + "temporarily denied until")');
+    // Completion gate: exit 0 REQUIRED. status null (SIGKILL/timer) or a
+    // spawn error (-1) FAILS the leg — a killed child's partial receipts
+    // are forensics, never a pass. (The retained receipt shows status 0.)
+    check(A.status === 0, `A: opencode run completed with exit 0 (status ${A.status})`);
     writeReceipt(A, aChecks);
 }
 
 if (B) {
     const bChecks = {};
     console.log(`B judge-timeout: status=${B.status} secs=${B.secs} modelCalls=${B.agentModelCalls} executed=${B.executed}/${B.turns}`);
+    // Cardinality pinned from the retained receipt (rev 19e6d97): exactly
+    // 6 why:"judge-timeout" rows. Structural: 8 scripted turns, the first
+    // 2 spend-gate-skipped, and every subsequent call is assessed BEFORE
+    // it executes; each stalled judge burns the full 800 ms deadline, so
+    // post-assessment cadence intervals stay comfortably above the 1 s
+    // floor and no further skips occur. Wrong-class guard: zero
+    // judge-network rows (that is the dead-port class, leg D).
+    const bTimeout = countRows(B.rows, (r) => r.why === "judge-timeout");
+    const bNetwork = countRows(B.rows, (r) => r.why === "judge-network");
     bChecks.judge_timeout_recorded = B.verdicts.includes("judge-timeout");
+    bChecks.judge_timeout_rows_exactly_six = bTimeout === 6;
     bChecks.no_network_class = !B.verdicts.includes("judge-network");
+    bChecks.judge_network_rows_zero = bNetwork === 0;
     bChecks.no_deny = !B.denyInStdout;
     bChecks.all_executed = B.executed === B.turns;
+    bChecks.run_completed = B.status === 0;
     check(B.verdicts.includes("judge-timeout"), "B: verdicts.jsonl records why:judge-timeout (stall-headers, true deadline class)");
+    check(bTimeout === 6, `B: exactly 6 why:"judge-timeout" rows in verdicts.jsonl (got ${bTimeout})`);
     check(!B.verdicts.includes("judge-network"), "B: NOT the dead-port judge-network class");
+    check(bNetwork === 0, `B: zero judge-network rows parsed (got ${bNetwork})`);
     check(!B.denyInStdout, "B: timeout fails open (no deny)");
     check(B.executed === B.turns, `B: all turns executed (${B.executed}/${B.turns})`);
+    // Completion gate: a SIGKILLed/timed-out child (status null) FAILS the
+    // leg — the receipt is forensics, never a pass.
+    check(B.status === 0, `B: opencode run completed with exit 0 (status ${B.status})`);
     writeReceipt(B, bChecks);
 }
 
 if (C) {
     const cChecks = {};
     console.log(`C audit/slowpath: status=${C.status} secs=${C.secs} modelCalls=${C.agentModelCalls} executed=${C.executed}/${C.turns}`);
+    // Counts are deliberately NOT pinned for C. The mechanical/semantic
+    // would-deny alternation races 1 s lease windows against call gaps
+    // that grow with conversation length (retained receipt: 5 would-deny,
+    // 2 assessments — but a ~±150 ms shift moves one call in/out of a
+    // lease window and changes the split). The CLASS invariants below are
+    // the stable, regression-catching core.
+    const cAssess = C.rows.filter((r) => r.kind === "assessment");
+    const cAssessOk = cAssess.length >= 1 && cAssess.every((r) => r.judge === true && r.verdict === "looping");
+    const cWouldDeny = countRows(C.rows, (r) => r.action === "would-deny");
+    const cHardDeny = countRows(C.rows, (r) => r.action === "deny");
+    const cFailClass = countRows(C.rows, (r) => r.why === "judge-network" || r.why === "judge-timeout");
     cChecks.assessments_with_verdict = /"kind":"assessment"/.test(C.verdicts) && /"verdict":"looping"/.test(C.verdicts);
+    cChecks.assessments_parsed_all_judge_looping = cAssessOk;
     cChecks.would_deny = C.verdicts.includes("would-deny");
+    cChecks.would_deny_rows_at_least_one = cWouldDeny >= 1;
     cChecks.audit_never_throws = !C.denyInStdout;
+    cChecks.hard_deny_rows_zero = cHardDeny === 0;
+    cChecks.judge_failure_classes_zero = cFailClass === 0;
     cChecks.all_executed = C.executed === C.turns;
+    cChecks.run_completed = C.status === 0;
     check(/"kind":"assessment"/.test(C.verdicts) && /"verdict":"looping"/.test(C.verdicts),
         "C: real assessments with parsed verdicts recorded (scripted-judge, real-seam)");
+    check(cAssessOk, `C: every parsed assessment row is judge:true verdict:"looping" (${cAssess.length} rows)`);
     check(C.verdicts.includes("would-deny"), "C: audit records would-deny");
+    check(cWouldDeny >= 1, `C: >=1 parsed would-deny row (got ${cWouldDeny}; exact count not pinned — lease/cadence race)`);
     check(!C.denyInStdout, "C: audit mode NEVER denies");
+    check(cHardDeny === 0, `C: zero hard action:"deny" rows in audit mode (got ${cHardDeny})`);
+    check(cFailClass === 0, `C: zero judge failure-class rows — the scripted judge must succeed (got ${cFailClass})`);
     check(C.executed === C.turns, `C: all turns executed (${C.executed}/${C.turns})`);
+    // Completion gate: a SIGKILLed/timed-out child (status null) FAILS the
+    // leg — the receipt is forensics, never a pass.
+    check(C.status === 0, `C: opencode run completed with exit 0 (status ${C.status})`);
     writeReceipt(C, cChecks);
 }
 
 if (D) {
     const dChecks = {};
     console.log(`D fail-open/semantic: status=${D.status} secs=${D.secs} modelCalls=${D.agentModelCalls} executed=${D.executed}/${D.turns}`);
+    // Cardinality pinned from the retained receipt (rev 19e6d97): exactly
+    // 5 why:"judge-network" rows. Shape: 8 scripted turns; the first 2
+    // calls are spend-gate-skipped, and call 4 lands ~0.87 s after the
+    // first assessment — inside the 1 s cadence floor — so it is skipped
+    // too (3 skips + 5 assessments). That 0.87 s gap carries only ~130 ms
+    // of margin against the 1 s floor: sustained host jitter pushing call
+    // 4 past 1 s would make the count 6. Verified stable across full-suite
+    // runs on this host; if it ever flakes, relax to >=5 and keep the
+    // zero-deny + all-executed invariants (the class guard is the
+    // load-bearing part, not the exact census).
+    const dNetwork = countRows(D.rows, (r) => r.why === "judge-network");
+    const dDeny = countRows(D.rows, (r) => r.action === "deny");
     dChecks.judge_network_recorded = D.verdicts.includes("judge-network");
+    dChecks.judge_network_rows_exactly_five = dNetwork === 5;
     dChecks.no_deny = !D.denyInStdout;
+    dChecks.hard_deny_rows_zero = dDeny === 0;
     dChecks.all_executed = D.executed === D.turns;
+    dChecks.run_completed = D.status === 0;
     check(D.verdicts.includes("judge-network"), "D: judge failure class recorded (dead endpoint -> network)");
+    check(dNetwork === 5, `D: exactly 5 why:"judge-network" rows in verdicts.jsonl (got ${dNetwork})`);
     check(!D.denyInStdout, "D: dead judge + semantic-only -> fail-open allow (enforce, NO deny)");
+    check(dDeny === 0, `D: zero action:"deny" rows parsed under enforce fail-open (got ${dDeny})`);
     check(D.executed === D.turns, `D: all turns executed (${D.executed}/${D.turns})`);
+    // Completion gate: a SIGKILLed/timed-out child (status null) FAILS the
+    // leg — the receipt is forensics, never a pass.
+    check(D.status === 0, `D: opencode run completed with exit 0 (status ${D.status})`);
     writeReceipt(D, dChecks);
 }
 
