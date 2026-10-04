@@ -360,7 +360,7 @@ nonexistent:
   selection paths render the same cluster.
 
 - `auto-classifier-pilot` — the opt-in auto-classifier safety pilot (a
-  three-hook tool-call gate with `audit`/`enforce`/`live`/`live-tiered` modes).
+  two-hook tool-call gate with `audit`/`enforce`/`live`/`live-tiered` modes).
   It is **overlay-only** (no capability-manifest), so it is selected solely via
   `overlays: [auto-classifier-pilot]`. See "Auto-classifier configuration"
   below, or run `vh-agent-harness overlay docs auto-classifier-pilot` for the

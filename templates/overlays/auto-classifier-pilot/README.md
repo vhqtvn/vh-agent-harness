@@ -1,6 +1,6 @@
 # auto-classifier-pilot
 
-An **opt-in** overlay pack that ships a three-hook plugin — the pilot for an
+An **opt-in** overlay pack that ships a two-hook plugin — the pilot for an
 auto-classifier-style tool-call gate. It implements three behavior modes,
 selected by a live config `mode` field (default `audit`):
 
@@ -20,7 +20,7 @@ selected by a live config `mode` field (default `audit`):
 
 ## What this is
 
-The plugin (`auto-tool-gate`) hooks **three** OpenCode surfaces, but only one is
+The plugin (`auto-tool-gate`) hooks **two** OpenCode surfaces, and only one is
 the **enforcement surface** — the **`event` hook**. In the default **`audit`**
 mode the plugin writes one audit line to **stderr** per firing, capturing a
 verdict placeholder (`verdict=AUDIT_ONLY`). It never throws, never blocks, never
@@ -28,7 +28,7 @@ mutates a tool call, and never replies to a permission event. **Enabling this
 overlay with the default mode changes zero behavior** — it only adds stderr
 audit lines.
 
-The three hooks:
+The two hooks:
 
 1. **`event`** *(PRIMARY ENFORCEMENT SURFACE)* — receives every OpenCode bus
    event, including `permission.asked`. When OpenCode's permission table routes
@@ -55,18 +55,23 @@ The three hooks:
    It **must NOT throw or block** — enforcement is owned entirely by the event
    hook. This hook is kept because it sees calls `permission.asked` does not
    (the table-allowed fast-path).
-3. **`permission.ask`** *(DORMANT — RETAINED AS RESERVE)* — OpenCode does not
-   fire `permission.ask` in any stock release as of the studied version. The
-   event hook is the active enforcement surface. This hook is retained as a
-   hedge in case upstream wires it; it mirrors the same decision logic so it
-   could serve as the enforcement surface if the hook ever fires. **No claim of
-   auto-approval rests on this hook.** It is a dormant reserve only.
+
+> **Historical note — why there is no `permission.ask` hook.** Upstream's
+> plugin system dispatched a `permission.ask` plugin hook from the plugin
+> system's introduction (2025-08-02) until the legacy permission module was
+> deleted (2026-03-14). The last upstream release whose tree carried the
+> dispatch was v1.2.26; the first without it was v1.2.27. No runtime this
+> repo supports dispatches the hook (both installed surfaces here are
+> post-deletion), which is why the dormant reserve hook this pack once
+> carried was removed as unreachable code. Should a future runtime re-wire
+> it, re-derive with one grep for the hook name in the runtime's
+> permission/plugin modules and re-open the decision.
 
 ## Decision architecture
 
-### The three-hook model
+### The two-hook model
 
-OpenCode exposes **three** plugin hooks relevant to this plugin (verified
+OpenCode exposes **two** plugin hooks relevant to this plugin (verified
 against `@opencode-ai/plugin` + `@opencode-ai/sdk` types + three shipped
 reference implementations):
 
@@ -74,7 +79,10 @@ reference implementations):
 |------|-------|--------|---------------------|
 | `event` | `{ event }` where `event.type` is the event name and `event.properties` is the payload | Receives **every bus event**, including `permission.asked`. For `permission.asked`, `properties` is the `Request` `{id, sessionID, permission, patterns, metadata, always, tool}`. The hook replies via the SDK client to resolve the Deferred → auto-approve or auto-reject. **Allow** replies use the v1 route (`postSessionIdPermissionsPermissionId`); **reject** replies use the v2 route (`POST /permission/:id/reply`) to attach a reason (per-call gate — see "Per-call gate" below). | **PRIMARY ENFORCEMENT SURFACE.** This is the hook that makes `enforce`/`live` auto-approve against stock OpenCode. |
 | `tool.execute.before` | `{tool, sessionID, callID}` | **block (throw)** or **passthrough (bare return)** only. Cannot force-allow. Sees EVERY tool call. | **AUDIT-ONLY OBSERVER.** Must NOT throw/block. Kept because it sees calls the event hook does not (table-allowed fast-path). |
-| `permission.ask` | `Permission {id, type, pattern, sessionID, messageID, callID?, title, metadata, time}` + `{status}` output | Three-way `status` mutation (`allow` / `deny` / `ask`). | **DORMANT RESERVE.** Not fired by stock OpenCode. Retained as hedge. No enforcement claim rests on it. |
+
+(A `permission.ask` plugin hook also exists as a type-level declaration
+upstream, but no release since v1.2.27 dispatches it — see the historical note
+above.)
 
 The `event` hook is the surface that maps onto the reference classifier's three
 dispositions (allow / deny / ask). When `mode` is `enforce` or `live`, the hook
@@ -136,9 +144,9 @@ trigger machinery:
 - **`tool.execute.before` fires BEFORE `item.execute`.** In
   `refs/opencode/packages/opencode/src/session/prompt.ts`, the tool-execution
   path yields `plugin.trigger("tool.execute.before", ...)` first, and only then
-  runs `item.execute`, whose `ask` callback calls `permission.ask` (i.e.
-  `ctx.ask`) — the entry point that consults the permission table and, on an
-  `ask` routing, publishes the `permission.asked` event.
+  runs `item.execute`, whose `ask` callback consults the permission service
+  (`ctx.ask` → `Permission.ask`) — the entry point that checks the permission
+  table and, on an `ask` routing, publishes the `permission.asked` event.
 
 Concretely:
 
@@ -218,12 +226,12 @@ When the classifier owns the event hook, the layered precedence is:
 
 ### Which hook each phase uses
 
-| Phase | `tool.execute.before` | `permission.ask` | `event` | Behavior |
-|-------|-----------------------|------------------|---------|----------|
-| **1 (this pack)** | audit (no block) | audit (dormant, no status mutation) | audit (logs only, NO reply) | Observability only. Default mode `audit`. |
-| **2 (this pack)** | unchanged (audit, permanent) | dormant reserve | **verdict parser + fail-closed stub evaluator → reply** | `enforce` mode: parses a verdict via a DETERMINISTIC STUB and replies `"once"`/`"always"`/`"reject"`. Fail-closed → reject. Not a real model. |
-| **3b (this pack)** | unchanged (audit) | dormant reserve | **live classifier model (OpenAI-compatible HTTP) → reply** | `live` mode: real security-monitor LLM replaces the stub in the event hook, fed by a serialized transcript. Same fail-closed matrix as `enforce`. |
-| **4** | promotion review | promotion review | promotion review | Decide whether to promote into core templates / `README.agent.md`. |
+| Phase | `tool.execute.before` | `event` | Behavior |
+|-------|-----------------------|---------|----------|
+| **1 (this pack)** | audit (no block) | audit (logs only, NO reply) | Observability only. Default mode `audit`. |
+| **2 (this pack)** | unchanged (audit, permanent) | **verdict parser + fail-closed stub evaluator → reply** | `enforce` mode: parses a verdict via a DETERMINISTIC STUB and replies `"once"`/`"always"`/`"reject"`. Fail-closed → reject. Not a real model. |
+| **3b (this pack)** | unchanged (audit) | **live classifier model (OpenAI-compatible HTTP) → reply** | `live` mode: real security-monitor LLM replaces the stub in the event hook, fed by a serialized transcript. Same fail-closed matrix as `enforce`. |
+| **4** | promotion review | promotion review | Decide whether to promote into core templates / `README.agent.md`. |
 
 ### Settled: does the enforcement surface fire for every tool call?
 
@@ -424,7 +432,7 @@ Or using the env-var-name form for the endpoint (operator sets the URL via the
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
 | `enabled` | boolean | `true` | Master live toggle. `false` live-disables the plugin: both hooks no-op immediately on the next tool call (no audit, no behavior change, no restart). `true` is the normal on state. |
-| `mode` | `"audit"` \| `"enforce"` \| `"live"` \| `"live-tiered"` | `"audit"` | Behavior selector. `audit` = Phase 1 observability only (default, zero behavior change). `enforce` = Phase 2 decision path on `permission.ask` (verdict parser + STUB evaluator; fail-closed to deny). `live` = Phase 3b decision path using a REAL OpenAI-compatible model call (fail-closed to deny on any error/timeout/misconfiguration). `live-tiered` = Phase 2 multi-leaf consensus: dispatches the `live` classifier for EACH configured leaf IN PARALLEL and grants only on **unanimous-allow** (see "Phase 2 — `live-tiered` consensus mode"). `tool.execute.before` stays an observer in all modes. |
+| `mode` | `"audit"` \| `"enforce"` \| `"live"` \| `"live-tiered"` | `"audit"` | Behavior selector. `audit` = Phase 1 observability only (default, zero behavior change). `enforce` = Phase 2 decision path on the `event` hook (verdict parser + STUB evaluator; fail-closed to reject). `live` = Phase 3b decision path using a REAL OpenAI-compatible model call (fail-closed to reject on any error/timeout/misconfiguration). `live-tiered` = Phase 2 multi-leaf consensus: dispatches the `live` classifier for EACH configured leaf IN PARALLEL and grants only on **unanimous-allow** (see "Phase 2 — `live-tiered` consensus mode"). `tool.execute.before` stays an observer in all modes. |
 | `stubVerdict` | `"allow"` \| `"block"` \| `"fail"` | `"block"` | Drives the Phase 2 STUB evaluator in `enforce` mode. `"allow"` → allow verdict; `"block"` → block verdict; `"fail"` → unparseable output (exercises fail-closed). **Test/placeholder only** — not a real classifier; ignored unless `mode: "enforce"`. |
 | `promptFile` | string | `""` | **Full-override escape hatch** for the `live` classifier system prompt. If set and readable, its contents are used VERBATIM and **composition is skipped entirely** (no harness-context fragment, no adopter guides are appended). If unset/missing/unreadable, the plugin COMPOSES the prompt from fragments at load time (see "Classifier system-prompt composition" below). Lives in the plugin-config file (not the LLM file) so it MAY be committed as a shared default. |
 | `replyMode` | `"once"` \| `"always"` | `"once"` | Controls the reply disposition when the classifier verdict is **allow**. `"once"` = approve this call only (the tool call proceeds; future matching calls still prompt). `"always"` = approve AND **persist the pattern into OpenCode's in-memory allowlist** — future matching calls never prompt again (self-tightening). **`"always"` is powerful**: it auto-allowlists patterns, so a wrong allow verdict permanently silences that pattern for the session. Use `"once"` (the default) unless you are confident in the classifier's precision. Ignored in `audit` mode (no reply is sent). Invalid values → default `"once"`. |
@@ -950,8 +958,7 @@ fallback already applies when no v2 transport is available at all.
 `mode: "enforce"` switches the `event` hook from observability into a
 deterministic, **fail-closed** decision path that **auto-approves or
 auto-rejects** tool calls by replying to the `permission.asked` bus event. The
-`audit` default is unchanged (see below). The `permission.ask` hook remains
-dormant.
+`audit` default is unchanged (see below).
 
 ### What it does
 

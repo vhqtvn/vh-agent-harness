@@ -11,14 +11,11 @@
 //      /tmpproj/.opencode/repo-configs/*.json paths that the plugin reads.
 //   4. SYS-PROMPT BINARY — no promptFile in config, so the plugin shells out to
 //      `vh-agent-harness sys-prompt auto-gate-classifier` (the real Go binary on PATH).
-//   5. HOOK CONTRACT — drives BOTH hook surfaces the way OpenCode does:
-//        a. permission.ask hook (DORMANT regression — upstream does not fire it
-//           in stock releases; retained as a reserve).
-//        b. event hook (PRIMARY enforcement surface) — receives the
-//           permission.asked bus event, classifies, and replies via
-//           client.postSessionIdPermissionsPermissionId. This is the surface
-//           that makes enforce/live actually auto-approve against stock OpenCode
-//           (same pattern the upstream ships in ACP/CLI/TUI).
+//   5. HOOK CONTRACT — drives the event hook the way OpenCode does: it
+//      receives the permission.asked bus event, classifies, and replies via
+//      client.postSessionIdPermissionsPermissionId. This is the surface
+//      that makes enforce/live actually auto-approve against stock OpenCode
+//      (same pattern the upstream ships in ACP/CLI/TUI).
 //   6. TRANSCRIPT FETCH — fake client.session.messages returns a RequestResult-
 //      shaped {data, error} the plugin reads.
 //
@@ -156,26 +153,6 @@ function makeLlmConfig(scenario, overrides = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Hook invocation helper — builds a realistic Permission input + output the
-// way OpenCode delivers them to the plugin, then invokes the hook.
-// ---------------------------------------------------------------------------
-
-function makePermissionInput() {
-    return {
-        type: "bash",
-        pattern: "ls -la",
-        sessionID: "sess-e2e-1",
-        messageID: "msg-e2e-1",
-        title: "run ls",
-    };
-}
-
-function makePermissionOutput() {
-    // OpenCode initializes output.status to "ask" before calling the hook.
-    return { status: "ask" };
-}
-
-// ---------------------------------------------------------------------------
 // Event-hook helper — builds a fake permission.asked bus event (the payload
 // the event hook receives for every ask-routed permission request).
 // ---------------------------------------------------------------------------
@@ -250,10 +227,13 @@ describe("auto-gate-classifier plugin e2e", () => {
 
         // Build the plugin instance with the fake client (gap #6 transcript path).
         hooks = await server({ client: makeFakeClient(), directory: TMPROJ });
-        assert.ok(hooks && typeof hooks["permission.ask"] === "function");
         assert.ok(
             typeof hooks["event"] === "function",
             "plugin does not expose event hook (PRIMARY enforcement surface)",
+        );
+        assert.ok(
+            typeof hooks["tool.execute.before"] === "function",
+            "plugin does not expose tool.execute.before hook (audit observer)",
         );
 
         // Set the API key env var the live path reads.
@@ -266,153 +246,9 @@ describe("auto-gate-classifier plugin e2e", () => {
     });
 
     // -------------------------------------------------------------------------
-    // AUDIT mode — gap #5: status stays "ask", no model call.
-    // -------------------------------------------------------------------------
-    describe("audit mode", () => {
-        it('leaves output.status="ask" (unchanged) and makes no model call', async () => {
-            await resetMockCounts(MOCK_LLM_BASE);
-
-            writeGateConfig({ enabled: true, mode: "audit" });
-            __resetConfigCaches();
-
-            const input = makePermissionInput();
-            const output = makePermissionOutput();
-            await hooks["permission.ask"](input, output);
-
-            // CRITICAL: audit mode MUST NOT mutate output.status.
-            assert.equal(output.status, "ask", "audit mode mutated output.status");
-
-            // No model call: mock count for any scenario stays 0.
-            const allowCount = await getMockCount(MOCK_LLM_BASE, "allow");
-            assert.equal(allowCount, 0, "audit mode made a model HTTP call");
-        });
-    });
-
-    // -------------------------------------------------------------------------
-    // ENFORCE mode — gap #5: stub decision path, no model call.
-    // -------------------------------------------------------------------------
-    describe("enforce mode (stub)", () => {
-        it('sets output.status="deny" when stubVerdict="block"', async () => {
-            await resetMockCounts(MOCK_LLM_BASE);
-
-            writeGateConfig({ enabled: true, mode: "enforce", stubVerdict: "block" });
-            __resetConfigCaches();
-
-            const input = makePermissionInput();
-            const output = makePermissionOutput();
-            await hooks["permission.ask"](input, output);
-
-            assert.equal(output.status, "deny", "enforce+block did not deny");
-
-            const allowCount = await getMockCount(MOCK_LLM_BASE, "allow");
-            assert.equal(allowCount, 0, "enforce mode made a model HTTP call");
-        });
-
-        it('sets output.status="allow" when stubVerdict="allow"', async () => {
-            await resetMockCounts(MOCK_LLM_BASE);
-
-            writeGateConfig({ enabled: true, mode: "enforce", stubVerdict: "allow" });
-            __resetConfigCaches();
-
-            const input = makePermissionInput();
-            const output = makePermissionOutput();
-            await hooks["permission.ask"](input, output);
-
-            assert.equal(output.status, "allow", "enforce+allow did not allow");
-
-            const allowCount = await getMockCount(MOCK_LLM_BASE, "allow");
-            assert.equal(allowCount, 0, "enforce mode made a model HTTP call");
-        });
-    });
-
-    // -------------------------------------------------------------------------
-    // LIVE mode — gaps #4 + #6: real HTTP to mock + real sys-prompt binary +
-    // transcript fetch + verdict parse.
-    // -------------------------------------------------------------------------
-    describe("live mode", () => {
-        it('returns "allow" for the /allow scenario (real HTTP + binary + transcript)', async () => {
-            await resetMockCounts(MOCK_LLM_BASE);
-
-            writeGateConfig({ enabled: true, mode: "live" });
-            writeLlmConfig(makeLlmConfig("allow"));
-            __resetConfigCaches();
-
-            const beforeCount = transcriptCallCount;
-            const input = makePermissionInput();
-            const output = makePermissionOutput();
-            await hooks["permission.ask"](input, output);
-
-            assert.equal(output.status, "allow", "live /allow did not allow");
-
-            // Gap #6: transcript fetch fired through the fake client.
-            assert.ok(
-                transcriptCallCount > beforeCount,
-                "live mode did not call client.session.messages (transcript fetch path)",
-            );
-
-            // Real HTTP path: mock count incremented.
-            const count = await getMockCount(MOCK_LLM_BASE, "allow");
-            assert.ok(count > 0, `live /allow mock count not > 0 (got ${count})`);
-        });
-
-        it('returns "deny" for the /block scenario (real HTTP verdict parse)', async () => {
-            await resetMockCounts(MOCK_LLM_BASE);
-
-            writeGateConfig({ enabled: true, mode: "live" });
-            writeLlmConfig(makeLlmConfig("block"));
-            __resetConfigCaches();
-
-            const input = makePermissionInput();
-            const output = makePermissionOutput();
-            await hooks["permission.ask"](input, output);
-
-            assert.equal(output.status, "deny", "live /block did not deny");
-
-            const count = await getMockCount(MOCK_LLM_BASE, "block");
-            assert.ok(count > 0, `live /block mock count not > 0 (got ${count})`);
-        });
-
-        it('returns "allow" after retry for /recover-after-stall (retry-on-idle)', async () => {
-            // recover-after-stall: 1st request stalls (held socket), 2nd
-            // succeeds. With maxRetries=1 + timeoutMs=1000, the first attempt
-            // aborts on timeout, the retry succeeds -> allow.
-            await resetMockCounts(MOCK_LLM_BASE);
-
-            writeGateConfig({ enabled: true, mode: "live" });
-            writeLlmConfig(
-                makeLlmConfig("recover-after-stall", {
-                    timeoutMs: 1000,
-                    maxRetries: 1,
-                    retryDelayMs: 100,
-                }),
-            );
-            __resetConfigCaches();
-
-            const input = makePermissionInput();
-            const output = makePermissionOutput();
-            await hooks["permission.ask"](input, output);
-
-            assert.equal(
-                output.status,
-                "allow",
-                "live /recover-after-stall did not allow after retry",
-            );
-
-            // Exactly 2 model calls: 1st (stall) + 2nd (success).
-            const count = await getMockCount(MOCK_LLM_BASE, "recover-after-stall");
-            assert.equal(
-                count,
-                2,
-                `recover-after-stall expected count=2 (stall+retry), got ${count}`,
-            );
-        });
-    });
-
-    // -------------------------------------------------------------------------
     // EVENT hook — the PRIMARY enforcement surface. Drives the event hook the
     // way OpenCode delivers it: a permission.asked bus event arrives, the hook
     // classifies, and replies via client.postSessionIdPermissionsPermissionId.
-    // The existing permission.ask scenarios above are dormant-hook regression.
     // -------------------------------------------------------------------------
     describe("event hook (enforcement surface)", () => {
         it("audit mode → no reply (observe-only)", async () => {
@@ -557,6 +393,45 @@ describe("auto-gate-classifier plugin e2e", () => {
 
             const count = await getMockCount(MOCK_LLM_BASE, "block");
             assert.ok(count > 0, `live /block mock count not > 0 (got ${count})`);
+        });
+
+        it('live /recover-after-stall → reply "once" after retry (retry-on-idle)', async () => {
+            // recover-after-stall: 1st request stalls (held socket), 2nd
+            // succeeds. With maxRetries=1 + timeoutMs=1000, the first attempt
+            // aborts on timeout, the retry succeeds -> allow -> reply "once".
+            // Ported from the removed dormant-reserve live describe when the
+            // unreachable permission hook was deleted: the retry-on-idle path
+            // through the RENDERED plugin is live shared code (auto-gate-live.js)
+            // and keeps its e2e coverage on the event surface.
+            eventReplies = [];
+            await resetMockCounts(MOCK_LLM_BASE);
+
+            writeGateConfig({ enabled: true, mode: "live" });
+            writeLlmConfig(
+                makeLlmConfig("recover-after-stall", {
+                    timeoutMs: 1000,
+                    maxRetries: 1,
+                    retryDelayMs: 100,
+                }),
+            );
+            __resetConfigCaches();
+
+            await hooks["event"]({ event: makeAskedEvent({ id: "req-live-retry" }) });
+
+            assert.equal(eventReplies.length, 1, "live /recover-after-stall did not reply");
+            assert.equal(
+                eventReplies[0].body.response,
+                "once",
+                "live retry recovery should reply once",
+            );
+
+            // Exactly 2 model calls: 1st (stall) + 2nd (success).
+            const count = await getMockCount(MOCK_LLM_BASE, "recover-after-stall");
+            assert.equal(
+                count,
+                2,
+                `recover-after-stall expected count=2 (stall+retry), got ${count}`,
+            );
         });
     });
 

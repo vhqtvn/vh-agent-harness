@@ -1,22 +1,23 @@
-// auto-tool-gate.js — dual-surface plugin: audit + fail-closed enforce + live
+// auto-tool-gate.js — two-hook plugin: audit + fail-closed enforce + live
 // (Phases 1–3b pilot).
 //
 // This is the opt-in pilot for an auto-classifier-style tool-call gate. It
-// hooks BOTH permission surfaces. Behavior is selected by the live config
-// `mode` field (default `audit`):
+// hooks the observer surface and the event surface. Behavior is selected by
+// the live config `mode` field (default `audit`):
 //
 //   mode "audit"   (Phase 1, default) — observability only. Both hooks log to
 //                  stderr with a verdict PLACEHOLDER. No model call, no real
 //                  verdict, no status mutation, no blocking. Zero behavior
 //                  change.
-//   mode "enforce" (Phase 2)          — permission.ask runs the decision path
-//                  (stubEvaluate -> parseVerdict -> matrix) and sets
-//                  output.status. Fail-closed: ANY uncertainty (parse failure,
-//                  evaluator error, thrown exception) -> deny, NEVER silent
+//   mode "enforce" (Phase 2)          — the event hook runs the decision path
+//                  (stubEvaluate -> parseVerdict -> matrix) on each
+//                  permission.asked event and replies via the SDK client.
+//                  Fail-closed: ANY uncertainty (parse failure,
+//                  evaluator error, thrown exception) -> reject, NEVER silent
 //                  allow. tool.execute.before stays an OBSERVER in every mode.
 //                  The Phase 2 evaluator is a DETERMINISTIC STUB, not a real
 //                  classifier model.
-//   mode "live"    (Phase 3b)         — permission.ask fetches the real
+//   mode "live"    (Phase 3b)         — the event hook fetches the real
 //                  transcript, serializes it to a redacted text-mode string,
 //                  and calls a provider-agnostic OpenAI-compatible HTTP
 //                  completion endpoint (see ./auto-gate-live.js). The returned
@@ -24,11 +25,11 @@
 //                  matrix as enforce, so the existing fail-closed matrix
 //                  applies: any transport error / timeout / non-2xx / malformed
 //                  / missing-choices / misconfigured-endpoint / missing-API-key
-//                  -> deny, NEVER silent allow. tool.execute.before stays an
+//                  -> reject, NEVER silent allow. tool.execute.before stays an
 //                  OBSERVER. The API key is read from the named env var at call
 //                  time; it NEVER lives in the (commitable) config file.
 //
-// THREE HOOKS, ONE ENFORCEMENT SURFACE (verified against @opencode-ai/plugin
+// TWO HOOKS, ONE ENFORCEMENT SURFACE (verified against @opencode-ai/plugin
 // + sdk types + the upstream's shipped ACP / CLI / TUI reference impls):
 //
 //   1. tool.execute.before  (input:{tool,sessionID,callID}, output:{args})
@@ -40,13 +41,7 @@
 //      in EVERY mode — it must NOT throw or block in the new model; the
 //      event hook owns enforcement.
 //
-//   2. permission.ask  (input:Permission, output:{status})
-//      DORMANT — OpenCode does not fire `permission.ask` in any stock
-//      release as of the studied version. The hook is RETAINED as a RESERVE
-//      in case upstream wires it (preserves the Phase 2/3b investment).
-//      Do NOT rely on it. No claim of auto-approval rests on this hook.
-//
-//   3. event  ({ event }) — the PRIMARY ENFORCEMENT SURFACE.
+//   2. event  ({ event }) — the PRIMARY ENFORCEMENT SURFACE.
 //      Receives EVERY bus event. Acts only on `permission.asked` — the event
 //      OpenCode publishes when its ruleset routes a tool call to "ask". The
 //      event payload is the Request {id, sessionID, permission, patterns,
@@ -63,6 +58,17 @@
 //      onUncertain:"passthrough" (interactive only) are the only no-reply
 //      paths.
 //
+// NOTE ON THE REMOVED `permission.ask` RESERVE: an earlier revision of this
+// plugin also registered a dormant `permission.ask` hook as a hedge against
+// upstream wiring it. Upstream dispatched that hook only from the plugin
+// system's introduction (2025-08-02) until the legacy permission module was
+// deleted (2026-03-14); the last release carrying the dispatch was v1.2.26
+// and the first without it was v1.2.27. No runtime this repo supports
+// dispatches it, so the reserve was removed as unreachable code. If a future
+// runtime version bump re-wires the hook (re-derive with one grep for the
+// hook name in the runtime's permission/plugin modules), re-open that
+// decision rather than assuming this two-hook surface.
+//
 // HARD-FLOOR INVARIANT: the event hook fires ONLY for ask-routed calls
 // (table-allow fast-paths past the bus event; table-deny / shell-guard blocks
 // before it). The classifier can NEVER override a static deny. It only ever
@@ -70,8 +76,8 @@
 // gate; the classifier runs strictly after it.
 //
 // Phase status:
-//   Phase 3b (implemented here) — live classifier model wired into
-//             permission.ask behind mode:"live" (replaces the enforce stub with
+//   Phase 3b (implemented here) — live classifier model wired into the event
+//             hook behind mode:"live" (replaces the enforce stub with
 //             a real OpenAI-compatible HTTP call via ./auto-gate-live.js).
 //   Phase 4   (later slice)     — promotion review (core-template /
 //             README.agent.md).
@@ -96,14 +102,13 @@
 //           // console.error(reason); return; → ASK (passthrough to perm table)
 //           // return;                        → ALLOW / passthrough (do nothing)
 //       },
-//       "permission.ask": async (input, output) => {
-//           // input  → Permission {id, type, pattern, sessionID, messageID,
-//           //                       callID?, title, metadata:{}, time:{created}}
-//           // output → {status:"ask"|"deny"|"allow"} (default "ask")
-//           // output.status = "allow" → GRANT + skip user prompt
-//           // output.status = "deny"  → BLOCK
-//           // output.status = "ask"   → trigger interactive prompt (default)
-//           // bare return             → leave status unchanged (Phase 1)
+//       "event": async ({ event }) => {
+//           // event.type       → bus event name; we act only on
+//           //                    "permission.asked" (ask-routed tool calls)
+//           // event.properties → Request {id, sessionID, permission, patterns,
+//           //                    metadata, always, tool}
+//           // reply via client.postSessionIdPermissionsPermissionId(...) →
+//           //                    resolves the Deferred the tool call awaits
 //       }
 //   });
 //
@@ -158,7 +163,7 @@ import { decideLive, serializeTranscript } from "./auto-gate-live.js";
 
 // Shared credential scrubber (egress-safe): auto-tool-gate.js is the
 // AUDIT/STDERR-LOG egress surface. Every tool-call-derived value that reaches a
-// console.error line (summarizeArgs output + the permission.ask `pattern`)
+// console.error line (summarizeArgs output + the permission.asked `patterns`)
 // passes through scrubTruncate (scrubCredentials then truncate), NOT truncate
 // alone, so a credential embedded in a `command`/`pattern` cannot survive into
 // the stderr log. The IDENTICAL scrubber is shared with the HTTP-egress path
@@ -1191,10 +1196,11 @@ async function __decisionLiveGuard(config, serialized) {
 // The factory receives the full PluginInput ({client, project, directory,
 // worktree, serverUrl, $}) — same contract session-state.js relies on for
 // client.session.todo(). We close over `client` (the OpenCode SDK client, used
-// in mode:"live" to fetch the session transcript + in mode:"enforce"/"live" of
-// the event hook to reply to permission.asked) and `directory` (the repo dir,
-// passed as the SDK query param for transcript fetch). The audit and
-// enforce branches never touch either.
+// by the event hook in mode:"live" to fetch the session transcript and in
+// mode:"enforce"/"live" to reply to permission.asked) and `directory` (the
+// repo dir, passed as the SDK query param for transcript fetch). The audit
+// branch of the event hook and the tool.execute.before observer never touch
+// either.
 //
 // `configPath` / `llmConfigPath` are optional test-injection points for the
 // committed PROJECT-level files: production callers omit them (the hooks
@@ -1238,235 +1244,23 @@ export const server = async ({
             // passthrough; this hook changes zero tool-call behavior.
             //
             // This hook sees EVERY tool call — including ones the permission
-            // table auto-allows (those never reach permission.ask). That makes
-            // it the right place to capture the arg summary, and the
-            // complementary surface to permission.ask for the dual-hook audit.
+            // table auto-allows (those never reach permission.asked). That
+            // makes it the right place to capture the arg summary, and the
+            // complementary surface to the event hook for the dual-hook audit.
             //
             // WHY THIS HOOK STAYS AN OBSERVER EVEN IN ENFORCE MODE: it can ONLY
             // block (throw) or passthrough (bare return) — it cannot force-allow
             // or force-ask. Because it fires for ALL calls (not just ask-routed
             // ones), running a classifier verdict here would either block calls
-            // the table already allowed (wrong) or be redundant with
-            // permission.ask. So only permission.ask owns the authoritative
-            // decision (Phase 2+); this hook is always an observer.
+            // the table already allowed (wrong) or be redundant with the event
+            // hook. So only the event hook owns the authoritative decision
+            // (Phase 2+); this hook is always an observer.
             const tool = (input && input.tool) || "unknown";
             const summary = summarizeArgs(output && output.args);
             console.error(
                 `[auto-gate-audit] tool=${tool} ${summary} verdict=AUDIT_ONLY`,
             );
             return;
-        },
-
-        "permission.ask": async (input, output) => {
-            // DORMANT — OpenCode does not fire `permission.ask` in any stock
-            // release as of the studied version. The `event` hook (below) is the
-            // ACTIVE enforcement surface: it receives the `permission.asked`
-            // bus event and replies via the SDK client
-            // (postSessionIdPermissionsPermissionId). This hook is RETAINED as
-            // a RESERVE in case upstream wires permission.ask in a future
-            // release — do NOT rely on it, but keep the investment intact.
-            // Live config — read on every call (mtime-cached).
-            const config = readConfig(configPath, userConfigPath, localConfigPath);
-            if (config.enabled === false) {
-                // Operator kill-switch: fully inert, no audit, no behavior
-                // change. output.status is left at its default so opencode's
-                // normal interactive ask still fires.
-                return;
-            }
-
-            if (config.mode === "enforce") {
-                // ENFORCE (Phase 2): run the verdict decision path.
-                //
-                // HARD-FLOOR INVARIANT: permission.ask fires ONLY for calls
-                // opencode's permission table routes to `ask`. Table-`allow`
-                // fast-paths past this hook; table-`deny` / shell-guard blocks
-                // BEFORE this hook. Therefore the classifier decision below
-                // can only ever lift an `ask` to `allow`/`deny` — it can NEVER
-                // override a static deny, because a statically-denied call
-                // never reaches this hook. The classifier only ever decides
-                // the ask-routed subset.
-                //
-                // Phase 2 uses a STUB evaluator (stubEvaluate inside
-                // decidePermission), NOT a real classifier model. Do NOT run
-                // enforce mode against real traffic until Phase 3 wires a live
-                // model. The decision path fail-closes to deny on ANY
-                // uncertainty (parse failure, evaluator error, thrown
-                // exception).
-                const type = (input && input.type) || "unknown";
-                const pattern = scrubTruncate((input && input.pattern) || "", MAX_ARG_LEN);
-                console.error(
-                    `[auto-gate] permission.ask type=${type} pattern=${pattern} mode=enforce (deciding)`,
-                );
-                // Decision path. decidePermission(config) composes
-                // stubEvaluate(config) -> parseVerdict(raw) -> decision matrix
-                // and NEVER throws (it catches evaluator errors internally and
-                // returns a fail-closed deny). We wrap defensively anyway so a
-                // future regression fail-closes to deny rather than crashing
-                // the hook.
-                let result;
-                try {
-                    result = decidePermission(config);
-                } catch (err) {
-                    const msg = (err && err.message) || String(err);
-                    console.error(
-                        `[auto-gate] fail-closed: decision error: ${msg}`,
-                    );
-                    output.status = "deny";
-                    return;
-                }
-                if (result.audit) {
-                    console.error(`[auto-gate] ${result.audit}`);
-                }
-                output.status = result.status; // "allow" | "deny"
-                return;
-            }
-
-            if (config.mode === "live") {
-                // LIVE (Phase 3b): run the REAL classifier model decision path.
-                //
-                // The same hard-floor invariant holds: permission.ask only
-                // fires for ask-routed calls, so this can only lift an `ask` to
-                // allow/deny — never override a static deny. The decision path
-                // uses the SAME parseVerdict -> decision matrix as enforce, fed
-                // by a real model verdict instead of the stub. The matrix is
-                // fail-closed, so the live path inherits that posture:
-                // transport error / timeout / non-2xx / malformed / missing-
-                // choices / unparseable verdict -> deny, NEVER silent allow.
-                //
-                // Transcript fetch degrades GRACEFULLY: if the SDK call fails
-                // (no client, error wrapper, missing data), we fall back to the
-                // permission payload ALONE (serializeTranscript([], input))
-                // rather than fail-closed. The model still gets the type+pattern
-                // to judge. Only the model-call / decision layer fail-closes.
-                const type = (input && input.type) || "unknown";
-                const pattern = scrubTruncate((input && input.pattern) || "", MAX_ARG_LEN);
-                console.error(
-                    `[auto-gate] permission.ask type=${type} pattern=${pattern} mode=live (deciding)`,
-                );
-
-                // MERGE POINT: build ONE config object for the live path by
-                // merging the plugin-behavior config (already read above into
-                // `config` as {enabled, mode, stubVerdict, promptFile}) with the
-                // LLM config (auto-gate-llm.json → {modelEndpoint,
-                // modelEndpointEnv, model, apiKey, apiKeyEnv, timeoutMs}). A missing LLM file is SILENT here:
-                // readLlmConfig() returns empty-string defaults, which flow
-                // straight into the fail-closed validation below. Downstream
-                // decideLive / classifyLive / resolveSystemPrompt see a single
-                // merged object exactly as before the two-file split.
-                const liveConfig = { ...config, ...readLlmConfig(llmConfigPath, userLlmConfigPath, localLlmConfigPath) };
-
-                // (1) Validate live config up front so a misconfigured live
-                // mode fail-closes to deny with a CLEAR audit line instead of a
-                // cryptic adapter error. Dual-form endpoint: either a literal
-                // modelEndpoint OR a modelEndpointEnv name must be present (the
-                // resolved env VALUE is checked by classifyLive at call time;
-                // here we only confirm the config specifies at least one form).
-                if (!liveConfig.modelEndpoint && !liveConfig.modelEndpointEnv) {
-                    console.error(
-                        "[auto-gate] live mode misconfigured: no modelEndpoint; fail-closed deny",
-                    );
-                    output.status = "deny";
-                    return;
-                }
-                if (!liveConfig.model) {
-                    console.error(
-                        "[auto-gate] live mode misconfigured: no model; fail-closed deny",
-                    );
-                    output.status = "deny";
-                    return;
-                }
-
-                // (2) Fetch the session transcript. Graceful degradation on any
-                // failure: use the permission payload alone. SDK calls return a
-                // RequestResult wrapper — read payload via .data and check
-                // .error (proven in .opencode/plugins/session-state.js).
-                let transcript = [];
-                try {
-                    if (
-                        client &&
-                        client.session &&
-                        typeof client.session.messages === "function" &&
-                        input &&
-                        input.sessionID
-                    ) {
-                        const r = await client.session.messages({
-                            path: { id: input.sessionID },
-                            query: { directory },
-                        });
-                        if (r && r.error) throw r.error;
-                        if (r && Array.isArray(r.data)) {
-                            transcript = r.data;
-                        }
-                    } else {
-                        // No client threaded into the plugin, or no sessionID on
-                        // the input: degrade to permission-payload-only. (This
-                        // is a soft degradation, NOT a fail-closed condition.)
-                        throw new Error("client/session unavailable");
-                    }
-                } catch (err) {
-                    const msg = (err && err.message) || String(err);
-                    console.error(
-                        `[auto-gate] transcript fetch failed (${msg}); using permission payload only`,
-                    );
-                    transcript = [];
-                }
-
-                // (3) Serialize the transcript to a redacted text-mode string.
-                const serialized = serializeTranscript(transcript, input);
-
-                // (4) Run the live model decision path. decideLive() awaits the
-                // HTTP adapter and hands the raw verdict text to the SAME
-                // synchronous decidePermission() decision matrix (so the
-                // existing fail-closed matrix applies unchanged). It returns
-                // {status, audit, reason, latencyMs} and never throws.
-                let result;
-                try {
-                    result = await decideLive(liveConfig, serialized);
-                } catch (err) {
-                    // Defensive: decideLive itself does not throw, but a future
-                    // regression must fail-closed rather than crash the hook.
-                    const msg = (err && err.message) || String(err);
-                    console.error(
-                        `[auto-gate] fail-closed: live decision error: ${msg}`,
-                    );
-                    output.status = "deny";
-                    return;
-                }
-                if (result.audit) {
-                    console.error(`[auto-gate] ${result.audit}`);
-                }
-                // Telemetry: surface the retry count when retries occurred
-                // (result.retries is a safe integer; no tool-call content).
-                // Egress discipline unchanged — this is the existing audit
-                // surface, no new console site.
-                const retryTag = result.retries > 0 ? ` retries=${result.retries}` : "";
-                console.error(
-                    `[auto-gate] live decision status=${result.status} latencyMs=${result.latencyMs}${retryTag}`,
-                );
-                output.status = result.status; // "allow" | "deny"
-                return;
-            }
-
-            // AUDIT ONLY (Phase 1, byte-for-byte unchanged). Log the
-            // permission-decision request WITHOUT changing the outcome. This
-            // hook fires only when opencode's permission table resolves to
-            // `ask` or no-match: table-`allow` calls fast-path past it, and
-            // table-`deny`/shell-guard blocks before it. We record the request
-            // and leave output.status at its default so the normal interactive
-            // ask still fires.
-            //
-            // CRITICAL: this audit branch MUST NOT mutate output.status.
-            // Setting it to "allow" would grant + skip the prompt (the enforce
-            // branch above does that); setting it to "deny" would block. The
-            // audit branch leaves it untouched — audit only, zero behavior
-            // change. This is the default mode (`mode: "audit"`).
-            const type = (input && input.type) || "unknown";
-            const pattern = scrubTruncate((input && input.pattern) || "", MAX_ARG_LEN);
-            const incoming = (output && output.status) || "(unset)";
-            console.error(
-                `[auto-gate-audit] permission.ask type=${type} pattern=${pattern} incoming=${incoming} verdict=AUDIT_ONLY`,
-            );
-            return; // do NOT set output.status — audit only
         },
 
         // ===================================================================
@@ -2135,56 +1929,6 @@ if (__isMain) {
             false,
             "raw unknown-arg value must not be dumped",
         );
-    });
-
-    // ===== permission.ask pattern-audit value (enforce / live / audit branches) =====
-    //
-    // All three permission.ask branches build the audit line with the SAME
-    // expression: scrubTruncate((input && input.pattern) || "", MAX_ARG_LEN).
-    // We test that expression directly (it is the value interpolated into the
-    // `pattern=${pattern}` field of the stderr audit line) so a secret in a
-    // permission pattern cannot survive into any of the three audit lines.
-
-    test("permission pattern: Bearer jwt is absent from the audit value", () => {
-        const jwt =
-            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature";
-        const input = { type: "bash", pattern: `curl -H "Authorization: Bearer ${jwt}"` };
-        // The exact expression the three permission.ask branches interpolate.
-        const patternVal = scrubTruncate(
-            (input && input.pattern) || "",
-            MAX_ARG_LEN,
-        );
-        assert.equal(
-            patternVal.includes(jwt),
-            false,
-            "Bearer jwt in permission pattern must not survive into the audit line",
-        );
-        assert.match(patternVal, /Bearer \[redacted\]/);
-    });
-
-    test("permission pattern: api_key is absent from the audit value", () => {
-        const secret = "sk-abcdefghij1234567890qrstuvwxyz";
-        const input = { type: "bash", pattern: `export api_key=${secret}` };
-        const patternVal = scrubTruncate(
-            (input && input.pattern) || "",
-            MAX_ARG_LEN,
-        );
-        assert.equal(patternVal.includes(secret), false);
-        assert.match(patternVal, /api_key=\[redacted\]/);
-    });
-
-    test("permission pattern: safe pattern with no secret is unchanged", () => {
-        const input = { type: "bash", pattern: "rm -rf tmp/" };
-        const patternVal = scrubTruncate(
-            (input && input.pattern) || "",
-            MAX_ARG_LEN,
-        );
-        assert.equal(patternVal, "rm -rf tmp/");
-    });
-
-    test("permission pattern: missing input -> empty string (no crash)", () => {
-        assert.equal(scrubTruncate((null && null.pattern) || "", MAX_ARG_LEN), "");
-        assert.equal(scrubTruncate((undefined && undefined.pattern) || "", MAX_ARG_LEN), "");
     });
 
     // ===== Config readers: three-level layered model (project > user > default) =====
