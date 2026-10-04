@@ -406,12 +406,15 @@ nonexistent:
   `overlays: [contract-invariant-audit-pilot]` entry re-adds it even when
   opted out.
 
-- `session-progress-pilot` — a **default-OUT**, audit-default looping-tool-call
-  detector pilot. A single-hook plugin (`tool.execute.before` ONLY) that
-  selectively DENIES one exact repeated tool invocation (identical signature +
-  unchanged adverse outcomes) with a bounded reason — throw-to-deny in
-  `enforce` mode only; `audit` (the default) records would-deny and NEVER
-  throws. Fail-open on every error/timeout/malformed verdict (total slow-path
+- `session-progress-pilot` — a **default-OUT**, **off-by-default**
+  looping-tool-call detector pilot. A single-hook plugin
+  (`tool.execute.before` ONLY) that selectively DENIES one exact repeated
+  tool invocation (identical signature + unchanged adverse outcomes) with a
+  bounded reason — throw-to-deny in `enforce` mode only; `audit` records
+  would-deny and NEVER throws. Until config opts an agent (or `"*"`) in as
+  `audit`/`enforce`, every agent is `off`: the plugin is completely inert
+  (no observation, no records, no diagnostics, no judge calls, no LLM spend).
+  Fail-open on every error/timeout/malformed verdict (total slow-path
   deadline ≤2000 ms incl. retry; no cancellation of SDK/tool requests ever).
   It is **overlay-only** (no capability-manifest), selected solely via
   `overlays: [session-progress-pilot]`, and deliberately NOT in the frozen
@@ -619,14 +622,16 @@ the local layer) and includes it in effective-value resolution.
 `session-progress-pilot` (see "Shipped overlay packs") is configured by ONE
 operator-owned, gitignored-by-convention file:
 `.opencode/repo-configs/session-progress.local.json`. Absent file = safe
-defaults (audit mode, zero behavior change). A present-but-invalid file falls
+defaults (every agent `off` — the plugin is fully inert, zero observation,
+until config opts in). A present-but-invalid file falls
 back to defaults with one deduplicated stderr notice and NEVER throws. The
 file is re-read per tool call behind an mtime cache — edits apply on the next
 call, no restart. The full field table lives in the pack README
 (`vh-agent-harness overlay docs session-progress-pilot`); the operator-facing
 summary:
 
-- `agents` — `{"*": "audit"}` by default; per-agent `off|audit|enforce`.
+- `agents` — `{"*": "off"}` by default (fully inert until an agent or `"*"`
+  is explicitly set to `audit`/`enforce`); per-agent `off|audit|enforce`.
   `enforce` may deny (throw a bounded reason); `audit` records would-deny and
   never denies; `off` disables observation. With only the `*` key the mode is
   unambiguous; when any specific agent key exists, a call with UNKNOWN

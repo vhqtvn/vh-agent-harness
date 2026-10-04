@@ -1,9 +1,13 @@
 # session-progress-pilot
 
-A **default-out**, audit-default overlay pack shipping a single-hook plugin
-(`session-progress.js`) that detects **looping tool calls** — the same exact
-tool invocation repeated with unchanged adverse results — and selectively
-**denies that one exact invocation** with a bounded reason.
+A **default-out**, **off-by-default** overlay pack shipping a single-hook
+plugin (`session-progress.js`) that detects **looping tool calls** — the same
+exact tool invocation repeated with unchanged adverse results — and
+selectively **denies that one exact invocation** with a bounded reason.
+
+Until the operator opts in via config, the plugin is **completely inert**:
+no observation, no records, no diagnostics files, no judge calls, no LLM
+spend.
 
 This is a **pilot**, not a safety fence. It intentionally trades recall for a
 narrow, low-false-positive deny surface. The uniform `steps: 10000` backstop
@@ -40,11 +44,25 @@ The pack ships embedded in the binary and is selected explicitly:
 2. Re-render (`make update` in this repo; `vh-agent-harness update` for
    consumers) and restart the opencode server — the plugin is auto-discovered
    from `.opencode/plugins/session-progress.js`.
-3. Behavior is **audit by default**: zero denials, diagnostic records only.
+3. Behavior is **off by default**: with no config file every agent is `off`
+   and the hook is a pure no-op (no observation, no records, no diagnostics,
+   no judge calls, no LLM spend). Monitoring starts ONLY when the config
+   explicitly names an agent (or `"*"`) as `audit` or `enforce`, e.g.:
+
+   ```json
+   {"agents": {"*": "audit"}}
+   ```
+
+   or, to watch one agent only:
+
+   ```json
+   {"agents": {"*": "off", "build": "audit"}}
+   ```
 
 ## Operator-owned configuration
 
-Config lives in ONE optional file (absent → safe defaults, audit mode):
+Config lives in ONE optional file (absent → safe defaults: every agent `off`,
+the plugin fully inert):
 
 `.opencode/repo-configs/session-progress.local.json`
 
@@ -57,7 +75,7 @@ environment variables referenced BY NAME (see `judge.*_env` below).
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `enabled` | boolean | `true` | Master toggle. `false` = plugin no-ops (allow everything, no records). |
-| `agents` | object mapping agent name → `off`\|`audit`\|`enforce`, or the single string shorthand | `{"*": "audit"}` | Per-agent mode. `*` is the wildcard. Default is **audit for everyone** — the shipped state changes zero behavior. `enforce` may deny; `off` disables observation for that agent. With ONLY the `*` key, no agent attribution is needed (the mode is unambiguous). When any specific agent key is present, a call with UNKNOWN attribution can never be denied (audit ceiling). |
+| `agents` | object mapping agent name → `off`\|`audit`\|`enforce`, or the single string shorthand | `{"*": "off"}` | Per-agent mode. `*` is the wildcard. Default is **off for everyone** — the plugin is fully inert (nothing observed, recorded, or spent) until an agent is explicitly opted in as `audit`/`enforce`. `enforce` may deny; `audit` records would-deny and never denies; `off` disables observation for that agent. With ONLY the `*` key, no agent attribution is needed (the mode is unambiguous). When any specific agent key is present, a call with UNKNOWN attribution can never be denied (audit ceiling). |
 | `judge.model_env` | string (env var NAME) | `"SESSION_PROGRESS_JUDGE_MODEL"` | Env var holding the judge model ID. Unset → semantic judging unavailable → allow (recorded). |
 | `judge.endpoint_env` | string (env var NAME) | `"SESSION_PROGRESS_JUDGE_ENDPOINT"` | Env var holding an OpenAI-compatible chat-completions URL. Unset → judging unavailable. |
 | `judge.api_key_env` | string (env var NAME) | `"SESSION_PROGRESS_JUDGE_API_KEY"` | Env var holding the API key VALUE — the key never lives in the config file or diagnostics. |

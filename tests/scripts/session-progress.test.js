@@ -123,7 +123,7 @@ test("[ss2] server factory registers ONLY tool.execute.before", async () => {
     assert.deepEqual(Object.keys(hooks), ["tool.execute.before"]);
 });
 
-test("[ss2] defaults: absent config file is silent and yields audit mode", async () => {
+test("[ss2] defaults: absent config file is silent and yields off mode (fully inert)", async () => {
     const cfgmod = await loadConfigModule();
     cfgmod.__resetConfigCacheForTest();
     const errs = [];
@@ -133,7 +133,7 @@ test("[ss2] defaults: absent config file is silent and yields audit mode", async
         const root = freshRoot(); // no config file
         const cfg = cfgmod.loadConfig(root);
         assert.equal(cfg.enabled, true);
-        assert.equal(cfg.agents["*"], "audit");
+        assert.equal(cfg.agents["*"], "off", "absent config: every agent off (opt-in only)");
         assert.deepEqual(errs, [], "absent config must be SILENT");
         const cfg2 = cfgmod.loadConfig(root); // cached path also silent
         assert.deepEqual(errs, [], "cached reload still silent");
@@ -171,7 +171,7 @@ test("[ss2] invalid config falls back to defaults with ONE deduped warn, never t
     console.error = (...a) => errs.push(a.join(" "));
     try {
         const cfg = cfgmod.loadConfig(root);
-        assert.equal(cfg.agents["*"], "audit", "defaults after invalid file");
+        assert.equal(cfg.agents["*"], "off", "defaults after invalid file (inert, not audit)");
         cfgmod.loadConfig(root);
         cfgmod.loadConfig(root);
         assert.equal(errs.length, 1, "persistent failure warns exactly once");
@@ -282,11 +282,14 @@ test("[ss2] boundRing caps entries and serialized bytes, dropping oldest first",
     assert.equal(tiny[tiny.length - 1].seq, 39, "newest survives");
 });
 
-test("[ss2] hook: audit default NEVER throws across many identical calls; observations accrue", async () => {
+test("[ss2] hook: audit mode NEVER throws across many identical calls; observations accrue", async () => {
     const mod = await loadPlugin();
     mod.__test.resetState();
     const root = freshRoot();
     process.env.SESSION_PROGRESS_REPO_ROOT = root;
+    const cfgmod = await loadConfigModule();
+    cfgmod.__resetConfigCacheForTest();
+    writeConfig(root, { agents: { "*": "audit" } }); // explicit opt-in (off by default)
     try {
         const hooks = await mod.server({ client: nullClient(), directory: root });
         let clock = 1000;
@@ -387,6 +390,9 @@ test("[ss2] hook: per-tool observation — read tool recorded but never mechanic
     mod.__test.resetState();
     const root = freshRoot();
     process.env.SESSION_PROGRESS_REPO_ROOT = root;
+    const cfgmod = await loadConfigModule();
+    cfgmod.__resetConfigCacheForTest();
+    writeConfig(root, { agents: { "*": "audit" } }); // explicit opt-in (off by default)
     try {
         const hooks = await mod.server({ client: nullClient(), directory: root });
         let clock = 5000;
@@ -1391,6 +1397,78 @@ test("[ss4] diagnostics.enabled=false writes NEITHER verdicts.jsonl NOR status.j
     } finally {
         delete process.env.SESSION_PROGRESS_REPO_ROOT;
         mod.__test.setNow(() => Date.now());
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+// [opt-in pin] Off-by-default (operator decision 2026-10-04): selecting the
+// pack with NO config file must yield a completely INERT plugin — every call
+// allows immediately, nothing is observed (no ring entries, no accrual), no
+// diagnostics dir/files are created, and no judge HTTP call is made (a live
+// judge endpoint + env are wired so any pipeline execution would be COUNTED;
+// history reads are counted too). Writing {"*":"audit"} resumes observation
+// on the next call (mtime live reload, no restart) — the explicit opt-in
+// path. This pins that the off early-return precedes ALL observation.
+test("[opt-in pin] no config => hook fully inert (no records, no diagnostics, no judge calls); {\"*\":\"audit\"} => observing resumes", async () => {
+    const mod = await loadPlugin();
+    mod.__test.resetState();
+    const root = freshRoot(); // NO config file — the shipped default state
+    process.env.SESSION_PROGRESS_REPO_ROOT = root;
+    const cfgmod = await loadConfigModule();
+    cfgmod.__resetConfigCacheForTest();
+    const { server, url, requests } = await startJudgeServer("ok");
+    withJudgeEnv(url); // judge WOULD be reachable and counted if anything ran
+    let historyReads = 0;
+    const client = {
+        session: {
+            messages: async () => {
+                historyReads += 1;
+                return { data: [] };
+            },
+        },
+    };
+    const hooks = await mod.server({ client, directory: root });
+    let clock = 0;
+    mod.__test.setNow(() => clock);
+    const diagDir = join(root, "tmp", "agent-runs", "session-progress-pilot");
+    try {
+        // Phase 1 — no config: the hook is a pure no-op beyond the allow.
+        for (let i = 1; i <= 6; i++) {
+            clock += 600;
+            const r = await driveHook(hooks, { args: { command: "make inert" }, callID: "c" + i });
+            assert.equal(r.threw, null, `no-config call ${i} allows immediately`);
+        }
+        await new Promise((r) => setTimeout(r, 80));
+        for (const st of mod.__test.sessions().values()) {
+            assert.equal(st.ring.length, 0, "no-config: nothing observed (empty rings)");
+            assert.equal(st.spend.accrued, 0, "no-config: no spend accrual");
+        }
+        assert.equal(mod.__test.diagStats().records, 0, "no-config: no diagnostic records queued");
+        assert.equal(fs.existsSync(diagDir), false, "no-config: diagnostics directory never created");
+        assert.equal(fs.existsSync(join(diagDir, "verdicts.jsonl")), false, "no-config: no verdicts.jsonl");
+        assert.equal(fs.existsSync(join(diagDir, "status.json")), false, "no-config: no status.json");
+        assert.equal(historyReads, 0, "no-config: no history reads");
+        assert.equal(requests.length, 0, "no-config: ZERO judge HTTP calls (no LLM spend)");
+
+        // Phase 2 — explicit opt-in {"*":"audit"}: observing resumes on the
+        // very next call. The scripted clock keeps the spend gate closed
+        // (default 60s/8obs), so audit records observations but never judges.
+        writeConfig(root, { agents: { "*": "audit" } });
+        for (let i = 7; i <= 12; i++) {
+            clock += 600;
+            const r = await driveHook(hooks, { args: { command: "make inert" }, callID: "c" + i });
+            assert.equal(r.threw, null, `audit call ${i} never throws`);
+        }
+        const st = mod.__test.sessions().get("s1");
+        assert.ok(st, "audit: session observed");
+        assert.equal(st.ring.length, 6, "audit: observation resumed and recorded");
+        assert.equal(st.spend.accrued, 6, "audit: accrual resumed");
+        assert.equal(requests.length, 0, "spend gate closed by design: still zero judge calls");
+    } finally {
+        clearJudgeEnv();
+        delete process.env.SESSION_PROGRESS_REPO_ROOT;
+        mod.__test.setNow(() => Date.now());
+        server.close();
         rmSync(root, { recursive: true, force: true });
     }
 });

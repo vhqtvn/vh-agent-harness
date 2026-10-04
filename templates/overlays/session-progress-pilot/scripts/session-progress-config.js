@@ -4,8 +4,9 @@
 // CONTRACT (Phase 1, pinned by the v2 brief):
 //   - ONE optional config file: <repoRoot>/.opencode/repo-configs/
 //     session-progress.local.json (operator-owned, gitignored by convention).
-//   - Absent file -> safe defaults (audit mode) SILENTLY (absence is the
-//     normal state; no stderr spam).
+//   - Absent file -> safe defaults (every agent OFF — the plugin is fully
+//     inert until configured) SILENTLY (absence is the normal state; no
+//     stderr spam).
 //   - Present-but-invalid (unreadable / bad JSON / non-object) -> defaults +
 //     ONE deduplicated stderr notice. NEVER throws.
 //   - Read on every hook invocation behind an mtime cache: an unchanged file
@@ -24,13 +25,16 @@ import fs from "node:fs";
 import path from "node:path";
 
 // ---------------------------------------------------------------------------
-// Defaults — the shipped, fail-open posture. Audit for everyone, semantic
-// judge env-referenced (unset env = unavailable = allow), narrow leases.
+// Defaults — the shipped, fail-open posture. OFF for everyone (operator
+// decision 2026-10-04: fully opt-in — no observation, no records, no
+// diagnostics, no judge spend until config names an agent or "*" as
+// audit/enforce), semantic judge env-referenced (unset env = unavailable =
+// allow), narrow leases.
 // ---------------------------------------------------------------------------
 
 export const DEFAULTS = Object.freeze({
     enabled: true,
-    agents: Object.freeze({ "*": "audit" }),
+    agents: Object.freeze({ "*": "off" }),
     judge: Object.freeze({
         model_env: "SESSION_PROGRESS_JUDGE_MODEL",
         endpoint_env: "SESSION_PROGRESS_JUDGE_ENDPOINT",
@@ -104,13 +108,13 @@ function isPlainObject(v) {
 // normalizeAgents — accepts the object form ({"*":"audit", "build":"off"}) or
 // the string shorthand ("audit" == {"*":"audit"}). Invalid per-key values are
 // dropped (those agents fall back to the wildcard); an invalid/missing
-// wildcard falls back to "audit" — the fail-open default. A completely
-// invalid shape yields {"*":"audit"}.
+// wildcard falls back to "off" — the inert fail-open default. A completely
+// invalid shape yields {"*":"off"}.
 export function normalizeAgents(raw) {
     const out = {};
     if (typeof raw === "string") {
         if (AGENT_MODES.has(raw)) out["*"] = raw;
-        else out["*"] = "audit";
+        else out["*"] = "off";
         return out;
     }
     if (isPlainObject(raw)) {
@@ -120,7 +124,7 @@ export function normalizeAgents(raw) {
             }
         }
     }
-    if (!AGENT_MODES.has(out["*"])) out["*"] = "audit";
+    if (!AGENT_MODES.has(out["*"])) out["*"] = "off";
     return out;
 }
 
@@ -210,7 +214,7 @@ export function resolveModeForAgent(cfg, agentName) {
     if (agentName && Object.prototype.hasOwnProperty.call(agents, agentName)) {
         return agents[agentName];
     }
-    return agents["*"] || "audit";
+    return agents["*"] || "off";
 }
 
 // needsAgentAttribution — true when any SPECIFIC (non-wildcard) agent key is
@@ -243,7 +247,7 @@ function warnOnce(pathStr, state, detail) {
     console.error(
         `[session-progress] config ${state} at ${pathStr}` +
             (detail ? ` (${detail})` : "") +
-            `; using safe defaults (audit mode)`,
+            `; using safe defaults (agents off)`,
     );
 }
 
