@@ -856,6 +856,18 @@ Stamp kinds and their admission rules:
 | `fail(parse-error; no parseable verdict returned)` | response carried no anchored `<block>` tag | named fallback; raw classifier payload never surfaces |
 | `fail(unavailable[/subkind]; no safety judgment was obtained)` | leaf infrastructure failure (throw/timeout/HTTP/config/key) | named fallback; `subkind` is derived only from executor-side error TAGS (`timeout`, `http-<code>`, `transport`, `malformed`, `missing-key`, `missing-endpoint`, `missing-model`), never from message text |
 
+**Outer decision-boundary failures** (a fault past the decision layer's own
+typed-error handling — the defensive catches around the `enforce`/`live`
+decision calls in the event hook) follow the same named-fallback discipline on
+BOTH sinks. They surface
+`[auto-gate] fail-closed: decision error: fail(internal; no safety judgment was obtained)`
+(and the `live decision error:` variant) through `onUncertain`; the raw
+exception text never reaches the stderr audit line or the v2 rejection
+feedback. The catch and the fail-closed reject policy are unchanged — only the
+surfaced text is a named failure. (These catches are not reachable by ordinary
+evaluator/HTTP failures — those become typed deny results — so they are pinned
+by fault-injection selftests through an internal test-only seam, not by e2e.)
+
 The `admitReason` pipeline (in `auto-gate-scrub.js`, the single source of
 truth for egress scrubbing) runs in a fixed, load-bearing order:
 

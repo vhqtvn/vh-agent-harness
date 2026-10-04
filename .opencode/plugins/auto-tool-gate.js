@@ -285,6 +285,17 @@ const MAX_DENY_STRING_CHARS = 2000;
 const _SUBKIND_SHAPE_RE =
     /^(?:timeout|transport|malformed|missing-key|missing-endpoint|missing-model|http-[0-9]{1,3})$/;
 
+// Named truthful failure for the OUTER decision-boundary catches (the
+// defensive wrappers around the event hook's decidePermission / decideLive
+// calls). Those catches fire only on a fault PAST the decision layer's own
+// typed-error handling, so the truthful statement is that the decision path
+// itself failed internally and NO judgment was obtained. The raw exception
+// text NEVER rides either egress sink (stderr audit line, v2 rejection
+// feedback) — same O2 fallback family as the leaf stamps: a NAMED failure,
+// never a sanitized exception narrative.
+const DECISION_BOUNDARY_FAILURE =
+    "fail(internal; no safety judgment was obtained)";
+
 // collectKnownValues(config, leaves) — the exact-string suppression set for
 // admitReason step 2. Gathers, from the merged LLM config (top level) and
 // every WELL-FORMED leaf: literal modelEndpoint / model / apiKey values, plus
@@ -1114,6 +1125,41 @@ export function __resetConfigCaches() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// TEST-ONLY FAULT-INJECTION SEAM (outer decision-boundary egress hardening).
+//
+// The event handler's two OUTER decision boundaries (enforce ->
+// decidePermission, live -> decideLive) carry defensive catches. Normal
+// evaluator/HTTP/config failures NEVER reach those catches — they become
+// TYPED deny results inside decidePermission/decideLive — so the catches are
+// only exercisable by a fault that throws AT the boundary itself.
+//
+// This seam is an INTERNAL injection hook, NOT a production configuration
+// flag: the binding lives in module scope, is never exported, and is never
+// read from any config file or env var. Only the self-test section at the
+// bottom of this file (same module scope, behind the __isMain guard) can set
+// it. When unset (the only production state) each guard below is an identity
+// passthrough to the real decision function.
+// ---------------------------------------------------------------------------
+const __testFaults = {
+    decidePermission: null, // (config) => any — set ONLY by the self-test section
+    decideLive: null, // async (config, serialized) => any — set ONLY by the self-test section
+};
+
+function __decisionPermissionGuard(config) {
+    if (__testFaults.decidePermission) {
+        return __testFaults.decidePermission(config);
+    }
+    return decidePermission(config);
+}
+
+async function __decisionLiveGuard(config, serialized) {
+    if (__testFaults.decideLive) {
+        return __testFaults.decideLive(config, serialized);
+    }
+    return await decideLive(config, serialized);
+}
+
 // The factory receives the full PluginInput ({client, project, directory,
 // worktree, serverUrl, $}) — same contract session-state.js relies on for
 // client.session.todo(). We close over `client` (the OpenCode SDK client, used
@@ -1606,10 +1652,18 @@ export const server = async ({
                 );
                 let result;
                 try {
-                    result = decidePermission(config);
-                } catch (err) {
-                    const msg = (err && err.message) || String(err);
-                    await handleUncertain(`decision error: ${msg}`);
+                    // Test-only fault seam (see __testFaults above); an
+                    // identity passthrough in every production state.
+                    result = __decisionPermissionGuard(config);
+                } catch (_err) {
+                    // EGRESS DISCIPLINE (dormant-path hardening): the raw
+                    // exception NEVER rides either sink — handleUncertain
+                    // receives a NAMED truthful failure (O2 fallback family).
+                    // The catch itself and the fail-closed reject policy are
+                    // preserved exactly.
+                    await handleUncertain(
+                        `decision error: ${DECISION_BOUNDARY_FAILURE}`,
+                    );
                     return;
                 }
                 if (result.audit) console.error(`[auto-gate] ${result.audit}`);
@@ -1696,10 +1750,16 @@ export const server = async ({
                 // fail-closed decision matrix as enforce.
                 let result;
                 try {
-                    result = await decideLive(liveConfig, serialized);
-                } catch (err) {
-                    const msg = (err && err.message) || String(err);
-                    await handleUncertain(`live decision error: ${msg}`);
+                    // Test-only fault seam (see __testFaults above); an
+                    // identity passthrough in every production state.
+                    result = await __decisionLiveGuard(liveConfig, serialized);
+                } catch (_err) {
+                    // EGRESS DISCIPLINE (dormant-path hardening): same as the
+                    // enforce boundary — a NAMED truthful failure, never the
+                    // raw exception text; catch + fail-closed preserved.
+                    await handleUncertain(
+                        `live decision error: ${DECISION_BOUNDARY_FAILURE}`,
+                    );
                     return;
                 }
                 // EGRESS DISCIPLINE: result.audit is NOT logged raw on the live
@@ -4777,6 +4837,135 @@ if (__isMain) {
             combined.includes("non-2xx response"),
             false,
             "raw evaluator-error text must not survive into stderr",
+        );
+    });
+
+    // --- outer decision-boundary fault injection (dormant-path egress) ---
+    //
+    // The two OUTER catches around the event hook's decision calls are NOT
+    // reachable by typed evaluator/HTTP failures (those become typed denies
+    // inside decidePermission/decideLive — see the D1 tests above). They are
+    // exercised here through the internal __testFaults seam (set ONLY in this
+    // self-test section; never a production config flag): an injected
+    // sentinel-throwing fault must (a) still fail-closed with a reject reply,
+    // (b) surface a NAMED truthful failure, and (c) keep the sentinel OUT of
+    // BOTH egress sinks — the stderr audit line AND the v2 rejection feedback.
+
+    test("outer-boundary egress: enforce decision fault → named failure, sentinel absent from BOTH sinks", async () => {
+        const { hooks, replies } = await setupEventTest({
+            mode: "enforce",
+            stubVerdict: "allow",
+        });
+        const SENTINEL = "enforce-fault-sentinel-must-not-egress-7f3a91";
+        const errors = [];
+        const orig = console.error;
+        console.error = (msg) => errors.push(msg);
+        __testFaults.decidePermission = () => {
+            throw new Error(SENTINEL);
+        };
+        try {
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            __testFaults.decidePermission = null;
+            console.error = orig;
+        }
+        // Fail-closed policy preserved: the catch still replies reject.
+        assert.equal(
+            replies.length,
+            1,
+            "boundary fault must still reply (fail-closed)",
+        );
+        assert.equal(replies[0].body.response, "reject");
+        assert.equal(replies[0]._route, "v2");
+        const msg = replies[0].body.message;
+        assert.ok(
+            typeof msg === "string" && msg.length > 0,
+            "reject must carry a non-empty named failure",
+        );
+        // Named truthful failure (O2 fallback family), never the raw text.
+        assert.ok(
+            msg.includes("fail(internal; no safety judgment was obtained)"),
+            "boundary fault must surface the named fail(internal) failure",
+        );
+        // SINK 1 (v2 rejection feedback): sentinel absent.
+        assert.equal(
+            msg.includes(SENTINEL),
+            false,
+            "injected sentinel must NOT reach the v2 rejection feedback",
+        );
+        // SINK 2 (stderr audit): sentinel absent; the uncertain line names
+        // the failure instead.
+        const combined = errors.join("\n");
+        assert.equal(
+            combined.includes(SENTINEL),
+            false,
+            "injected sentinel must NOT reach the stderr audit line",
+        );
+        assert.match(
+            combined,
+            /uncertain: decision error: fail\(internal; no safety judgment was obtained\)/,
+        );
+    });
+
+    test("outer-boundary egress: live decision fault → named failure, sentinel absent from BOTH sinks", async () => {
+        // Same proof at the LIVE decision boundary. The llm config is
+        // well-formed so the flow reaches the decision call (endpoint/model
+        // validation passes; transcript fetch uses the fake client).
+        const { hooks, replies } = await setupEventTest(
+            {
+                mode: "live",
+                promptFile: testConfigPath("evt-classifier-prompt.txt"),
+            },
+            {
+                modelEndpoint: "http://mock-llm",
+                model: "test-model",
+                maxRetries: 0,
+            },
+        );
+        const SENTINEL = "live-fault-sentinel-must-not-egress-4c2b77";
+        const errors = [];
+        const orig = console.error;
+        console.error = (msg) => errors.push(msg);
+        __testFaults.decideLive = async () => {
+            throw new Error(SENTINEL);
+        };
+        try {
+            await hooks["event"]({ event: makeAskedEvent() });
+        } finally {
+            __testFaults.decideLive = null;
+            console.error = orig;
+        }
+        // Fail-closed policy preserved.
+        assert.equal(
+            replies.length,
+            1,
+            "boundary fault must still reply (fail-closed)",
+        );
+        assert.equal(replies[0].body.response, "reject");
+        assert.equal(replies[0]._route, "v2");
+        const msg = replies[0].body.message;
+        assert.ok(
+            typeof msg === "string" && msg.length > 0,
+            "reject must carry a non-empty named failure",
+        );
+        assert.ok(
+            msg.includes("fail(internal; no safety judgment was obtained)"),
+            "boundary fault must surface the named fail(internal) failure",
+        );
+        assert.equal(
+            msg.includes(SENTINEL),
+            false,
+            "injected sentinel must NOT reach the v2 rejection feedback",
+        );
+        const combined = errors.join("\n");
+        assert.equal(
+            combined.includes(SENTINEL),
+            false,
+            "injected sentinel must NOT reach the stderr audit line",
+        );
+        assert.match(
+            combined,
+            /uncertain: live decision error: fail\(internal; no safety judgment was obtained\)/,
         );
     });
 
