@@ -415,7 +415,9 @@ nonexistent:
   `audit`/`enforce`, every agent is `off`: the plugin is completely inert
   (no observation, no records, no diagnostics, no judge calls, no LLM spend).
   Fail-open on every error/timeout/malformed verdict (total slow-path
-  deadline ≤2000 ms incl. retry; no cancellation of SDK/tool requests ever).
+  deadline ≤20000 ms incl. retry — ceiling set 2026-10-05 from measured
+  real-gateway latency, down-configurable; no cancellation of SDK/tool
+  requests ever).
   It is **overlay-only** (no capability-manifest), selected solely via
   `overlays: [session-progress-pilot]`, and deliberately NOT in the frozen
   greenfield recipe (the bootstrap-inventory decision is `out`). See
@@ -651,10 +653,14 @@ summary:
   gitignored repo-local config and the user-level file, never in
   diagnostics. `judge.user_config_path` overrides the user-file path
   (test/hermeticity seam). Unresolvable ⇒ semantic judging unavailable ⇒
-  allow (recorded). `timeout_ms` (default 2000, clamped 250–2000 — the
-  ceiling is the pinned ≤2000 ms deadline invariant, configurable down only)
+  allow (recorded). `timeout_ms` (default 20000, clamped 250–20000 — the
+  ceiling is the pinned ≤20000 ms deadline invariant, set 2026-10-05 from
+  measured real-gateway latency where no sampled model answers <6 s,
+  configurable down only)
   is the TOTAL slow-path deadline — bounded history read, judge fetch, and the
-  optional single retry (`retries` 0–1) all share it.
+  optional single retry (`retries` 0–1) all share it. Judged calls are
+  cadence-gated: at most one assessment per 60 seconds per session when the
+  new-observation condition is also met.
 - `cadence.*` — judge-spend throttling ONLY (never a deny reason):
   `min_interval_seconds` 60, `min_new_signatures` 8 (the latter counts NEW
   call observations, NOT distinct signatures — the name is historical).

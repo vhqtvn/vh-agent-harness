@@ -26,7 +26,8 @@ change that and does NOT make unattended sessions "safely bounded".
   Audit mode NEVER throws.
 - **Fail-open everywhere.** Any error, malformed judge output, stale verdict,
   busy slot, missing config, unknown attribution, oversized args, or deadline
-  hit (≤2000 ms total including retry; ≤5 ms target on the local path)
+  hit (≤20000 ms total including retry — the 2026-10-05 operator-set ceiling,
+  default and clamp max, down-configurable; ≤5 ms target on the local path)
   → the call is ALLOWED.
 - **Cadence/time/rate gating throttles judge spend only** — it is never an
   escalation ladder and never a deny reason by itself.
@@ -89,7 +90,7 @@ Diagnostics never contain credentials in any form.
 | `judge.endpoint_env` | string (env var NAME) | `"SESSION_PROGRESS_JUDGE_ENDPOINT"` | Fallback: env var holding an OpenAI-compatible chat-completions URL. |
 | `judge.api_key_env` | string (env var NAME) | `"SESSION_PROGRESS_JUDGE_API_KEY"` | Fallback: env var holding the API key VALUE. |
 | `judge.user_config_path` | string (path) | `""` | Overrides the user-level judge-file location (empty = `<XDG_CONFIG_HOME or ~/.config>/vh-agent-harness/session-progress-llm.json`). Primarily a test-injection/hermeticity seam. |
-| `judge.timeout_ms` | number | `2000` | TOTAL slow-path deadline (history read + judge fetch + retries all share it). At deadline → allow. Clamped to [250, 2000] — the 2000 ms ceiling is the pinned deadline invariant, configurable down only, never up. |
+| `judge.timeout_ms` | number | `20000` | TOTAL slow-path deadline (history read + judge fetch + retries all share it). At deadline → allow. Clamped to [250, 20000] — the 20000 ms ceiling is the pinned deadline invariant (operator decision 2026-10-05, set from measured real-gateway latency: no sampled model answers <6 s, so a 2000 ms pin guaranteed fail-open for every real judge), configurable down only, never up. Judged calls are cadence-gated: at most one assessment per 60 seconds per session when the new-observation condition is also met. |
 | `judge.retries` | number 0..1 | `0` | Extra judge attempts INSIDE the same deadline. Max 1. |
 | `judge.min_looping_confidence` | number 0..1 | `0.90` | Minimum confidence for a `looping` verdict to qualify for denial. |
 | `cadence.min_interval_seconds` | number | `60` | Minimum seconds between judge assessments (spend control only). |
@@ -172,7 +173,7 @@ Two deny paths, both exact-signature-scoped (a deny NEVER covers other calls):
 2. **Semantic judge path.** When the spend gate opens (≥60 s AND ≥8 new
    observations) and a judge model is configured, a bounded packet (≤32
    observations, scrubbed, ≤512-char assistant excerpt) is assessed under one
-   total 2000 ms deadline. Only `looping` verdicts with confidence ≥0.90,
+   total deadline (default 20000 ms). Only `looping` verdicts with confidence ≥0.90,
    ≥1 valid evidence reference, ≥3 matching completed prior calls of the
    current signature within 90 s with adverse unchanged outcomes, and
    trustworthy attribution may deny. `productive`, `stuck`, and `drifting`

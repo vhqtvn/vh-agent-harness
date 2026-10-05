@@ -5,9 +5,10 @@
 //   - ONE hook only: `tool.execute.before`. Deny = throw a bounded reason
 //     (enforce mode ONLY). Allow = plain return. Audit mode NEVER throws.
 //   - NO cancellation: the plugin never aborts the SDK/tool request. Any
-//     deadline (<=2000 ms total slow path incl. retry; <=5 ms local path
-//     target) means RETURN ALLOW, never abort. The only AbortController in
-//     this pack belongs to the judge's OWN HTTP fetch.
+//     deadline (<=20000 ms total slow path incl. retry, the operator-set
+//     2026-10-05 ceiling — down-configurable, default 20000; <=5 ms local
+//     path target) means RETURN ALLOW, never abort. The only AbortController
+//     in this pack belongs to the judge's OWN HTTP fetch.
 //   - Fail-open EVERYWHERE: the entire hook body is wrapped; any error in
 //     config/state/attribution/history/judge/diagnostics -> allow.
 //   - Cadence/time/rate gating throttles judge spend ONLY — never a deny
@@ -581,7 +582,7 @@ export const server = async ({ client, directory } = {}) => ({
                 // slow-path deadline. The old Math.max(25, ...) floor let
                 // the race wait its 25 ms even when <=25 ms of budget
                 // remained, returning AFTER the deadline (same invariant
-                // family as the <=2000 ms pinned ceiling). No positive
+                // family as the <=20000 ms pinned ceiling). No positive
                 // budget -> skip enrichment entirely (fail-open null, allow
                 // below); otherwise the race is capped at the ACTUAL
                 // remaining budget — never beyond the deadline.

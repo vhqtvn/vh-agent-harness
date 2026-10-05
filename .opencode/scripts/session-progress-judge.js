@@ -1,7 +1,7 @@
 // session-progress-judge.js — bounded LLM judge for session-progress-pilot.
 //
 // CONTRACT (Phase 1, pinned by the v2 brief):
-//   - ONE total deadline (default 2000 ms, provided by the caller as
+//   - ONE total deadline (default 20000 ms, provided by the caller as
 //     deadlineAt) shared by ALL attempts including the optional single
 //     retry. At deadline -> fail-open ("timeout"); the caller returns allow.
 //   - The plugin may abort ITS OWN judge fetch (AbortController scoped to
@@ -230,7 +230,7 @@ export async function runJudge(cfg, packet, opts) {
     const target = judgeTarget(cfg, env);
     if (!target) return { status: "unavailable" };
     if (!fetchImpl) return { status: "error", class: "no-fetch", message: "no fetch implementation" };
-    const timeoutMs = (cfg && cfg.judge && cfg.judge.timeout_ms) || 2000;
+    const timeoutMs = (cfg && cfg.judge && cfg.judge.timeout_ms) || 20000;
     // The caller may pass ONE shared slow-path deadlineAt (the plugin's
     // history+judge budget). Without it, the judge owns its own timeout_ms.
     const deadlineAt = typeof o.deadlineAt === "number" ? o.deadlineAt : now() + timeoutMs;

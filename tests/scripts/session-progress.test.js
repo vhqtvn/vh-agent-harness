@@ -143,6 +143,11 @@ test("[ss2] defaults: absent config file is silent and yields off mode (fully in
         const cfg = cfgmod.loadConfig(root);
         assert.equal(cfg.enabled, true);
         assert.equal(cfg.agents["*"], "off", "absent config: every agent off (opt-in only)");
+        // Default pin: the absent-config judge deadline IS the documented
+        // 20000 ms ceiling — the ceiling is the shipped default, not just a
+        // clamp bound.
+        assert.equal(cfgmod.normalizeConfig({}).judge.timeout_ms, 20000,
+            "default judge deadline == the documented 20000 ms ceiling");
         assert.deepEqual(errs, [], "absent config must be SILENT");
         const cfg2 = cfgmod.loadConfig(root); // cached path also silent
         assert.deepEqual(errs, [], "cached reload still silent");
@@ -220,20 +225,24 @@ test("[ss2] normalization clamps every bound field; unknown fields ignored", asy
     assert.equal(cfg.nonsense, undefined, "unknown fields ignored");
 });
 
-// [B1-pin] The judge timeout ceiling is operator-pinned at 2000 ms: the
-// documented invariant is "deadline hit (<=2000 ms total including retry) ->
-// the call is ALLOWED", so the deadline is a safety property of the hot path
-// — configurable DOWN only, never up. A configured value above 2000 must
-// clamp to 2000 (commit-review B1: the old [250, 5000] clamp let a config
-// silently violate the documented ceiling).
-test("[ss2] judge.timeout_ms clamps DOWN to the pinned 2000 ms ceiling (5000 -> 2000)", async () => {
+// [B1-pin] The judge timeout ceiling is operator-set at 20000 ms (decision
+// 2026-10-05, up from the original 2000 pin): the documented invariant is
+// "deadline hit (<=20000 ms total including retry) -> the call is ALLOWED",
+// so the deadline remains a safety property of the hot path — finite,
+// bounded, configurable DOWN only, never up. The ceiling number changed
+// because measured real-gateway latency (6–18 s across every sampled model,
+// the configured kimi judge ~11 s) made the 2000 pin guarantee fail-open
+// for all real judges; the invariant CLASS is unchanged. A configured value
+// above 20000 must clamp to 20000 (commit-review B1 lineage: a clamp wider
+// than the documented ceiling silently violates the invariant).
+test("[ss2] judge.timeout_ms clamps DOWN to the pinned 20000 ms ceiling (50000 -> 20000)", async () => {
     const cfgmod = await loadConfigModule();
     const clamp = (v) => cfgmod.normalizeConfig({ judge: { timeout_ms: v } }).judge.timeout_ms;
-    assert.equal(clamp(5000), 2000, "configured 5000 clamps to the 2000 ceiling");
-    assert.equal(clamp(2500), 2000, "anything above 2000 clamps down");
-    assert.equal(clamp(2001), 2000, "just over the ceiling clamps down");
-    assert.equal(clamp(2000), 2000, "the ceiling itself is legal");
-    assert.equal(clamp(1200), 1200, "in-range values pass through untouched");
+    assert.equal(clamp(50000), 20000, "configured 50000 clamps to the 20000 ceiling");
+    assert.equal(clamp(25000), 20000, "anything above 20000 clamps down");
+    assert.equal(clamp(20001), 20000, "just over the ceiling clamps down");
+    assert.equal(clamp(20000), 20000, "the ceiling itself is legal");
+    assert.equal(clamp(12000), 12000, "in-range values pass through untouched");
     assert.equal(clamp(250), 250, "the floor remains 250");
 });
 
@@ -823,7 +832,7 @@ test("[ss4] history request carries BOTH SDK path-key eras (id + sessionID) with
 // (re-review F1): the old Math.max(25, remaining()) floor let the race wait
 // its 25 ms floor even when <=25 ms of budget remained, returning the hook
 // AFTER the documented deadline (same invariant family as the pinned
-// <=2000 ms judge ceiling). Two pins:
+// <=20000 ms judge ceiling). Two pins:
 //   (a) near-expiry: ~1 ms of budget + a hanging history client -> the hook
 //       allows at/near the deadline (no 25 ms floor wait).
 //   (b) healthy budget: the history race still runs and enrichment still

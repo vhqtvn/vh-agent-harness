@@ -58,7 +58,7 @@ export const DEFAULTS = Object.freeze({
         api_key_env: "SESSION_PROGRESS_JUDGE_API_KEY",
         // Empty = the default user-level path (defaultUserJudgeConfigPath).
         user_config_path: "",
-        timeout_ms: 2000,
+        timeout_ms: 20000,
         retries: 0,
         min_looping_confidence: 0.9,
     }),
@@ -175,10 +175,17 @@ export function normalizeConfig(raw) {
             // Optional override of the user-level judge-file path (empty =
             // the XDG default). Primarily a test-injection seam.
             user_config_path: strOr(judgeSrc.user_config_path, d.judge.user_config_path),
-            // Ceiling pinned at 2000: the deadline is a safety property (the
-            // documented "deadline hit (<=2000 ms total incl. retry) -> allow"
-            // invariant). Configurable DOWN only, never up.
-            timeout_ms: intIn(judgeSrc.timeout_ms, d.judge.timeout_ms, 250, 2000),
+            // Deadline remains a SAFETY PROPERTY — finite, bounded, and
+            // configurable DOWN only from the 20000 ms ceiling, never up
+            // (the documented "deadline hit (<=20000 ms total incl. retry)
+            // -> allow" invariant). Operator decision 2026-10-05: the
+            // ceiling is set from measured real-gateway latency — no
+            // sampled model answers in <6 s (the configured kimi judge
+            // ~11 s), so the old 2000 ms pin guaranteed fail-open for
+            // every real judge. Judged calls are cadence-gated: at most
+            // one assessment per 60 seconds per session when the
+            // new-observation condition is also met.
+            timeout_ms: intIn(judgeSrc.timeout_ms, d.judge.timeout_ms, 250, 20000),
             retries: intIn(judgeSrc.retries, d.judge.retries, 0, 1),
             min_looping_confidence: numIn(
                 judgeSrc.min_looping_confidence, d.judge.min_looping_confidence, 0.5, 1),

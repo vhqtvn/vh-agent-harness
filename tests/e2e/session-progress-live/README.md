@@ -83,7 +83,11 @@ binary itself phones home for).
 
 Per-leg receipts land in `tmp/agent-runs/session-progress-live/receipts/`
 (`<leg>-receipt.json` + `<leg>-verdicts.jsonl` copy), bound to the repo git
-rev: command + outcome summaries, never raw dumps. Receipts are tmp-only and
+rev: command + outcome summaries, never raw dumps. Each receipt also carries
+the **D-F1 byte binding** (card requirement): `git rev-parse HEAD` PLUS a
+sha256 per fixture-copied plugin/judge/config file (`d_f1_binding` block) —
+HEAD alone cannot bind uncommitted pack edits; the hashes bind the exact
+working-tree bytes that ran. Receipts are tmp-only and
 MUST NOT be committed. Child stdout/stderr are retained alongside as
 `<leg>.child-*.log` for forensics.
 
@@ -100,8 +104,12 @@ MUST NOT be committed. Child stdout/stderr are retained alongside as
   root (`~/.opencode` is still read — it is loaded literally from `$HOME`).
 - **The mock server must be in-process (async spawn, not spawnSync)** — a
   synchronous child would starve the mock's event loop.
-- **Judge timeout_ms floors at 250 ms** (config clamp); the stall-headers
-  leg uses 800 ms.
+- **Judge timeout_ms floors at 250 ms and ceilings at 20000 ms** (config
+  clamp; the 20000 default/ceiling is the 2026-10-05 operator decision from
+  measured real-gateway latency). Every leg PINS a short explicit
+  `timeout_ms` (500–1500 ms) in its fixture config so legs stay fast and
+  deterministic instead of inheriting the 20 s production default; the
+  stall-headers leg uses 800 ms.
 - A mechanical deny with `max_denials: 1` denies exactly ONE call (7/8
   side effects): the lease then caps and later identical calls are allowed
   again until it expires.

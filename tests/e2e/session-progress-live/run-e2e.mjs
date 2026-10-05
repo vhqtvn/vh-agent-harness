@@ -59,6 +59,7 @@
 // root so the repo root's .opencode/ and ~/.opencode are not inherited.
 
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
@@ -78,6 +79,17 @@ const BASE_CFG = {
     agents: { "*": "enforce" },
     cadence: { min_interval_seconds: 1, min_new_signatures: 1 },
 };
+// DEADLINE PIN DISCIPLINE (operator decision 2026-10-05): the config-level
+// judge.timeout_ms DEFAULT and clamp ceiling rose 2000 -> 20000 (measured
+// real-gateway latency: no sampled model answers <6 s). Every leg below
+// therefore PINS a short explicit judge.timeout_ms (500–1500 ms) in its
+// fixture config — legs stay fast and deterministic instead of inheriting
+// the 20 s production default: leg B's stall judge must burn its deadline
+// quickly enough to keep post-assessment cadence intervals above the 1 s
+// floor, and legs A/C/D must not stretch wall time. All pins are inside
+// [250, 20000], so they pass through the clamp untouched — the structural
+// count bases (B: exactly 6; D: exactly 5) are unchanged by the ceiling
+// move because the effective per-leg timeouts are unchanged.
 
 function log(msg) {
     console.log(`[live-e2e] ${msg}`);
@@ -263,6 +275,17 @@ function startScriptedJudge() {
 // into an isolated scratch project. The pack carries no {{tokens}} (verified
 // by the committed pack test), so source bytes == rendered bytes. A git init
 // inside the scratch fences the config up-walk at the scratch root.
+//
+// D-F1 (card defer-session-progress-live-receipts binding requirement): the
+// receipt must bind the EXACT bytes that ran. `git rev-parse HEAD` alone is
+// NOT sufficient while pack edits are uncommitted (this repo's no-commit
+// slices) — buildFixture therefore sha256-hashes every fixture-copied
+// plugin/script/config file and the hashes ride the leg result into the
+// receipt JSON alongside leg outcomes.
+
+function sha256File(p) {
+    return createHash("sha256").update(fs.readFileSync(p)).digest("hex");
+}
 
 function buildFixture(name, agentPort, pluginCfg) {
     const dir = path.join(FIXROOT, name);
@@ -320,7 +343,25 @@ function buildFixture(name, agentPort, pluginCfg) {
     fs.writeFileSync(
         path.join(dir, ".opencode", "repo-configs", "session-progress.local.json"),
         JSON.stringify(hermeticCfg, null, 2));
-    return dir;
+    // D-F1 byte binding: hash the exact fixture-copied bytes (plugin, the
+    // three pack scripts, and the per-leg config actually read by the
+    // plugin). Hashes land in the receipt; `git rev-parse HEAD` alone
+    // cannot bind uncommitted working-tree bytes.
+    const fixtureFiles = {
+        "plugin:session-progress.js":
+            path.join(dir, ".opencode", "plugins", "session-progress.js"),
+        "script:session-progress-config.js":
+            path.join(dir, ".opencode", "scripts", "session-progress-config.js"),
+        "script:session-progress-judge.js":
+            path.join(dir, ".opencode", "scripts", "session-progress-judge.js"),
+        "script:session-progress-policy.js":
+            path.join(dir, ".opencode", "scripts", "session-progress-policy.js"),
+        "config:session-progress.local.json":
+            path.join(dir, ".opencode", "repo-configs", "session-progress.local.json"),
+    };
+    const hashes = {};
+    for (const [label, p] of Object.entries(fixtureFiles)) hashes[label] = sha256File(p);
+    return { dir, hashes };
 }
 
 async function runOpencode(dir, judgeEnv, name) {
@@ -441,7 +482,7 @@ function countRows(rows, pred) {
 async function caseRun(name, { mode, pluginCfg, judgeEnv = {}, judgeServer }) {
     const mock = await startMockAgent({ mode, command: COMMAND, turns: TURNS });
     try {
-        const dir = buildFixture(name, mock.port, pluginCfg);
+        const { dir, hashes } = buildFixture(name, mock.port, pluginCfg);
         const r = await runOpencode(dir, judgeEnv, name);
         log(`${name}: finished in ${r.secs}s (status=${r.status})`);
         const denyInStdout = r.stdout.includes("[session-progress]");
@@ -457,7 +498,7 @@ async function caseRun(name, { mode, pluginCfg, judgeEnv = {}, judgeServer }) {
             stdout: r.stdout, stderr: r.stderr,
             agentModelCalls: toolBodies.length,
             mockEvents: mock.events(),
-            judgeServer,
+            judgeServer, fixtureHashes: hashes,
             childOutPath: r.outPath, childErrPath: r.errPath, args: r.args,
         };
     } finally {
@@ -608,6 +649,16 @@ function writeReceipt(r, legChecks) {
             verdicts_copy: `tmp/agent-runs/session-progress-live/receipts/${r.name}-verdicts.jsonl`,
         },
         judge_server: r.judgeServer || { kind: "dead-port", port: 1 },
+        // D-F1 binding (card requirement): the tree/commit hash AND the
+        // byte-hash of every fixture-copied plugin/judge/config file,
+        // recorded alongside the leg results. HEAD alone cannot bind
+        // uncommitted pack edits; the sha256s bind the working-tree bytes
+        // that actually ran.
+        d_f1_binding: {
+            git_head: REV,
+            git_status_clean: false, // this driver never asserts a clean tree
+            file_sha256: r.fixtureHashes,
+        },
         mock_trace_summary: r.mockEvents.slice(0, 6).map((e) => e.kind),
     };
     fs.writeFileSync(path.join(RECEIPTS, `${r.name}-receipt.json`), JSON.stringify(receipt, null, 2));
