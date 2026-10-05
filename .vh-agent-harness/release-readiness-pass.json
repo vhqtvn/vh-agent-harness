@@ -1,11 +1,22 @@
 {
   "schema_version": 1,
-  "commit_sha": "3348b95be44a675fe7b551365a5064d1f78c1d96",
+  "release_version": "v0.28.0",
+  "commit_sha": "7d986678490b37b1ca328772a2224aa316949876",
+  "evaluated_at": "2026-10-05T21:55:00+07:00",
   "model_gates": {
     "G1_coverage": "ready",
     "G2_significance": "ready",
     "G3_docs": "ready",
     "G4_visibility": "ready",
     "G5_curated_note": "ready"
-  }
+  },
+  "gate_evidence": {
+    "G1_coverage": "Release-prep base N = 7d98667 (the committed v0.28.0 migration note; resumable_existing_note — no second note commit per Invariant 1a). Arc v0.27.0..N = 13 commits, every commit classified: 0 breaking / 6 feat / 2 fix / 5 other (1 refactor, 3 test, 1 docs). Consumer vs non-consumer split complete in the note's Non-consumer changes section. The 2 path_touched re-fired defer cards surfaced by doctor #12 (defer-018-overlay-docs-shadow-sentinel-vacuous, draft-e2e-stale-image-20261004) receive explicit committed dispositions in the v0.28.0 manifest M (gate's named remedy (b)); cards stay on disk untouched.",
+    "G2_significance": "Significant MINOR: uniform steps:10000 dead-man backstop on the 12 capped agents (defaults change, announced), NEW embedded session-progress-pilot overlay pack (default-out, double opt-in, deny-only, LLM-judged, 20s deadline clamp), auto-gate hardening trio. Conventional-commit semver: v0.27.0 -> v0.28.0.",
+    "G3_docs": "README.agent.md updated this arc (+105 lines: pack documentation, config reference). Migration note templates/migrations/v0.28.0.md committed at HEAD 7d98667; TestMigrationNotes_Canonical PASS (heading + command contract).",
+    "G4_visibility": "Changelog folded into the annotated tag message (tmp/release-tag-msg-v0.28.0.txt). Note ships via help migrate (binary embed). Claim-discipline guard honored: no 'safely bounded' claims in any release surface — the backstop is framed as a dead-man fence and the detector as an audit-first pilot (note Watch-out #5).",
+    "G5_curated_note": "The committed migration note is the curated artifact: canonical structure (test-gated), review-hardened, coverage consistent with the discovered arc, honest latency/temperature:0 incident disclosure, rollback caveats for the steps re-render inversion and pack renders."
+  },
+  "deterministic_note": "G0 (version format / tag uniqueness), G0b (clean tree), G0c (doctor, all 21 checks), G6 (S2 holds), G7-DEFER (manifest handshake + dispositions) are re-computed by the wrapper at tag time; this artifact carries only the model-driven G1-G5 verdicts.",
+  "generated_by": "releaser ceremony 2026-10-05 (operator-dispatched; readiness evaluation assigned to the releaser by the initiating instruction)"
 }
