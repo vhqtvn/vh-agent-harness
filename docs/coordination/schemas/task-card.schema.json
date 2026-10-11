@@ -1,0 +1,513 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agent Harness Coordination Task Card",
+  "type": "object",
+  "required": [
+    "task_id",
+    "title",
+    "task_type",
+    "coordination_mode",
+    "primary_lane",
+    "report_envelope",
+    "status",
+    "session_aliases",
+    "active_session_alias",
+    "claimed_at",
+    "report_paths",
+    "review_paths",
+    "history",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "task_type": {
+      "type": "string",
+      "enum": ["implementation", "study", "research", "docs", "verification"]
+    },
+    "coordination_mode": {
+      "type": "string",
+      "enum": ["short", "medium", "long"]
+    },
+    "primary_lane": {
+      "type": "string",
+      "minLength": 1
+    },
+    "research_question": {
+      "type": "string"
+    },
+    "source_policy": {
+      "type": ["string", "null"],
+      "enum": ["repo_only", "web_repo", "restricted_sites", null]
+    },
+    "source_allowlist": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "desired_artifact_type": {
+      "type": ["string", "null"],
+      "enum": ["sources", "decision", null]
+    },
+    "target_artifact_path": {
+      "type": ["string", "null"]
+    },
+    "rough_scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "open_questions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "ready_criteria": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "files_in_scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "non_goals": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "success_criteria": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "validation_plan": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "report_envelope": {
+      "type": "string",
+      "enum": ["minimal", "standard", "synthesis"]
+    },
+    "backlog_id": {
+      "type": ["string", "null"]
+    },
+    "workstream_slug": {
+      "type": ["string", "null"]
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "owner_notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "ready",
+        "working",
+        "reported",
+        "blocked",
+        "completed",
+        "cancelled"
+      ]
+    },
+    "session_aliases": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "active_session_alias": {
+      "type": ["string", "null"]
+    },
+    "claimed_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "report_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "review_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "latest_report": {
+      "type": ["object", "null"],
+      "required": [
+        "path",
+        "title",
+        "status",
+        "report_envelope",
+        "created_at",
+        "summary",
+        "promotion_recommended"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "reported",
+            "blocked",
+            "completed"
+          ]
+        },
+        "report_envelope": {
+          "type": "string",
+          "enum": ["minimal", "standard", "synthesis"]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "promotion_recommended": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "next_action": {
+      "type": "string"
+    },
+    "predicted_impact": {
+      "type": ["string", "null"]
+    },
+    "measured_outcome": {
+      "type": ["string", "null"]
+    },
+    "last_review": {
+      "type": ["object", "null"],
+      "required": [
+        "path",
+        "reviewed_at",
+        "title",
+        "status",
+        "summary",
+        "next_action"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "session_name": {
+          "type": ["string", "null"]
+        },
+        "title": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "working",
+            "reported",
+            "blocked",
+            "completed",
+            "cancelled"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["at", "event"],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "event": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": ["string", "null"]
+          },
+          "status": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "recurrence": {
+      "type": "object",
+      "description": "Optional recurrence-signature block. OPTIONAL on every card: legacy cards carry no block (backward-compat). When present, REQUIRES the two-level identity (recurrence_id = exact-defect collapse key; symptom_class_id = immutable/versioned taxonomy id) AND the acknowledgement pair (recurrence_count / last_acknowledged_count), and carries non-identity evidence[] plus a bounded aliases[]/supersession list. The cross-field invariant recurrence_count >= last_acknowledged_count is enforced by the validator script (draft-07 cannot express it).",
+      "required": ["recurrence_id", "symptom_class_id", "recurrence_count", "last_acknowledged_count"],
+      "properties": {
+        "recurrence_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable, explicit identity of ONE underlying defect. The actual collapse key. Authored when a defect is first recognized as recurring."
+        },
+        "symptom_class_id": {
+          "type": "string",
+          "pattern": "^recurrence\\.v1/.+$",
+          "description": "Immutable, versioned taxonomy identifier aggregating the CLASS of symptom (e.g. recurrence.v1/<class>)."
+        },
+        "recurrence_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total observations of this recurrence_id. The ack-pair invariant (recurrence_count >= last_acknowledged_count) is enforced by the validator script."
+        },
+        "last_acknowledged_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "recurrence_count at last disposition adjudication. A recurrence_count above this marks the entry unadjudicated (release-enforcement semantics, a later slice)."
+        },
+        "evidence": {
+          "type": "array",
+          "description": "Non-identity observations attached to the entry: paths, claim_ids, affected capabilities, outcomes, commit subjects/ranges, later root-cause findings.",
+          "items": {
+            "type": "object",
+            "required": ["kind", "ref"],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Discriminator for the evidence entry (e.g. path, claim_id, capability, outcome, commit_subject, commit_range)."
+              },
+              "ref": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The evidence locator/value (a path, a claim id, a capability name, a commit subject/range, etc.)."
+              },
+              "note": {
+                "type": "string"
+              },
+              "capability": {
+                "type": "string"
+              },
+              "outcome": {
+                "type": "string"
+              },
+              "commit_subject": {
+                "type": "string"
+              },
+              "commit_range": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "aliases": {
+          "type": "array",
+          "description": "Bounded alias/supersession reconciliation for an identity that must be re-pointed after later evidence.",
+          "items": {
+            "type": "object",
+            "required": ["recurrence_id"],
+            "properties": {
+              "recurrence_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "An alternate or superseded recurrence_id reconciled into this canonical entry."
+              },
+              "superseded": {
+                "type": "boolean",
+                "description": "True when this alias has been superseded by the canonical recurrence_id."
+              },
+              "note": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "task_type": {
+            "const": "research"
+          }
+        },
+        "required": ["task_type"]
+      },
+      "then": {
+        "required": [
+          "research_question",
+          "source_policy",
+          "desired_artifact_type",
+          "target_artifact_path"
+        ],
+        "properties": {
+          "research_question": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_policy": {
+            "type": "string",
+            "enum": ["repo_only", "web_repo", "restricted_sites"]
+          },
+          "desired_artifact_type": {
+            "type": "string",
+            "enum": ["sources", "decision"]
+          },
+          "target_artifact_path": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "draft"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "rough_scope": {
+                "minItems": 1
+              }
+            }
+          },
+          {
+            "properties": {
+              "open_questions": {
+                "minItems": 1
+              }
+            }
+          },
+          {
+            "properties": {
+              "ready_criteria": {
+                "minItems": 1
+              }
+            }
+          }
+        ]
+      },
+      "else": {
+        "properties": {
+          "files_in_scope": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "success_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "validation_plan": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "working"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "active_session_alias": {
+            "type": "string",
+            "minLength": 1
+          },
+          "claimed_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}
