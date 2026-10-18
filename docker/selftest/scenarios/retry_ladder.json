@@ -1,0 +1,5 @@
+[
+  {"fault": {"status": 500, "body": "{\"error\":{\"message\":\"mock 500 one\"}}"}},
+  {"fault": {"status": 429, "body": "{\"error\":{\"message\":\"mock 429 two\"}}", "retry_after_ms": 2000}},
+  {"text": "retry ladder complete"}
+]

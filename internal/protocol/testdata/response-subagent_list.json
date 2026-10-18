@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":11,"result":{"children":[{"childId":"sess-example.1","kind":"one-shot","prompt":"study the repo","depth":1,"state":"settled","result":"completed","contentSeq":7},{"childId":"sess-example.2","kind":"continuable","depth":1,"state":"waiting"}]}}

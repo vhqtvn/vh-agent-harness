@@ -14,7 +14,7 @@ import (
 // argv: vh-agent-harness __exec_sandbox_child -- <target> <args...>
 // The profile is passed via VH_EXEC_SANDBOX_* env vars.
 var execSandboxChildCmd = &cobra.Command{
-	Use:    "__exec_sandbox_child",
+	Use:    execsandbox.TrampolineVerb,
 	Short:  "Internal exec-sandbox trampoline (do not call directly)",
 	Hidden: true,
 	Args:   cobra.MinimumNArgs(1),

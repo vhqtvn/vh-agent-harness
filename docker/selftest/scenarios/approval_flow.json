@@ -1,0 +1,7 @@
+[
+  {"tool_calls": [
+    {"id": "call-af-1", "name": "run_shell", "args": {"command": "echo approval-flow-ran"}},
+    {"id": "call-af-2", "name": "run_shell", "args": {"command": "git push origin main"}}
+  ]},
+  {"text": "approval flow exercised"}
+]
