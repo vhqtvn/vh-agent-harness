@@ -1,0 +1,148 @@
+{
+  "_comment": "Synthetic scrubbed fixtures for session-progress-pilot sub-slice 3 (polling exemption + mechanical fast path). All commands/args are synthetic; no real session data. Field guide: polling.{expect:true} commands MUST be exempt (never deny, never accrue); polling.{expect:false} MUST NOT be exempt. mechanical.scenarios drive the REAL hook: each entry in `calls` is one tool call; `history_error` marks that AFTER the call completes it records an adverse outcome (ToolStateError) in the scripted session history the stub client serves to the NEXT assessment; the first call whose 1-based index reaches `first_deny_at` must THROW the bounded deny reason (enforce mode); calls at other indexes must allow.",
+  "polling": [
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py status --job build --lines 40", "expect": true },
+    { "command": "vh-agent-harness exec python3 .opencode/skills/bgshell-job/scripts/bgshell_job.py status --job build --lines 40", "expect": true },
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py status --job-dir tmp/agent-runs/alice/bg-jobs/build", "expect": true },
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py status --lines 40 --job build", "expect": true },
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py status --job build", "expect": true },
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py status --job build --lines 40 && echo done", "expect": false },
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py logs --job build --lines 80", "expect": false },
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py stop --job build --force", "expect": false },
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py status", "expect": false },
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py status --job", "expect": false },
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py status --job build --lines 0", "expect": false },
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py status --job build --lines 9999", "expect": false },
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py status --job build extra", "expect": false },
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py status --job a --job b", "expect": false },
+    { "command": "status --job build", "expect": false },
+    { "command": "echo status --job build", "expect": false },
+    { "command": "vh-agent-harness exec python other/scripts/thing.py status --job build", "expect": false },
+    { "command": "vh-agent-harness exec python .opencode/skills/bgshell-job/scripts/bgshell_job.py status --job build; rm -rf /", "expect": false }
+  ],
+  "mechanical": {
+    "scenarios": [
+      {
+        "name": "identical-failing-bash-denies-at-threshold",
+        "note": "Identical failing bash calls; cadence 1s / min_new 1. Session observation starts at call 1 (t=600ms), so the first assessment opens at call 3 (t=1800) and enriches c1+c2. The most recent prior (c3) is structurally un-enrichable at call 4's mechanical check, so the all-but-most-recent rule is satisfied with outs=[c1,c2]: the deny lands exactly at call 4, and the 1-hit lease cap allows every later identical call.",
+        "config": {
+          "agents": { "*": "enforce" },
+          "cadence": { "min_interval_seconds": 1, "min_new_signatures": 1 }
+        },
+        "step_ms": 600,
+        "command": "make test-js",
+        "calls": [
+          { "callID": "c1", "history_error": true },
+          { "callID": "c2", "history_error": true },
+          { "callID": "c3", "history_error": true },
+          { "callID": "c4", "history_error": true },
+          { "callID": "c5", "history_error": true },
+          { "callID": "c6", "history_error": true },
+          { "callID": "c7", "history_error": true },
+          { "callID": "c8", "history_error": true }
+        ],
+        "first_deny_at": 4,
+        "lease_seconds": 20,
+        "max_denials": 1,
+        "later_identical_allowed": [5, 6, 7, 8]
+      },
+      {
+        "name": "changing-args-never-deny",
+        "note": "Every call differs (the classic legitimate-retry shape): no mechanical lease may fire.",
+        "config": {
+          "agents": { "*": "enforce" },
+          "cadence": { "min_interval_seconds": 1, "min_new_signatures": 1 }
+        },
+        "step_ms": 600,
+        "command": null,
+        "calls": [
+          { "callID": "c1", "command": "make test A=1", "history_error": true },
+          { "callID": "c2", "command": "make test A=2", "history_error": true },
+          { "callID": "c3", "command": "make test A=3", "history_error": true },
+          { "callID": "c4", "command": "make test A=4", "history_error": true },
+          { "callID": "c5", "command": "make test A=5", "history_error": true },
+          { "callID": "c6", "command": "make test A=6", "history_error": true }
+        ],
+        "first_deny_at": null
+      },
+      {
+        "name": "polling-interleaved-breaks-the-run",
+        "note": "Identical failing bash calls interleaved with EXEMPT bgshell status polls: each poll is a different signature that breaks the trailing run, so the threshold is never reached by the failing signature.",
+        "config": {
+          "agents": { "*": "enforce" },
+          "cadence": { "min_interval_seconds": 1, "min_new_signatures": 1 }
+        },
+        "step_ms": 600,
+        "command": "make poll-loop",
+        "calls": [
+          { "callID": "c1", "history_error": true },
+          { "callID": "p1", "polling": true },
+          { "callID": "c2", "history_error": true },
+          { "callID": "p2", "polling": true },
+          { "callID": "c3", "history_error": true },
+          { "callID": "p3", "polling": true },
+          { "callID": "c4", "history_error": true }
+        ],
+        "first_deny_at": null
+      },
+      {
+        "name": "successful-completions-never-mechanically-deny",
+        "note": "Identical bash calls all completing with exit 0 (history_success): 'exact successful reads and unknown outcomes are not enough'.",
+        "config": {
+          "agents": { "*": "enforce" },
+          "cadence": { "min_interval_seconds": 1, "min_new_signatures": 1 }
+        },
+        "step_ms": 600,
+        "command": "make green",
+        "calls": [
+          { "callID": "c1", "history_success": true },
+          { "callID": "c2", "history_success": true },
+          { "callID": "c3", "history_success": true },
+          { "callID": "c4", "history_success": true },
+          { "callID": "c5", "history_success": true },
+          { "callID": "c6", "history_success": true }
+        ],
+        "first_deny_at": null
+      },
+      {
+        "name": "changed-outcome-resets-evidence",
+        "note": "c1 fails with error-alpha, then the SAME command's outcome CHANGES from call 2 on (error-beta). The first assessment (call 3) enriches c1(alpha)+c2(beta); at call 4 the recorded outcomes are not UNCHANGED, so no mechanical deny ever fires. (A change on the LAST prior only would be invisible to enrichment — the one-behind structural lag — and is bounded by the 1-hit lease; this fixture pins the VISIBLE-change guarantee.)",
+        "config": {
+          "agents": { "*": "enforce" },
+          "cadence": { "min_interval_seconds": 1, "min_new_signatures": 1 }
+        },
+        "step_ms": 600,
+        "command": "make flaky",
+        "calls": [
+          { "callID": "c1", "history_error": "error-alpha" },
+          { "callID": "c2", "history_error": "error-beta" },
+          { "callID": "c3", "history_error": "error-beta" },
+          { "callID": "c4", "history_error": "error-beta" },
+          { "callID": "c5", "history_error": "error-beta" },
+          { "callID": "c6", "history_error": "error-beta" }
+        ],
+        "first_deny_at": null
+      },
+      {
+        "name": "non-bash-tool-never-mechanically-denies",
+        "note": "Identical failing `read` calls: read has NO verified safe adapter, so the mechanical path is disabled for it regardless of repetition.",
+        "config": {
+          "agents": { "*": "enforce" },
+          "cadence": { "min_interval_seconds": 1, "min_new_signatures": 1 }
+        },
+        "step_ms": 600,
+        "command": null,
+        "tool": "read",
+        "calls": [
+          { "callID": "c1", "args": { "filePath": "/nonexistent/x" }, "history_error": true },
+          { "callID": "c2", "args": { "filePath": "/nonexistent/x" }, "history_error": true },
+          { "callID": "c3", "args": { "filePath": "/nonexistent/x" }, "history_error": true },
+          { "callID": "c4", "args": { "filePath": "/nonexistent/x" }, "history_error": true },
+          { "callID": "c5", "args": { "filePath": "/nonexistent/x" }, "history_error": true },
+          { "callID": "c6", "args": { "filePath": "/nonexistent/x" }, "history_error": true }
+        ],
+        "first_deny_at": null
+      }
+    ]
+  }
+}

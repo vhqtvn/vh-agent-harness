@@ -27,7 +27,8 @@ ambiguous/unsafe plan aborts before writing.
 
 ## Phases `guide` reports
 
-- **greenfield** — no harness here. → `install --name <Name> --slug <slug>`.
+- **greenfield** — no harness here. → `install --name <Name> --slug <slug>`
+  (seeds the FULL surface by default; `--minimal` for the lean shape).
 - **adoptable** — an existing `.opencode` not yet managed by vh-agent-harness.
   → `install` adopts it; managed files are refreshed, your project-owned files
   preserved. Preview with `--dry-run` first.
@@ -93,7 +94,7 @@ real target locations.
 | `.vh-agent-harness/project.config.json` | Fill `project.mission_summary` + `architecture_summary` (and `db_user`/`db_name` if used). Resolved into the seeded `CLAUDE.md`/`Makefile` at install — **create + fill it BEFORE `install`** (those seeds are written once). A field that does NOT apply (e.g. `db_user`/`db_name` when there is no database) may be set to a blessed N/A sentinel — `none` / `n/a` / `null` / `na` (case-insensitive; string form only — write `"null"`, not bare JSON `null`): it renders empty and silences the `token(s) UNRESOLVED` warning for that field. |
 | `.vh-agent-harness/AGENTS.mission.md` | Write the project's domain mission/architecture/rules; composed into root `AGENTS.md` on `update`. |
 | `.vh-agent-harness/vh-harness-profile.yml` | (armed, seeded) Select features + `overlays: [<pack>]` (S3). |
-| `.vh-agent-harness/run-shape.yml` | (seeded host-shell) Set runtime `backend:` (`host-shell`/`docker_compose`/`proxy`) + `compose_file`/`default_service` or `proxy_command`; lifecycle hooks/verbs (S4). |
+| `.vh-agent-harness/run-shape.yml` | (seeded host-shell) Set runtime `backend:` (`host-shell`/`docker-compose`/`proxy`) + `compose_file`/`default_service` or `proxy_command`; lifecycle hooks/verbs (S4). |
 | `.vh-agent-harness/harness-ownership.yml` | (optional; not seeded) Raise-only ownership overrides — create only to take a managed file to `project_owned`. |
 | `.vh-agent-harness/product-prefixes.json` | (optional; not seeded) Declare the product-code surface (directory prefixes) for the coordination cross-boundary-slice hint. Absent or malformed → monorepo default `apps/` + `packages/`; create only for a non-monorepo layout (e.g. `src/`). Read at runtime by `coordination-hints-lib.js` (not the render seam). |
 | `.vh-agent-harness/overlays/<pack>/` | Project overlay: `agents/`, `commands/`, `skills/`, `opencode-append.jsonc`, `permission-pack.jsonc`, `callable-graph-snippet.md`. |
@@ -111,7 +112,12 @@ never hand-edit the sidecar), `AGENTS.core.md` (managed compose source), or
 anything under `.opencode/` that is `platform_managed` — unless you intend to
 keep the edit (see golden rule #2: a hand-edited managed file is preserved, not
 overwritten, and `origin-hashes.json` is how the platform remembers your edit is
-yours).
+yours). One deliberate exception to "preserved, not overwritten": in repos that
+adopted the core/mission split (a `.vh-agent-harness/AGENTS.mission.md` exists),
+the root `AGENTS.md` is a GENERATED artifact — `update` re-composes it from
+`AGENTS.core.md` + `AGENTS.mission.md` unconditionally, so hand edits to the
+root file are discarded by design (doctor's `agents-composition` check WARNs on
+divergence; edit the sources, not the composition).
 
 ### `vh-harness-profile.yml` field contract
 
@@ -181,6 +187,51 @@ capability or provide an accessible `path:`/`url:` they can perceive
 directly). This prevents the failure mode where a caller holds a screenshot,
 self-refuses "I can't read the image," and does not know the specialist
 exists.
+
+#### Gated-commit capability condition (git routing guidance)
+
+`core/gated-commit` is the one capability whose WORKFLOW GUIDANCE (routing
+doc, AGENTS core, agent prompts, command footers, denial messages) ships
+unconditionally while its PERMISSION WIRING (the `committer` /
+`commit-message` / `commit-reviewer` agent blocks and every `committer` task
+edge in `opencode.jsonc`) is emitted only when the capability is selected.
+The guidance is therefore capability-conditional on every surface:
+
+- **Selected** (`supervised`, or `capabilities: [core/gated-commit]`): the
+  reviewed committer route applies unchanged — delegate commits to
+  `committer` through the gated-commit protocol.
+- **Not selected** (e.g. `minimal`): the committer agents are NOT wired —
+  delegation denies. Guidance and every denial message then instruct the
+  agent to STOP (never probe the route, never fall back to raw git — the
+  raw-git denial is unconditional on every profile), PRESERVE the work
+  uncommitted, REPORT "gated-commit capability not selected; automated
+  committing unavailable" in the closeout, and REQUEST separately-authorized
+  activation (`capabilities: [core/gated-commit]` in
+  `vh-harness-profile.yml` — narrower than switching to `supervised`) or
+  operator handling. The full contract lives in
+  `.opencode/docs/git-execution-routing.md` → "Capability condition".
+
+Two advisory diagnostics make the selection-to-wiring state visible (never
+blocking):
+
+- `doctor` → `capability-coherence` (LIVE files on disk): PASS for
+  coherently-unselected (healthy, no nag) and for selected-and-wired; WARN
+  when the capability is selected but an agent block or a required caller
+  task edge is missing from the live `opencode.jsonc`; INFO for hand-wired
+  residue without selection or an unreadable config. Findings carry an
+  unconditional restart caveat — doctor observes files, not the running
+  opencode process; if a session predates the config, restart it to load the
+  new permissions.
+- `install` / `update --dry-run` (PROSPECTIVE): the same check lints the
+  STAGED `opencode.jsonc` this update proposes to write, warning on
+  selected-but-missing wiring or unselected residue in the emitted output —
+  catching emitter regressions before they land. Dry-run remains a pure
+  preview (no writes).
+- If an update PRESERVES your locally-edited
+  `.opencode/docs/git-execution-routing.md` (managed-diverged — never
+  clobbered), a stderr note calls out that the routing guidance changed to
+  the capability-conditional model so you can re-adopt the new wording
+  deliberately.
 
 #### Media-perception model seed
 
@@ -292,7 +343,7 @@ not claim it passed from prompt inspection alone.
 
 ### Shipped overlay packs
 
-Besides project packs you author under `.vh-agent-harness/overlays/`, seven
+Besides project packs you author under `.vh-agent-harness/overlays/`, eight
 overlay packs ship **embedded in the binary**, selectable by name with no
 vendoring. Run `vh-agent-harness overlay list` to see every pack (embedded +
 project-local) with its source and selected/available status — the discovery
@@ -309,7 +360,7 @@ nonexistent:
   selection paths render the same cluster.
 
 - `auto-classifier-pilot` — the opt-in auto-classifier safety pilot (a
-  three-hook tool-call gate with `audit`/`enforce`/`live`/`live-tiered` modes).
+  two-hook tool-call gate with `audit`/`enforce`/`live`/`live-tiered` modes).
   It is **overlay-only** (no capability-manifest), so it is selected solely via
   `overlays: [auto-classifier-pilot]`. See "Auto-classifier configuration"
   below, or run `vh-agent-harness overlay docs auto-classifier-pilot` for the
@@ -355,15 +406,79 @@ nonexistent:
   `overlays: [contract-invariant-audit-pilot]` entry re-adds it even when
   opted out.
 
+- `session-progress-pilot` — a **default-OUT**, **off-by-default**
+  looping-tool-call detector pilot. A single-hook plugin
+  (`tool.execute.before` ONLY) that selectively DENIES one exact repeated
+  tool invocation (identical signature + unchanged adverse outcomes) with a
+  bounded reason — throw-to-deny in `enforce` mode only; `audit` records
+  would-deny and NEVER throws. Until config opts an agent (or `"*"`) in as
+  `audit`/`enforce`, every agent is `off`: the plugin is completely inert
+  (no observation, no records, no diagnostics, no judge calls, no LLM spend).
+  Fail-open on every error/timeout/malformed verdict (total slow-path
+  deadline ≤20000 ms incl. retry — ceiling set 2026-10-05 from measured
+  real-gateway latency, down-configurable; no cancellation of SDK/tool
+  requests ever).
+  It is **overlay-only** (no capability-manifest), selected solely via
+  `overlays: [session-progress-pilot]`, and deliberately NOT in the frozen
+  greenfield recipe (the bootstrap-inventory decision is `out`). See
+  "Session-progress configuration" below, or run
+  `vh-agent-harness overlay docs session-progress-pilot`.
+
 Each renders into `.opencode/` on `update` exactly like a project-local pack.
 The three pilots (`formal-verification-pilot`, `resolve-first-pilot`,
 `contract-invariant-audit-pilot`) are **default-on**: a `minimal` profile that
 never names them still renders them because their platform-default feature
 keys are `true`. Disable any pilot by setting its feature key to `false`. The
-other four (`release`, `auto-classifier-pilot`, `repo-mail`,
-`frontend-ui-pilot`) remain opt-in (a `minimal` profile that never names them
-renders nothing of them). A project-local pack of the same name still shadows
-the embed wholly.
+other five (`release`, `auto-classifier-pilot`, `repo-mail`,
+`frontend-ui-pilot`, `session-progress-pilot`) remain opt-in (a `minimal`
+profile that never names them renders nothing of them). A project-local pack
+of the same name still shadows the embed wholly.
+
+### Greenfield bootstrap default (frozen full recipe)
+
+A **greenfield** `install` (no live `.vh-agent-harness/vh-harness-profile.yml`)
+with NO selector seeds the **frozen full recipe** — `supervised` preset + every
+shipped core capability + every shipped overlay pack, explicitly enumerated —
+embedded binary-only at `templates/install/full-harness-profile.yml`
+(`corpus.InstallFS`; never rendered as a repo file, never reconciled). `--full`
+pins the same recipe explicitly; `--minimal` seeds the historical minimal
+default; `--profile <preset>` seeds the default carrying that preset.
+
+Properties (load-bearing):
+
+- **Existing installs are never touched.** The recipe lives OUTSIDE
+  `templates/core` because recurring reconciliation UNIONs the core default's
+  arrays into every existing live profile — a widened default would backfill
+  installed harnesses. Bootstrap selection flows only through the greenfield
+  install path and never leaks into `update`/`doctor`. (The first `update`
+  after a full install normalizes the seeded file to canonical YAML form —
+  the SELECTION is preserved exactly; only comments/serialization change,
+  which is standard armed-file reconcile behavior for any profile that
+  differs from the platform default.)
+- **Selectors are greenfield-only.** `--full` / `--minimal` /
+  `--profile <preset>` against a target with an existing live profile are
+  rejected as usage errors BEFORE any write. A no-selector install over an
+  existing install keeps the historical reconcile semantics (live selection
+  preserved).
+- **Preview/apply parity.** One effective profile drives staged profile bytes,
+  capability selection, overlay rendering, and the `--dry-run` preview; the
+  preview reports the same effective selection apply seeds.
+- **Incomplete install exits non-zero.** A live install whose generation
+  applied partially reports the failed writes and exits 1 (lineage not
+  advanced). `update` keeps its own exit contract.
+- **Replay + selection report.** Install prints the effective selection with
+  its source and a shell-safe `replay:` command preserving target and identity
+  flags; a default-full replay is pinned to `--full`.
+
+**Future-inventory policy (maintainers):** every overlay pack or core
+capability shipped in the binary requires an explicit **default-in /
+default-out** decision at introduction time, recorded in the inventory ledger
+in `internal/cli/bootstrap_inventory_test.go`; an `in` decision adds the item
+to the frozen recipe in the same change. The inventory coverage test fails
+(`make check`) until the decision exists, and a deliberate `out` decision
+PASSES — the ledger is a genuine decision surface, not a forever-full
+assertion. Never widen the `templates/core` minimal default to distribute new
+surface.
 
 ### Auto-classifier configuration
 
@@ -421,6 +536,37 @@ For the complete reference (all modes, fail-closed behavior, prompt
 composition, per-call gate flow), run
 `vh-agent-harness overlay docs auto-classifier-pilot`.
 
+#### Surfaced deny string (safe feedback)
+
+When the gate denies a call in `live` or `live-tiered` mode, the reject message
+is the only string the model sees — it carries an ATTRIBUTED, SANITIZED reason
+or a NAMED fallback, never raw classifier output or raw error text:
+
+```
+[auto-gate] blocked by consensus: tier-aggregate: deny (reason=disagreement leaves=2 allows=1 denies=1 tier=consensus) | leaf#0=allow leaf#1=deny(judgment; reason=[Rule] the echoed reason, sanitized)
+[auto-gate] blocked by live classifier: fail(unavailable/timeout; no safety judgment was obtained)
+```
+
+- The historical aggregate segment (`blocked by consensus: tier-aggregate:
+  ...`) is byte-identical to the old shape — per-leaf stamps APPEND after
+  `" | "`, so existing log scrapes keep matching.
+- Stamp kinds: `allow`; `deny(judgment; reason=…)` (a valid block verdict was
+  parsed; the `<reason>` rides a fixed sanitize pipeline — control-char
+  normalization to one line, config-known-value suppression `[suppressed]`,
+  credential scrub `[redacted]`, then truncation at 240 chars with
+  `…[truncated]`); `fail(parse-error; no parseable verdict returned)`; and
+  `fail(unavailable[/subkind]; no safety judgment was obtained)` where
+  `subkind` ∈ `timeout|http-<code>|transport|malformed|missing-key|
+  missing-endpoint|missing-model` comes only from executor-side error tags.
+- Unusable reasons get NAMED fallbacks (`reason=<none>`, `reason=<suppressed>`)
+  — never an empty `reason=`, never an invented policy explanation.
+- Failure semantics are TYPED and truthful: an infrastructure-errored leaf
+  (timeout/HTTP/transport/config/key) is a `fail(...)` stamp that aggregates as
+  `reason=incomplete` — it can never surface as `unanimous-deny`, which would
+  falsely claim a safety judgment. Fail-closed enforcement is unchanged: deny
+  is still deny.
+
+
 #### CI gate & credential hygiene (never-commit paths)
 
 The auto-gate config surface has two never-commit file classes the seed
@@ -472,6 +618,81 @@ override — e.g. a developer can flip just `{"mode":"live-tiered"}` locally
 without touching the committed base. `vh-agent-harness doctor` lints the local
 file when present (absent = valid/silent; present-but-invalid = FAIL identifying
 the local layer) and includes it in effective-value resolution.
+
+### Session-progress configuration
+
+`session-progress-pilot` (see "Shipped overlay packs") is configured by ONE
+operator-owned, gitignored-by-convention file:
+`.opencode/repo-configs/session-progress.local.json`. Absent file = safe
+defaults (every agent `off` — the plugin is fully inert, zero observation,
+until config opts in). A present-but-invalid file falls
+back to defaults with one deduplicated stderr notice and NEVER throws. The
+file is re-read per tool call behind an mtime cache — edits apply on the next
+call, no restart. The full field table lives in the pack README
+(`vh-agent-harness overlay docs session-progress-pilot`); the operator-facing
+summary:
+
+- `agents` — `{"*": "off"}` by default (fully inert until an agent or `"*"`
+  is explicitly set to `audit`/`enforce`); per-agent `off|audit|enforce`.
+  `enforce` may deny (throw a bounded reason); `audit` records would-deny and
+  never denies; `off` disables observation. With only the `*` key the mode is
+  unambiguous; when any specific agent key exists, a call with UNKNOWN
+  attribution can never be denied (audit ceiling).
+- `judge.*` — the semantic judge target resolves via a DUAL form
+  (operator decision 2026-10-05, mirroring auto-gate), PER FIELD,
+  first-non-empty-wins: repo-config literal
+  (`judge.endpoint`/`judge.model`/`judge.api_key`, gitignored repo-local
+  config only) → user-level file
+  (`~/.config/vh-agent-harness/session-progress-llm.json`, schema
+  `{endpoint, model, apiKey}` — auto-gate spellings `modelEndpoint`/`api_key`
+  accepted as aliases; mtime-cached, absent = silent, invalid = one deduped
+  notice) → env vars by NAME (`SESSION_PROGRESS_JUDGE_MODEL` / `_ENDPOINT` /
+  `_API_KEY` — the original fallback, unchanged). Partial per-field mixes are
+  legitimate; all three fields must resolve or the judge is unavailable.
+  TRACKED files carry env var NAMES only — literal secrets live ONLY in the
+  gitignored repo-local config and the user-level file, never in
+  diagnostics. `judge.user_config_path` overrides the user-file path
+  (test/hermeticity seam). Unresolvable ⇒ semantic judging unavailable ⇒
+  allow (recorded). `timeout_ms` (default 20000, clamped 250–20000 — the
+  ceiling is the pinned ≤20000 ms deadline invariant, set 2026-10-05 from
+  measured real-gateway latency where no sampled model answers <6 s,
+  configurable down only)
+  is the TOTAL slow-path deadline — bounded history read, judge fetch, and the
+  optional single retry (`retries` 0–1) all share it. Judged calls are
+  cadence-gated: at most one assessment per 60 seconds per session when the
+  new-observation condition is also met.
+- `cadence.*` — judge-spend throttling ONLY (never a deny reason):
+  `min_interval_seconds` 60, `min_new_signatures` 8 (the latter counts NEW
+  call observations, NOT distinct signatures — the name is historical).
+- `mechanical.*` — the no-LLM fast path (default `4`th identical invocation
+  within `30`s, lease `20`s, max `1` denied hit), enabled only for tools with
+  a verified safe adapter (`bash` in Phase 1: non-zero `metadata.exit` or
+  tool-error state counts as adverse; completed calls of unadapted tools and
+  successful reads never mechanically deny).
+- `semantic.*` — `looping` verdicts with confidence ≥ `0.90`, ≥1 valid packet
+  evidence ref, AND ≥3 local prior adverse unchanged matches within `90`s may
+  deny (lease `45`s, max `2` hits). `productive`/`stuck`/`drifting` NEVER
+  deny.
+- `polling_exemptions.bgshell_status` — exempts the EXACT documented
+  bgshell-job `status` grammar (`--job`/`--job-dir`, bounded `--lines`);
+  chains, other subcommands, and anything looser are not exempt.
+- `state.*` / `concurrency.*` — per-session ring ≤32 observations /
+  ≤16KiB, ≤128 sessions with lazy 30-min idle eviction; one judge assessment
+  per session, ≤4 globally (busy ⇒ allow). Leases/counters are process
+  memory ONLY — never persisted, never restored from diagnostics.
+- Diagnostics (when `diagnostics.enabled`) land under
+  `tmp/agent-runs/session-progress-pilot/` (`verdicts.jsonl` + one rotation,
+  `status.json`), scrubbed (no raw args, outputs, or credentials),
+  best-effort, never read back for enforcement.
+
+Fail-open inventory (each ⇒ allow): config missing/invalid, `enabled:false`,
+mode `off`, unknown attribution with specific agent keys, oversized/unsupported
+args (never truncated into a colliding signature), spend gate closed, busy
+slots, judge unavailable, history failure, judge timeout/non-2xx/malformed/
+schema-invalid output, verdicts resolving after the deadline, expired or
+capped leases, and any internal error (top-level catch). This is a PILOT: it
+does not make unattended sessions safely bounded — the uniform `steps: 10000`
+backstop remains the only fence, and this pack never changes it.
 
 ## Permission transform (F-intent)
 
@@ -672,7 +893,14 @@ export default function transform({ context }) {
 ### Setup & configuration
 
 - **Install / adopt:** `vh-agent-harness install --name <Name> --slug <slug>`
-  (run with `--dry-run` first). Then `vh-agent-harness guide` for config steps.
+  (run with `--dry-run` first). On a GREENFIELD target a no-selector install
+  seeds the frozen FULL recipe (supervised preset + every shipped core
+  capability + every shipped overlay pack — see "Greenfield bootstrap
+  default" below); `--minimal` seeds the historical 8-agent baseline,
+  `--profile <preset>` seeds a specific preset. Selectors are mutually
+  exclusive and REJECTED on an existing install (edit
+  `vh-harness-profile.yml` + `update` instead). Then `vh-agent-harness guide`
+  for config steps.
 - **Add domain agents/commands/skills:** `vh-agent-harness overlay new <pack>
   --agent <n> [--command <n>] [--skill <n>]` scaffolds the pack and wires it into
   `vh-harness-profile.yml` in one command (see "Scaffolding an overlay pack"
@@ -720,7 +948,7 @@ export default function transform({ context }) {
   exec-ro is a HOST-SIDE INTENT CLASSIFIER that runs BEFORE backend dispatch: it
   classifies the command against the host repo path, then delegates to the
   selected runtime backend. It is NOT proof that the backend payload is
-  OS-sandboxed or on read-only mounts — under proxy/docker_compose the classified
+  OS-sandboxed or on read-only mounts — under proxy/docker-compose the classified
   command runs in-container against the container's filesystem view. This is a
   general read-only execution gate enforced INSIDE the Go binary (a separate,
   narrower gate than `exec`). It is allowlisted in `opencode.jsonc` as
@@ -752,7 +980,7 @@ export default function transform({ context }) {
     per-binary safe-flag allowlist is deferred and the OS-level exec-sandbox is
     the authoritative layer for the long tail of unknown flags ON THE HOST-SHELL
     BACKEND — exec-sandbox is host-local-only and does not follow the payload
-    into a proxy/docker_compose container. The `readonly`
+    into a proxy/docker-compose container. The `readonly`
     group entry itself is left as `find *` / `sort *` / `sed -n *` on purpose:
     it also feeds the shell-guard L2 permission.bash emission for ALL agents,
     and widening it would emit a broader prompt-free rule for every agent and
@@ -771,7 +999,7 @@ export default function transform({ context }) {
     a per-verb safe-flag allowlist is deferred and the OS-level exec-sandbox is
     the authoritative layer for the long tail of unknown flags ON THE HOST-SHELL
     BACKEND (exec-sandbox is host-local-only and does not follow the payload into
-    a proxy/docker_compose container) — including diff/log textconv, which is
+    a proxy/docker-compose container) — including diff/log textconv, which is
     default-on when configured via gitattributes and is therefore a residual the
     flag-level denylist cannot fully close).
   - **Shell metacharacters are refused** (conservative deny-on-unparseable): any
@@ -805,7 +1033,7 @@ export default function transform({ context }) {
   another verb. For separately identified, explicitly granted host-local
   read-code work, use `vh-agent-harness exec-sandbox` when the calling role has
   the grant AND the applicable mode-floor (`exec_sandbox.min_mode`) supplies the
-  required containment; it does NOT follow a command into `proxy`/`docker_compose`
+  required containment; it does NOT follow a command into `proxy`/`docker-compose`
   backends. Use `exec` for genuine mutation, anything with shell plumbing, or
   runtime/backend execution.
 - **Run a command under a kernel-enforced HOST-LOCAL Linux sandbox:** `vh-agent-harness exec-sandbox [--sandbox=off|best-effort|strict] [--net=deny|allow|ask] -- <cmd>`. An optional **mode floor** (`exec_sandbox.min_mode` in `run-shape.yml`) can clamp the effective mode UP so a caller can never run below the configured minimum (see "Mode floor" below).
@@ -813,7 +1041,7 @@ export default function transform({ context }) {
   **Two execution planes (read this).** The exec commands look like one family
   but sit on two disjoint planes. `exec` and `exec-ro` dispatch through
   `resolveBackend()` and are runtime-backend-aware: under `host-shell` they run
-  on the host; under `proxy`/`docker_compose` they run INSIDE the container.
+  on the host; under `proxy`/`docker-compose` they run INSIDE the container.
   `exec-sandbox` is a HOST-LOCAL Landlock+seccomp trampoline that NEVER calls
   `resolveBackend` and always runs on the host. The Landlock/seccomp
   restrictions apply only to the host process tree directly launched by the
@@ -957,7 +1185,7 @@ export default function transform({ context }) {
   command cannot write outside the repo/tmp contract or make unauthorized network
   connections. Compose with exec-ro on the host-shell backend: exec-ro is the
   fast pre-filter; exec-sandbox is the authoritative backstop — but ONLY for
-  host-local execution. Under proxy/docker_compose, exec-ro's classified command
+  host-local execution. Under proxy/docker-compose, exec-ro's classified command
   runs in-container and exec-sandbox cannot follow it; use backend-native
   container security for in-container containment.
 

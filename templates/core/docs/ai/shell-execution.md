@@ -20,9 +20,9 @@ Pick the narrowest verb that fits the work:
 
 | Verb | What runs where | Safety boundary |
 |------|-----------------|-----------------|
-| `vh-agent-harness exec` | Inside the project runtime backend (host under `host-shell`; inside the container under `proxy`/`docker_compose`) | Genuine mutation allowed; only forbidden patterns and the commit-gate are blocked |
+| `vh-agent-harness exec` | Inside the project runtime backend (host under `host-shell`; inside the container under `proxy`/`docker-compose`) | Genuine mutation allowed; only forbidden patterns and the commit-gate are blocked |
 | `vh-agent-harness exec-ro` | Read-only intent, classified host-side BEFORE backend dispatch | Prompt-free allowlisted classifier; default-deny of anything not proven read-only; a DENY is final — never rerun the denied command through another verb |
-| `vh-agent-harness exec-sandbox` | Host-local kernel sandbox (Landlock + seccomp) for arbitrary read-code | Writes outside `./tmp/` and network are physically impossible under a strict mode floor; host-local only — does not follow a command into `proxy`/`docker_compose` backends |
+| `vh-agent-harness exec-sandbox` | Host-local kernel sandbox (Landlock + seccomp) for arbitrary read-code | Writes outside `./tmp/` and network are physically impossible under a strict mode floor; host-local only — does not follow a command into `proxy`/`docker-compose` backends |
 | `vh-agent-harness shell` | Interactive shell in the runtime | Not for agents — use only when a human explicitly asks for interactive use |
 
 Command hygiene that keeps you on the sanctioned path:
@@ -58,7 +58,7 @@ Core rules (every adopter):
 | `ssh-host-key-bypass` | `ssh -o StrictHostKeyChecking=no` / `-o UserKnownHostsFile=/dev/null` | Run `vh-agent-harness ssh-trust <host>` once on the host (the remedy the rule itself prescribes; the verb is pending CLI implementation), then ssh from inside with no flags |
 | `scp-upload` | `scp … user@host:` deploys | Land changes via the configured release flow (git push + on-host pull, or container image rebuild) — scp leaves the host out of sync with git |
 | `system-tmp-access` | any read/write of system `/tmp` | Use the repo `tmp/` (relative) for scratch, or `/workspace/tmp/` inside the dev container — out-of-repo writes trigger permission prompts and break unattended runs |
-| `git-mutation-bypass` | raw `git add` / `commit` / `reset` / `push` / … | Git mutations route through the committer agent and `.opencode/scripts/commit-gate.sh` only (see `.opencode/docs/git-execution-routing.md`) |
+| `git-mutation-bypass` | raw `git add` / `commit` / `reset` / `push` / … | Git mutations route through the committer agent and `.opencode/scripts/commit-gate.sh` only (see `.opencode/docs/git-execution-routing.md`). Where `core/gated-commit` is not selected there is no committer route: preserve the work, report the missing route, and request separately-authorized activation or operator handling — the raw-git denial is unconditional on every profile |
 
 Project-overlay classes (a consuming project adds these in
 `forbidden-patterns.project.js`; check your repo's own file for the live list):

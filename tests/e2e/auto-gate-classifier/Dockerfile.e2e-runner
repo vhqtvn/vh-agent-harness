@@ -7,10 +7,10 @@
 #   Stage 2 (runtime): node:22-alpine COPYs the built binary onto PATH (so the
 #     plugin's spawnSync("vh-agent-harness","sys-prompt",...) works), COPYs the
 #     rendered /tmpproj, and runs the node:test driver that imports the RENDERED
-#     plugin and drives its permission.ask hook.
+#     plugin and drives its event hook.
 #
 # This is a PLUGIN e2e, NOT a full-OpenCode e2e. No OpenCode server runs. The
-# driver builds a faithful fake client/Permission/output stand-in.
+# driver builds a faithful fake client / permission.asked-event stand-in.
 #
 # Build context: REPO ROOT (set in docker-compose.yml via context: ../../..) so
 # the Go source, the overlay pack source, and the test driver are all reachable.

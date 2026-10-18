@@ -39,7 +39,7 @@ Add `--json` for machine-readable output.
 - **Ownership classes** decide what a re-render may touch: `platform_managed`
   (force-overwritten), `platform_armed` (schema-reconciled), `project_owned`
   (seeded once, then preserved forever), `overlay_extension`, `external_generated`.
-- **Runtime backend abstraction** (`host-shell`, `docker_compose`, `bare`,
+- **Runtime backend abstraction** (`host-shell`, `docker-compose`, `bare`,
   `proxy`) selected by `.vh-agent-harness/run-shape.yml`; `exec`/`shell` run the
   shell-guard permission gate first.
 - **Lineage-governed, repo-relative state**: `.vh-agent-harness/lineage.yml` is
@@ -167,14 +167,15 @@ A consuming project extends the managed core without editing managed files:
 - **Take over a managed file** — raise it to `project_owned` in
   `harness-ownership.yml` (raise-only).
 - **Operational docs (`docs/ai/`)** — several managed agent prompts and commands
-  tell agents to consult project operational primitives under `docs/ai/` (e.g.
-  `docs/ai/codebase-operational-primitives.md`, `shell-execution.md`,
+  tell agents to consult project operational primitives under `docs/ai/` when one
+  exists (e.g. `docs/ai/codebase-operational-primitives.md`, `shell-execution.md`,
   `dev-environment.md`): canonical paths, helper functions, container/service
   names, env conventions, API shapes. These are **domain knowledge the harness
   cannot ship** (the core stays domain-free), so the harness does **not** seed
-  them — authoring them is the adopting project's job. Until you create them the
-  references are simply forward pointers; create the ones your agents need so
-  they stop rediscovering project facts from scratch.
+  them — authoring them is the adopting project's job. Every such reference is
+  explicitly conditional — consult it when one exists, never chase or fail
+  when absent; create the ones your agents need so they stop rediscovering
+  project facts from scratch.
 
 Adopting an existing hand-maintained harness is the **adoptable** path: run
 `install` (preview with `--dry-run`); managed files are refreshed and your

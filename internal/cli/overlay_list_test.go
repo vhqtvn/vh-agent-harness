@@ -342,7 +342,7 @@ func TestOverlayList_TransitiveHardDepParity_RenderSeam(t *testing.T) {
 	//    exact call seam.go renderSeamStaging makes) INCLUDES `release` for this
 	//    fixture. This is the render-side pack-set assertion that matches the
 	//    display's "selected" report.
-	_, packs, _, _, err := resolveCapabilityAnswers(root)
+	_, packs, _, _, err := resolveCapabilityAnswers(root, nil)
 	if err != nil {
 		t.Fatalf("resolveCapabilityAnswers (the render-seam pack-set source): %v", err)
 	}

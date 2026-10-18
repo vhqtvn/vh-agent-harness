@@ -925,8 +925,8 @@ single-path child of the note commit N); M = manifest-only child commit
 4. **Re-run the manifest evaluator** against M to confirm the handshake passes
    before tagging:
    ```sh
-   node .opencode/scripts/check-defer-triggers.mjs --mode=release \
-     --release-version <vX.Y.Z>
+   vh-agent-harness exec bash -c 'node .opencode/scripts/check-defer-triggers.mjs \
+     --mode=release --release-version <vX.Y.Z>'
    ```
    (Add `--override-confirmed-version <vX.Y.Z>` only when an override has been
    operator-confirmed for this release — Invariant 7.)

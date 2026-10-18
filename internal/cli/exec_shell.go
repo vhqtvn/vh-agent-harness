@@ -87,7 +87,7 @@ var shellCmd = &cobra.Command{
 	SilenceUsage: true,
 	Long: `Open an interactive shell inside the configured runtime backend.
 
-For docker_compose this is ` + "`docker compose exec <service>`" + ` with the host TTY
+For docker-compose this is ` + "`docker compose exec <service>`" + ` with the host TTY
 passed through; for bare it opens the host $SHELL. The command is evaluated by
 the permission gate first (the real shell-guard hook, internal/permission.NewShellGuardHook).`,
 	Args: cobra.NoArgs,

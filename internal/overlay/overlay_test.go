@@ -11,16 +11,19 @@ package overlay
 // extended 2026-07-14 with the auto-classifier-pilot embed promotion, extended
 // 2026-07-27 with the repo-mail embed promotion, extended 2026-08-04 with the
 // three skills-only pilot embed promotions, extended 2026-08-12 with the
-// frontend-ui-pilot embed promotion):
-// the harness ships SEVEN embedded overlay packs — `auto-classifier-pilot` (the
+// frontend-ui-pilot embed promotion, extended 2026-10-03 with the
+// session-progress-pilot embed promotion):
+// the harness ships EIGHT embedded overlay packs — `auto-classifier-pilot` (the
 // opt-in auto-classifier safety pilot), `release` (Phase-3
 // capability-installer overlay-integration reference implementation, the first
 // shipped pack), `repo-mail` (the repo-mail inter-repo communication
-// protocol overlay — egress-gate wiring), and four skills-only overlay pilots
-// (`contract-invariant-audit-pilot`, `formal-verification-pilot`,
-// `frontend-ui-pilot`, `resolve-first-pilot`) that are strictly INFORMS-only (no
-// agent/command/permission/gate) and name-selectable via `overlays:` like the
-// other three. web-overlay was relocated to a non-shipped adoption reference
+// protocol overlay — egress-gate wiring), `session-progress-pilot` (the
+// looping-tool-call detector pilot, default-OUT — select explicitly), and
+// four skills-only overlay pilots (`contract-invariant-audit-pilot`,
+// `formal-verification-pilot`, `frontend-ui-pilot`, `resolve-first-pilot`)
+// that are strictly INFORMS-only (no agent/command/permission/gate) and
+// name-selectable via `overlays:` like the other four. web-overlay was
+// relocated to a non-shipped adoption reference
 // under docs/adoption-examples/web/, so it is NOT a shipped pack. To keep
 // exercising the Pack API + merge/render contract against a richer shape than
 // the shipped packs carry, every pack-touching test below builds a SYNTHETIC
@@ -42,20 +45,22 @@ import (
 )
 
 // knownPackNames is the sorted list of overlay packs shipped under
-// templates/overlays. The harness ships seven embedded overlay packs:
+// templates/overlays. The harness ships eight embedded overlay packs:
 // `auto-classifier-pilot` (opt-in auto-classifier safety pilot, promoted to the
 // embed on 2026-07-14), `release` (Phase-3 capability-installer reference, the
 // first shipped pack), `repo-mail` (repo-mail inter-repo communication
 // protocol overlay — egress-gate wiring, promoted to the embed on 2026-07-27),
-// and four skills-only overlay pilots (`contract-invariant-audit-pilot`,
+// `session-progress-pilot` (looping-tool-call detector pilot, default-OUT —
+// select explicitly; promoted to the embed on 2026-10-03), and four skills-only
+// overlay pilots (`contract-invariant-audit-pilot`,
 // `formal-verification-pilot`, `frontend-ui-pilot`, `resolve-first-pilot`) that
 // are strictly INFORMS-only (no agent/command/permission/gate), so KnownPacks
 // returns ["auto-classifier-pilot", "contract-invariant-audit-pilot",
 // "formal-verification-pilot", "frontend-ui-pilot", "release", "repo-mail",
-// "resolve-first-pilot"] (sorted). web-overlay remains relocated to
-// docs/adoption-examples/web/ and is NOT a shipped pack, so it is deliberately
-// absent here. (See TestKnownPacks_ShipsEmbeddedPacks for the live assertion
-// that pins this fixture to reality.)
+// "resolve-first-pilot", "session-progress-pilot"] (sorted). web-overlay
+// remains relocated to docs/adoption-examples/web/ and is NOT a shipped pack,
+// so it is deliberately absent here. (See TestKnownPacks_ShipsEmbeddedPacks
+// for the live assertion that pins this fixture to reality.)
 var knownPackNames = []string{
 	"auto-classifier-pilot",
 	"contract-invariant-audit-pilot",
@@ -64,6 +69,7 @@ var knownPackNames = []string{
 	"release",
 	"repo-mail",
 	"resolve-first-pilot",
+	"session-progress-pilot",
 }
 
 // synthWebStyleFS builds an in-memory fs.FS that mirrors the on-disk layout the

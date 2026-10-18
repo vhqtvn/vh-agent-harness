@@ -55,12 +55,15 @@ func TestCapabilityOutput_SelectedRendersFiles(t *testing.T) {
 }
 
 // TestCapabilityOutput_UnselectedGreenfieldOmitsFiles proves that when
-// core/media-perception is NOT selected (the default profile), a greenfield
-// install does NOT create either file or the media-perception skill directory.
+// core/media-perception is NOT selected (an explicit --minimal install), a
+// greenfield install does NOT create either file or the media-perception skill
+// directory. (The bare no-selector default now installs the frozen FULL recipe,
+// which selects media-perception — so the unselected case is pinned via the
+// explicit minimal selector.)
 func TestCapabilityOutput_UnselectedGreenfieldOmitsFiles(t *testing.T) {
 	root := t.TempDir()
-	seamInstallInto(t, root)
-	// Default install profile does NOT select media-perception.
+	seamInstallMinimalInto(t, root)
+	// The --minimal install profile does NOT select media-perception.
 	assertFilesAbsent(t, root, mediaPerceptionLivePaths, "greenfield unselected install")
 	// The skill directory should not exist either (nothing created it).
 	if _, err := os.Stat(filepath.Join(root, ".opencode", "skills", "media-perception")); !os.IsNotExist(err) {
@@ -71,10 +74,12 @@ func TestCapabilityOutput_UnselectedGreenfieldOmitsFiles(t *testing.T) {
 // TestCapabilityOutput_UnselectedDoctorClean proves doctor's managed-drift check
 // does NOT flag the absent media-perception files as drift when the capability
 // is unselected (greenfield). This is the core Slice-3 fix: active ownership
-// excludes inactive paths, so they are neither counted nor compared.
+// excludes inactive paths, so they are neither counted nor compared. (Pinned
+// via the explicit --minimal selector: the bare no-selector default now seeds
+// the frozen FULL recipe, which selects media-perception.)
 func TestCapabilityOutput_UnselectedDoctorClean(t *testing.T) {
 	root := t.TempDir()
-	seamInstallInto(t, root)
+	seamInstallMinimalInto(t, root)
 	out := seamDoctorOut(t, root)
 	if strings.Contains(out, "FAIL") {
 		t.Fatalf("doctor should be clean on greenfield unselected install; got:\n%s", out)

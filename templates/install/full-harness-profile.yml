@@ -1,0 +1,64 @@
+# FROZEN full-install bootstrap recipe (install-only; binary-embedded).
+#
+# This file is the greenfield DEFAULT for `vh-agent-harness install`: a no-flag
+# install (or `install --full`) seeds EXACTLY this selection at
+# .vh-agent-harness/vh-harness-profile.yml. It is deliberately SEPARATE from
+# templates/core/.vh-agent-harness/vh-harness-profile.yml (the minimal
+# reconciliation baseline): recurring reconciliation unions default arrays into
+# EXISTING live profiles, so widening the core default would backfill every
+# installed harness. Keeping the recipe install-only means existing installs
+# are never touched by this selection — only fresh installs receive it.
+#
+# It is embedded binary-only (templates/install, corpus.InstallFS) and is
+# NEVER rendered into a target by the seam. `--minimal` seeds the historical
+# minimal default instead; `--profile <preset>` seeds the default with that
+# preset. All three selectors are greenfield-only: any of them against an
+# existing live profile is rejected before writes.
+#
+# ── FUTURE-INVENTORY POLICY (load-bearing) ──────────────────────────────────
+# Every overlay pack or core capability shipped in the binary requires an
+# EXPLICIT default-in / default-out decision recorded at introduction time:
+#
+#   1. add the item to the inventory ledger in
+#      internal/cli/bootstrap_inventory_test.go (decision: in | out), and
+#   2. add it to this recipe's overlays:/capabilities: lists ONLY when the
+#      decision is `in`.
+#
+# The inventory coverage test FAILS (`go test ./internal/cli`) until the ledger
+# entry exists: a new shipped pack with no decision cannot merge. A deliberate
+# default-OUT is valid and passes coverage — record the `out` ledger entry and
+# leave the recipe unchanged. NEVER select discovered directories at runtime;
+# discovery validates coverage, it does not determine selection.
+#
+# Removing an item from this recipe also requires flipping its ledger entry to
+# `out` in the same change, or coverage fails.
+# ────────────────────────────────────────────────────────────────────────────
+#
+# Supervised preset (baseline 8 agents + gated-commit + debate clusters), plus
+# every shipped core capability, plus every shipped overlay pack — all
+# enumerated explicitly (auditability over derivation).
+profile: supervised
+capabilities:
+  - core/debate
+  - core/gated-commit
+  - core/media-perception
+  - core/release
+  - core/worker-read-only
+overlays:
+  - auto-classifier-pilot
+  - contract-invariant-audit-pilot
+  - formal-verification-pilot
+  - frontend-ui-pilot
+  - release
+  - repo-mail
+  - resolve-first-pilot
+features:
+  backlog: true
+  # Shipped default-on pilot features stay true here as well. NOTE: a pilot's
+  # feature `false` is NOT a veto over its explicit overlays: entry above —
+  # disabling a pilot in a customized copy of this profile requires removing
+  # its overlays: entry AND setting its feature false.
+  formal-verification-pilot: true
+  resolve-first-pilot: true
+  contract-invariant-audit-pilot: true
+policy_packs: []

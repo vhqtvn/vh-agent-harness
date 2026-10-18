@@ -365,11 +365,13 @@ fi
 # --- release DEFER gate (authoritative hard enforcement) ---
 #
 # The deterministic evaluator at .opencode/scripts/check-defer-triggers.mjs is
-# the SINGLE source of DEFER classification truth. G7 in harness-release-
-# readiness consumes the same evaluator ADVISORY-only; THIS gate is
-# AUTHORITATIVE: a blocker or evaluator-error classification REFUSES the
-# release before any `git tag` mutation. DEFERs stay non-blocking at COMMIT
-# time (hard non-goal) — this gate fires only at release-tag time.
+# the SINGLE source of DEFER classification truth. The readiness agent's G7 is
+# phase-honest (it runs NO evaluator — release mode's freshness handshake is
+# satisfiable only at HEAD=M, which never exists at the readiness phase); THIS
+# gate is the AUTHORITATIVE post-M surface: a blocker or evaluator-error
+# classification REFUSES the release before any `git tag` mutation. DEFERs
+# stay non-blocking at COMMIT time (hard non-goal) — this gate fires only at
+# release-tag time.
 #
 # Fail-closed policy (manifest-authority mode, the sole release mode):
 #   committed manifest missing      → REFUSE (evaluator-error); override CANNOT cure
@@ -384,11 +386,11 @@ fi
 # See AGENTS.md "DEFER / follow-up curation" for the candidate contract and
 # the v1 trigger grammar (path_touched(<exact-file>) and after_tag(<tag>) only).
 
+# PRIOR_TAG feeds ONLY the G0c doctor env below (VH_HARNESS_DEFER_DIFF_SINCE).
+# Release mode takes no --since operand: mainRelease derives its release base
+# itself (options.since is read only by promoter and release-prep modes).
 PRIOR_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
 DEFER_ARGS=(--mode=release)
-if [ -n "$PRIOR_TAG" ]; then
-  DEFER_ARGS+=(--since "$PRIOR_TAG")
-fi
 DEFER_ARGS+=(--release-version "$VERSION")
 if [ -n "$CONFIRMED_VERSION" ]; then
   DEFER_ARGS+=(--override-confirmed-version "$CONFIRMED_VERSION")

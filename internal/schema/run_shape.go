@@ -65,10 +65,16 @@ func runShapeAllowedTopLevelList() string {
 	return strings.Join(ks, ", ")
 }
 
-// allowedBackend enumerates the valid runtime backend values for v1.
+// allowedBackend enumerates the valid runtime backend values for v1. Both
+// spellings of the docker backend are valid: `docker-compose` (hyphen, the
+// canonical public enum) and `docker_compose` (underscore, the legacy
+// manifest spelling, still written by existing consumers such as the
+// docker-validate workflow). The runtime collapses both onto the internal
+// `docker_compose` token (internal/cli normalizeDockerBackend).
 var allowedBackend = map[string]bool{
 	"bare":           true,
 	"docker-compose": true,
+	"docker_compose": true,
 	"host-shell":     true,
 	"proxy":          true,
 }
@@ -123,7 +129,7 @@ func (RunShape) Validate(raw []byte) []FieldError {
 				if !allowedBackend[s] {
 					errs = append(errs, FieldError{
 						Field:   "runtime.backend",
-						Message: fmt.Sprintf("invalid backend %q; enum: bare | docker-compose | host-shell | proxy", s),
+						Message: fmt.Sprintf("invalid backend %q; enum: bare | docker-compose | host-shell | proxy (docker_compose also accepted)", s),
 					})
 				}
 			} else {

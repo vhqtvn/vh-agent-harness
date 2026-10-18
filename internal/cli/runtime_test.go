@@ -10,6 +10,7 @@ import (
 
 	"github.com/vhqtvn/vh-agent-harness/internal/manifest"
 	"github.com/vhqtvn/vh-agent-harness/internal/permission"
+	"github.com/vhqtvn/vh-agent-harness/internal/runshape"
 	"github.com/vhqtvn/vh-agent-harness/internal/runtime"
 )
 
@@ -207,6 +208,48 @@ func TestBackendSelection_EmptyBackend(t *testing.T) {
 			t.Errorf("empty backend should error with guidance; got %v", err)
 		}
 	})
+}
+
+// TestSelectBackend_DockerSpellingRoundTrip pins the spelling-collapse contract:
+// a run-shape declaring `backend: docker-compose` (the documented public enum)
+// loads via runshape.Load and resolves via selectBackend to a backend whose
+// Name() is the internal `docker_compose` token — and the legacy underscore
+// spelling resolves identically. This is the load-side twin of internal/schema's
+// TestRunShapeValidateBackendEnum (which pins both-accepted validation); the
+// schema layer accepts both spellings and this side proves they converge on one
+// backend. No docker daemon is contacted: NewDockerCompose only probes
+// reachability on Up, not at selection.
+func TestSelectBackend_DockerSpellingRoundTrip(t *testing.T) {
+	for _, spelling := range []string{"docker-compose", "docker_compose"} {
+		t.Run(spelling, func(t *testing.T) {
+			root := t.TempDir()
+			rsDir := filepath.Join(root, runshape.DirName)
+			if err := os.MkdirAll(rsDir, 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", rsDir, err)
+			}
+			rsPath := filepath.Join(rsDir, runshape.FileName)
+			content := "run_shape_version: \"0.1\"\nruntime:\n  backend: " + spelling + "\n"
+			if err := os.WriteFile(rsPath, []byte(content), 0o644); err != nil {
+				t.Fatalf("write run-shape: %v", err)
+			}
+
+			rs, err := runshape.Load(rsPath)
+			if err != nil {
+				t.Fatalf("runshape.Load(%s): %v", spelling, err)
+			}
+			if rs.Runtime == nil || rs.Runtime.Backend != spelling {
+				t.Fatalf("loaded backend = %+v, want %q", rs.Runtime, spelling)
+			}
+
+			be, err := selectBackend(runtimeConfig{backend: rs.Runtime.Backend}, root)
+			if err != nil {
+				t.Fatalf("selectBackend(%s): %v", spelling, err)
+			}
+			if got := be.Name(); got != "docker_compose" {
+				t.Errorf("spelling %q: backend Name() = %q, want internal token %q", spelling, got, "docker_compose")
+			}
+		})
+	}
 }
 
 // TestFailWithGuidance_NoSilentFallback verifies the live docker_compose path

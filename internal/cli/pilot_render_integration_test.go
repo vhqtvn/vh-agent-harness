@@ -29,7 +29,7 @@ func renderPilotStaging(t *testing.T, root string) []string {
 	}
 	renderer := substrate.EmbedFSRenderer{Source: sub}
 	answers := mergeRenderAnswers(installRenderAnswers(root), readProfileAnswers(root))
-	overlayFiles, _, _, err := renderSeamStaging(staging, renderer, answers, root)
+	overlayFiles, _, _, err := renderSeamStaging(staging, renderer, answers, root, nil)
 	if err != nil {
 		t.Fatalf("renderSeamStaging: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestPilotRender_StagedFilesExistOnDisk(t *testing.T) {
 	}
 	renderer := substrate.EmbedFSRenderer{Source: sub}
 	answers := mergeRenderAnswers(installRenderAnswers(root), readProfileAnswers(root))
-	overlayFiles, _, _, err := renderSeamStaging(staging, renderer, answers, root)
+	overlayFiles, _, _, err := renderSeamStaging(staging, renderer, answers, root, nil)
 	if err != nil {
 		t.Fatalf("renderSeamStaging: %v", err)
 	}

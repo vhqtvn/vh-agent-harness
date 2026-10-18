@@ -247,8 +247,8 @@ func hostShellMatrix() CapabilityMatrix {
 			{Verb: VerbDown, Cap: CapNoop, Guidance: "host-shell manages no services; nothing to stop (commands run directly on the host)"},
 			{Verb: VerbExec, Cap: CapSupported, Guidance: "commands run directly on the host"},
 			{Verb: VerbShell, Cap: CapSupported, Guidance: "interactive host shell"},
-			{Verb: VerbLogs, Cap: CapUnsupported, Guidance: "host-shell backend does not manage services and has no logs; declare a lifecycle hook (run-shape.yml) or use runtime.backend=docker_compose/proxy for service logs"},
-			{Verb: VerbPs, Cap: CapUnsupported, Guidance: "host-shell backend does not manage services and has no ps; declare a lifecycle hook (run-shape.yml) or use runtime.backend=docker_compose/proxy for service status"},
+			{Verb: VerbLogs, Cap: CapUnsupported, Guidance: "host-shell backend does not manage services and has no logs; declare a lifecycle hook (run-shape.yml) or use runtime.backend=docker-compose/proxy for service logs"},
+			{Verb: VerbPs, Cap: CapUnsupported, Guidance: "host-shell backend does not manage services and has no ps; declare a lifecycle hook (run-shape.yml) or use runtime.backend=docker-compose/proxy for service status"},
 			{Verb: VerbHook, Cap: CapSupported, Guidance: "custom-hook leaves run on the host (project-owned .vh-agent-harness/scripts/*.sh)"},
 		},
 	}
@@ -283,8 +283,8 @@ func bareMatrix() CapabilityMatrix {
 			{Verb: VerbDown, Cap: CapNoop, Guidance: "bare has no managed services; nothing to stop (commands run directly on the host, no isolation)"},
 			{Verb: VerbExec, Cap: CapSupported, Guidance: "commands run directly on the host (no isolation)"},
 			{Verb: VerbShell, Cap: CapSupported, Guidance: "interactive host shell (no isolation)"},
-			{Verb: VerbLogs, Cap: CapUnsupported, Guidance: "bare backend has no managed services to log; use runtime.backend=docker_compose for service logs"},
-			{Verb: VerbPs, Cap: CapUnsupported, Guidance: "bare backend has no managed services to list; use runtime.backend=docker_compose for service status"},
+			{Verb: VerbLogs, Cap: CapUnsupported, Guidance: "bare backend has no managed services to log; use runtime.backend=docker-compose for service logs"},
+			{Verb: VerbPs, Cap: CapUnsupported, Guidance: "bare backend has no managed services to list; use runtime.backend=docker-compose for service status"},
 			{Verb: VerbHook, Cap: CapSupported, Guidance: "custom-hook leaves run on the host (project-owned .vh-agent-harness/scripts/*.sh)"},
 		},
 	}

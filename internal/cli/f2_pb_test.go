@@ -488,6 +488,20 @@ func TestF2PBMedia_HandConstructedAttachmentRejectedAtDurablePaths(t *testing.T)
 				return a
 			},
 		},
+		{
+			name: "locator_value_transient_root",
+			forge: func(a F2MediaAttachment) F2MediaAttachment {
+				a.Locator.Value = "tmp/agent-runs/wave1/chart-001.png"
+				return a
+			},
+		},
+		{
+			name: "provenance_source_locator_transient_root",
+			forge: func(a F2MediaAttachment) F2MediaAttachment {
+				a.Provenance.SourceLocator = "tmp/agent-runs/wave1/chart-001-src.png"
+				return a
+			},
+		},
 	}
 
 	for _, tc := range tamperCases {
@@ -564,6 +578,138 @@ func TestF2PBMedia_HandConstructedAttachmentRejectedAtDurablePaths(t *testing.T)
 			t.Fatalf("valid attachment rejected at RenderF2MarkdownProjection: %v", rErr)
 		}
 	})
+}
+
+// --- Transient-locator admission for media attachment locators ---------------
+
+// TestF2PBMedia_TransientLocatorRootsRejectedByValidator proves the
+// transient-locator admission gate (the same narrow lexical tmp/agent-runs/
+// refusal the canonical provenance-locator walk applies) now covers BOTH
+// F2-derived media-attachment locator fields: F2MediaAttachment.Locator.Value
+// and F2MediaAttachment.Provenance.SourceLocator. Durable roots (including
+// other tmp roots, URLs, and absolute paths) keep behaving exactly as before.
+func TestF2PBMedia_TransientLocatorRootsRejectedByValidator(t *testing.T) {
+	emit := pbEmitFromFixture(t)
+	validAtt, err := BuildF2MediaAttachment(emit, pbValidDescriptor())
+	if err != nil {
+		t.Fatalf("BuildF2MediaAttachment failed: %v", err)
+	}
+	env := emit.CanonicalEnvelope
+
+	rejectCases := []struct {
+		name      string
+		forge     func(a F2MediaAttachment) F2MediaAttachment
+		wantField string // substring of the refusal naming the offending field
+	}{
+		{
+			name: "locator value path-kind under tmp/agent-runs/",
+			forge: func(a F2MediaAttachment) F2MediaAttachment {
+				a.Locator.Value = "tmp/agent-runs/percept/chart-001.png"
+				return a
+			},
+			wantField: "locator.value",
+		},
+		{
+			name: "provenance source locator under tmp/agent-runs/",
+			forge: func(a F2MediaAttachment) F2MediaAttachment {
+				a.Provenance.SourceLocator = "tmp/agent-runs/percept/chart-001-src.png"
+				return a
+			},
+			wantField: "provenance.source_locator",
+		},
+		{
+			name: "locator value with leading dot-slash (normalization applies)",
+			forge: func(a F2MediaAttachment) F2MediaAttachment {
+				a.Locator.Value = "./tmp/agent-runs/percept/chart-001.png"
+				return a
+			},
+			wantField: "locator.value",
+		},
+		{
+			name: "locator value with backslash separators (normalization applies)",
+			forge: func(a F2MediaAttachment) F2MediaAttachment {
+				a.Locator.Value = `tmp\agent-runs\percept\chart-001.png`
+				return a
+			},
+			wantField: "locator.value",
+		},
+	}
+	for _, tc := range rejectCases {
+		t.Run("reject: "+tc.name, func(t *testing.T) {
+			forged := tc.forge(*validAtt)
+			verr := ValidateF2MediaAttachmentAgainstEnvelope(&forged, env)
+			if verr == nil {
+				t.Fatalf("expected a transient-locator refusal, got nil")
+			}
+			msg := verr.Error()
+			if !strings.Contains(msg, tc.wantField) {
+				t.Fatalf("refusal does not name the offending field %q:\n%s", tc.wantField, msg)
+			}
+			if !strings.Contains(msg, "tmp/agent-runs") {
+				t.Fatalf("refusal does not name the disposable root:\n%s", msg)
+			}
+		})
+	}
+
+	// Positive fixtures: durable roots (and non-classified shapes) are admitted
+	// with NO behavior change outside the extended walk.
+	acceptCases := []struct {
+		name  string
+		forge func(a F2MediaAttachment) F2MediaAttachment
+	}{
+		{
+			name: "locator value under a durable evidence root",
+			forge: func(a F2MediaAttachment) F2MediaAttachment {
+				a.Locator.Value = "evidence/charts/chart-001.png"
+				return a
+			},
+		},
+		{
+			name: "source locator under a durable docs root",
+			forge: func(a F2MediaAttachment) F2MediaAttachment {
+				a.Provenance.SourceLocator = "docs/researches/chart-001-src.md"
+				return a
+			},
+		},
+		{
+			name: "both fields under durable roots",
+			forge: func(a F2MediaAttachment) F2MediaAttachment {
+				a.Locator.Value = "researches/sources/chart-001.png"
+				a.Provenance.SourceLocator = "researches/sources/chart-001-src.png"
+				return a
+			},
+		},
+		{
+			name: "locator value under another tmp root (narrow admission)",
+			forge: func(a F2MediaAttachment) F2MediaAttachment {
+				a.Locator.Value = "tmp/scratch/chart-001.png"
+				return a
+			},
+		},
+		{
+			name: "url-kind locator with scheme (never matches lexically)",
+			forge: func(a F2MediaAttachment) F2MediaAttachment {
+				a.Locator.Kind = F2MediaLocatorKindURL
+				a.Locator.Value = "https://media.example.com/chart-001.png"
+				return a
+			},
+		},
+		{
+			name: "absolute locator path (absolute classification is a non-goal)",
+			forge: func(a F2MediaAttachment) F2MediaAttachment {
+				a.Locator.Value = "/tmp/agent-runs/absolute.png"
+				return a
+			},
+		},
+	}
+	for _, tc := range acceptCases {
+		t.Run("accept: "+tc.name, func(t *testing.T) {
+			mutated := tc.forge(*validAtt)
+			if verr := ValidateF2MediaAttachmentAgainstEnvelope(&mutated, env); verr != nil {
+				t.Fatalf("durable locator was refused (narrow-scope violation): %v", verr)
+			}
+		})
+	}
 }
 
 // --- Persistence in canonical sidecar ----------------------------------------

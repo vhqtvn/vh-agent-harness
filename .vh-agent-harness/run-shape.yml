@@ -3,7 +3,7 @@ run_shape_version: "0.1"
 # `vh-agent-harness update` never overwrites this file. See the run-shape spec.
 runtime:
   backend: host-shell
-# services: {}      # none for host-shell; declare for docker_compose
+# services: {}      # none for host-shell; declare for docker-compose
 # lifecycle: {}     # hooks are scripts/ pointers; absent = no-op
 # runners: {}
 # verbs: {}

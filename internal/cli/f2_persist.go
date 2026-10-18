@@ -358,10 +358,18 @@ func f2IsTransientAgentRunsLocator(locator string) bool {
 //     checked"), not a provenance locator. Narrow by design.
 //   - F2ViewMetadata.StorageLocator / AttachmentMetaRef — F2-derived metadata,
 //     excluded from canonical content; not canonical provenance.
-//   - R5Binding.SourceLocators / MediaAttachments[].Locator — F2-derived
-//     metadata carried on the sidecar (not the canonical envelope); R5 source
-//     locators are separately constrained to match a canonical entry's
-//     SourceRefs, so a transient SourceRef is caught here transitively.
+//   - R5Binding.SourceLocators — F2-derived metadata carried on the sidecar
+//     (not the canonical envelope); R5 source locators are separately
+//     constrained to match a canonical entry's SourceRefs, so a transient
+//     SourceRef is caught here transitively.
+//   - MediaAttachments[].Locator.Value / MediaAttachments[].Provenance.
+//     SourceLocator — F2-derived metadata carried on the sidecar, NOT part of
+//     the canonical envelope walk. Their transient-root admission is covered
+//     at this SAME persistence boundary by the per-attachment leg of the walk:
+//     ValidateF2MediaAttachmentAgainstEnvelope (f2_pb.go) applies the identical
+//     lexical tmp/agent-runs/ refusal to both fields, and every persist
+//     entrypoint (PersistF2CanonicalSidecar, PersistF2Pair) already calls it
+//     per attachment before any write.
 //   - cross-reference ID fields (SupportRefs, CounterEvidenceProbeRefs,
 //     TargetRef, AffectedProperties, ancestry roots, conclusion/option/probe
 //     IDs) — these resolve WITHIN the envelope, not at the filesystem; they are
@@ -494,7 +502,10 @@ func PersistF2CanonicalSidecar(ingest *F2IngestResult, dir string, now time.Time
 	// P-b media attachment validation gate (defense-in-depth): if the ingest
 	// carries media attachments, each is structurally validated against the
 	// canonical envelope. A hand-constructed attachment with arbitrary strings
-	// is rejected here — it never reaches the durable artifact.
+	// is rejected here — it never reaches the durable artifact. The validator
+	// (f2_pb.go) also applies the transient-locator admission to BOTH media
+	// locator fields (Locator.Value and Provenance.SourceLocator) — the same
+	// narrow lexical tmp/agent-runs/ refusal as the canonical walk above.
 	for i := range ingest.MediaAttachments {
 		if vErr := ValidateF2MediaAttachmentAgainstEnvelope(&ingest.MediaAttachments[i], ingest.CanonicalEnvelope); vErr != nil {
 			return F2PersistNotAttempted, fmt.Errorf("f2 persist: media attachment[%d] validation failed (durable-path gate): %w", i, vErr)

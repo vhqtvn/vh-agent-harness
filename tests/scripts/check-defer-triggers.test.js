@@ -167,6 +167,79 @@ test("emitReleasePrepResult: >64KiB payload round-trips through a tee-captured p
 });
 
 // ---------------------------------------------------------------------------
+// EVALUATOR ENVELOPE FIELD PINS (folded 2026-09-29, operator-approved wave-3).
+// The envelope-field needles "accepted_overrides" and "disclose_ids" used to
+// live in the readiness agent's content test (internal/cli/
+// harness_dogfood_render_test.go assertManifestAuthorityContent) but were
+// removed with the executable G7 prescription (the readiness agent no longer
+// runs the evaluator or parses its envelope — see the O3 phase-honest note
+// there). The fields remain real evaluator outputs consumed by the post-M
+// surfaces (wrapper, releaser Step 3.3 item 4, CI), so they are re-pinned
+// HERE, in the evaluator's own content tests: emitReleaseResult must
+// round-trip both fields through the tee-captured pipe exactly as authored
+// (faithful pass-through — no silent drop, rename, or reshape).
+// ---------------------------------------------------------------------------
+
+test("envelope field pin: emitReleaseResult round-trips accepted_overrides + disclose_ids (pass-through contract)", () => {
+    const payload = {
+        mode: "release",
+        manifest_authority: true,
+        classification: "disclose",
+        records: [],
+        disclosures: [
+            { defer_id: "defer-disclose-pin", release_relevance: "no", disposition: "disclose", why: "pin fixture" },
+        ],
+        accepted_overrides: [
+            {
+                defer_id: "defer-override-pin",
+                release_version: "v9.9.9",
+                approved_by: "operator",
+                approved_at: "2026-09-29T00:00:00Z",
+                reason: "wave-3 envelope-field pin fixture",
+            },
+        ],
+        refusals: [],
+        blocking_ids: [],
+        disclose_ids: ["defer-disclose-pin"],
+    };
+    const { captured, status } = emitViaTee(`emitReleaseResult(${JSON.stringify(payload)});`);
+    assert.equal(status, 0, "disclose classification must exit 0");
+    const parsed = JSON.parse(captured);
+    // accepted_overrides: field present + faithful pass-through (array of
+    // override records with the wrapper-ceremony shape).
+    assert.ok(Array.isArray(parsed.accepted_overrides), "accepted_overrides must survive the emit as an array");
+    assert.equal(parsed.accepted_overrides.length, 1, "accepted_overrides must not be silently dropped");
+    assert.deepEqual(parsed.accepted_overrides[0], payload.accepted_overrides[0], "accepted_overrides entries must round-trip verbatim");
+    // disclose_ids: field present + faithful pass-through (sorted id list the
+    // post-M surfaces consume).
+    assert.ok(Array.isArray(parsed.disclose_ids), "disclose_ids must survive the emit as an array");
+    assert.deepEqual(parsed.disclose_ids, ["defer-disclose-pin"], "disclose_ids must round-trip verbatim");
+    // Whole-envelope faithfulness (both pins in context).
+    assert.deepEqual(parsed, payload, "emitReleaseResult must be a faithful pass-through of the authored envelope");
+});
+
+// Usage/help text: --since is advertised ONLY for the modes that consume it
+// (promoter + release-prep). Release mode never reads options.since (it
+// evaluates the committed manifest at the tagged commit, not a diff — the
+// wrapper's forwarding was removed in 6598b99), so the global usage line must
+// not carry an unqualified [--since <ref>].
+test("usage text: --since is mode-qualified (promoter + release-prep only, never release)", () => {
+    const res = spawnSync("node", [SCRIPT, "--help"], { encoding: "utf8" });
+    assert.equal(res.status, 0, `--help must exit 0; stderr: ${res.stderr}`);
+    const usageLine = res.stdout.split("\n")[0];
+    assert.ok(usageLine.startsWith("usage: check-defer-triggers.mjs"), `first line must be the usage line; got:\n${usageLine}`);
+    assert.ok(!usageLine.includes("--since"), `the global usage line must not advertise an unqualified --since; got:\n${usageLine}`);
+    assert.ok(
+        res.stdout.includes("--since <ref>: diff base for PROMOTER and RELEASE-PREP modes only"),
+        `help text must carry the mode-qualified --since paragraph; got:\n${res.stdout}`,
+    );
+    assert.ok(
+        res.stdout.includes("Release mode NEVER reads --since"),
+        `the release-mode paragraph must state it never reads --since; got:\n${res.stdout}`,
+    );
+});
+
+// ---------------------------------------------------------------------------
 // PROMOTER MODE — 6-state classification + false-READY refusal.
 //
 // The promoter path used to collapse every non-met card into a single [hold]

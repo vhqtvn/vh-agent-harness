@@ -37,7 +37,7 @@ type Verdict struct {
 // full read-only execution ladder (exec-ro → exec-sandbox → full exec) with
 // the two load-bearing caveats:
 //   - exec-sandbox is HOST-LOCAL only — it does NOT follow a command into
-//     proxy/docker_compose backends.
+//     proxy or docker-compose backends.
 //   - exec-sandbox requires an applicable mode-floor (exec_sandbox.min_mode)
 //     supplied by the project's run-shape.yml; preserved/upgrade run-shapes
 //     may lack it.
@@ -64,7 +64,7 @@ func denyFooter(repoRoot string) string {
 		"consider a separate explicit 'vh-agent-harness exec-sandbox' invocation — " +
 		"when the calling role has the grant AND the applicable mode-floor supplies " +
 		"the required containment (active floor: " + floor + ").\n" +
-		"- exec-sandbox does NOT follow a command into proxy or docker_compose backends.\n" +
+		"- exec-sandbox does NOT follow a command into proxy or docker-compose backends.\n" +
 		"- For backend-executed work, use backend-native containment or hand off to an authorized role.\n" +
 		"- For genuinely mutating work, use the proper executable/editing role — " +
 		"do not disguise mutation as read-only.\n" +

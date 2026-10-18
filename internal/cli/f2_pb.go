@@ -262,14 +262,21 @@ func BuildF2MediaAttachment(emit *ValidatedF1Emit, descriptor *F2MediaAttachment
 // gate catches it before the attachment reaches persistence or rendering.
 //
 // The validation covers the FABRICATED-CHART REFUSAL conditions (memo L217-225)
-// PLUS the digest/cycle binding:
+// PLUS the digest/cycle binding PLUS the transient-locator admission:
 //  1. EntryID must resolve to an entry in the envelope;
 //  2. Locator.Kind must be in {path, url}, Locator.Value non-empty;
-//  3. EvidenceGrade must be in {captured, verified} (capability_status values
+//  3. Locator.Value and Provenance.SourceLocator must NOT be lexically rooted
+//     under the disposable tmp/agent-runs/ root — the SAME narrow admission
+//     contract as the canonical provenance-locator gate
+//     (validateNoTransientProvenanceLocators in f2_persist.go), extended here
+//     to the F2-derived media-attachment locator fields. Every persist
+//     entrypoint calls this validator per attachment at the same boundary, so
+//     the admission walk covers both locator fields at the same pre-write gate;
+//  4. EvidenceGrade must be in {captured, verified} (capability_status values
 //     NOT accepted — memo L214-215);
-//  4. Required provenance fields must be present;
-//  5. BoundCycleID must equal the envelope's SynthesisCycleID;
-//  6. BoundDigest must equal the envelope's SemanticDigest.
+//  5. Required provenance fields must be present;
+//  6. BoundCycleID must equal the envelope's SynthesisCycleID;
+//  7. BoundDigest must equal the envelope's SemanticDigest.
 //
 // HONESTY CEILING (memo L227-233): this validator establishes "required
 // provenance metadata is structurally present and declares the source as
@@ -321,7 +328,28 @@ func ValidateF2MediaAttachmentAgainstEnvelope(att *F2MediaAttachment, env *F1Syn
 		return fmt.Errorf("f2 pb validate: attachment %q locator.value is empty", att.AttachmentID)
 	}
 
-	// 3. EvidenceGrade must be in {captured, verified}.
+	// 3. Transient-locator admission (narrow durable-path gate): the media
+	// locator value AND the provenance source locator must not be lexically
+	// rooted under the disposable tmp/agent-runs/ root — the same pure-lexical
+	// contract as the canonical provenance-locator gate (f2_persist.go
+	// validateNoTransientProvenanceLocators), extended to the F2-derived
+	// media-attachment locator fields. No resolve/rewrite/inline/hash/stat; no
+	// new roots. URLs (scheme-prefixed) and absolute paths never match the
+	// repo-relative root per that documented lexical contract; durable roots
+	// are admitted. Recovery is a new emit with a durable locator — never an
+	// in-place rewrite.
+	if f2IsTransientAgentRunsLocator(att.Locator.Value) {
+		return fmt.Errorf(
+			"f2 pb validate: attachment %q locator.value %q is rooted under the disposable tmp/agent-runs/ root (transient locators must not enter the durable F2 artifact; persistence does not resolve, rewrite, inline, or replace the locator — re-emit with a durable locator under a new synthesis cycle)",
+			att.AttachmentID, att.Locator.Value)
+	}
+	if f2IsTransientAgentRunsLocator(att.Provenance.SourceLocator) {
+		return fmt.Errorf(
+			"f2 pb validate: attachment %q provenance.source_locator %q is rooted under the disposable tmp/agent-runs/ root (transient locators must not enter the durable F2 artifact; persistence does not resolve, rewrite, inline, or replace the locator — re-emit with a durable locator under a new synthesis cycle)",
+			att.AttachmentID, att.Provenance.SourceLocator)
+	}
+
+	// 4. EvidenceGrade must be in {captured, verified}.
 	// VERBATIM OPERATOR REQUIREMENT: capability_status values NOT accepted.
 	if att.EvidenceGrade != F2MediaEvidenceGradeCaptured && att.EvidenceGrade != F2MediaEvidenceGradeVerified {
 		return fmt.Errorf(
@@ -329,7 +357,7 @@ func ValidateF2MediaAttachmentAgainstEnvelope(att *F2MediaAttachment, env *F1Syn
 			att.AttachmentID, att.EvidenceGrade)
 	}
 
-	// 4. Required provenance fields present.
+	// 5. Required provenance fields present.
 	if att.Provenance.SourceLocator == "" {
 		return fmt.Errorf("f2 pb validate: attachment %q provenance.source_locator is empty", att.AttachmentID)
 	}
@@ -343,14 +371,14 @@ func ValidateF2MediaAttachmentAgainstEnvelope(att *F2MediaAttachment, env *F1Syn
 		return fmt.Errorf("f2 pb validate: attachment %q provenance.producer_or_verifier_class is empty", att.AttachmentID)
 	}
 
-	// 5. BoundCycleID must equal the envelope's SynthesisCycleID.
+	// 6. BoundCycleID must equal the envelope's SynthesisCycleID.
 	if att.BoundCycleID != env.SynthesisCycleID {
 		return fmt.Errorf(
 			"f2 pb validate: attachment %q BoundCycleID %q does not match envelope SynthesisCycleID %q — a hand-constructed attachment cannot substitute an arbitrary cycle ID",
 			att.AttachmentID, att.BoundCycleID, env.SynthesisCycleID)
 	}
 
-	// 6. BoundDigest must equal the envelope's SemanticDigest.
+	// 7. BoundDigest must equal the envelope's SemanticDigest.
 	if att.BoundDigest != env.SemanticDigest {
 		return fmt.Errorf(
 			"f2 pb validate: attachment %q BoundDigest does not match envelope SemanticDigest — a hand-constructed attachment cannot substitute an arbitrary digest",

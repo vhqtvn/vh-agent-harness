@@ -31,7 +31,9 @@ const (
 // (every exception below is mirrored exactly in the classifyCorePath switch):
 //
 //   - .vh-agent-harness/vh-harness-profile.yml             -> platform_armed     (provenance "core.profile")
+//   - .vh-agent-harness/complexity-policy.yml              -> platform_armed     (provenance "core.complexity-policy")
 //   - .vh-agent-harness/config-transform.mjs               -> project_owned      (provenance "core.transform.project")
+//   - .opencode/repo-configs/complexity-dispositions.yml   -> project_owned      (provenance "core.complexity-dispositions")
 //   - .opencode/repo-configs/forbidden-patterns.project.js -> project_owned      (provenance "core.deny.project")
 //   - .opencode/repo-configs/repo-recon-data.yml           -> external_generated (provenance "core.repo-recon.data")
 //   - docs/planning/backlog.md, docs/planning/roadmap.md   -> project_owned      (provenance "core.planning")
@@ -106,7 +108,9 @@ func CoreOwnershipDefaults() (ownership.ModuleDefaults, error) {
 //   - residue recognition (the drift/inventory paths need to know which live
 //     paths are KNOWN capability outputs so they can exempt them as residue
 //     rather than reporting them as unexpected),
-//   - the memoized core-only classifier used outside the seam path.
+//   - accept-platform's --all enumeration (the platform-managed path list is
+//     derived from the all-known map, so it includes capability outputs
+//     regardless of the current selection).
 func CoreOwnershipDefaultsWithExclusion(inactive map[string]bool) (ownership.ModuleDefaults, error) {
 	if len(inactive) == 0 {
 		// Fast path: no exclusion is byte-identical to the unconditional walk.

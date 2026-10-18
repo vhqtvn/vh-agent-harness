@@ -19,7 +19,14 @@ package permission
 //     sessionID only and no session→agent resolution may be inferred),
 //   - the no-match control: a denied command with no matching configured
 //     grant keeps the plain engine deny message (no suffix),
-//   - fail-open: no/broken opencode.jsonc → no suffix, deny unchanged.
+//   - fail-open: no/broken opencode.jsonc → no suffix, deny unchanged,
+//   - JSONC parity: a hand-edited config (// and /* */ comments, trailing
+//     commas) yields the SAME suffix as its JSON twin (string-aware
+//     stripping — a // inside a string value is not a comment), while a
+//     document still unparseable after JSONC normalization stays fail-open,
+//   - matcher shapes: exact no-star grants are listed; non-trailing `*`
+//     shapes (interior/leading) never match and are never listed; the bare
+//     "*" catch-all is never listed.
 //
 // The WASM parser is NOT needed for these commands (evaluate's fallback
 // tokenizer handles them; the live-bridge suite covers the parser paths), so
@@ -33,18 +40,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vhqtvn/vh-agent-harness/internal/jsonc"
 )
 
-// wrapperNamingScratch stages a scratch install with the wrapper + core +
-// repo-configs and an opencode.jsonc whose grants exercise the naming, then
-// writes the driver. Returns the driver path (run: node <driver> "<command>").
-func wrapperNamingScratch(t *testing.T, opencodeJSONC string) string {
+// stageWrapperScratch stages a scratch install with the wrapper + core +
+// repo-configs from the corpus templates and returns the scratch root (which
+// contains the .opencode/ tree). Node itself is required (skip otherwise).
+func stageWrapperScratch(t *testing.T) string {
 	t.Helper()
-	nodeBin, err := exec.LookPath("node")
-	if err != nil {
+	if _, err := exec.LookPath("node"); err != nil {
 		t.Skipf("node not available: %v", err)
 	}
-	_ = nodeBin
 
 	modRoot := findModuleRoot(t)
 	tmplOpencode := filepath.Join(modRoot, "templates", "core", ".opencode")
@@ -81,6 +88,15 @@ func wrapperNamingScratch(t *testing.T, opencodeJSONC string) string {
 			t.Fatalf("write %s: %v", dst, err)
 		}
 	}
+	return scratch
+}
+
+// wrapperNamingScratch stages a scratch install with the wrapper + core +
+// repo-configs and an opencode.jsonc whose grants exercise the naming, then
+// writes the driver. Returns the driver path (run: node <driver> "<command>").
+func wrapperNamingScratch(t *testing.T, opencodeJSONC string) string {
+	t.Helper()
+	scratch := stageWrapperScratch(t)
 	if opencodeJSONC != "" {
 		if err := os.WriteFile(filepath.Join(scratch, "opencode.jsonc"), []byte(opencodeJSONC), 0o644); err != nil {
 			t.Fatalf("write opencode.jsonc: %v", err)
@@ -302,5 +318,257 @@ func TestWrapperGrantNaming_FailOpenOnNonJSONConfig(t *testing.T) {
 	}
 	if strings.Contains(msg, "Matching configured grants") {
 		t.Errorf("broken opencode.jsonc must not produce a naming suffix; got:\n%s", msg)
+	}
+}
+
+// TestWrapperGrantNaming_FailOpenOnUnparseableJSONC: JSONC that is STILL
+// unparseable after comment/trailing-comma normalization (here: an object
+// that never closes) keeps the intentional fail-open contract — no suffix,
+// deny stands. The deterministic-JSONC outcome replaces the old
+// fail-open-on-comment behavior ONLY for documents that normalize to valid
+// JSON; genuinely malformed input is unchanged.
+func TestWrapperGrantNaming_FailOpenOnUnparseableJSONC(t *testing.T) {
+	cfg := `{
+    // a comment is stripped, but the object below never closes:
+    "permission": {
+        "bash": {
+            "pytest *": "allow",
+`
+	driver := wrapperNamingScratch(t, cfg)
+	msg := runWrapperDriver(t, driver, "pytest -x foo")
+	if msg == "" {
+		t.Fatalf("pytest must still be denied with an unparseable JSONC config; handler returned regularly")
+	}
+	if strings.Contains(msg, "Matching configured grants") {
+		t.Errorf("unparseable-after-normalization opencode.jsonc must not produce a naming suffix; got:\n%s", msg)
+	}
+}
+
+// wrapperNamingJSONCConfig is the JSONC twin of wrapperNamingConfig: same
+// grants, plus // line comments, a /* block */ comment, trailing commas, and
+// grant keys whose STRING VALUES contain " // " (a URL-shaped token) and an
+// ESCAPED QUOTE followed by " // " text. A naive line-comment stripper would
+// truncate the URL key mid-string, and one that mishandles escapes would end
+// string mode at the escaped quote and strip the rest as a comment — either
+// way the parse breaks and the reader fail-opens; a string-aware,
+// escape-aware one (the contract) leaves both keys intact.
+const wrapperNamingJSONCConfig = `{
+    // agent blocks carry the same grants as the JSON twin
+    "agent": {
+        "build": {
+            "permission": {
+                "bash": {
+                    "*": "ask",
+                    "ls *": "allow",
+                    /* block comment pins the block stripper */
+                    "pytest *": "allow",
+                }
+            }
+        },
+        "researcher": {
+            "permission": {
+                "bash": {
+                    "*": "deny",
+                    "docker *": "allow",
+                    "pytest *": "ask",
+                    "echo see https://example.com/x // not a comment *": "allow",
+                    "echo \"quoted\" // still not a comment *": "allow",
+                }
+            }
+        },
+    },
+    "permission": {
+        "bash": {
+            "*": "deny",
+            "terraform *": "allow",
+        }
+    },
+}
+`
+
+// TestWrapperGrantNaming_JSONCConfigNamesSameGrants: a hand-edited JSONC
+// config (comments + trailing commas) produces the IDENTICAL naming suffix
+// its JSON twin produces — no silent JSON/JSONC divergence. The suffix being
+// present at all proves string-aware comment stripping (the URL-shaped key
+// survives; a naive stripper would have broken the parse and fail-opened),
+// and the identical listing proves parse-level parity.
+func TestWrapperGrantNaming_JSONCConfigNamesSameGrants(t *testing.T) {
+	driver := wrapperNamingScratch(t, wrapperNamingJSONCConfig)
+	msg := runWrapperDriver(t, driver, "pytest -x foo")
+	if msg == "" {
+		t.Fatalf("pytest -x foo must be denied (throw); handler returned normally")
+	}
+	const header = "Denied before per-agent grants are evaluated. Matching configured grants that cannot rescue this command:"
+	if !strings.Contains(msg, header) {
+		t.Errorf("JSONC deny message missing the naming header; got:\n%s", msg)
+	}
+	// IDENTICAL to the JSON twin's listing (TestWrapperGrantNaming_Deny-
+	// ListsMatchingConfiguredGrants) — the JSON/JSONC parity pin.
+	wantList := `agent "build" pattern "pytest *" (allow); agent "researcher" pattern "pytest *" (ask)`
+	if !strings.Contains(msg, wantList) {
+		t.Errorf("JSONC deny message must list the same grants as the JSON twin %q; got:\n%s", wantList, msg)
+	}
+	// Non-matching grants — including the URL-shaped string-aware key and the
+	// escaped-quote key — must not be listed (neither matches `pytest -x foo`).
+	for _, absent := range []string{`"docker *"`, `"terraform *"`, `"ls *"`, "example.com", "still not a comment"} {
+		if strings.Contains(msg, absent) {
+			t.Errorf("JSONC deny message lists non-matching grant %s; got:\n%s", absent, msg)
+		}
+	}
+	if !strings.Contains(msg, "Commands outside the read-only inspection surface") {
+		t.Errorf("JSONC deny message must retain the engine reason; got:\n%s", msg)
+	}
+}
+
+// TestWrapperGrantNaming_ExactNoStarGrantListed: an exact token-sequence
+// grant with NO wildcard (an emitted-table shape: `uuidgen`, the gate
+// `…commit-gate.sh status` probe) is matched by token equality and listed
+// when the exact command is denied. The bare "*" catch-all in the same block
+// must NOT be listed.
+func TestWrapperGrantNaming_ExactNoStarGrantListed(t *testing.T) {
+	cfg := `{
+    "permission": {
+        "bash": {
+            "*": "ask",
+            "terraform apply": "allow"
+        }
+    }
+}
+`
+	driver := wrapperNamingScratch(t, cfg)
+	msg := runWrapperDriver(t, driver, "terraform apply")
+	if msg == "" {
+		t.Fatalf("terraform apply must be denied; handler returned regularly")
+	}
+	if !strings.Contains(msg, `agent "default" pattern "terraform apply" (allow)`) {
+		t.Errorf("exact no-star grant must be listed; got:\n%s", msg)
+	}
+	if strings.Contains(msg, `pattern "*"`) {
+		t.Errorf(`bare "*" catch-all must never be listed; got:\n%s`, msg)
+	}
+}
+
+// TestWrapperGrantNaming_NonTrailingStarNeverListed: shapes with a `*`
+// anywhere other than the trailing position (leading `*pytest *`, interior
+// `cat *=x *`) are outside the token-prefix model — the `*` is a literal
+// token character, real command tokens never contain one, so such grants can
+// never match and are never listed. The deny itself stands (documented
+// limitation at the read site: message-only impact).
+func TestWrapperGrantNaming_NonTrailingStarNeverListed(t *testing.T) {
+	cfg := `{
+    "permission": {
+        "bash": {
+            "*pytest *": "allow",
+            "cat *=x *": "ask"
+        }
+    }
+}
+`
+	driver := wrapperNamingScratch(t, cfg)
+	msg := runWrapperDriver(t, driver, "pytest -x foo")
+	if msg == "" {
+		t.Fatalf("pytest -x foo must be denied; handler returned regularly")
+	}
+	if strings.Contains(msg, "Matching configured grants") {
+		t.Errorf("non-trailing-star grants must never be listed; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "Commands outside the read-only inspection surface") {
+		t.Errorf("plain engine deny must stand; got:\n%s", msg)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Go↔JS JSONC stripper-twin parity (card jsonc-stripper-twin-parity). The
+// corpus plugin carries JS twins of internal/jsonc's strippers
+// (stripJSONCComments/stripJSONCTrailingCommas in shell-guard.js, feeding
+// parseJSONCTolerant — see the wrapper's JSONC reader contract). They are
+// module-internal, so this drives them through a scratch-only re-export: the
+// corpus file is copied verbatim into the scratch install by
+// stageWrapperScratch and ONE export line is appended to the COPY (the corpus
+// template itself is never touched). The appended export binds to the same
+// function declarations, so a corpus rename/removal of the strippers fails
+// the driver import loudly — the parity obligation trips instead of silently
+// testing nothing.
+//
+// The fixture corpus is shared with internal/jsonc (its testdata file is the
+// single source of truth; the Go side also pins it there, including the two
+// ad36dfa advisory EOF/CRLF edges). Parity is asserted on the FULL pipeline
+// both readers run: stripJSONCTrailingCommas ∘ stripJSONCComments ≡
+// jsonc.Normalize, byte for byte, across the corpus.
+// ---------------------------------------------------------------------------
+
+func TestWrapperGrantNaming_JSONCStripperTwinParity(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skipf("node not available: %v", err)
+	}
+	fixturesPath := filepath.Join(findModuleRoot(t), "internal", "jsonc", "testdata", "stripper-parity-fixtures.json")
+	fixturesAbs, err := filepath.Abs(fixturesPath)
+	if err != nil {
+		t.Fatalf("abs fixtures path: %v", err)
+	}
+	data, err := os.ReadFile(fixturesPath)
+	if err != nil {
+		t.Fatalf("read shared fixture corpus: %v", err)
+	}
+	var corpus []struct {
+		Name  string `json:"name"`
+		Input string `json:"input"`
+	}
+	if err := json.Unmarshal(data, &corpus); err != nil {
+		t.Fatalf("parse shared fixture corpus: %v", err)
+	}
+	if len(corpus) == 0 {
+		t.Fatalf("shared fixture corpus must not be empty")
+	}
+
+	scratch := stageWrapperScratch(t)
+	sgPath := filepath.Join(scratch, ".opencode", "plugins", "shell-guard.js")
+	src, err := os.ReadFile(sgPath)
+	if err != nil {
+		t.Fatalf("read scratch shell-guard.js: %v", err)
+	}
+	appendExport := "\n// scratch-only test re-export (the corpus template is never modified)\nexport { stripJSONCComments, stripJSONCTrailingCommas };\n"
+	if err := os.WriteFile(sgPath, append(src, []byte(appendExport)...), 0o644); err != nil {
+		t.Fatalf("append scratch re-export: %v", err)
+	}
+
+	driver := `
+import { readFileSync } from "node:fs";
+import { stripJSONCComments, stripJSONCTrailingCommas } from "./.opencode/plugins/shell-guard.js";
+const fixtures = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const out = fixtures.map((f) => stripJSONCTrailingCommas(stripJSONCComments(f.input)));
+process.stdout.write(JSON.stringify(out));
+`
+	driverPath := filepath.Join(scratch, "stripper-parity-driver.mjs")
+	if err := os.WriteFile(driverPath, []byte(driver), 0o644); err != nil {
+		t.Fatalf("write driver: %v", err)
+	}
+
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatalf("node disappeared: %v", err)
+	}
+	out, err := exec.Command(nodeBin, driverPath, fixturesAbs).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("stripper parity driver failed: %v\nstderr:\n%s", err, ee.Stderr)
+		}
+		t.Fatalf("run stripper parity driver: %v", err)
+	}
+	var jsOut []string
+	if err := json.Unmarshal(out, &jsOut); err != nil {
+		t.Fatalf("parse driver output %q: %v", string(out), err)
+	}
+	if len(jsOut) != len(corpus) {
+		t.Fatalf("driver returned %d outputs; want %d (corpus length)", len(jsOut), len(corpus))
+	}
+	for i, f := range corpus {
+		i, f := i, f
+		t.Run(f.Name, func(t *testing.T) {
+			want := string(jsonc.Normalize([]byte(f.Input)))
+			if jsOut[i] != want {
+				t.Fatalf("JS stripper twin diverged from internal/jsonc:\ninput:        %q\ngo (Normalize): %q\njs (strippers): %q", f.Input, want, jsOut[i])
+			}
+		})
 	}
 }

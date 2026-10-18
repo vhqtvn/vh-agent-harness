@@ -255,7 +255,7 @@ func TestProjectProfileAnswers_AbsentPilotKeyIsNotProjected(t *testing.T) {
 func TestFeatureActivatedPacks_DefaultOnNoOverlays(t *testing.T) {
 	target := t.TempDir()
 	writeProfile(t, target, "profile: minimal\noverlays: []\npolicy_packs: []\n")
-	_, packs, _, _, err := resolveCapabilityAnswers(target)
+	_, packs, _, _, err := resolveCapabilityAnswers(target, nil)
 	if err != nil {
 		t.Fatalf("resolveCapabilityAnswers: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestFeatureActivatedPacks_DefaultOnNoOverlays(t *testing.T) {
 func TestFeatureActivatedPacks_OptOutFalseDropsOne(t *testing.T) {
 	target := t.TempDir()
 	writeProfile(t, target, "profile: minimal\nfeatures:\n  formal-verification-pilot: false\noverlays: []\npolicy_packs: []\n")
-	_, packs, _, _, err := resolveCapabilityAnswers(target)
+	_, packs, _, _, err := resolveCapabilityAnswers(target, nil)
 	if err != nil {
 		t.Fatalf("resolveCapabilityAnswers: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestFeatureActivatedPacks_OptOutFalseDropsOne(t *testing.T) {
 func TestFeatureActivatedPacks_ExplicitOverlaySurvivesOptOut(t *testing.T) {
 	target := t.TempDir()
 	writeProfile(t, target, "profile: minimal\nfeatures:\n  formal-verification-pilot: false\noverlays: [formal-verification-pilot]\npolicy_packs: []\n")
-	_, packs, _, _, err := resolveCapabilityAnswers(target)
+	_, packs, _, _, err := resolveCapabilityAnswers(target, nil)
 	if err != nil {
 		t.Fatalf("resolveCapabilityAnswers: %v", err)
 	}

@@ -24,21 +24,20 @@ dev-logs:
 shell:
 	vh-agent-harness shell
 
-## Run the full test suite in the dev container.
+## Run the project test suite.
+## The test runner is project-specific; `test` is a custom verb the consumer
+## declares in .vh-agent-harness/run-shape.yml under verbs: (the harness core
+## ships no project test runner; declare your own, like `smoke` below).
 test:
-	vh-agent-harness exec pytest
+	vh-agent-harness test
 
-## Run unit tests only.
-test-unit:
-	vh-agent-harness exec pytest tests/unit/
-
-## Lint.
+## Lint (custom verb; declare in .vh-agent-harness/run-shape.yml under verbs:).
 lint:
-	vh-agent-harness exec ruff check .
+	vh-agent-harness lint
 
-## Format.
+## Format (custom verb; declare in .vh-agent-harness/run-shape.yml under verbs:).
 fmt:
-	vh-agent-harness exec ruff format .
+	vh-agent-harness fmt
 
 ## Run DB migrations.
 ## DB creds come from project.config.json (project.db_user / project.db_name).

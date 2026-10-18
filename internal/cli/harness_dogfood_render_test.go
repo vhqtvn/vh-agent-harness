@@ -25,9 +25,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/vhqtvn/vh-agent-harness/internal/jsonc"
 	"github.com/vhqtvn/vh-agent-harness/internal/overlay"
 	"github.com/vhqtvn/vh-agent-harness/internal/resolver"
 )
@@ -51,10 +53,17 @@ const harnessDogfoodManifestYAML = "id: project/harness-dogfood\nprovides:\n  - 
 
 // harnessDogfoodAppendJSONC mirrors the real pack's opencode-append.jsonc
 // agent block. The {file:...} prompt form is the A-F1 contract under test.
+// Since the 2026-10 uniform dead-man backstop decision, the pack carries NO
+// researcher steps key (the researcher→50 pin, 64d4d53, is superseded —
+// researcher inherits the core 10000 backstop); see
+// TestSeamRender_UniformStepsBackstop in capability_render_test.go.
+// The mirror is pinned 1:1 (parsed-block equality) against the REAL pack file
+// by TestHarnessDogfood_UniformBackstopLiveSurfaces below, so a change
+// to either surface must land in both — the fixture cannot silently drift.
 const harnessDogfoodAppendJSONC = `{
   "agent": {
     "harness-release-readiness": {
-      "description": "Harness release-readiness reporter (dogfood).",
+      "description": "Harness release-readiness reporter (dogfood) — read-only orchestrator ABOVE the existing tag-driven releaser; answers 'is vh-agent-harness ready to hand off to releaser?' via a G0–G7 evidence checklist. Never tags/commits/pushes; edits ONLY the release-readiness-pass artifact at .vh-agent-harness/release-readiness-pass.json.",
       "mode": "subagent",
       "color": "accent",
       "prompt": "{file:.opencode/agents/harness-release-readiness.md}",
@@ -368,14 +377,17 @@ func assertG6GateContent(t *testing.T, label, got string) {
 }
 
 // TestHarnessDogfood_ReleaseReadinessCarriesG7Gate is the deterministic content
-// contract for the G7 release gate (release-time DEFER enforcement, advisory
-// surface). Like G6, the G7 section is deterministic prose a regression can
-// silently delete — so this test pins its presence in BOTH the AUTHORITATIVE
-// overlay source AND its 1:1 RENDERED MIRROR. It also re-asserts that G6 was
-// NOT weakened when G7 was added (the two gates are independent and both must
-// survive). If G7 drifts out of either surface, OR G6 drifts out as a side
-// effect of a G7 edit, this test fails before a release can ship with an
-// unaddressed DEFER.
+// contract for the G7 release gate section (release-time DEFER enforcement).
+// Since the O3 phase-honest correction (2026-09-26, task card
+// release-readiness-g7-invocation-surface), G7 is DOCUMENTARY at the readiness
+// phase: the agent does NOT execute the release-mode evaluator (whose
+// freshness handshake is satisfiable only at HEAD=M, post-manifest-commit —
+// never at the readiness phase's HEAD=N), emits NO G7 verdict, and the final
+// defer-gate verification lives post-M at the release wrapper (authoritative),
+// the releaser's Step 3.3 item 4 re-verification, and CI. This test pins that
+// contract in BOTH the AUTHORITATIVE overlay source AND its 1:1 RENDERED
+// MIRROR. It also re-asserts that G6 was NOT weakened by the G7 rework (the
+// two gates are independent and both must survive).
 func TestHarnessDogfood_ReleaseReadinessCarriesG7Gate(t *testing.T) {
 	root := findModuleRoot(t)
 	relPaths := []string{
@@ -397,39 +409,59 @@ func TestHarnessDogfood_ReleaseReadinessCarriesG7Gate(t *testing.T) {
 	}
 }
 
-// assertG7GateContent asserts the distinctive G7 tokens are present in one
-// readiness agent body. Each needle is content the pre-G7 readiness agent did
-// NOT carry, so a regression that drops the G7 section (or weakens it to
-// advisory-only without the authoritative-wrapper pairing) fails here.
+// assertG7GateContent asserts the distinctive phase-honest G7 tokens are
+// present in one readiness agent body, and that the removed executable-G7
+// machinery stays absent. Each positive needle is content the pre-O3
+// readiness agent did NOT carry; each negative needle is content it DID carry
+// before the O3 correction removed it (a regression that re-introduces the
+// structurally-impossible G7 step fails here).
 func assertG7GateContent(t *testing.T, label, got string) {
 	t.Helper()
 	checks := []struct{ name, needle string }{
-		{"G7 section header", "### G7 — release-time DEFER enforcement gate (advisory)"},
-		{"G7 blocker id G7_ReleaseDeferGate", "G7_ReleaseDeferGate"},
+		{"G7 section header (phase-honest)", "### G7 — release-time DEFER enforcement gate (advisory, phase-honest)"},
 		{"checklist header bumped to G0–G7", "G0–G7"},
 		{"source:review-defer candidate selection", "source:review-defer"},
-		// Widened provenance scope (option b): the release-readiness G7 gate now
-		// dispositions EVERY firing card the release-prep enumerator surfaces, not
-		// just source:review-defer. The pre-widening policy did NOT enumerate
-		// source:external-study at all (it was the un-anticipated provenance in the
-		// v0.19.0 incident), so pinning "source:external-study" here fails on any
-		// regression that re-narrows the scope. See decision memo
+		// Widened provenance scope (option b): the release manifest
+		// dispositions EVERY firing card the release-prep enumerator surfaces,
+		// not just source:review-defer. The pre-widening policy did NOT
+		// enumerate source:external-study at all (it was the un-anticipated
+		// provenance in the v0.19.0 incident), so pinning
+		// "source:external-study" here fails on any regression that
+		// re-narrows the scope. See decision memo
 		// researches/decisions/2026-08-02-defer-liveness-provenance-scope-divergence.md.
 		{"external-study release-relevant (widened scope)", "source:external-study"},
-		{"deterministic evaluator invocation", "check-defer-triggers.mjs --mode=release"},
+		{"deterministic evaluator named (descriptive only)", "check-defer-triggers.mjs --mode=release"},
 		{"wrapper authority wording (scripts/release-tag.sh)", "scripts/release-tag.sh"},
-		{"advisory scope fence (G7 is ADVISORY)", "G7 itself is ADVISORY"},
+		{"phase matrix: no final G7 verdict at the readiness phase", "No final G7 verdict exists at this phase"},
+		{"agent does not execute the evaluator", "does NOT execute the evaluator"},
+		{"final controls named (releaser Step 3.3 item 4)", "releaser Step 3.3 item 4"},
+		{"write posture honest (no protected-state writes)", "no protected-state writes"},
+		{"write posture honest (transient scratch under repo tmp/)", "transient per-git-call scratch lives under repo"},
+		{"advisory parent-orchestrator release-prep note", "MAY run the release-prep enumerator"},
+		{"advisory never a prerequisite, never a gate", "never a readiness-agent prerequisite, never a gate"},
 		{"wrapper-authoritative restatement", "AUTHORITATIVE"},
-		{"ready:no + null-handoff behavior (scoped to G7)", "G7 blocker forces"},
-		{"evaluator-error blocker class", "evaluator-error class"},
+		{"evaluator-error refusal class (post-M surfaces)", "evaluator-error"},
 		{"absent/empty tasks-dir pass policy", "Absence policy"},
-		{"delegated owner entry for G7", `"for": "G7_ReleaseDeferGate"`},
-		{"blockers id enum includes G7", "G6_Skill_Pilot_Evidence | G7_ReleaseDeferGate"},
-		{"self-check reminder for G7", "G7 ran the deterministic release-DEFER evaluator"},
 	}
 	for _, c := range checks {
 		if !strings.Contains(got, c.needle) {
-			t.Errorf("%s: missing %s — %q (G7 gate content drifted out of the readiness agent)", label, c.name, c.needle)
+			t.Errorf("%s: missing %s — %q (phase-honest G7 content drifted out of the readiness agent)", label, c.name, c.needle)
+		}
+	}
+	// Negative contract (O3): the removed executable G7 machinery must stay
+	// out. Each absent needle is content the pre-O3 readiness agent carried —
+	// a regression that restores it re-introduces the chronology defect (a
+	// release-mode run at HEAD=N deterministically classifies evaluator-error
+	// and used to force ready:no on every ceremony).
+	absent := []struct{ name, needle string }{
+		{"bare-node release-mode invocation", "node .opencode/scripts/check-defer-triggers.mjs --mode=release"},
+		{"G7 verdict id machinery (G7 emits no verdict)", "G7_ReleaseDeferGate"},
+		{"G7-emitted blocker rule", "G7 blocker forces"},
+		{"stale activation ref (concept retired v0.13.0)", "(after activation)"},
+	}
+	for _, c := range absent {
+		if strings.Contains(got, c.needle) {
+			t.Errorf("%s: stale %s present — %q must be absent (O3 phase-honest G7 contract)", label, c.name, c.needle)
 		}
 	}
 }
@@ -477,8 +509,13 @@ func assertManifestAuthorityContent(t *testing.T, label, got string) {
 		{"wrapper override flag release-version", "--override-release-version"},
 		{"wrapper override flag manifest-sha", "--override-manifest-sha"},
 		{"release-version evaluator flag", "--release-version"},
-		{"accepted_overrides envelope field", "accepted_overrides"},
-		{"disclose_ids envelope field", "disclose_ids"},
+		// (O3 phase-honest note, 2026-09-26): the evaluator-envelope field
+		// needles that used to live here ("accepted_overrides",
+		// "disclose_ids") pinned the readiness agent's envelope-PARSING step —
+		// removed with the executable G7 prescription, since the agent no
+		// longer runs the evaluator or parses its envelope. The envelope
+		// fields remain real evaluator outputs consumed by the post-M
+		// surfaces (wrapper, releaser Step 3.3 item 4, CI).
 		// N -> R -> M ceremony topology (corrects the stale P -> M model that
 		// omitted the readiness-artifact commit R). Each needle is absent from
 		// the pre-correction readiness reporter, so a regression that drops the
@@ -636,5 +673,86 @@ func assertReadinessArtifactCapabilityContent(t *testing.T, label, got string) {
 		if !strings.Contains(got, c.needle) {
 			t.Errorf("%s: missing %s — %q (readiness-artifact capability drifted out of the readiness agent)", label, c.name, c.needle)
 		}
+	}
+}
+
+// TestHarnessDogfood_UniformBackstopLiveSurfaces is the two-surface LIVENESS
+// pin for the uniform dead-man steps backstop (2026-10 operator decision:
+// core ships steps: 10000 on every capped agent; the pack's old
+// researcher→50 pin, 64d4d53, is superseded and REMOVED).
+// TestSeamRender_UniformStepsBackstop (capability_render_test.go) proves
+// CONFIG PROPAGATION in a hermetic temp root; this test pins the contract on
+// BOTH real committed surfaces so a silent revert fails CI even if the seam
+// path itself stays green:
+//
+//  1. the REAL pack file
+//     .vh-agent-harness/overlays/harness-dogfood/opencode-append.jsonc (the
+//     authoritative overlay source — NOT the fixture mirror above) must parse
+//     (JSONC-aware) to agent.researcher.steps == ABSENT — a re-added
+//     researcher pin (which would shadow the core backstop) fails here;
+//  2. the LIVE rendered opencode.jsonc at the repo root (the surface the
+//     running opencode session actually consumes) must carry the full uniform
+//     contract — researcher at the core 10000 backstop and every other agent
+//     matching coreTemplateSteps, uncapped agents key-absent — reusing
+//     assertCoreStepsContract makes the no-silent-widening clause fall out
+//     for free.
+//
+// It also closes the old mirror-fidelity advisory (F4): the parsed agent
+// block of the fixture constant harnessDogfoodAppendJSONC must be
+// reflect.DeepEqual to the real pack's parsed agent block, so the hermetic
+// seam tests can never silently diverge from the real pack they mirror.
+//
+// Path/skip behavior: this follows the G6/G7 both-surface precedent in this
+// file — findModuleRoot locates the repo root deterministically (go.mod is
+// committed) and a moved/missing surface FAILS the test loudly rather than
+// skipping. A liveness tripwire that skips when files move would catch
+// nothing. HONEST scope: this pins CONFIG LIVENESS only, never session
+// outcomes.
+func TestHarnessDogfood_UniformBackstopLiveSurfaces(t *testing.T) {
+	root := findModuleRoot(t)
+
+	// --- Surface 1: the REAL pack append (authoritative overlay source) ---
+	packRel := filepath.Join(".vh-agent-harness", "overlays", "harness-dogfood", "opencode-append.jsonc")
+	packBytes, err := os.ReadFile(filepath.Join(root, packRel))
+	if err != nil {
+		t.Fatalf("read real harness-dogfood append %s: %v", packRel, err)
+	}
+	// The real file is JSONC with comments — normalize before unmarshaling.
+	var packDoc struct {
+		Agent map[string]struct {
+			Steps *int `json:"steps"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(jsonc.Normalize(packBytes), &packDoc); err != nil {
+		t.Fatalf("unmarshal real pack append %s (after JSONC normalize): %v\n--- pack ---\n%s", packRel, err, packBytes)
+	}
+	if got := packDoc.Agent["researcher"].Steps; got != nil {
+		t.Errorf("real pack append %s: agent.researcher.steps = %s, want ABSENT (the researcher pin is superseded by the 2026-10 uniform backstop; a re-added key shadows the core value and fails here)", packRel, stepsValue(got))
+	}
+
+	// --- Surface 2: the LIVE rendered opencode.jsonc (repo root) ---
+	liveSteps := parseRenderedAgentSteps(t, root)
+	// Explicit inheritance pin (also covered by assertCoreStepsContract via
+	// coreTemplateSteps): the live value must be sourced from core, not from
+	// a leftover pack pin or a stale pre-backstop render.
+	if got := liveSteps["researcher"]; got == nil || *got != 10000 {
+		t.Errorf("live rendered opencode.jsonc: agent.researcher.steps = %s, want 10000 (the uniform core backstop must reach the live config; a stale render or silent revert fails here)", stepsValue(got))
+	}
+	// Cheap no-silent-widening clause: every capped agent keeps its
+	// core-template value and every uncapped agent's steps key stays absent
+	// in the live config too, not just in the hermetic seam render.
+	assertCoreStepsContract(t, liveSteps, "live")
+
+	// --- Mirror fidelity (old advisory F4): fixture ≡ real pack, parsed ---
+	fixtureDoc, err := jsonc.Parse([]byte(harnessDogfoodAppendJSONC))
+	if err != nil {
+		t.Fatalf("parse harnessDogfoodAppendJSONC fixture: %v", err)
+	}
+	realDoc, err := jsonc.Parse(packBytes)
+	if err != nil {
+		t.Fatalf("parse real pack append %s: %v", packRel, err)
+	}
+	if !reflect.DeepEqual(fixtureDoc["agent"], realDoc["agent"]) {
+		t.Errorf("fixture harnessDogfoodAppendJSONC agent block must be parsed-equal to the real pack's agent block (mirror fidelity); the hermetic seam tests pin a fixture that drifted from %s", packRel)
 	}
 }

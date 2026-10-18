@@ -6,7 +6,7 @@ subtask: false
 
 Bring up the local-only browser viewer:
 
-- consult `docs/ai/codebase-operational-primitives.md` for canonical paths, helper functions, container names, env conventions, and API response shapes before acting — do not rediscover these from scratch.
+- consult `docs/ai/codebase-operational-primitives.md` (when one exists) for canonical paths, helper functions, container names, env conventions, and API response shapes before acting — do not chase or fail when it is absent, and do not rediscover these from scratch when it is present.
 - git mutations must flow through the `committer` agent via the gated-commit protocol. Load the `gated-commit` skill for details.
 
 ```bash

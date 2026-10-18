@@ -73,14 +73,17 @@ scope drift.
 
 ## Git boundary
 
-Git mutation is exclusive to `committer`.
+Git mutation is exclusive to `committer` (where `core/gated-commit` is
+selected; on profiles without it there is no commit route at all — report the
+missing route to the dispatcher and request activation or operator handling).
 
 You may use only configured read-only Git inspection. You must not stage or
 commit changes, invoke the commit gate, or ask another agent to perform Git
 mutation on your behalf.
 
 If later work needs a commit, report that fact to the dispatcher. The normal
-review and `committer` route remains mandatory.
+review and `committer` route remains mandatory wherever that capability is
+selected.
 
 ## Operating procedure
 

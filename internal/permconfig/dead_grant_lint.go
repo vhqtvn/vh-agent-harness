@@ -29,7 +29,9 @@ package permconfig
 //     forms (hard-denied: "Git commands must be run directly") and (ii)
 //     gate-wrapper forms (an exec/exec-ro payload mentioning commit-gate.sh,
 //     excluding the engine's static-inspection grammar: bash -n / cmp /
-//     accept-platform / diff) — modeling caveat a.
+//     accept-platform / diff) — modeling caveat a. (A third engine exception,
+//     wrapped git-mutation payloads under exec, is under-approximated —
+//     caveat (e) in the parity table below.)
 //   - everything else must intersect the engine allowlist (readonly ∪ gate
 //     groups after the git/harness branches above); a pattern with NO
 //     allowlisted intersection is hard-denied by the final
@@ -37,6 +39,85 @@ package permconfig
 //   - RF-B (shell file-authoring) and forbidden-pattern structural denies are
 //     OUT OF SCOPE (modeling caveat c): a grant whose only problem is such a
 //     deny is not this lint's finding.
+//
+// PER-CLASS PARITY TABLE — every evaluate() branch in
+// templates/core/.opencode/plugins/shell-guard-core.js, enumerated from the
+// CURRENT file (never from memory). Dispositions: MIRRORED (the lint models
+// the branch), under-approximated (the lint reads the class as reachable
+// where the engine denies every match — it can only MISS an advisory, never
+// produce a false positive: this lint is B3 ADVISORY and fails silent), or
+// N/A grant-side (the branch judges concrete-command properties a static
+// pattern cannot carry). Caveat taxonomy: a/b/c as above, extended with
+// d/e/f:
+//
+//   01 empty/null-command guard ....... N/A grant-side — lintBashEntries skips
+//      empty/whitespace/"*" pattern keys (mirrored-by-skip).
+//   02 RF-B file-authoring deny ....... under-approximated, caveat (c) — a
+//      redirection-carrying pattern (e.g. `echo hi > f`) reads as reachable.
+//      Why not mirrored: RF-B judges concrete-command shell structure
+//      (redirection position, quoting, compound form); a pattern-side model
+//      would re-derive that parser — out of scope for the token model.
+//   03 forbidden-pattern scan (+G4 rg/grep suppression): under-approximated,
+//      caveat (c) — a grant failing ONLY the scan is never flagged; one that
+//      ALSO fails the allowlist is flagged with the non-allowlist class (the
+//      dead verdict is identical; the class names the structural
+//      non-membership that also holds). Why not mirrored: the forbidden
+//      pattern set is engine-side regex state with no Go twin; modeling it
+//      would duplicate that corpus here.
+//   04 env-prefix-before-`vh-agent-harness exec` deny: under-approximated,
+//      caveat (d) — `FOO=1 vh-agent-harness exec *` reads as reachable while
+//      the engine denies every match. Why not mirrored: the deny's prefix
+//      shape is exactly `vh-agent-harness exec` (NOT exec-ro/exec-sandbox)
+//      and fires BEFORE the env strip the lint shares with the allowlist
+//      branch — mirroring it means a second, order-sensitive strip pass for
+//      one exotic grant shape.
+//   05 `vh-agent-harness git ` deny (pre- and post-env-strip) — MIRRORED
+//      (DenyClassHarnessGit).
+//   06 gate-wrapper deny + static-inspection carve-outs (bash -n / cmp /
+//      accept-platform / diff) — MIRRORED (DenyClassGateWrapper), caveat (a).
+//      Known breadth: the lint's carve-out recognizer (isStaticGate-
+//      InspectionShape) accepts token shapes the engine grammar is stricter
+//      about (e.g. extra operands after `bash -n`); the breadth points in
+//      the fail-open direction (MORE carve-out = FEWER flags), so it can
+//      only miss advisories. Tightening it would be a verdict-semantics
+//      change — deliberately not done here.
+//   07 F1 wrapped-git-mutation deny under exec/exec-ro (wrapper-flag table +
+//      walkGitGlobals verb past global flags + GIT_MUTATION_VERBS):
+//      under-approximated, caveat (e) — `vh-agent-harness exec git push *`
+//      reads as reachable while the engine denies every match. Why not
+//      mirrored: a faithful mirror needs the global-flag walker and the
+//      cobra wrapper-flag table in Go — a big lift for an exotic grant shape
+//      (exec is a trust layer); pinning, not half-mirroring.
+//   08 harness auto-allow fall-through . MIRRORED (reachable).
+//   09 parse-failure deny ............. N/A grant-side — patterns are static
+//      token lists by construction; parseability is a concrete-command
+//      property the token model never asserts (any divergence fails silent).
+//   10 per-command leading env-var strip  MIRRORED (envVarAssignmentToken).
+//   11 git walker relative-`-C` deny .. under-approximated, caveat (f) —
+//      `git -C sub diff *` reads as table-rescuable while the engine denies
+//      every match. Why not mirrored: distinguishing relative-vs-absolute
+//      `-C` payloads at pattern level needs path-shape modeling; the git
+//      umbrella (caveat b) stays silent on ALL git-verb grants.
+//   12 git walker infoOnly auto-allow (`git --help`) — MIRRORED-as-reachable
+//      under the git umbrella (caveat b).
+//   13 git walker uniform mutation-slip deny (verb extracted past flags):
+//      under-approximated — mutation verbs are caveat (b)/(c) territory.
+//      Why not mirrored: same reason as 03 — GIT_MUTATION_VERBS is
+//      engine-side forbidden-pattern state; the git umbrella stays silent.
+//   14 git walker fullyStrippable → stripped allowlist match: MIRRORED-as-
+//      reachable under the git umbrella (caveat b).
+//   15 git walker original-token pass → allowlist/ask — MIRRORED: the engine
+//      git ask branch is table-rescuable (the caveat b core).
+//   16 allowlist pass → allow ........ MIRRORED (engineIntersectsAllowlist).
+//   17 git blocked → ask pass-through . MIRRORED-as-reachable (caveat b).
+//   18 final non-git deny ............ MIRRORED (DenyClassNonAllowlisted).
+//
+// The lint's grammar helpers mirror the engine's compilation semantics and
+// are covered by the fixtures: compileEngineAllowPattern ↔ trimEndStar /
+// whitespace split / matchesPattern, tokenPrefixCompatible ↔ the
+// token-prefix + trailing-wildcard count rule, envVarAssignmentToken ↔
+// ENV_VAR_ASSIGNMENT_RE, and the non-terminal-wildcard verdict-unknown
+// carve-out ↔ glob shapes the token model does not represent.
 //
 // NEVER use internal/execro/classifier.go as the comparison source: it
 // deliberately under-approximates the engine surface (readonly-only, no

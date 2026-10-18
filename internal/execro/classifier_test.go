@@ -248,7 +248,7 @@ func assertDenyFooterLadder(t *testing.T, notice string) {
 		"DENY stays DENY",
 		"exec-sandbox",
 		"active floor:",
-		"does NOT follow a command into proxy or docker_compose",
+		"does NOT follow a command into proxy or docker-compose",
 		"proper executable/editing role",
 		"invoke the bare command directly",
 	}

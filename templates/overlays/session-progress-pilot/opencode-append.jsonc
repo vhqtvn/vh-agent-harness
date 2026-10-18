@@ -1,0 +1,16 @@
+{
+  // session-progress-pilot overlay pack — opencode-append.
+  //
+  // OpenCode auto-discovers plugins from .opencode/plugins/*.js (confirmed by
+  // the auto-classifier-pilot precedent: its plugins render into
+  // .opencode/plugins/ and load with NO "plugins" key anywhere in
+  // opencode.jsonc). This pack's only behavioral deliverable is
+  // plugins/session-progress.js (plus its scripts/ import targets, which are
+  // NOT auto-discovered — they are plain modules imported by the plugin).
+  //
+  // Therefore NO registration is needed here and this file is intentionally
+  // an empty object. The pack deliberately ships:
+  //   - NO permission-pack.jsonc (it adds no permission rules; its teeth are
+  //     throw-in-before-hook only), and
+  //   - NO capability-manifest.yml (it declares no core capability).
+}

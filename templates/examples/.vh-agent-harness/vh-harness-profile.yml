@@ -9,6 +9,13 @@
 #
 # You normally do NOT create this file by hand — `install` seeds it. Edit the
 # seeded copy. This document explains each field.
+#
+# WHAT INSTALL SEEDS (greenfield): a no-selector install seeds the frozen FULL
+# recipe (supervised preset + every shipped core capability + every shipped
+# overlay pack); `--minimal` seeds the historical minimal default below;
+# `--profile <preset>` seeds the default carrying that preset. Whatever lands
+# here, edits within the envelope survive every update — existing installs are
+# never re-seeded or backfilled.
 
 # profile: the feature bundle. Enum; the core ships "minimal".
 profile: minimal

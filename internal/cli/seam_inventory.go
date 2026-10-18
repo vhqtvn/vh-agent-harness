@@ -45,7 +45,7 @@ func seamInventory(target string) (staging string, eff ownership.EffectiveMap, s
 
 	answers := mergeRenderAnswers(installRenderAnswers(target), readProfileAnswers(target))
 	r := substrate.EmbedFSRenderer{Source: sub}
-	overlayFiles, _, inactiveLive, rerr := renderSeamStaging(staging, r, answers, target)
+	overlayFiles, _, inactiveLive, rerr := renderSeamStaging(staging, r, answers, target, nil)
 	if rerr != nil {
 		return cleanup(rerr)
 	}

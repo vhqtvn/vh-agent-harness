@@ -7,14 +7,15 @@
 # clobbers it. Pick ONE backend:
 
 runtime:
-  # backend: host-shell | docker_compose | bare | proxy
+  # backend: host-shell | docker-compose | bare | proxy
   #   host-shell     commands run directly on the host (default; no isolation).
-  #   docker_compose commands run via `docker compose exec` in a service.
+  #   docker-compose commands run via `docker compose exec` in a service
+  #                   (`docker_compose`, the legacy spelling, is accepted too).
   #   bare           no runtime; up/down are no-ops.
   #   proxy          delegate exec/shell to your own wrapper (after the gate).
   backend: host-shell
 
-  # docker_compose only:
+  # docker-compose only:
   # compose_file: docker-compose.yml      # optional; default compose discovery
   # default_service: dev                  # service exec/shell target
 

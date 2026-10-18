@@ -1,6 +1,6 @@
 # auto-classifier-pilot
 
-An **opt-in** overlay pack that ships a three-hook plugin — the pilot for an
+An **opt-in** overlay pack that ships a two-hook plugin — the pilot for an
 auto-classifier-style tool-call gate. It implements three behavior modes,
 selected by a live config `mode` field (default `audit`):
 
@@ -20,7 +20,7 @@ selected by a live config `mode` field (default `audit`):
 
 ## What this is
 
-The plugin (`auto-tool-gate`) hooks **three** OpenCode surfaces, but only one is
+The plugin (`auto-tool-gate`) hooks **two** OpenCode surfaces, and only one is
 the **enforcement surface** — the **`event` hook**. In the default **`audit`**
 mode the plugin writes one audit line to **stderr** per firing, capturing a
 verdict placeholder (`verdict=AUDIT_ONLY`). It never throws, never blocks, never
@@ -28,7 +28,7 @@ mutates a tool call, and never replies to a permission event. **Enabling this
 overlay with the default mode changes zero behavior** — it only adds stderr
 audit lines.
 
-The three hooks:
+The two hooks:
 
 1. **`event`** *(PRIMARY ENFORCEMENT SURFACE)* — receives every OpenCode bus
    event, including `permission.asked`. When OpenCode's permission table routes
@@ -55,18 +55,23 @@ The three hooks:
    It **must NOT throw or block** — enforcement is owned entirely by the event
    hook. This hook is kept because it sees calls `permission.asked` does not
    (the table-allowed fast-path).
-3. **`permission.ask`** *(DORMANT — RETAINED AS RESERVE)* — OpenCode does not
-   fire `permission.ask` in any stock release as of the studied version. The
-   event hook is the active enforcement surface. This hook is retained as a
-   hedge in case upstream wires it; it mirrors the same decision logic so it
-   could serve as the enforcement surface if the hook ever fires. **No claim of
-   auto-approval rests on this hook.** It is a dormant reserve only.
+
+> **Historical note — why there is no `permission.ask` hook.** Upstream's
+> plugin system dispatched a `permission.ask` plugin hook from the plugin
+> system's introduction (2025-08-02) until the legacy permission module was
+> deleted (2026-03-14). The last upstream release whose tree carried the
+> dispatch was v1.2.26; the first without it was v1.2.27. No runtime this
+> repo supports dispatches the hook (both installed surfaces here are
+> post-deletion), which is why the dormant reserve hook this pack once
+> carried was removed as unreachable code. Should a future runtime re-wire
+> it, re-derive with one grep for the hook name in the runtime's
+> permission/plugin modules and re-open the decision.
 
 ## Decision architecture
 
-### The three-hook model
+### The two-hook model
 
-OpenCode exposes **three** plugin hooks relevant to this plugin (verified
+OpenCode exposes **two** plugin hooks relevant to this plugin (verified
 against `@opencode-ai/plugin` + `@opencode-ai/sdk` types + three shipped
 reference implementations):
 
@@ -74,7 +79,10 @@ reference implementations):
 |------|-------|--------|---------------------|
 | `event` | `{ event }` where `event.type` is the event name and `event.properties` is the payload | Receives **every bus event**, including `permission.asked`. For `permission.asked`, `properties` is the `Request` `{id, sessionID, permission, patterns, metadata, always, tool}`. The hook replies via the SDK client to resolve the Deferred → auto-approve or auto-reject. **Allow** replies use the v1 route (`postSessionIdPermissionsPermissionId`); **reject** replies use the v2 route (`POST /permission/:id/reply`) to attach a reason (per-call gate — see "Per-call gate" below). | **PRIMARY ENFORCEMENT SURFACE.** This is the hook that makes `enforce`/`live` auto-approve against stock OpenCode. |
 | `tool.execute.before` | `{tool, sessionID, callID}` | **block (throw)** or **passthrough (bare return)** only. Cannot force-allow. Sees EVERY tool call. | **AUDIT-ONLY OBSERVER.** Must NOT throw/block. Kept because it sees calls the event hook does not (table-allowed fast-path). |
-| `permission.ask` | `Permission {id, type, pattern, sessionID, messageID, callID?, title, metadata, time}` + `{status}` output | Three-way `status` mutation (`allow` / `deny` / `ask`). | **DORMANT RESERVE.** Not fired by stock OpenCode. Retained as hedge. No enforcement claim rests on it. |
+
+(A `permission.ask` plugin hook also exists as a type-level declaration
+upstream, but no release since v1.2.27 dispatches it — see the historical note
+above.)
 
 The `event` hook is the surface that maps onto the reference classifier's three
 dispositions (allow / deny / ask). When `mode` is `enforce` or `live`, the hook
@@ -136,9 +144,9 @@ trigger machinery:
 - **`tool.execute.before` fires BEFORE `item.execute`.** In
   `refs/opencode/packages/opencode/src/session/prompt.ts`, the tool-execution
   path yields `plugin.trigger("tool.execute.before", ...)` first, and only then
-  runs `item.execute`, whose `ask` callback calls `permission.ask` (i.e.
-  `ctx.ask`) — the entry point that consults the permission table and, on an
-  `ask` routing, publishes the `permission.asked` event.
+  runs `item.execute`, whose `ask` callback consults the permission service
+  (`ctx.ask` → `Permission.ask`) — the entry point that checks the permission
+  table and, on an `ask` routing, publishes the `permission.asked` event.
 
 Concretely:
 
@@ -218,12 +226,12 @@ When the classifier owns the event hook, the layered precedence is:
 
 ### Which hook each phase uses
 
-| Phase | `tool.execute.before` | `permission.ask` | `event` | Behavior |
-|-------|-----------------------|------------------|---------|----------|
-| **1 (this pack)** | audit (no block) | audit (dormant, no status mutation) | audit (logs only, NO reply) | Observability only. Default mode `audit`. |
-| **2 (this pack)** | unchanged (audit, permanent) | dormant reserve | **verdict parser + fail-closed stub evaluator → reply** | `enforce` mode: parses a verdict via a DETERMINISTIC STUB and replies `"once"`/`"always"`/`"reject"`. Fail-closed → reject. Not a real model. |
-| **3b (this pack)** | unchanged (audit) | dormant reserve | **live classifier model (OpenAI-compatible HTTP) → reply** | `live` mode: real security-monitor LLM replaces the stub in the event hook, fed by a serialized transcript. Same fail-closed matrix as `enforce`. |
-| **4** | promotion review | promotion review | promotion review | Decide whether to promote into core templates / `README.agent.md`. |
+| Phase | `tool.execute.before` | `event` | Behavior |
+|-------|-----------------------|---------|----------|
+| **1 (this pack)** | audit (no block) | audit (logs only, NO reply) | Observability only. Default mode `audit`. |
+| **2 (this pack)** | unchanged (audit, permanent) | **verdict parser + fail-closed stub evaluator → reply** | `enforce` mode: parses a verdict via a DETERMINISTIC STUB and replies `"once"`/`"always"`/`"reject"`. Fail-closed → reject. Not a real model. |
+| **3b (this pack)** | unchanged (audit) | **live classifier model (OpenAI-compatible HTTP) → reply** | `live` mode: real security-monitor LLM replaces the stub in the event hook, fed by a serialized transcript. Same fail-closed matrix as `enforce`. |
+| **4** | promotion review | promotion review | Decide whether to promote into core templates / `README.agent.md`. |
 
 ### Settled: does the enforcement surface fire for every tool call?
 
@@ -424,7 +432,7 @@ Or using the env-var-name form for the endpoint (operator sets the URL via the
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
 | `enabled` | boolean | `true` | Master live toggle. `false` live-disables the plugin: both hooks no-op immediately on the next tool call (no audit, no behavior change, no restart). `true` is the normal on state. |
-| `mode` | `"audit"` \| `"enforce"` \| `"live"` \| `"live-tiered"` | `"audit"` | Behavior selector. `audit` = Phase 1 observability only (default, zero behavior change). `enforce` = Phase 2 decision path on `permission.ask` (verdict parser + STUB evaluator; fail-closed to deny). `live` = Phase 3b decision path using a REAL OpenAI-compatible model call (fail-closed to deny on any error/timeout/misconfiguration). `live-tiered` = Phase 2 multi-leaf consensus: dispatches the `live` classifier for EACH configured leaf IN PARALLEL and grants only on **unanimous-allow** (see "Phase 2 — `live-tiered` consensus mode"). `tool.execute.before` stays an observer in all modes. |
+| `mode` | `"audit"` \| `"enforce"` \| `"live"` \| `"live-tiered"` | `"audit"` | Behavior selector. `audit` = Phase 1 observability only (default, zero behavior change). `enforce` = Phase 2 decision path on the `event` hook (verdict parser + STUB evaluator; fail-closed to reject). `live` = Phase 3b decision path using a REAL OpenAI-compatible model call (fail-closed to reject on any error/timeout/misconfiguration). `live-tiered` = Phase 2 multi-leaf consensus: dispatches the `live` classifier for EACH configured leaf IN PARALLEL and grants only on **unanimous-allow** (see "Phase 2 — `live-tiered` consensus mode"). `tool.execute.before` stays an observer in all modes. |
 | `stubVerdict` | `"allow"` \| `"block"` \| `"fail"` | `"block"` | Drives the Phase 2 STUB evaluator in `enforce` mode. `"allow"` → allow verdict; `"block"` → block verdict; `"fail"` → unparseable output (exercises fail-closed). **Test/placeholder only** — not a real classifier; ignored unless `mode: "enforce"`. |
 | `promptFile` | string | `""` | **Full-override escape hatch** for the `live` classifier system prompt. If set and readable, its contents are used VERBATIM and **composition is skipped entirely** (no harness-context fragment, no adopter guides are appended). If unset/missing/unreadable, the plugin COMPOSES the prompt from fragments at load time (see "Classifier system-prompt composition" below). Lives in the plugin-config file (not the LLM file) so it MAY be committed as a shared default. |
 | `replyMode` | `"once"` \| `"always"` | `"once"` | Controls the reply disposition when the classifier verdict is **allow**. `"once"` = approve this call only (the tool call proceeds; future matching calls still prompt). `"always"` = approve AND **persist the pattern into OpenCode's in-memory allowlist** — future matching calls never prompt again (self-tightening). **`"always"` is powerful**: it auto-allowlists patterns, so a wrong allow verdict permanently silences that pattern for the session. Use `"once"` (the default) unless you are confident in the classifier's precision. Ignored in `audit` mode (no reply is sent). Invalid values → default `"once"`. |
@@ -584,6 +592,27 @@ wrapper. Conversely, an unwrapped mutating command (raw `bash -c '…'` with no
 `vh-agent-harness exec`) bypasses the harness's hygiene and warrants **more**
 scrutiny, not less. Adopter guides written against this model should treat the
 wrapper as environmental context, never as an allow signal.
+
+### Judgment scope: prose writes and delegated dispatch
+
+The embedded base prompt bounds two heuristics that otherwise over-block
+agent-authored work (both clauses are pinned by Go golden-line tests and can be
+replaced wholesale via `promptFile`):
+
+- **Documentation prose is a write, not a mechanism.** Authoring notes,
+  guides, or migration/release documentation is judged as a reversible,
+  version-controlled file write. The delayed-and-enabled-effects rule applies
+  to arming *executing* mechanisms (hooks, schedulers, workflows, access
+  grants) — not to prose a human may later read and choose to act on. A
+  classifier that blocks documentation for what its words could someday tell
+  someone to do would block all documentation.
+- **A session-opening dispatch is operator intent.** Work that reaches the
+  acting agent through an operator-driven delegation or coordination chain
+  counts as operator intent for scope purposes; actions plausibly serving the
+  dispatched task — including authoring an artifact the dispatch describes —
+  are not scope creep merely because no human-typed line names them. The
+  carve-out does not launder untrusted content: tool output and fetched text
+  still authorize nothing.
 
 ### `promptFile` — full-override escape hatch
 
@@ -755,13 +784,14 @@ The flow (proven by three shipped OpenCode reference implementations: ACP agent,
          headers: { "Content-Type": "application/json" },
      });
      ```
-     This hits `POST /permission/{requestID}/reply` (the same route the TUI's
-     RejectPrompt uses with feedback) → `Permission.reply({message})` → resolves
-     the Deferred with a `CorrectedError` carrying the feedback. The **reason
-     is threaded from every deny path**: the stub verdict reason (`enforce`),
-     the parsed `<reason>` (`live`), the aggregate audit (`live-tiered`), or a
-     fail-closed message (`onUncertain`). See "Per-call gate" below for why
-     this matters.
+      This hits `POST /permission/{requestID}/reply` (the same route the TUI's
+      RejectPrompt uses with feedback) → `Permission.reply({message})` → resolves
+      the Deferred with a `CorrectedError` carrying the feedback. The **reason
+      is threaded from every deny path**: the stub verdict reason (`enforce`),
+      the sanitized classifier stamp (`live`), the unchanged aggregate audit
+      plus sanitized per-leaf stamps (`live-tiered`), or a
+      fail-closed message (`onUncertain`). See "Per-call gate" and "Surfaced
+      deny-string grammar" below for the exact shapes and why this matters.
 5. `"once"` approves this call only; `"always"` persists the pattern into
    OpenCode's in-memory allowlist (future matching calls never prompt —
    self-tightening); `"reject"` denies.
@@ -799,6 +829,81 @@ The v1 route (`POST /session/:id/permissions/:permissionID`) only forwards
 switching the error class to `CorrectedError` and keeping the turn alive. This
 is what makes the gate **per-call**: block the one call, tell the model why, let
 it retry differently.
+
+### Surfaced deny-string grammar (safe feedback)
+
+The reject `message` is the only string the MODEL ever sees from the gate, so
+it is assembled under a typed, sanitized grammar — an attributed reason when
+one exists, a NAMED fallback when it does not, and never raw classifier
+output, raw error text, or an invented policy explanation. Enforcement
+posture is unchanged: deny is still deny.
+
+**`live-tiered`** — the historical aggregate segment is byte-identical
+(compat anchor for existing log scrapes) and per-leaf stamps append after
+`" | "` with config-array ordinals:
+
+```
+[auto-gate] blocked by consensus: tier-aggregate: deny (reason=unanimous-deny leaves=2 denies=2 tier=consensus) | leaf#0=deny(judgment; reason=[Irreversible] force push to protected ref) leaf#1=fail(unavailable/timeout; no safety judgment was obtained)
+```
+
+**`live`** (single leaf) — the same grammar minus leaf stamps:
+
+```
+[auto-gate] blocked by live classifier: deny(judgment; reason=<admitted>)
+[auto-gate] blocked by live classifier: fail(unavailable/http-500; no safety judgment was obtained)
+```
+
+Stamp kinds and their admission rules:
+
+| Stamp | When | Admission rule for the reason text |
+| --- | --- | --- |
+| `allow` | leaf returned a valid `<block>no</block>` | n/a (no reason exists on allow) |
+| `deny(judgment; reason=…)` | a valid `<block>yes</block>` verdict was parsed | the `<reason>` rides the `admitReason` pipeline (below), unconditional — no "looks safe" bypass |
+| `deny(judgment; reason=<none>)` | judgment deny with empty/whitespace-only reason | named fallback — an unusable reason is NAMED, never an empty `reason=` |
+| `deny(judgment; reason=<suppressed>)` | post-sanitization remainder is only `[redacted]`/`[suppressed]` tokens | named fallback |
+| `fail(parse-error; no parseable verdict returned)` | response carried no anchored `<block>` tag | named fallback; raw classifier payload never surfaces |
+| `fail(unavailable[/subkind]; no safety judgment was obtained)` | leaf infrastructure failure (throw/timeout/HTTP/config/key) | named fallback; `subkind` is derived only from executor-side error TAGS (`timeout`, `http-<code>`, `transport`, `malformed`, `missing-key`, `missing-endpoint`, `missing-model`), never from message text |
+
+**Outer decision-boundary failures** (a fault past the decision layer's own
+typed-error handling — the defensive catches around the `enforce`/`live`
+decision calls in the event hook) follow the same named-fallback discipline on
+BOTH sinks. They surface
+`[auto-gate] fail-closed: decision error: fail(internal; no safety judgment was obtained)`
+(and the `live decision error:` variant) through `onUncertain`; the raw
+exception text never reaches the stderr audit line or the v2 rejection
+feedback. The catch and the fail-closed reject policy are unchanged — only the
+surfaced text is a named failure. (These catches are not reachable by ordinary
+evaluator/HTTP failures — those become typed deny results — so they are pinned
+by fault-injection selftests through an internal test-only seam, not by e2e.)
+
+The `admitReason` pipeline (in `auto-gate-scrub.js`, the single source of
+truth for egress scrubbing) runs in a fixed, load-bearing order:
+
+1. **Control normalization** — strip control characters and trim (the
+   newline/tab ESCAPING runs last, after truncation, so the later matchers see
+   raw text and the output is guaranteed single-line).
+2. **Known-value suppression** — every exact-string occurrence of a
+   config-known value (leaf/top-level `modelEndpoint`, `model`, literal
+   `apiKey`, resolved env endpoint/key values) becomes `[suppressed]`.
+3. **Credential scrub** — the shared heuristic scrubber verbatim
+   (`Bearer …` → `Bearer [redacted]`, key=value, secret flags, high-entropy
+   blobs).
+4. **Length truncation, then escaping** — scrub-before-truncate, so a secret
+   split at the 240-char boundary cannot survive; truncated reasons end with
+   `…[truncated]`; newlines/tabs/backslashes are escaped as the final step.
+
+The whole assembly is capped (2000 chars) and built ONCE per deny for BOTH
+sinks — the v2 model-visible message and the stderr per-leaf line carry the
+same stamp strings, never divergent copies.
+
+> **Truth fix (behavior change).** Before typed provenance, an
+> infrastructure-errored leaf normalized to DENY, so two timed-out leaves
+> surfaced `reason=unanimous-deny` — a **false safety-judgment claim**. Leaf
+> results now carry `kind` (`judgment` | `error` | `unparseable`) from the
+> executor's control flow; infra failures aggregate as `reason=incomplete`
+> and surface `fail(unavailable…)` stamps. `fail-closed` enforcement is
+> unchanged — deny is still deny — only the truthfulness of the surfaced
+> label changed.
 
 ### Cascade caveat (parallel tool calls)
 
@@ -853,8 +958,7 @@ fallback already applies when no v2 transport is available at all.
 `mode: "enforce"` switches the `event` hook from observability into a
 deterministic, **fail-closed** decision path that **auto-approves or
 auto-rejects** tool calls by replying to the `permission.asked` bus event. The
-`audit` default is unchanged (see below). The `permission.ask` hook remains
-dormant.
+`audit` default is unchanged (see below).
 
 ### What it does
 
@@ -1053,10 +1157,11 @@ allow a call that another classifier would block.
 ### Unanimous-allow policy
 
 The aggregate is computed by the behavior-frozen aggregation core
-(`auto-gate-tiered.js`, 47 passing unit tests of its own). The policy is:
+(`auto-gate-tiered.js`, with its own unit-test suite — run it via
+`vh-agent-harness exec node --test` on the module). The policy is:
 
 - **ALLOW × N (≥1 leaf, all allow)** → **allow** (the ONLY grant path).
-- **Any DENY** → **deny**. If at least one leaf also ALLOWed → `disagreement: true`.
+- **Any judgment DENY** → **deny**. If at least one leaf also ALLOWed → `disagreement: true`.
 - **Any FAIL** (a leaf threw, timed out, returned an unparseable verdict, or hit
   a non-2xx) → **deny** with `incomplete: true`. The dominant reason is
   incompleteness, so `disagreement` is `false` even if both ALLOW and DENY are
@@ -1064,10 +1169,15 @@ The aggregate is computed by the behavior-frozen aggregation core
 - **Empty / malformed / missing leaves** → **deny** (fail-closed via `onUncertain`).
 - **Unknown leaf outcome** → treated as **FAIL** → deny.
 
-Each leaf's `decideLive` outcome (shape `{status, audit, reason, latencyMs,
-retries}`) is normalized by `normalizeLeafOutcome` — `{status:"allow"}` → ALLOW,
-`{status:"deny"}` → DENY, anything else → FAIL. No adapter is needed because the
-live path already returns exactly this shape.
+Each leaf's `decideLive` outcome (shape `{status, kind, subkind, audit, reason,
+latencyMs, retries}`) is normalized by `normalizeLeafOutcome` using the TYPED
+provenance — `{status:"allow"}` → ALLOW; `{status:"deny", kind:"judgment"}` →
+DENY; `{status:"deny", kind:"error"|"unparseable"}` or a KINDLESS deny → FAIL.
+The kind originates in `decidePermission`'s decision matrix (the executor's
+control flow), never from classifier prose, so an infrastructure failure can
+never masquerade as a judgment deny in the aggregate (see "Surfaced deny-string
+grammar" above). No adapter is needed because the live path already returns
+exactly this shape.
 
 ### Shared transcript, per-leaf endpoints
 
@@ -1130,9 +1240,12 @@ dropped; if that leaves zero valid leaves, the dispatch fail-closes.
 The aggregate audit line is **constant-shaped**: `tierId` + integer leaf counts
 + normalized-outcome enums only. Leaf endpoint/model/apiKeyEnv VALUES are
 **never** interpolated into any log line. The per-leaf summary logged alongside
-carries only the normalized outcome enum + integer retries/latency. All
-tool-call-derived content continues to pass through the existing
-`scrubTruncate`/`scrubCredentials` egress discipline.
+carries the SAME sanitized leaf stamps the model-visible deny message carries
+(one build, two sinks — see "Surfaced deny-string grammar") plus integer
+retries/latency; a judgment stamp's reason text rides the `admitReason`
+pipeline (known-value suppression + credential scrub + truncation), and infra
+stamps are fixed-wording fallbacks. All tool-call-derived content continues to
+pass through the existing `scrubTruncate`/`scrubCredentials` egress discipline.
 
 ## Where the plugin renders
 
