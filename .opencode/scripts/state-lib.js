@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "url";
 import {
     validateF3DesignReadiness,
@@ -862,6 +862,11 @@ function defaultCoordinationTaskPayload(taskID = "") {
         review_paths: [],
         latest_report: null,
         f3_design_readiness: null,
+        // Retention-preservation gate (owner-approved 2026-10-25): the
+        // decision_record declared at closeout. null until the first closeout
+        // (legacy cards predating the gate stay null and retire under the
+        // legacy compatibility rule, not the new gate).
+        decision_record: null,
         next_action: "",
         predicted_impact: null,
         measured_outcome: null,
@@ -1685,6 +1690,12 @@ function normalizeCoordinationTaskRecord(payload, taskID = "", accumulators = {}
                     !Array.isArray(source.f3_design_readiness)
                   ? source.f3_design_readiness
                   : null,
+        // Retention-preservation gate: lenient read-path normalization. A
+        // stored decision_record must be an object carrying an entries array;
+        // anything else (legacy cards have NO field at all → undefined →
+        // null) coerces to null so the retirement path treats it as the
+        // legacy compatibility case rather than crashing on a degraded shape.
+        decision_record: normalizeStoredDecisionRecord(source.decision_record),
         next_action: String(source.next_action || "").trim(),
         predicted_impact: normalizeOptionalText(source.predicted_impact),
         measured_outcome: normalizeOptionalText(source.measured_outcome),
@@ -4288,7 +4299,9 @@ function resolveRecurrenceDedup(incomingCard) {
 }
 
 // normalizeRecurrenceBlockForWrite validates an incoming recurrence block
-// against the task-card schema contract (task-card.schema.json:304-395)
+// against the task-card schema contract (task-card.schema.json, the
+// top-level `recurrence` property — cited by NAME, not line range; the
+// decision_record subschema above it shifts lines as the schema evolves)
 // BEFORE it reaches the persisted record. The schema requires:
 //   - string recurrence_id (minLength 1) — NO type coercion
 //   - string symptom_class_id (^recurrence.v1/.+$)
@@ -4524,7 +4537,8 @@ function saveCoordinationTask(sessionID, taskPayload, options = {}) {
     // --- Write-boundary recurrence validation ---
     // Validate the recurrence block BEFORE any dedup processing so no durable
     // card carries an invalid acknowledgement pair (schema contract:
-    // task-card.schema.json:304-395). This is producer convenience, NOT
+    // task-card.schema.json, the top-level `recurrence` property). This is
+    // producer convenience, NOT
     // gate-wired schema enforcement (defer-018, Slice 5). A recurrence block
     // that is undefined or null passes through unchanged (legacy / remove).
     let validatedRecurrence = input.recurrence;
@@ -5186,6 +5200,940 @@ function verifyLandingProof(taskID, repoOverride) {
     };
 }
 
+// =============================================================================
+// Retention-preservation gate (decision records)
+// =============================================================================
+// Owner-approved 2026-10-25. The landing-proof contract above proves the work
+// LANDED; it says nothing about whether decision-class knowledge (owner
+// authorizations, materially-rejected alternatives, review verdicts, measured
+// outcomes) SURVIVES retirement. Retiring a completed card deletes the card
+// AND its report directory — the last local copy of that knowledge — so an
+// ordinary retirement must first verify every declared decision-record entry
+// against COMMITTED, branch-reachable git state. There is deliberately NO
+// "inline" kind: content written only in the local closeout report is not
+// durable and never satisfies the gate (owner condition 1).
+//
+// Honest limits (documented, NOT enforced — no semantic engine, owner
+// condition 4):
+//   - a `routine` attestation is checked ONLY against explicit card fields
+//     (owner_notes, measured_outcome, open_questions, last_review, review
+//     history events); an attestation that contradicts nothing mechanical may
+//     still be dishonest;
+//   - a commit/artifact entry is verified to carry its declared MARKER at a
+//     reachable committed revision — whether the marker-bearing content is
+//     actually the decision the author claims is author + reviewer honesty;
+//   - verification proves LOCAL-repository reachability only. Cross-machine
+//     availability comes from the normal push/release flow; the gate performs
+//     no network operations and claims nothing about remotes (owner
+//     condition 2).
+
+const DECISION_RECORD_FENCE = "decision-record";
+const DECISION_ENTRY_KINDS = Object.freeze(["commit", "artifact", "routine"]);
+// Per-kind allowed entry keys, mirroring the decision_record entry variants
+// in docs/coordination/schemas/task-card.schema.json EXACTLY (every variant
+// carries additionalProperties:false). The closeout gate and the schema are
+// ONE contract: a key set the schema would reject (marker/revision/path on a
+// routine entry, path on a commit entry, any undeclared key) is refused here
+// too — the schema is never relaxed to match a lax gate, and the gate is
+// never looser than the schema.
+const DECISION_ENTRY_KEYS_BY_KIND = Object.freeze({
+    commit: Object.freeze(["kind", "revision", "marker", "note"]),
+    artifact: Object.freeze(["kind", "path", "revision", "marker", "note"]),
+    routine: Object.freeze(["kind", "note"]),
+});
+const DECISION_RECORD_KEYS = Object.freeze(["version", "entries"]);
+// Search-mode walk cap: `git log --branches -- <path>` on a long-lived repo
+// can return thousands of revisions; the marker is expected near the top of
+// the history of the declared durable path. The cap bounds retirement latency
+// without weakening the declared-revision path (which checks exactly one
+// revision).
+const DECISION_RECORD_SEARCH_CAP = 200;
+
+// Extract every fenced ```decision-record JSON block from closeout markdown.
+// Returns [{ record, error }] like extractAllRewriteParityBlocks.
+function extractAllDecisionRecordBlocks(markdown) {
+    const text = String(markdown || "");
+    const results = [];
+    const re = new RegExp(
+        "```" + DECISION_RECORD_FENCE + "[ \\t]*\\n([\\s\\S]*?)\\n```",
+        "g",
+    );
+    let m;
+    while ((m = re.exec(text)) !== null) {
+        try {
+            results.push({ record: JSON.parse(m[1]), error: null });
+        } catch (e) {
+            results.push({
+                record: null,
+                error:
+                    "decision-record fence found but its JSON is malformed: " +
+                    e.message,
+            });
+        }
+    }
+    return results;
+}
+
+// Lenient stored-shape normalization for the read path (see
+// normalizeCoordinationTaskRecord). Structural authority for NEW records is
+// the closeout gate (collectDecisionRecordStructuralErrors); this only keeps
+// an object-with-entries and coerces anything else to null.
+function normalizeStoredDecisionRecord(source) {
+    if (
+        source &&
+        typeof source === "object" &&
+        !Array.isArray(source) &&
+        Array.isArray(source.entries)
+    ) {
+        return {
+            version: source.version,
+            entries: source.entries.map((entry) =>
+                entry && typeof entry === "object" && !Array.isArray(entry)
+                    ? { ...entry }
+                    : entry,
+            ),
+        };
+    }
+    return null;
+}
+
+// Structural validation of a decision_record as declared at closeout (and
+// re-checked on the stored shape at retirement). Returns collected error
+// strings (empty = structurally valid). Mirrors the decision_record
+// subschema of docs/coordination/schemas/task-card.schema.json EXACTLY —
+// per-kind allowed keys with undeclared keys refused, like the schema's
+// additionalProperties:false in every variant:
+//   commit   — decision content lives in a specific git commit; `revision`
+//              optional (omitted = search reachable history for the marker
+//              in commit MESSAGES; declared = verify exactly that commit).
+//              Allowed keys: kind | revision | marker | note.
+//   artifact — content promoted to a designated durable file (docs/checkpoints/,
+//              researches/decisions/, researches/sources/, docs/planning/ per
+//              the repo placement rules); `path` required, `revision` optional
+//              (omitted = search reachable revisions of the path).
+//              Allowed keys: kind | path | revision | marker | note.
+//   routine  — attestation that nothing decision-class needs preserving; must
+//              be the ONLY entry (the mechanical contradiction check below
+//              fires against it). Allowed keys: kind | note ONLY — a routine
+//              attestation carries no marker; nothing is searched in git.
+// `marker` (commit/artifact only) defaults to the card id — the card-id
+// back-reference the retirement verifier searches for. A marker starting
+// with "-" is REFUSED: the verifier hands the marker to git (git grep -e,
+// log --grep=), and keeping the option-injection class closed structurally
+// (not just at the git call sites) means no user string that git could
+// parse as an option ever reaches a positional slot. The same rule applies
+// to `revision` (rev-parse receives it as a positional).
+function collectDecisionRecordStructuralErrors(record, taskID) {
+    const errors = [];
+    const where = `decision_record for ${taskID}`;
+    if (!record || typeof record !== "object" || Array.isArray(record)) {
+        return [`${where} must be a JSON object with version and entries.`];
+    }
+    Object.keys(record).forEach((key) => {
+        if (!DECISION_RECORD_KEYS.includes(key)) {
+            errors.push(
+                `${where}: unknown key "${key}" — a decision_record object carries exactly version and entries (task-card.schema.json).`,
+            );
+        }
+    });
+    if (record.version !== 1) {
+        errors.push(`${where}: version must be 1.`);
+    }
+    if (!Array.isArray(record.entries) || record.entries.length === 0) {
+        errors.push(
+            `${where}: entries must be a non-empty array of ${DECISION_ENTRY_KINDS.join(" | ")} entries.`,
+        );
+        return errors;
+    }
+    record.entries.forEach((entry, idx) => {
+        const at = `${where} entry #${idx + 1}`;
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+            errors.push(`${at} must be an object.`);
+            return;
+        }
+        if (!DECISION_ENTRY_KINDS.includes(entry.kind)) {
+            errors.push(
+                `${at}: kind must be one of ${DECISION_ENTRY_KINDS.join(" | ")} (got ${JSON.stringify(entry.kind)}). There is deliberately no "inline" kind — content only in the local closeout report is not durable.`,
+            );
+            return;
+        }
+        const allowedKeys = DECISION_ENTRY_KEYS_BY_KIND[entry.kind];
+        const unknownKeys = Object.keys(entry).filter(
+            (key) => !allowedKeys.includes(key),
+        );
+        if (unknownKeys.length > 0) {
+            const hints = [];
+            if (entry.kind === "routine") {
+                hints.push(
+                    "a routine attestation carries no marker/revision/path — nothing is searched in git",
+                );
+            }
+            if (entry.kind === "commit" && unknownKeys.includes("path")) {
+                hints.push(
+                    "commit entries take no path — declare an artifact entry for file-located content",
+                );
+            }
+            errors.push(
+                `${at}: unknown key(s) ${unknownKeys
+                    .map((k) => `"${k}"`)
+                    .join(", ")} — ${entry.kind} entries allow exactly ${allowedKeys.join(" | ")} (task-card.schema.json${hints.length > 0 ? `; ${hints.join("; ")}` : ""}).`,
+            );
+        }
+        if (allowedKeys.includes("marker") && entry.marker !== undefined) {
+            if (
+                typeof entry.marker !== "string" ||
+                entry.marker.trim() === ""
+            ) {
+                errors.push(
+                    `${at}: marker, when present, must be a non-empty string.`,
+                );
+            } else if (entry.marker.includes("\n")) {
+                errors.push(`${at}: marker must be a single line.`);
+            } else if (entry.marker.trim().startsWith("-")) {
+                errors.push(
+                    `${at}: marker must not start with "-" — the retirement verifier passes the marker to git, and a leading dash is how a marker could be parsed as a git OPTION instead of a pattern (option injection). Use a card-id back-reference like "Task-Card: <id>" or the exact marker the committed carrier carries.`,
+                );
+            }
+        }
+        if (entry.note !== undefined && typeof entry.note !== "string") {
+            errors.push(`${at}: note, when present, must be a string.`);
+        }
+        if (entry.kind === "commit") {
+            if (entry.revision !== undefined) {
+                if (
+                    typeof entry.revision !== "string" ||
+                    entry.revision.trim() === ""
+                ) {
+                    errors.push(
+                        `${at}: revision, when present, must be a non-empty string (a commit sha or resolvable revision).`,
+                    );
+                } else if (/\s/.test(entry.revision.trim())) {
+                    errors.push(
+                        `${at}: revision must be a single revision token.`,
+                    );
+                } else if (entry.revision.trim().startsWith("-")) {
+                    errors.push(
+                        `${at}: revision must not start with "-" — the verifier passes the revision to git as a positional, and a leading dash is how a user string could be parsed as a git OPTION (option injection). No resolvable revision (sha, ref, @{...}) ever starts with a dash.`,
+                    );
+                }
+            }
+        } else if (entry.kind === "artifact") {
+            const p =
+                typeof entry.path === "string" ? entry.path.trim() : "";
+            if (p === "") {
+                errors.push(
+                    `${at}: artifact entries require path — the designated durable file (docs/checkpoints/, researches/decisions/, researches/sources/, docs/planning/) carrying the card-id back-reference.`,
+                );
+            } else if (path.isAbsolute(p) || p.includes("..")) {
+                errors.push(
+                    `${at}: path must be repo-relative and physically contained (no absolute paths, no "..").`,
+                );
+            }
+            if (entry.revision !== undefined) {
+                if (
+                    typeof entry.revision !== "string" ||
+                    entry.revision.trim() === ""
+                ) {
+                    errors.push(
+                        `${at}: revision, when present, must be a non-empty string (a commit sha or resolvable revision).`,
+                    );
+                } else if (/\s/.test(entry.revision.trim())) {
+                    errors.push(
+                        `${at}: revision must be a single revision token.`,
+                    );
+                } else if (entry.revision.trim().startsWith("-")) {
+                    errors.push(
+                        `${at}: revision must not start with "-" — the verifier passes the revision to git as a positional, and a leading dash is how a user string could be parsed as a git OPTION (option injection). No resolvable revision (sha, ref, @{...}) ever starts with a dash.`,
+                    );
+                }
+            }
+        } else if (entry.kind === "routine") {
+            if (record.entries.length !== 1) {
+                errors.push(
+                    `${at}: a routine attestation must be the ONLY entry — it cannot coexist with commit/artifact entries.`,
+                );
+            }
+        }
+    });
+    return errors;
+}
+
+// Mechanical contradiction check (owner condition 4): the explicit
+// decision-bearing card fields a `routine` attestation (or a legacy record
+// with no decision_record) must not contradict. Returns an array of
+// { field, detail } — empty means no mechanical contradiction. SEMANTIC
+// honesty of the attestation is deliberately NOT evaluated.
+function collectDecisionClassFields(task, incoming = {}) {
+    const found = [];
+    const ownerNotes = Array.isArray(task && task.owner_notes)
+        ? task.owner_notes.filter((n) => String(n || "").trim() !== "")
+        : [];
+    if (ownerNotes.length > 0) {
+        found.push({
+            field: "owner_notes",
+            detail: `${ownerNotes.length} non-empty owner note(s), e.g. "${String(ownerNotes[0]).slice(0, 80)}"`,
+        });
+    }
+    const measuredOutcome = incoming.measuredOutcome !== undefined
+        ? String(incoming.measuredOutcome || "").trim()
+        : String((task && task.measured_outcome) || "").trim();
+    if (measuredOutcome !== "") {
+        found.push({
+            field: "measured_outcome",
+            detail: `"${measuredOutcome.slice(0, 80)}"`,
+        });
+    }
+    const openQuestions = Array.isArray(task && task.open_questions)
+        ? task.open_questions.filter((q) => String(q || "").trim() !== "")
+        : [];
+    if (openQuestions.length > 0) {
+        found.push({
+            field: "open_questions",
+            detail: `${openQuestions.length} non-empty open question(s)`,
+        });
+    }
+    if (
+        task &&
+        task.last_review &&
+        typeof task.last_review === "object"
+    ) {
+        found.push({
+            field: "last_review",
+            detail: `review verdict recorded (${task.last_review.status || "status unknown"})`,
+        });
+    }
+    const reviewEvents = Array.isArray(task && task.history)
+        ? task.history.filter(
+              (entry) =>
+                  entry &&
+                  typeof entry === "object" &&
+                  entry.event === "task_reviewed",
+          )
+        : [];
+    if (reviewEvents.length > 0) {
+        found.push({
+            field: "history.task_reviewed",
+            detail: `${reviewEvents.length} review event(s) in card history`,
+        });
+    }
+    return found;
+}
+
+// --- git verification helpers (spawnSync so expected non-zero exits like a
+// miss from `git grep` are distinguishable from spawn failures) ------------
+
+function gitSpawn(repo, args) {
+    try {
+        const res = spawnSync("git", args, {
+            cwd: repo,
+            encoding: "utf8",
+            timeout: 10000,
+        });
+        if (res.error) {
+            return { status: null, stdout: "", stderr: String(res.error.message || "") };
+        }
+        return {
+            status: res.status,
+            stdout: String(res.stdout || ""),
+            stderr: String(res.stderr || ""),
+        };
+    } catch (error) {
+        return {
+            status: null,
+            stdout: "",
+            stderr: String((error && error.message) || error),
+        };
+    }
+}
+
+// Resolve a declared revision to a full commit sha (null when unresolvable).
+function resolveCommitRevision(repo, revision) {
+    const res = gitSpawn(repo, [
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `${revision}^{commit}`,
+    ]);
+    if (res.status !== 0) {
+        return null;
+    }
+    const sha = res.stdout.trim();
+    return sha === "" ? null : sha;
+}
+
+// Branch-generic reachability (mirrors verifyLandingProof's --branches
+// semantic): true iff some local branch tip has the commit as an ancestor.
+function isCommitReachableFromBranches(repo, sha) {
+    const res = gitSpawn(repo, [
+        "branch",
+        "--contains",
+        sha,
+        "--format=%(refname)",
+    ]);
+    if (res.status !== 0) {
+        return false;
+    }
+    return res.stdout.trim() !== "";
+}
+
+// Tri-state commit-message read: { available, contains, stderr }. A failed
+// read (spawn failure, non-zero exit) is UNAVAILABLE — never a clean
+// "does not contain" — so the call site maps it to verifier_unavailable
+// instead of silently falling through to the tree search on a false
+// negative. (Pre-tri-state this returned a bare false on ANY git failure.)
+function commitMessageContains(repo, sha, marker) {
+    const res = gitSpawn(repo, ["log", "-1", "--format=%B", sha]);
+    if (res.status !== 0) {
+        return {
+            available: false,
+            contains: false,
+            stderr: res.stderr || `git log exited ${res.status}`,
+        };
+    }
+    return {
+        available: true,
+        contains: res.stdout.includes(marker),
+        stderr: "",
+    };
+}
+
+// Fixed-string search of the whole tree AT a committed revision. git grep
+// exits 0 on match and 1 on no-match (both expected); ANY other exit
+// (including a spawn failure) is UNAVAILABLE — a failed read is never
+// reported as marker-not-found (fail-closed either way; the diagnosis must
+// be honest). Working-tree content is never consulted. The marker is bound
+// with an EXPLICIT `-e`: as a bare positional, a marker with a leading dash
+// (e.g. "-v" = --invert-match) was consumed by git as an OPTION — the sha
+// became the pattern, no revision was searched, git scanned the WORKING
+// TREE inverted and exited 0, and the gate read contains:true (option
+// injection → fail-open deletion). `-e` consumes the next argument as the
+// pattern whatever it starts with; the structural gate additionally
+// refuses dash-prefixed markers at declaration AND retirement.
+function treeAtRevisionContains(repo, sha, marker) {
+    const res = gitSpawn(repo, [
+        "grep",
+        "-F",
+        "--quiet",
+        "-e",
+        marker,
+        sha,
+        "--",
+    ]);
+    if (res.status === 0) {
+        return { available: true, contains: true, stderr: "" };
+    }
+    if (res.status === 1) {
+        return { available: true, contains: false, stderr: "" };
+    }
+    return {
+        available: false,
+        contains: false,
+        stderr: res.stderr || `git grep exited ${res.status}`,
+    };
+}
+
+// Reachable commits whose tree touched the path, newest first (capped).
+function reachableCommitsTouchingPath(repo, targetPath) {
+    const res = gitSpawn(repo, [
+        "log",
+        "--branches",
+        "--format=%H",
+        "--",
+        targetPath,
+    ]);
+    if (res.status !== 0) {
+        return null;
+    }
+    return res.stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line !== "")
+        .slice(0, DECISION_RECORD_SEARCH_CAP);
+}
+
+// Tri-state committed-blob read: { available, tracked, blob, stderr,
+// missReason }. Reads the COMMITTED blob — never the worktree.
+// `available:false` means the READ failed (spawn failure, corrupt/missing
+// object) and is mapped by the caller to verifier_unavailable — never
+// overstated as path-not-tracked; `available:true, tracked:false` is a
+// DETERMINATE miss (no file blob at that path in that tree), carrying
+// `missReason` when the path resolves to a directory so the caller can
+// NAME that problem instead of a generic not-tracked diagnosis.
+//
+// Classification ALWAYS runs an explicit `git ls-tree <rev> -- <path>`
+// object-type probe BEFORE any content read (the `--` keeps the
+// user-supplied path on the pathspec side — it can never parse as an
+// option), on the success path too, because `git show`'s exits cannot
+// separate the shapes:
+//   - `git show <rev>:<dir>` exits 0 and prints the directory LISTING, so
+//     a success-path content read alone cannot tell a file blob from a
+//     directory — and a listing whose FILENAMES happen to contain the
+//     marker would falsely verify (round-3 blocker b-F1: the default
+//     marker is the card-id, and an id-named FILENAME inside the listed
+//     directory made retirement destroy the card unread);
+//   - `git show`'s non-zero exits do not distinguish "path absent from
+//     the tree" from genuine read failures.
+// The probe entry's path must also equal the declared path EXACTLY: a
+// directory-shaped pathspec (e.g. a trailing slash) makes ls-tree answer
+// with CHILD entries — a directory declaration in disguise.
+function committedBlobAt(repo, sha, targetPath) {
+    const probe = gitSpawn(repo, ["ls-tree", sha, "--", targetPath]);
+    if (probe.status !== 0) {
+        return {
+            available: false,
+            tracked: null,
+            blob: null,
+            stderr: probe.stderr || `git ls-tree exited ${probe.status}`,
+        };
+    }
+    const firstLine = (probe.stdout.split(/\r?\n/)[0] || "").trim();
+    if (firstLine === "") {
+        // Determinate miss: nothing at that path in that tree.
+        return { available: true, tracked: false, blob: null, stderr: "" };
+    }
+    const entry = /^([0-7]+) (\w+) ([0-9a-f]+)\t(.*)$/.exec(firstLine);
+    if (!entry) {
+        // Cannot classify the probe output — report a failed read, never
+        // a guess.
+        return {
+            available: false,
+            tracked: null,
+            blob: null,
+            stderr: `unparseable git ls-tree output: ${firstLine.slice(0, 120)}`,
+        };
+    }
+    const entryType = entry[2];
+    const entryPath = entry[4];
+    if (entryType === "tree" || entryType === "commit") {
+        // Determinate miss, honestly named: the path is a directory
+        // (submodules are the `commit` shape — `git show` exits 0 on both
+        // and prints a listing). A listing is not blob content, and
+        // filenames inside it must never verify a marker.
+        return {
+            available: true,
+            tracked: false,
+            blob: null,
+            stderr: "",
+            missReason: `"${targetPath}" at commit ${sha} is a directory, not a file blob — declare the durable file, not its containing directory (a directory listing is not content; filenames in it never verify a marker)`,
+        };
+    }
+    if (entryPath !== targetPath.replace(/^(?:\.\/)+/, "")) {
+        // Determinate miss, honestly named: the pathspec matched OTHER
+        // paths (a directory-shaped declaration, e.g. a trailing slash,
+        // makes ls-tree answer with child entries) — no file blob exists
+        // at exactly the declared path.
+        return {
+            available: true,
+            tracked: false,
+            blob: null,
+            stderr: "",
+            missReason: `"${targetPath}" at commit ${sha} matched directory contents, not a file blob — declare the durable file itself (a directory listing is not content; filenames in it never verify a marker)`,
+        };
+    }
+    const blob = gitSpawn(repo, ["show", `${sha}:${targetPath}`]);
+    if (blob.status !== 0) {
+        // The path IS a tracked blob yet `git show` failed — a genuine
+        // read failure (e.g. corrupt or missing object), never a
+        // determinate miss.
+        return {
+            available: false,
+            tracked: true,
+            blob: null,
+            stderr: blob.stderr || `git show exited ${blob.status}`,
+        };
+    }
+    return { available: true, tracked: true, blob: blob.stdout, stderr: "" };
+}
+
+// Verify every declared commit/artifact entry of a decision_record against
+// committed, branch-reachable state in `repo`. Returns
+// { ok, problems: [{ index, kind, locator, code, detail }], verified: [...] }.
+// Never throws — the caller maps problems to a structured refusal naming each
+// missing/uncommitted/unreachable item.
+function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
+    const repo = repoOverride || repoRoot();
+    const problems = [];
+    const verified = [];
+    // A degraded record (missing, non-object, or carrying an EMPTY entries
+    // array — e.g. {version:1, entries:[]}) is NOT verified: iterating zero
+    // entries proves nothing and must never read as "every pointer
+    // resolved". Refuse with an honest diagnosis instead of trusting an
+    // empty inventory (the retirement call site additionally runs the full
+    // structural check, so the stored shape is refused there with the
+    // specific structural problems; this guard keeps the verifier itself
+    // fail-closed for any caller).
+    if (
+        !record ||
+        typeof record !== "object" ||
+        Array.isArray(record) ||
+        !Array.isArray(record.entries) ||
+        record.entries.length === 0
+    ) {
+        problems.push({
+            index: 0,
+            kind: "record",
+            locator: "",
+            code: "record_degraded",
+            detail:
+                "the stored decision_record is degraded (missing, non-object, or carrying no entries) — an empty inventory is not a verified inventory",
+        });
+        return { ok: false, problems, verified };
+    }
+    record.entries.forEach((entry, idx) => {
+        const index = idx + 1;
+        if (!entry || typeof entry !== "object") {
+            problems.push({
+                index,
+                kind: "unknown",
+                locator: "",
+                code: "entry_malformed",
+                detail: "entry is not an object",
+            });
+            return;
+        }
+        const marker =
+            typeof entry.marker === "string" && entry.marker.trim() !== ""
+                ? entry.marker.trim()
+                : taskID;
+        if (entry.kind === "routine") {
+            verified.push({
+                index,
+                kind: "routine",
+                locator: "",
+                how: "attestation (mechanical contradiction check applies, not git)",
+            });
+            return;
+        }
+        if (entry.kind === "commit") {
+            const locator = String(entry.revision || "").trim();
+            if (locator === "") {
+                // Search mode: the marker must appear in a REACHABLE commit
+                // MESSAGE (fixed string). This is the home of decision content
+                // in the landing commit body, which cannot be pinned by sha at
+                // closeout time (the commit does not exist yet).
+                const res = gitSpawn(repo, [
+                    "log",
+                    "--branches",
+                    "--fixed-strings",
+                    `--grep=${marker}`,
+                    "--format=%H%x1f%B%x1e",
+                ]);
+                if (res.status !== 0) {
+                    // `git log` exits 0 even on NO match, so ANY non-zero
+                    // exit (spawn failure included) is a failed read, not a
+                    // miss. Map it to verifier_unavailable — never collapse
+                    // a failed read to marker-not-found (fail-closed either
+                    // way, but the diagnosis must be honest).
+                    problems.push({
+                        index,
+                        kind: "commit",
+                        locator: "<reachable history>",
+                        code: "verifier_unavailable",
+                        detail: `git could not read history: ${res.stderr || `exit ${res.status}`}`,
+                    });
+                    return;
+                }
+                let hit = null;
+                for (const record_ of res.stdout.split("\x1e")) {
+                    const rec = record_.trim();
+                    if (!rec) continue;
+                    const sep = rec.indexOf("\x1f");
+                    const sha = (sep >= 0 ? rec.slice(0, sep) : rec).trim();
+                    const body = sep >= 0 ? rec.slice(sep + 1) : "";
+                    if (sha && body.includes(marker)) {
+                        hit = sha;
+                        break;
+                    }
+                }
+                if (hit) {
+                    verified.push({
+                        index,
+                        kind: "commit",
+                        locator: hit,
+                        how: `marker "${marker}" present in a reachable commit message`,
+                    });
+                } else {
+                    problems.push({
+                        index,
+                        kind: "commit",
+                        locator: "<reachable history>",
+                        code: "marker_not_in_reachable_history",
+                        detail: `no reachable commit message contains the marker "${marker}" (local-repository reachability only)`,
+                    });
+                }
+                return;
+            }
+            const sha = resolveCommitRevision(repo, locator);
+            if (sha === null) {
+                problems.push({
+                    index,
+                    kind: "commit",
+                    locator,
+                    code: "revision_not_resolvable",
+                    detail: `"${locator}" does not resolve to a commit`,
+                });
+                return;
+            }
+            if (!isCommitReachableFromBranches(repo, sha)) {
+                problems.push({
+                    index,
+                    kind: "commit",
+                    locator,
+                    code: "revision_not_reachable",
+                    detail: `commit ${sha} exists but is not reachable from any local branch (reflog-only/orphaned commits do not count)`,
+                });
+                return;
+            }
+            const inMessage = commitMessageContains(repo, sha, marker);
+            if (!inMessage.available) {
+                problems.push({
+                    index,
+                    kind: "commit",
+                    locator,
+                    code: "verifier_unavailable",
+                    detail: `git could not read the commit message at ${sha}: ${inMessage.stderr}`,
+                });
+                return;
+            }
+            if (inMessage.contains) {
+                verified.push({
+                    index,
+                    kind: "commit",
+                    locator: sha,
+                    how: `marker "${marker}" present in the commit message`,
+                });
+                return;
+            }
+            const inTree = treeAtRevisionContains(repo, sha, marker);
+            if (!inTree.available) {
+                problems.push({
+                    index,
+                    kind: "commit",
+                    locator,
+                    code: "verifier_unavailable",
+                    detail: `git could not search the tree at commit ${sha}: ${inTree.stderr}`,
+                });
+                return;
+            }
+            if (inTree.contains) {
+                verified.push({
+                    index,
+                    kind: "commit",
+                    locator: sha,
+                    how: `marker "${marker}" present in a file blob at that committed revision`,
+                });
+                return;
+            }
+            problems.push({
+                index,
+                kind: "commit",
+                locator,
+                code: "marker_missing",
+                detail: `commit ${sha} is reachable but carries neither the marker "${marker}" in its message nor in any blob at that committed revision`,
+            });
+            return;
+        }
+        if (entry.kind === "artifact") {
+            const targetPath = String(entry.path || "").trim();
+            const declaredRev = String(entry.revision || "").trim();
+            const checkBlob = (sha, how) => {
+                const read = committedBlobAt(repo, sha, targetPath);
+                if (!read.available) {
+                    // A failed read is NEVER overstated as
+                    // path-not-tracked / marker-not-in-blob.
+                    return {
+                        code: "verifier_unavailable",
+                        detail: `git could not read "${targetPath}" at commit ${sha}: ${read.stderr}`,
+                    };
+                }
+                if (read.blob === null) {
+                    if (read.missReason) {
+                        // Determinate miss that must be NAMED (b-F1): the
+                        // declared path is a directory, not a file blob —
+                        // pre-fix, `git show` exited 0 on the directory
+                        // LISTING and an id-named filename inside it
+                        // falsely verified.
+                        return {
+                            code: "path_is_directory_not_file_blob",
+                            detail: read.missReason,
+                        };
+                    }
+                    return {
+                        code: "path_not_tracked_at_revision",
+                        detail: `"${targetPath}" is not tracked as a file blob at commit ${sha}`,
+                    };
+                }
+                if (read.blob.includes(marker)) {
+                    verified.push({
+                        index,
+                        kind: "artifact",
+                        locator: `${sha}:${targetPath}`,
+                        how,
+                    });
+                    return null;
+                }
+                return {
+                    code: "marker_not_in_committed_blob",
+                    detail: `"${targetPath}" is tracked at commit ${sha} but its committed blob does not contain the marker "${marker}" (working-tree modifications never count)`,
+                };
+            };
+            if (declaredRev !== "") {
+                const sha = resolveCommitRevision(repo, declaredRev);
+                if (sha === null) {
+                    problems.push({
+                        index,
+                        kind: "artifact",
+                        locator: `${declaredRev}:${targetPath}`,
+                        code: "revision_not_resolvable",
+                        detail: `"${declaredRev}" does not resolve to a commit`,
+                    });
+                    return;
+                }
+                if (!isCommitReachableFromBranches(repo, sha)) {
+                    problems.push({
+                        index,
+                        kind: "artifact",
+                        locator: `${declaredRev}:${targetPath}`,
+                        code: "revision_not_reachable",
+                        detail: `commit ${sha} exists but is not reachable from any local branch`,
+                    });
+                    return;
+                }
+                const problem = checkBlob(
+                    sha,
+                    `marker "${marker}" present in the committed blob at the declared revision`,
+                );
+                if (problem) {
+                    problems.push({
+                        index,
+                        kind: "artifact",
+                        locator: `${declaredRev}:${targetPath}`,
+                        ...problem,
+                    });
+                }
+                return;
+            }
+            // Search mode: walk reachable commits that touched the path,
+            // newest first. This is the home of post-landing material (review
+            // verdicts, measured outcomes) promoted to a durable file after
+            // closeout declared it — the sha cannot be known at closeout time.
+            const revs = reachableCommitsTouchingPath(repo, targetPath);
+            if (revs === null) {
+                problems.push({
+                    index,
+                    kind: "artifact",
+                    locator: targetPath,
+                    code: "verifier_unavailable",
+                    detail: "git could not read history for the path",
+                });
+                return;
+            }
+            if (revs.length === 0) {
+                problems.push({
+                    index,
+                    kind: "artifact",
+                    locator: targetPath,
+                    code: "path_never_committed",
+                    detail: `no reachable commit carries "${targetPath}" — the durable file was never committed (local-only files never count)`,
+                });
+                return;
+            }
+            let unavailableDetail = null;
+            let directoryDetail = null;
+            for (const sha of revs) {
+                const problem = checkBlob(
+                    sha,
+                    `marker "${marker}" present in the committed blob at reachable revision ${sha}`,
+                );
+                if (problem === null) {
+                    return;
+                }
+                if (
+                    problem.code === "verifier_unavailable" &&
+                    unavailableDetail === null
+                ) {
+                    unavailableDetail = problem.detail;
+                } else if (
+                    problem.code === "path_is_directory_not_file_blob" &&
+                    directoryDetail === null
+                ) {
+                    directoryDetail = problem.detail;
+                }
+            }
+            if (unavailableDetail !== null) {
+                // No carrier verified AND at least one read was
+                // unavailable — the negative search is INCOMPLETE, not
+                // concluded (b-F2): report the failed read instead of
+                // overstating a completed marker-absent search. Fail
+                // direction unchanged (refusal either way); this is
+                // diagnosis honesty only.
+                problems.push({
+                    index,
+                    kind: "artifact",
+                    locator: targetPath,
+                    code: "verifier_unavailable",
+                    detail: `no reachable revision verified "${targetPath}" and at least one committed-blob read was unavailable — marker absence is NOT established: ${unavailableDetail}`,
+                });
+                return;
+            }
+            if (directoryDetail !== null) {
+                // Every reachable read determinately found a directory —
+                // name that problem (b-F1), never a blanket marker-absent
+                // claim.
+                problems.push({
+                    index,
+                    kind: "artifact",
+                    locator: targetPath,
+                    code: "path_is_directory_not_file_blob",
+                    detail: directoryDetail,
+                });
+                return;
+            }
+            problems.push({
+                index,
+                kind: "artifact",
+                locator: targetPath,
+                code: "marker_not_in_committed_blob",
+                detail: `"${targetPath}" is committed at ${revs.length} reachable revision(s) (capped at ${DECISION_RECORD_SEARCH_CAP}) but none contains the marker "${marker}" — the back-reference exists only in the working tree or not at all`,
+            });
+            return;
+        }
+        problems.push({
+            index,
+            kind: String(entry.kind || "unknown"),
+            locator: "",
+            code: "entry_kind_unknown",
+            detail: `kind must be one of ${DECISION_ENTRY_KINDS.join(" | ")}`,
+        });
+    });
+    return { ok: problems.length === 0, problems, verified };
+}
+
+// Destructive-warning inventory for the FORCE path (and pre-removal audit):
+// what decision-class content is about to be destroyed. Fields come from the
+// mechanical contradiction scan; entries are the declared decision_record
+// pointers (verified or not). Best-effort — a force never blocks on this.
+function decisionRecordDestructionInventory(task) {
+    const fields = collectDecisionClassFields(task || {});
+    const record = task && task.decision_record;
+    const entries =
+        record &&
+        typeof record === "object" &&
+        Array.isArray(record.entries)
+            ? record.entries.map((entry, i) => ({
+                  index: i + 1,
+                  kind: entry && entry.kind,
+                  locator:
+                      (entry && entry.path) ||
+                      (entry && entry.revision) ||
+                      (entry && entry.kind === "routine"
+                          ? "routine attestation"
+                          : ""),
+              }))
+            : [];
+    return { fields, entries };
+}
+
 function deleteCoordinationTask(sessionID, taskIDRaw, options = {}) {
     const actor = coordinationActorContext(sessionID, options);
     const forced = options.force === true;
@@ -5480,7 +6428,177 @@ function deleteCoordinationTask(sessionID, taskIDRaw, options = {}) {
                 },
             };
         }
-        // Landing proven: fall through to the removal sequence below.
+        // 4c-2. Retention-preservation gate (owner-approved 2026-10-25).
+        //     Landing proven ≠ knowledge preserved: retirement deletes the
+        //     card AND its report dir — the last local copy of decision-class
+        //     content. Before removal, resolve every declared decision-record
+        //     pointer against COMMITTED, branch-reachable state. Legacy
+        //     completed cards without a decision_record follow the
+        //     compatibility rule instead: retirement is refused ONLY when
+        //     explicit decision-class card fields are non-empty (and
+        //     therefore unpromoted — nothing durable was declared for them);
+        //     otherwise routine retirement proceeds (owner condition 5).
+        //     Never weakens the guards above: this runs AFTER landing proof,
+        //     completed-only, and force bypasses it as an explicit emergency.
+        // Structural authority is the RAW stored record. The read-path
+        // normalizeStoredDecisionRecord keeps only {version, entries}, so
+        // checking AFTER normalization would silently strip record-level
+        // junk from a hand-edited stored record and never name it (F2);
+        // entry-level keys were never at risk (entries are copied
+        // verbatim). The raw pre-check refuses and names the exact
+        // structural problems; only a record that is ABSENT (null or
+        // undefined — the legacy path below) skips it — any other value
+        // that fails the shape check (string, number, array, empty
+        // object) is degraded garbage and is refused, not treated as
+        // "no record".
+        const rawRecord = parsedCard ? parsedCard.decision_record : null;
+        const record =
+            rawRecord === null || rawRecord === undefined
+                ? null
+                : normalizeStoredDecisionRecord(rawRecord);
+        if (rawRecord !== null && rawRecord !== undefined) {
+            // 4c-2a. A stored record must be STRUCTURALLY sound before its
+            //     inventory is trusted. A degraded record (empty entries,
+            //     wrong version, undeclared keys — checked on the RAW
+            //     shape, pre-normalization) is NOT verified: an empty
+            //     inventory proves nothing, and previously it read as
+            //     "every pointer resolved" (the B1 fail-open — strictly
+            //     weaker than the legacy null-record path). Fail closed
+            //     with decision_record_unresolved naming the structural
+            //     problem, and apply the explicit-decision-field check
+            //     here too so treatment is at least as strong as legacy
+            //     null-record.
+            const structuralProblems = collectDecisionRecordStructuralErrors(
+                rawRecord,
+                taskID,
+            );
+            if (structuralProblems.length > 0) {
+                const contradictions = collectDecisionClassFields(parsedCard);
+                const namedStructural = structuralProblems
+                    .map((detail) => `  - ${detail}`)
+                    .join("\n");
+                const namedFields = contradictions
+                    .map((c) => `  - ${c.field}: ${c.detail}`)
+                    .join("\n");
+                return {
+                    ...actor,
+                    ok: false,
+                    operation: "delete_coordination_task",
+                    refusal: {
+                        code: "decision_record_unresolved",
+                        task_id: taskID,
+                        status: "completed",
+                        problems: structuralProblems.map((detail) => ({
+                            index: 0,
+                            kind: "record",
+                            locator: "",
+                            code: "record_degraded",
+                            detail,
+                        })),
+                        fields: contradictions.map((c) => c.field),
+                        force_required: true,
+                        message:
+                            `Task ${taskID} is 'completed' and landed, but its stored decision_record is invalid/degraded and is NOT treated as verified:\n${namedStructural}\n` +
+                            (contradictions.length > 0
+                                ? `Explicit decision-class card fields are also non-empty (the same check as a legacy card with no decision_record):\n${namedFields}\n`
+                                : "") +
+                            `Repair or re-declare the decision_record (close out again under the current gate), or re-run with explicit force ONLY for genuine emergency cleanup — force destroys the card, the report directory, AND the unpreserved decision-class content.`,
+                    },
+                };
+            }
+        }
+        if (record !== null) {
+            const decision = verifyDecisionRecordForRetirement(
+                taskID,
+                record,
+                options.landingProofRepo,
+            );
+            if (!decision.ok) {
+                const named = decision.problems
+                    .map(
+                        (p) =>
+                            `  - entry #${p.index} (${p.kind}${
+                                p.locator ? ` ${p.locator}` : ""
+                            }): ${p.code} — ${p.detail}`,
+                    )
+                    .join("\n");
+                return {
+                    ...actor,
+                    ok: false,
+                    operation: "delete_coordination_task",
+                    refusal: {
+                        code: "decision_record_unresolved",
+                        task_id: taskID,
+                        status: "completed",
+                        problems: decision.problems,
+                        force_required: true,
+                        message:
+                            `Task ${taskID} is 'completed' and landed, but its decision_record does not resolve against committed, branch-reachable git state. ` +
+                            `Retirement is refused so the last local copy of decision-class content is not destroyed:\n${named}\n` +
+                            `Promote the content to a reachable commit or a committed durable file (with the card-id back-reference), or re-run with explicit force ONLY for genuine emergency cleanup — force destroys the card, the report directory, AND the unpreserved decision-class content.`,
+                    },
+                };
+            }
+            // A routine attestation must not contradict explicit decision-
+            // class fields as the card stands NOW (fields may have been added
+            // after closeout, e.g. a review verdict via /task-review).
+            if (
+                record.entries.length === 1 &&
+                record.entries[0] &&
+                record.entries[0].kind === "routine"
+            ) {
+                const contradictions = collectDecisionClassFields(parsedCard);
+                if (contradictions.length > 0) {
+                    const named = contradictions
+                        .map((c) => `  - ${c.field}: ${c.detail}`)
+                        .join("\n");
+                    return {
+                        ...actor,
+                        ok: false,
+                        operation: "delete_coordination_task",
+                        refusal: {
+                            code: "decision_content_unpromoted",
+                            task_id: taskID,
+                            status: "completed",
+                            fields: contradictions.map((c) => c.field),
+                            force_required: true,
+                            message:
+                                `Task ${taskID} carries a routine decision_record (nothing decision-class to preserve) but explicit decision-class card fields are non-empty:\n${named}\n` +
+                                `Promote that content to a reachable commit or a committed durable file and re-declare the decision_record, or re-run with explicit force ONLY for genuine emergency cleanup — force destroys it.`,
+                        },
+                    };
+                }
+            }
+            // Landing proven + every pointer resolved: retire.
+        } else {
+            // Legacy compatibility (owner condition 5): no decision_record.
+            // Refuse ONLY when explicit decision-class fields are non-empty
+            // (nothing durable was declared for them — retiring would destroy
+            // the last copy); otherwise retire routinely.
+            const contradictions = collectDecisionClassFields(parsedCard);
+            if (contradictions.length > 0) {
+                const named = contradictions
+                    .map((c) => `  - ${c.field}: ${c.detail}`)
+                    .join("\n");
+                return {
+                    ...actor,
+                    ok: false,
+                    operation: "delete_coordination_task",
+                    refusal: {
+                        code: "decision_content_unpromoted",
+                        task_id: taskID,
+                        status: "completed",
+                        fields: contradictions.map((c) => c.field),
+                        force_required: true,
+                        message:
+                            `Task ${taskID} is a legacy completed card with no decision_record, and explicit decision-class card fields are non-empty:\n${named}\n` +
+                            `Ordinary retirement would destroy the last local copy. Promote the content to a reachable commit or a committed durable file (closeout again with a decision_record under the current gate), or re-run with explicit force ONLY for genuine emergency cleanup.`,
+                    },
+                };
+            }
+        }
+        // Landing proven (+ decision record resolved where declared): fall
+        // through to the removal sequence below.
     }
 
     // 5. Pre-removal summary. Built BEFORE any fs mutation; emitted to the
@@ -5496,6 +6614,35 @@ function deleteCoordinationTask(sessionID, taskIDRaw, options = {}) {
         report_dir: relativeToRepo(reportDir),
         forced,
     };
+    // 5b. Destructive warning for a FORCED completed retirement (owner
+    //     condition: the force path survives with UNCHANGED semantics, but
+    //     the warning must NAME the decision-class content about to be
+    //     destroyed — fields and declared entries — not boilerplate). The
+    //     force itself is not blocked by this inventory (best-effort).
+    let decisionContentDestroyed = null;
+    if (forced && summaryStatus === "completed") {
+        decisionContentDestroyed =
+            decisionRecordDestructionInventory(parsedCard);
+        const hasFields = decisionContentDestroyed.fields.length > 0;
+        const hasEntries = decisionContentDestroyed.entries.length > 0;
+        if (hasFields || hasEntries) {
+            const fieldLines = decisionContentDestroyed.fields
+                .map((f) => `  - card field ${f.field}: ${f.detail}`)
+                .join("\n");
+            const entryLines = decisionContentDestroyed.entries
+                .map(
+                    (e) =>
+                        `  - decision_record entry #${e.index} (${e.kind}${e.locator ? ` ${e.locator}` : ""})`,
+                )
+                .join("\n");
+            summary.destructive_warning =
+                `force is destroying the LAST LOCAL COPY of decision-class content for ${taskID}:\n` +
+                (hasFields ? `${fieldLines}\n` : "") +
+                (hasEntries ? `${entryLines}\n` : "") +
+                `This content will NOT be recoverable from the card, the report directory, or (unless independently promoted) git history.`;
+            summary.decision_content_destroyed = decisionContentDestroyed;
+        }
+    }
     if (typeof options.beforeRemove === "function") {
         options.beforeRemove(summary);
     }
@@ -5526,6 +6673,12 @@ function deleteCoordinationTask(sessionID, taskIDRaw, options = {}) {
             forced,
             card_removed: cardRemoved,
             report_dir_removed: reportDirRemoved,
+            ...(decisionContentDestroyed
+                ? {
+                      decision_content_destroyed: decisionContentDestroyed,
+                      destructive_warning: summary.destructive_warning,
+                  }
+                : {}),
         },
     };
 }
@@ -7170,6 +8323,75 @@ function saveCoordinationTaskCloseout(sessionID, taskIDRaw, options = {}) {
             }
         });
     }
+    // Decision-record gate (retention preservation, owner-approved
+    // 2026-10-25). EVERY closeout saved under the current gate must declare
+    // how decision-class knowledge (owner authorizations, materially-rejected
+    // alternatives, review verdicts, measured outcomes) survives retirement —
+    // retiring a completed card deletes the card AND its report dir, the last
+    // local copy. Entries are exactly three kinds: `commit` (content in a
+    // specific git commit's message or a blob at that committed revision),
+    // `artifact` (content promoted to a designated durable file with the
+    // card-id back-reference), `routine` (attestation that nothing
+    // decision-class needs preserving). There is deliberately NO `inline`
+    // kind — content only in this local closeout report is NOT durable and
+    // never satisfies the gate (owner condition 1). Verification is deferred
+    // to retirement (the landing/durable commits usually do not exist yet at
+    // closeout time); here we enforce structure + the mechanical routine
+    // contradiction check only (owner condition 4).
+    let decisionRecord = null;
+    const drBlocks = extractAllDecisionRecordBlocks(options.body || "");
+    if (drBlocks.length === 0) {
+        errors.push(
+            `Task ${loaded.payload.task_id} closeout requires a decision_record block: a fenced ` +
+            "```decision-record JSON block with entries of kind commit | artifact | routine " +
+            "(see docs/coordination/CLOSEOUT_TEMPLATE.md).",
+        );
+    } else if (drBlocks.length > 1) {
+        errors.push(
+            `Task ${loaded.payload.task_id} closeout declares ${drBlocks.length} decision-record blocks; declare exactly ONE (merge the entries).`,
+        );
+    } else if (drBlocks[0].error) {
+        errors.push(
+            `Task ${loaded.payload.task_id} decision-record block could not be parsed: ${drBlocks[0].error}`,
+        );
+    } else {
+        decisionRecord = drBlocks[0].record;
+        errors.push(
+            ...collectDecisionRecordStructuralErrors(
+                decisionRecord,
+                loaded.payload.task_id,
+            ),
+        );
+        // Guard: a JSON body of `null` (or a primitive/array — JSON allows
+        // all of them at top level) parses WITHOUT a parse error, and the
+        // structural collector already refuses it above. The routine
+        // contradiction probe below must not dereference it — that raised a
+        // raw TypeError instead of the collected StateError. Only probe a
+        // plausible object shape.
+        const isRoutineAttestation =
+            decisionRecord !== null &&
+            typeof decisionRecord === "object" &&
+            !Array.isArray(decisionRecord) &&
+            Array.isArray(decisionRecord.entries) &&
+            decisionRecord.entries.length === 1 &&
+            decisionRecord.entries[0] &&
+            decisionRecord.entries[0].kind === "routine";
+        if (isRoutineAttestation) {
+            const contradictions = collectDecisionClassFields(
+                loaded.payload,
+                { measuredOutcome: options.measuredOutcome },
+            );
+            if (contradictions.length > 0) {
+                const named = contradictions
+                    .map((c) => `  - ${c.field}: ${c.detail}`)
+                    .join("\n");
+                errors.push(
+                    `Task ${loaded.payload.task_id} declares a routine decision_record (nothing decision-class to preserve) but explicit decision-class card fields are non-empty:\n${named}\n` +
+                    "Replace the routine attestation with commit/artifact entries that preserve that content, or clear the fields if they are not decision-class.",
+                );
+            }
+        }
+    }
     throwCollectedErrors(errors);
     const createdAt = isoZ();
     const reportTitle =
@@ -7213,6 +8435,17 @@ function saveCoordinationTaskCloseout(sessionID, taskIDRaw, options = {}) {
         ...current,
         status: taskStatus,
         report_envelope: reportEnvelope,
+        // Retention-preservation gate: persist the declared decision_record so
+        // the retirement path can resolve every pointer against committed git
+        // state before deleting the card + report dir. decisionRecord is
+        // non-null here (a missing/invalid block refused the closeout above).
+        decision_record:
+            decisionRecord !== null
+                ? {
+                      version: 1,
+                      entries: decisionRecord.entries,
+                  }
+                : current.decision_record,
         session_aliases: actor.session_name
             ? uniqueStrings([...(current.session_aliases || []), actor.session_name])
             : current.session_aliases,
@@ -8097,6 +9330,18 @@ export {
     saveCoordinationTaskCloseout,
     reviewCoordinationTask,
     deleteCoordinationTask,
+    // Read-only decision-record verifier (retention-preservation gate).
+    // Exported as a TEST SEAM so tests can exercise git-failure mapping
+    // (verifier_unavailable) directly, without fabricating a repo where
+    // landing proof succeeds but later git reads fail.
+    verifyDecisionRecordForRetirement,
+    // Tri-state git read helpers behind that verifier, exported as TEST
+    // SEAMS for the same reason: repo corruption cannot selectively fail
+    // `git log -1` / `git show` while letting the earlier rev-parse /
+    // reachability reads succeed, so their unavailable branches are
+    // injected directly (non-git directory).
+    commitMessageContains,
+    committedBlobAt,
     saveSkillProposal,
     readSkillProposal,
     listSkillProposals,
@@ -8168,6 +9413,18 @@ export default {
     saveCoordinationTaskCloseout,
     reviewCoordinationTask,
     deleteCoordinationTask,
+    // Read-only decision-record verifier (retention-preservation gate).
+    // Exported as a TEST SEAM so tests can exercise git-failure mapping
+    // (verifier_unavailable) directly, without fabricating a repo where
+    // landing proof succeeds but later git reads fail.
+    verifyDecisionRecordForRetirement,
+    // Tri-state git read helpers behind that verifier, exported as TEST
+    // SEAMS for the same reason: repo corruption cannot selectively fail
+    // `git log -1` / `git show` while letting the earlier rev-parse /
+    // reachability reads succeed, so their unavailable branches are
+    // injected directly (non-git directory).
+    commitMessageContains,
+    committedBlobAt,
     saveSkillProposal,
     readSkillProposal,
     listSkillProposals,

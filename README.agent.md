@@ -1244,7 +1244,15 @@ export default function transform({ context }) {
   retirement is allowed only when a commit carrying `Task-Card: <card-id>` is
   reachable from the integration branch, so direct `rm` of a `completed` card is
   NOT equivalent (it bypasses the landing check — see
-  `docs/coordination/RECORD_LIFECYCLE.md`). The Slice-2 retirement CODE will
+  `docs/coordination/RECORD_LIFECYCLE.md`). Since the retention-preservation
+  gate (2026-10-25), ordinary `completed` retirement is additionally
+  **decision-record-gated**: after the landing proof, every `commit`/`artifact`
+  entry of the card's closeout-declared `decision_record` must resolve against
+  committed, branch-reachable git state, and a `routine` attestation (or legacy
+  card without a record) must not contradict explicit decision-class card
+  fields (`decision_record_unresolved` / `decision_content_unpromoted`
+  refusals); `force` bypasses it and the result names the destroyed
+  decision-class content (same doc). The Slice-2 retirement CODE will
   enforce the reachability check in the sanctioned op; until then a `working`,
   `reported`, `blocked`, or `completed` card is refused without an explicit
   `force` (a `completed` card is additionally landing-gated per the contract

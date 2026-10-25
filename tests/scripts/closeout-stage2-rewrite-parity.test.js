@@ -74,11 +74,30 @@ function loadFixture(name) {
 }
 
 // Wrap a contract object as the fenced ```rewrite-parity markdown body the
-// closeout pipeline extracts from.
+// closeout pipeline extracts from. Since the retention-preservation gate
+// (owner-approved 2026-10-25), EVERY closeout body must also carry a fenced
+// ```decision-record block; these rewrite-parity fixtures are routine slices
+// (no decision-class card fields), so a routine attestation is appended. The
+// decision-record gate has its own dedicated suite
+// (tests/scripts/task-closeout-decision-record.test.js).
 function rewriteParityBody(contract) {
     return (
         "# Closeout\n\nDeclared rewrite-parity contract:\n\n```rewrite-parity\n" +
         JSON.stringify(contract, null, 2) +
+        "\n```\n\n```decision-record\n" +
+        JSON.stringify(
+            {
+                version: 1,
+                entries: [
+                    {
+                        kind: "routine",
+                        note: "rewrite-parity fixture; nothing decision-class to preserve",
+                    },
+                ],
+            },
+            null,
+            2,
+        ) +
         "\n```\n"
     );
 }
@@ -383,7 +402,18 @@ test("rewrite-parity Stage-2 gate fires through the real saveCoordinationTaskClo
         const okNoBlock = runCloseout(
             "rp-c-noblock",
             "completed",
-            "# Ordinary closeout\n\nNo rewrite-parity contract declared here.\n",
+            "# Ordinary closeout\n\nNo rewrite-parity contract declared here.\n\n```decision-record\n" +
+                JSON.stringify(
+                    {
+                        version: 1,
+                        entries: [
+                            { kind: "routine", note: "ordinary slice" },
+                        ],
+                    },
+                    null,
+                    2,
+                ) +
+                "\n```\n",
         );
         assert.equal(
             okNoBlock.task.status,

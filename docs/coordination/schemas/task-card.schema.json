@@ -223,6 +223,80 @@
     "measured_outcome": {
       "type": ["string", "null"]
     },
+    "decision_record": {
+      "type": ["object", "null"],
+      "description": "Retention-preservation declaration (owner-approved 2026-10-25). Set by the closeout gate; resolved against committed, branch-reachable git state before a completed card is retired. null on legacy cards that predate the gate.",
+      "required": ["version", "entries"],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "entries": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {
+                  "kind": { "const": "commit" },
+                  "revision": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Commit sha or resolvable revision carrying the decision content. Omitted = search reachable commit messages for the marker. Must not start with \"-\" (option-injection guard: the retirement verifier passes it to git as a positional)."
+                  },
+                  "marker": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Content marker verified in the commit message or a blob at that committed revision. Defaults to the card id. Must not start with \"-\" (option-injection guard: the retirement verifier hands it to git as a search pattern)."
+                  },
+                  "note": { "type": "string" }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": ["kind", "path"],
+                "properties": {
+                  "kind": { "const": "artifact" },
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Repo-relative durable file (docs/checkpoints/, researches/decisions/, researches/sources/, docs/planning/) carrying the card-id back-reference."
+                  },
+                  "revision": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Commit sha or resolvable revision whose committed blob must contain the marker. Omitted = search reachable revisions of the path. Must not start with \"-\" (option-injection guard: the retirement verifier passes it to git as a positional)."
+                  },
+                  "marker": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Back-reference string verified in the committed blob. Defaults to the card id. Must not start with \"-\" (option-injection guard: the retirement verifier hands it to git as a search pattern)."
+                  },
+                  "note": { "type": "string" }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {
+                  "kind": { "const": "routine" },
+                  "note": {
+                    "type": "string",
+                    "description": "Attestation that nothing decision-class needs preserving; must be the only entry and must not contradict explicit decision-class card fields."
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "last_review": {
       "type": ["object", "null"],
       "required": [

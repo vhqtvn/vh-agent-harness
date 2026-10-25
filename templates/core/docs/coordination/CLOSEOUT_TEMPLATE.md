@@ -106,6 +106,79 @@ result: proven               # proven | skipped | not-demonstrable (the crux out
     accepts the honest declaration, and the closeout routes to defer rather
     than `completed`.
 
+## Decision record (retention preservation — REQUIRED on every closeout)
+
+Every closeout must declare exactly ONE fenced ```decision-record block saying
+how decision-class knowledge (owner authorizations, materially-rejected
+alternatives, review verdicts, measured outcomes) survives retirement. Retiring
+a completed card deletes the card and its report directory — the last local
+copy — so the block's entries are verified against committed, branch-reachable
+git state before ordinary retirement (see RECORD_LIFECYCLE.md → "Retention
+preservation"). There is deliberately NO `inline` kind: content only in the
+local closeout report is not durable.
+
+````text
+```decision-record
+{
+  "version": 1,
+  "entries": [
+    { "kind": "commit",   "revision": "<sha-or-ref>", "marker": "<string>", "note": "what this preserves" },
+    { "kind": "artifact", "path": "docs/checkpoints/<file>.md", "marker": "<card-id>", "note": "post-landing material" }
+  ]
+}
+```
+````
+
+The example above shows BOTH carrier kinds; declare only the entries you
+actually need. The ALTERNATIVE shape for routine work is a single `routine`
+attestation — it must be the ONLY entry (a block mixing `routine` with
+`commit`/`artifact` entries is refused):
+
+````text
+```decision-record
+{
+  "version": 1,
+  "entries": [
+    { "kind": "routine", "note": "nothing decision-class to preserve" }
+  ]
+}
+```
+````
+
+Rules:
+
+- `kind` is exactly one of `commit` | `artifact` | `routine`.
+- Allowed keys per entry are EXACTLY the schema's per-kind set
+  (`docs/coordination/schemas/task-card.schema.json`,
+  `additionalProperties:false` in every variant): `commit` →
+  `kind | revision | marker | note`; `artifact` →
+  `kind | path | revision | marker | note`; `routine` → `kind | note` ONLY
+  (a routine attestation carries no `marker`/`revision`/`path` — nothing is
+  searched in git). The record object carries exactly `version | entries`;
+  unknown keys anywhere are refused at closeout.
+- `commit` — decision content lives in a git commit. `revision` optional
+  (omitted = the marker is searched for in reachable commit messages — the
+  home of decision content in the landing commit body, which cannot be
+  sha-pinned at closeout time). `marker` defaults to the card id; verified in
+  the commit's message or a blob at that committed revision.
+- `artifact` — content promoted to a designated durable file
+  (`docs/checkpoints/`, `researches/decisions/`, `researches/sources/`,
+  `docs/planning/`). `path` required (repo-relative); `revision` optional
+  (omitted = reachable revisions of the path are searched); the marker
+  (default: card id) must be present in the COMMITTED blob — the home of
+  post-landing material (review verdicts, objections, measured outcomes)
+  which cannot retroactively appear in the landing commit body.
+- `routine` — attestation that nothing decision-class needs preserving; must
+  be the ONLY entry and is refused (at closeout AND at retirement) when
+  explicit decision-class card fields are non-empty: `owner_notes`,
+  `measured_outcome`, non-empty `open_questions`, `last_review` /
+  `task_reviewed` history events. This is a MECHANICAL contradiction check
+  only — no semantic validator judges whether the attestation is honest.
+- Verified content means COMMITTED, branch-reachable state. Working-tree
+  files, uncommitted edits, reflog-only commits, and local-only report prose
+  never count. Verification proves local-repository reachability only;
+  cross-machine availability comes from the normal push/release flow.
+
 ## Rewrite-parity contract (only for explicitly-declared deletion/rewrite slices)
 
 When the task was an explicitly-declared deletion or rewrite slice — the task
