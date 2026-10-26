@@ -110,20 +110,37 @@ result: proven               # proven | skipped | not-demonstrable (the crux out
 
 Every closeout must declare exactly ONE fenced ```decision-record block saying
 how decision-class knowledge (owner authorizations, materially-rejected
-alternatives, review verdicts, measured outcomes) survives retirement. Retiring
-a completed card deletes the card and its report directory — the last local
-copy — so the block's entries are verified against committed, branch-reachable
-git state before ordinary retirement (see RECORD_LIFECYCLE.md → "Retention
-preservation"). There is deliberately NO `inline` kind: content only in the
-local closeout report is not durable.
+alternatives, non-approve review verdicts, measured outcomes) survives
+retirement. Retiring a completed card deletes the card and its report
+directory — the last local copy — so the block's entries are verified against
+committed, branch-reachable git state before ordinary retirement (see
+RECORD_LIFECYCLE.md → "Retention preservation"). There is deliberately NO
+`inline` kind: content only in the local closeout report is not durable.
+
+**Coverage binds content, never presence** (owner-approved 2026-10-26): every
+non-empty decision-class field must be covered by an entry declaring `carries`
+with a verbatim excerpt from that field's own content, and at retirement that
+excerpt must be present — with the card-id anchor — in the same committed
+carrier. A marker alone (including the card-id default the landing trailer
+satisfies) covers nothing.
 
 ````text
 ```decision-record
 {
   "version": 1,
   "entries": [
-    { "kind": "commit",   "revision": "<sha-or-ref>", "marker": "<string>", "note": "what this preserves" },
-    { "kind": "artifact", "path": "docs/checkpoints/<file>.md", "marker": "<card-id>", "note": "post-landing material" }
+    { "kind": "commit",
+      "carries": {
+        "owner_notes": "OWNER 2026-10-26: approved the bounded correction over a full rewrite",
+        "history.task_reviewed": "Blocked: ownership question must be answered first"
+      },
+      "note": "owner decision + review verdict in the landing commit body" },
+    { "kind": "artifact",
+      "path": "docs/checkpoints/<file>.md",
+      "carries": {
+        "measured_outcome": "regressions green; 3 concerns reproduced and corrected"
+      },
+      "note": "post-landing measured outcome in a durable file" }
   ]
 }
 ```
@@ -132,7 +149,8 @@ local closeout report is not durable.
 The example above shows BOTH carrier kinds; declare only the entries you
 actually need. The ALTERNATIVE shape for routine work is a single `routine`
 attestation — it must be the ONLY entry (a block mixing `routine` with
-`commit`/`artifact` entries is refused):
+`commit`/`artifact` entries is refused) and is valid only when every
+decision-class field is empty:
 
 ````text
 ```decision-record
@@ -151,33 +169,49 @@ Rules:
 - Allowed keys per entry are EXACTLY the schema's per-kind set
   (`docs/coordination/schemas/task-card.schema.json`,
   `additionalProperties:false` in every variant): `commit` →
-  `kind | revision | marker | note`; `artifact` →
-  `kind | path | revision | marker | note`; `routine` → `kind | note` ONLY
-  (a routine attestation carries no `marker`/`revision`/`path` — nothing is
-  searched in git). The record object carries exactly `version | entries`;
-  unknown keys anywhere are refused at closeout.
+  `kind | revision | marker | carries | note`; `artifact` →
+  `kind | path | revision | marker | carries | note`; `routine` →
+  `kind | note` ONLY (a routine attestation carries no `marker` /
+  `revision` / `path` / `carries` — nothing is searched in git). The record
+  object carries exactly `version | entries`; unknown keys anywhere are
+  refused at closeout.
 - `commit` — decision content lives in a git commit. `revision` optional
-  (omitted = the marker is searched for in reachable commit messages — the
-  home of decision content in the landing commit body, which cannot be
-  sha-pinned at closeout time). `marker` defaults to the card id; verified in
-  the commit's message or a blob at that committed revision.
+  (omitted = the landing-commit body pattern — the card-id anchor and every
+  excerpt are searched for in reachable commit messages; the landing commit
+  cannot be sha-pinned at closeout time). `marker` defaults to the card id
+  and is verified in the commit's message or a blob at that committed
+  revision — but a marker proves presence only and covers NO field.
 - `artifact` — content promoted to a designated durable file
   (`docs/checkpoints/`, `researches/decisions/`, `researches/sources/`,
   `docs/planning/`). `path` required (repo-relative); `revision` optional
-  (omitted = reachable revisions of the path are searched); the marker
-  (default: card id) must be present in the COMMITTED blob — the home of
-  post-landing material (review verdicts, objections, measured outcomes)
-  which cannot retroactively appear in the landing commit body.
+  (omitted = reachable revisions of the path are searched); the card-id
+  back-reference (the default marker) must be present in the COMMITTED blob —
+  the home of post-landing material which cannot retroactively appear in the
+  landing commit body.
+- `carries` — the coverage declaration: a map of decision-class field name →
+  verbatim excerpt. Fields: `owner_notes` | `measured_outcome` |
+  `open_questions` | `last_review` | `history.task_reviewed`. Excerpt rules:
+  a single line, at least 24 characters (trimmed), drawn from the covered
+  field's CURRENT content (whitespace-normalized), not equal to the card id
+  or the entry marker, no leading dash. Put the same excerpt line — ideally
+  the full decision text — into the landing commit body (or the durable
+  file) so the verified carrier and the declaration match.
 - `routine` — attestation that nothing decision-class needs preserving; must
   be the ONLY entry and is refused (at closeout AND at retirement) when
-  explicit decision-class card fields are non-empty: `owner_notes`,
-  `measured_outcome`, non-empty `open_questions`, `last_review` /
-  `task_reviewed` history events. This is a MECHANICAL contradiction check
-  only — no semantic validator judges whether the attestation is honest.
+  decision-class card fields are non-empty: `owner_notes`, `measured_outcome`,
+  non-empty `open_questions`, and NON-APPROVE review signals (`last_review` /
+  `task_reviewed` with a status other than `completed` — an ordinary
+  clean-approve review is a process record and does NOT block routine
+  retirement). This is a MECHANICAL classification only — no semantic
+  validator judges whether the attestation is honest.
 - Verified content means COMMITTED, branch-reachable state. Working-tree
   files, uncommitted edits, reflog-only commits, and local-only report prose
   never count. Verification proves local-repository reachability only;
   cross-machine availability comes from the normal push/release flow.
+- **Private content:** never commit sensitive owner notes merely to satisfy
+  the gate. If decision-class content genuinely cannot be promoted, the
+  documented path is the operator force at retirement (the destructive
+  warning names what it destroys) — never a hollow declaration.
 
 ## Rewrite-parity contract (only for explicitly-declared deletion/rewrite slices)
 

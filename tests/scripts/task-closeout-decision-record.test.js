@@ -1,5 +1,6 @@
 // Decision-record closeout gate tests (retention preservation,
-// owner-approved 2026-10-25).
+// owner-approved 2026-10-25; v2 coverage rule + review classification
+// owner-approved 2026-10-26).
 //
 // Pins the CLOSEOUT half of the retention-preservation gate in
 // saveCoordinationTaskCloseout: every new closeout must declare exactly ONE
@@ -9,18 +10,27 @@
 // the task-card schema's per-kind allowed keys EXACTLY (unknown keys,
 // marker-on-routine, and record-level junk refused — B2); JSON bodies that
 // parse to null/primitives/arrays refuse with a collected StateError, never
-// a raw TypeError (B4); the MECHANICAL routine contradiction check against
-// explicit decision-class card fields (owner_notes, measured_outcome incl.
-// the incoming closeout option, non-empty open_questions, last_review /
-// task_reviewed history); the parsed record persisting on the card for the
-// retirement verifier; and schema conformance of records produced by
-// successful closeouts (rendered task-card.schema.json). Dash-prefixed
-// markers/revisions are refused at declaration naming the option-injection
-// rule (F1); the retirement-side half of that pin lives in
+// a raw TypeError (B4); the COVERAGE rule (v2, C1) — every non-empty
+// decision-class card field (owner_notes, measured_outcome incl. the
+// incoming closeout option, non-empty open_questions, non-approve
+// last_review / task_reviewed signals) must be covered by an entry
+// declaring carries with a verbatim excerpt DRAWN FROM that field's content
+// (a bare {kind:commit} or marker-only entry covers NOTHING — the landing
+// trailer's default marker must not satisfy content coverage); the excerpt
+// structural guards (single line, >= 24 chars trimmed, not the card id, not
+// the marker, no leading dash, known field names); the C2 review
+// classification (a clean-approve review is a PROCESS record — routine
+// closeout succeeds; a non-approve verdict is decision-class — routine
+// refused naming last_review + history.task_reviewed); the parsed record
+// persisting on the card for the retirement verifier; and schema
+// conformance of records produced by successful closeouts (rendered
+// task-card.schema.json). Dash-prefixed markers/revisions/excerpts are
+// refused at declaration naming the option-injection rule (F1); the
+// retirement-side half of that pin lives in
 // tests/scripts/task-retire-decision-record.test.js.
 //
-// The RETIREMENT half (git resolution of declared pointers, legacy
-// compatibility, force warning) is pinned by
+// The RETIREMENT half (git resolution of declared pointers + excerpts,
+// legacy compatibility, force warning) is pinned by
 // tests/scripts/task-retire-decision-record.test.js.
 //
 // Run:  vh-agent-harness exec node --test tests/scripts/task-closeout-decision-record.test.js
@@ -360,11 +370,14 @@ test("decision-record closeout gate: block required, kinds enforced, routine con
             "must be the ONLY entry",
         );
 
-        // (9) VALID commit+artifact entries -> closeout SUCCEEDS and the
-        //     parsed decision_record PERSISTS on the card (the retirement
-        //     verifier's input). Card owner_notes do NOT contradict
-        //     commit/artifact entries — the contradiction check is
-        //     routine-only.
+        // (9) VALID covering commit+artifact entries (retention gate v2,
+        //     owner-approved 2026-10-26): the commit entry COVERS owner_notes
+        //     via a verbatim excerpt from the field's own content, the
+        //     artifact entry covers the incoming measured_outcome — closeout
+        //     SUCCEEDS and the parsed decision_record PERSISTS on the card
+        //     (the retirement verifier's input). Marker-only or bare entries
+        //     are refused when decision-class fields are non-empty (pinned
+        //     below as the C1 cases).
         writeWorkingCard(isoRoot, "dr-valid", ALIAS, {
             owner_notes: ["OWNER APPROVAL 2026-10-25: approved."],
         });
@@ -377,12 +390,19 @@ test("decision-record closeout gate: block required, kinds enforced, routine con
                     entries: [
                         {
                             kind: "commit",
-                            marker: "OWNER-AUTH dr-valid",
+                            carries: {
+                                owner_notes:
+                                    "OWNER APPROVAL 2026-10-25: approved.",
+                            },
                             note: "authorization + rejected alternative in the landing commit body",
                         },
                         {
                             kind: "artifact",
                             path: "docs/checkpoints/2026-10-25-dr-valid.md",
+                            carries: {
+                                measured_outcome:
+                                    "decision content preserved in git",
+                            },
                             note: "measured outcome in a durable file",
                         },
                     ],
@@ -402,6 +422,9 @@ test("decision-record closeout gate: block required, kinds enforced, routine con
         );
         assert.equal(stored.decision_record.entries[0].kind, "commit");
         assert.equal(stored.decision_record.entries[1].kind, "artifact");
+        assert.deepEqual(stored.decision_record.entries[0].carries, {
+            owner_notes: "OWNER APPROVAL 2026-10-25: approved.",
+        });
 
         // (10) routine on a clean card -> SUCCEEDS (the one-line routine
         //      burden for ordinary work — no mandatory docs).
@@ -532,6 +555,349 @@ test("decision-record closeout gate: block required, kinds enforced, routine con
             'must not start with "-"',
             "revision",
         );
+
+        // =====================================================================
+        // Retention gate v2 (owner-approved 2026-10-26) — the COVERAGE rule.
+        //
+        // (15) C1, the owner's exact scenario: card whose owner_notes carry a
+        //      consequential owner decision (with provenance) + an important
+        //      rejected alternative; closeout declares the BARE
+        //      {kind:"commit"} entry (default marker = card id, satisfied by
+        //      the landing trailer itself). Pre-v2 this closeout SUCCEEDED
+        //      (reproduced 2026-10-26 against HEAD b788b438) and retirement
+        //      then destroyed the only copy. Now refused naming owner_notes.
+        // =====================================================================
+        writeWorkingCard(isoRoot, "dr-c1-bare", ALIAS, {
+            owner_notes: [
+                "OWNER 2026-10-26 (chat m0051): approved the bounded-correction path for the retention gate",
+                "REJECTED ALTERNATIVE: dual-ledger archive — violates the no-new-ledger constraint",
+            ],
+        });
+        expectCloseoutRefusal(
+            "dr-c1-bare",
+            "completed",
+            decisionRecordBlock({
+                version: 1,
+                entries: [{ kind: "commit" }],
+            }),
+            "do not COVER",
+            "owner_notes",
+            "carries",
+        );
+
+        // (15b) MARKER-ONLY entry (marker present in some carrier) with
+        //       non-empty owner_notes -> refused: a marker proves presence of
+        //       an arbitrary string, never that the field's content survived.
+        writeWorkingCard(isoRoot, "dr-c1-marker", ALIAS, {
+            owner_notes: ["OWNER APPROVAL 2026-10-26: approved the marker carve-out"],
+        });
+        expectCloseoutRefusal(
+            "dr-c1-marker",
+            "completed",
+            decisionRecordBlock({
+                version: 1,
+                entries: [
+                    { kind: "commit", marker: "OWNER-AUTH dr-c1-marker" },
+                ],
+            }),
+            "do not COVER",
+            "owner_notes",
+        );
+
+        // (16) carries excerpt NOT drawn from the covered field's content
+        //      -> refused naming the unbound declaration (anti-fake-pointer
+        //      binding).
+        writeWorkingCard(isoRoot, "dr-c1-unbound", ALIAS, {
+            owner_notes: ["OWNER APPROVAL 2026-10-26: approved the excerpt binding rule"],
+        });
+        expectCloseoutRefusal(
+            "dr-c1-unbound",
+            "completed",
+            decisionRecordBlock({
+                version: 1,
+                entries: [
+                    {
+                        kind: "commit",
+                        carries: {
+                            owner_notes:
+                                "this line appears nowhere in the covered field",
+                        },
+                    },
+                ],
+            }),
+            "NOT drawn from that field's current content",
+            "owner_notes",
+        );
+
+        // (17) Excerpt structural guards.
+        //      (a) too short (< 24 trimmed) — trivially generic strings must
+        //          not satisfy coverage by accident;
+        //      (b) equals the card id — the landing trailer's default marker
+        //          must NOT satisfy content coverage;
+        //      (c) equals the entry marker;
+        //      (d) leading dash — the option-injection class refused for
+        //          markers/revisions is refused for excerpts too;
+        //      (e) multi-line;
+        //      (f) unknown carries field key;
+        //      (g) carries on a routine entry (unknown key — routine allows
+        //          kind | note only).
+        writeWorkingCard(isoRoot, "dr-exc-short", ALIAS, {
+            owner_notes: ["OWNER APPROVAL 2026-10-26: approved the length floor rule"],
+        });
+        expectCloseoutRefusal(
+            "dr-exc-short",
+            "completed",
+            decisionRecordBlock({
+                version: 1,
+                entries: [
+                    {
+                        kind: "commit",
+                        carries: { owner_notes: "approved the floor" },
+                    },
+                ],
+            }),
+            "at least 24 characters",
+        );
+        // Card id >= 24 chars so the card-id rule fires (a short id would
+        // trip the length floor first).
+        writeWorkingCard(isoRoot, "dr-exc-cardid-equals-excerpt", ALIAS, {
+            owner_notes: ["OWNER APPROVAL 2026-10-26: approved the card-id refusal rule"],
+        });
+        expectCloseoutRefusal(
+            "dr-exc-cardid-equals-excerpt",
+            "completed",
+            decisionRecordBlock({
+                version: 1,
+                entries: [
+                    {
+                        kind: "commit",
+                        carries: {
+                            owner_notes: "dr-exc-cardid-equals-excerpt",
+                        },
+                    },
+                ],
+            }),
+            "must not equal the card id",
+        );
+        writeWorkingCard(isoRoot, "dr-exc-marker", ALIAS, {
+            owner_notes: ["OWNER APPROVAL 2026-10-26: approved the marker refusal rule"],
+        });
+        expectCloseoutRefusal(
+            "dr-exc-marker",
+            "completed",
+            decisionRecordBlock({
+                version: 1,
+                entries: [
+                    {
+                        kind: "commit",
+                        marker: "OWNER-AUTH dr-exc-marker",
+                        carries: {
+                            owner_notes: "OWNER-AUTH dr-exc-marker",
+                        },
+                    },
+                ],
+            }),
+            "must not equal the entry's marker",
+        );
+        writeWorkingCard(isoRoot, "dr-exc-dash", ALIAS, {
+            owner_notes: ["OWNER APPROVAL 2026-10-26: approved the dash refusal rule"],
+        });
+        expectCloseoutRefusal(
+            "dr-exc-dash",
+            "completed",
+            decisionRecordBlock({
+                version: 1,
+                entries: [
+                    {
+                        kind: "commit",
+                        carries: {
+                            owner_notes:
+                                "-v OWNER APPROVAL 2026-10-26: approved the dash refusal rule",
+                        },
+                    },
+                ],
+            }),
+            'must not start with "-"',
+            "excerpt",
+        );
+        writeWorkingCard(isoRoot, "dr-exc-multiline", ALIAS, {
+            owner_notes: [
+                "OWNER APPROVAL 2026-10-26: approved the single-line rule",
+            ],
+        });
+        expectCloseoutRefusal(
+            "dr-exc-multiline",
+            "completed",
+            decisionRecordBlock({
+                version: 1,
+                entries: [
+                    {
+                        kind: "commit",
+                        carries: {
+                            owner_notes:
+                                "OWNER APPROVAL 2026-10-26: approved the single-line rule\nsecond line",
+                        },
+                    },
+                ],
+            }),
+            "must be a single line",
+        );
+        writeWorkingCard(isoRoot, "dr-exc-unknownfield", ALIAS, {
+            owner_notes: ["OWNER APPROVAL 2026-10-26: approved the known-fields rule"],
+        });
+        expectCloseoutRefusal(
+            "dr-exc-unknownfield",
+            "completed",
+            decisionRecordBlock({
+                version: 1,
+                entries: [
+                    {
+                        kind: "commit",
+                        carries: {
+                            secret_notes:
+                                "OWNER APPROVAL 2026-10-26: approved the known-fields rule",
+                        },
+                    },
+                ],
+            }),
+            "not a decision-class field name",
+        );
+        writeWorkingCard(isoRoot, "dr-exc-routine-carries", ALIAS);
+        expectCloseoutRefusal(
+            "dr-exc-routine-carries",
+            "reported",
+            decisionRecordBlock({
+                version: 1,
+                entries: [
+                    {
+                        kind: "routine",
+                        note: "x",
+                        carries: { owner_notes: "a routine entry covers nothing at all" },
+                    },
+                ],
+            }),
+            "unknown key",
+            '"carries"',
+        );
+
+        // =====================================================================
+        // (18) C2 review classification (owner-approved 2026-10-26): an
+        //      ordinary CLEAN-APPROVE review verdict (last_review.status =
+        //      "completed", task_reviewed events with status "completed") is
+        //      a PROCESS record — a routine closeout on a card that carries
+        //      one SUCCEEDS. A NON-APPROVE verdict (blocked / ready /
+        //      reported / cancelled) changed the card's trajectory and is
+        //      decision-class: a routine closeout is refused naming
+        //      last_review + history.task_reviewed.
+        // =====================================================================
+        writeWorkingCard(isoRoot, "dr-c2-approve", ALIAS, {
+            last_review: {
+                path: ".local/coordinator/reports/dr-c2-approve/review.md",
+                reviewed_at: "2026-10-26T00:00:00Z",
+                title: "Coordinator Review",
+                status: "completed",
+                summary: "Approve. Routine work; nothing decision-class.",
+                next_action: "retire",
+            },
+            history: [
+                {
+                    at: "2026-10-26T00:00:00Z",
+                    event: "task_reviewed",
+                    status: "completed",
+                    note: "clean approve recorded",
+                },
+            ],
+        });
+        const c2Approve = runCloseout(
+            "dr-c2-approve",
+            "completed",
+            "# Routine closeout\n\n" + decisionRecordBlock(routineRecord()),
+        );
+        assert.equal(
+            c2Approve.task.status,
+            "completed",
+            "(18) routine closeout after a clean-approve review must succeed (process record, not decision-class)",
+        );
+
+        writeWorkingCard(isoRoot, "dr-c2-blocked", ALIAS, {
+            last_review: {
+                path: ".local/coordinator/reports/dr-c2-blocked/review.md",
+                reviewed_at: "2026-10-26T00:00:00Z",
+                title: "Coordinator Review",
+                status: "blocked",
+                summary: "Blocked: ownership question must be answered first",
+                next_action: "rework",
+            },
+            history: [
+                {
+                    at: "2026-10-26T00:00:00Z",
+                    event: "task_reviewed",
+                    status: "blocked",
+                    note: "blocked: ownership question must be answered first",
+                },
+                {
+                    at: "2026-10-26T00:01:00Z",
+                    event: "task_reviewed",
+                    status: "ready",
+                    note: "re-opened for rework after the blocker resolved",
+                },
+            ],
+        });
+        expectCloseoutRefusal(
+            "dr-c2-blocked",
+            "completed",
+            decisionRecordBlock(routineRecord()),
+            "last_review",
+            "history.task_reviewed",
+            "blocked",
+        );
+
+        // (18b) The honest path for a non-approve review: covering entries
+        //       with excerpts drawn from the review fields -> closeout
+        //       succeeds (the promotion the refusal asks for).
+        writeWorkingCard(isoRoot, "dr-c2-blocked-covered", ALIAS, {
+            last_review: {
+                path: ".local/coordinator/reports/dr-c2-blocked-covered/review.md",
+                reviewed_at: "2026-10-26T00:00:00Z",
+                title: "Coordinator Review",
+                status: "blocked",
+                summary: "Blocked: ownership question must be answered first",
+                next_action: "rework",
+            },
+            history: [
+                {
+                    at: "2026-10-26T00:00:00Z",
+                    event: "task_reviewed",
+                    status: "blocked",
+                    note: "blocked: ownership question must be answered first",
+                },
+            ],
+        });
+        const c2Covered = runCloseout(
+            "dr-c2-blocked-covered",
+            "completed",
+            "# Closeout\n\n" +
+                decisionRecordBlock({
+                    version: 1,
+                    entries: [
+                        {
+                            kind: "commit",
+                            carries: {
+                                last_review:
+                                    "Blocked: ownership question must be answered first",
+                                "history.task_reviewed":
+                                    "blocked: ownership question must be answered first",
+                            },
+                            note: "review verdict + reasoning promoted to the landing commit body",
+                        },
+                    ],
+                }),
+        );
+        assert.equal(
+            c2Covered.task.status,
+            "completed",
+            "(18b) non-approve review covered by carries excerpts must close out",
+        );
     } finally {
         if (prevCoordRoot === undefined) {
             delete process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
@@ -582,8 +948,8 @@ test("decision-record schema conformance: successful closeouts produce schema-va
             "schema checker must reject empty entries",
         );
 
-        // Real closeout producing a commit+artifact record (card
-        // owner_notes do not contradict non-routine entries).
+        // Real closeout producing a covering commit+artifact record (v2:
+        // every decision-class field covered by a carries excerpt).
         writeWorkingCard(isoRoot, "dr-conf-carriers", ALIAS, {
             owner_notes: ["OWNER APPROVAL 2026-10-25: approved."],
         });
@@ -596,12 +962,19 @@ test("decision-record schema conformance: successful closeouts produce schema-va
                     entries: [
                         {
                             kind: "commit",
-                            marker: "OWNER-AUTH dr-conf-carriers",
+                            carries: {
+                                owner_notes:
+                                    "OWNER APPROVAL 2026-10-25: approved.",
+                            },
                             note: "authorization in the landing commit body",
                         },
                         {
                             kind: "artifact",
                             path: "docs/checkpoints/2026-10-25-dr-conf.md",
+                            carries: {
+                                measured_outcome:
+                                    "decision content preserved in git",
+                            },
                             note: "measured outcome in a durable file",
                         },
                     ],
@@ -614,7 +987,7 @@ test("decision-record schema conformance: successful closeouts produce schema-va
         assert.deepEqual(
             schemaErrors(carriers, DR_SUBSCHEMA, "decision_record"),
             [],
-            "commit+artifact record from a successful closeout must be schema-valid",
+            "covering commit+artifact record from a successful closeout must be schema-valid",
         );
 
         // Real closeout producing a routine record.

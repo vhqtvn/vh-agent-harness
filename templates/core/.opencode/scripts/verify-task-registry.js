@@ -981,7 +981,13 @@ function main() {
                                 {
                                     kind: "commit",
                                     marker: primary.task.task_id,
-                                    note: "the earlier coordinator review verdict is decision-class post-commit material; this verification fixture never retires, so the pointer is structurally declared, never resolved",
+                                    carries: {
+                                        last_review:
+                                            "The slice is directionally correct, but another pass is still required",
+                                        "history.task_reviewed":
+                                            "Return this task to ready so the next execution session can claim it explicitly",
+                                    },
+                                    note: "the earlier coordinator review verdict (a non-completed rework review — decision-class under the v2 classification) is covered by these excerpts; this verification fixture never retires, so the pointer is structurally declared, never resolved",
                                 },
                             ],
                         },

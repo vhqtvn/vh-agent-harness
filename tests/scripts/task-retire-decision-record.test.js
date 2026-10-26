@@ -1,24 +1,39 @@
 // Decision-record RETIREMENT gate tests (retention preservation,
-// owner-approved 2026-10-25).
+// owner-approved 2026-10-25; v2 coverage rule + review classification
+// owner-approved 2026-10-26).
 //
 // Pins the retirement half of the gate in deleteCoordinationTask (completed
 // branch, AFTER the unchanged landing-proof check):
 //
 //   - E2E (the owner's acceptance test): a completed card whose decision-class
 //     content (consequential decision + materially-rejected alternative +
-//     owner-authorization provenance) is declared via commit/artifact entries
-//     retires ONLY after every pointer resolves against committed,
-//     branch-reachable git state — and after retirement the content is
-//     recoverable FROM SURVIVING GIT STATE ONLY (fresh git processes; the
-//     card + report dir are gone). RED against the pre-gate behavior was
-//     demonstrated on 2026-10-25 (HEAD b7af07ed): the un-patched retirement
-//     deleted the only copy and no git query could recover it.
+//     owner-authorization provenance) is declared via COVERING commit/artifact
+//     entries (carries: field -> verbatim excerpt) retires ONLY after every
+//     pointer resolves against committed, branch-reachable git state — and
+//     after retirement the content is recoverable FROM SURVIVING GIT STATE
+//     ONLY (fresh git processes; the card + report dir are gone), including
+//     the C3 chain: a fresh session knowing ONLY the card id retrieves the
+//     decision content via two bounded queries (trailer grep -> body). RED
+//     against the pre-gate behavior was demonstrated on 2026-10-25 (HEAD
+//     b7af07ed): the un-patched retirement deleted the only copy and no git
+//     query could recover it.
+//   - C1 (owner concern 2026-10-26, trivial satisfaction): v1-shape stored
+//     records (bare {kind:commit} whose default card-id marker the landing
+//     trailer satisfies, or marker-only entries) with non-empty decision-
+//     class fields are REFUSED — coverage binds content, never presence.
+//   - C1 negatives: excerpt absent from the carrier, excerpt only in an
+//     un-anchored commit (anchor rule), short stored excerpt (length floor).
+//   - C2 (owner concern 2026-10-26, routine-after-review burden): a routine
+//     task with a clean-approve review (status "completed" — a PROCESS
+//     record) retires through the REAL lifecycle with zero promotion; a
+//     non-approve review verdict (blocked) still blocks a routine record,
+//     naming last_review + history.task_reviewed.
 //   - Negative (a): entry pointing at local report content (gitignored path,
 //     no committed carrier) -> refused, item NAMED.
 //   - Negative (b): artifact file committed WITHOUT the back-ref, back-ref
 //     added only in the WORKING TREE -> refused, item NAMED.
-//   - Negative (c): routine/legacy card contradicted by explicit
-//     decision-class card fields -> refused, fields NAMED.
+//   - Negative (c1): legacy card contradicted by explicit decision-class
+//     card fields -> refused, fields NAMED.
 //   - Negative (d): force -> deletion proceeds AND the destructive warning
 //     NAMES the decision-class content about to be destroyed.
 //   - Legacy compatibility: completed card with NO decision_record retires
@@ -26,7 +41,8 @@
 //   - Ordering pin: landing proof runs FIRST (no trailer -> landing_not_confirmed
 //     even when the decision record is unresolved).
 //   - Declared-revision entries: exact-sha commit + artifact verified
-//     precisely; unresolvable and orphaned revisions refused.
+//     precisely (anchor + excerpts for covering entries); unresolvable and
+//     orphaned revisions refused; pinned excerpt miss named.
 //   - F1 option injection: dash-prefixed marker refused structurally at
 //     retirement AND un-verifiable by the git layer (git grep -e searches
 //     the declared tree only); dash-prefixed revision fails closed.
@@ -69,11 +85,16 @@ const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const STATE_LIB = path.join(REPO_ROOT, ".opencode", "scripts", "state-lib.js");
 const {
     bindSessionName,
+    saveCoordinationTask,
+    readyCoordinationTask,
+    activateCoordinationTask,
     saveCoordinationTaskCloseout,
+    reviewCoordinationTask,
     deleteCoordinationTask,
     verifyDecisionRecordForRetirement,
     commitMessageContains,
     committedBlobAt,
+    computeTaskDesignDigest,
 } = await import(pathToFileURL(STATE_LIB).href);
 
 // --- hermetic scratch git repo helpers (mirrors task-delete-retirement) ------
@@ -225,11 +246,18 @@ test("decision-record retirement gate: E2E recovery + negatives + legacy compat 
 
         // =====================================================================
         // E2E — the owner's acceptance test (GREEN on the gated path).
+        // Retention gate v2 (owner-approved 2026-10-26): the commit entry
+        // COVERS owner_notes via a verbatim excerpt from the field's own
+        // content (carries), and the artifact entry covers the measured
+        // outcome — the post-landing material pattern. Marker-only entries
+        // cover nothing; a bare {kind:commit} is refused when decision-class
+        // fields are non-empty (see the C1 regression below).
         // =====================================================================
         const ID = "dr-e2e";
         const DECISION = "DECISION dr-e2e: adopt the retention-preservation gate";
         const REJECTED = "REJECTED ALTERNATIVE dr-e2e: dual-ledger archive (violates the no-new-ledger constraint)";
         const OWNER_AUTH = "OWNER-AUTH dr-e2e: owner approved 2026-10-25, five conditions";
+        const MEASURED = "Measured outcome: gate refuses unpromoted retirement.";
         const ARTIFACT_REL = "docs/checkpoints/2026-10-25-dr-e2e.md";
 
         // Card carries the decision-class provenance up front.
@@ -238,19 +266,25 @@ test("decision-record retirement gate: E2E recovery + negatives + legacy compat 
         });
 
         // Closeout declares BOTH carriers BEFORE they exist (revision omitted
-        // = search mode — the landing commit cannot be sha-pinned at closeout).
-        closeout(ID, [
-            {
-                kind: "commit",
-                marker: OWNER_AUTH,
-                note: "authorization + decision + rejected alternative in the landing commit body",
-            },
-            {
-                kind: "artifact",
-                path: ARTIFACT_REL,
-                note: "post-landing measured outcome + rejected alternative in a durable file",
-            },
-        ]);
+        // = search mode — the landing commit cannot be sha-pinned at closeout)
+        // and binds CONTENT: each covered field's verbatim excerpt.
+        closeout(
+            ID,
+            [
+                {
+                    kind: "commit",
+                    carries: { owner_notes: OWNER_AUTH },
+                    note: "authorization + decision + rejected alternative in the landing commit body",
+                },
+                {
+                    kind: "artifact",
+                    path: ARTIFACT_REL,
+                    carries: { measured_outcome: MEASURED },
+                    note: "post-landing measured outcome in a durable file",
+                },
+            ],
+            { measuredOutcome: MEASURED },
+        );
 
         // Landing commit: trailer + ALL decision content in the BODY.
         fs.writeFileSync(path.join(scratch.dir, "e2e.txt"), "landed\n");
@@ -260,13 +294,16 @@ test("decision-record retirement gate: E2E recovery + negatives + legacy compat 
             `land retention gate\n\nTask-Card: ${ID}\n\n${DECISION}\n${REJECTED}\n${OWNER_AUTH}\n`,
         );
         // Promoted durable file, committed WITH the card-id back-reference
-        // (and the decision content it preserves).
+        // (and the decision content + measured outcome it preserves). The
+        // measured-outcome line is WRAPPED across two lines in the doc — the
+        // excerpt check is whitespace-normalized, so wrapped carriers still
+        // verify.
         fs.mkdirSync(path.dirname(path.join(scratch.dir, ARTIFACT_REL)), {
             recursive: true,
         });
         fs.writeFileSync(
             path.join(scratch.dir, ARTIFACT_REL),
-            `# Retention gate decision record\n\nTask-Card: ${ID}\n\n${DECISION}\n${REJECTED}\nMeasured outcome: gate refuses unpromoted retirement.\n`,
+            `# Retention gate decision record\n\nTask-Card: ${ID}\n\n${DECISION}\n${REJECTED}\nMeasured outcome: gate refuses unpromoted\nretirement.\n`,
         );
         const artifactSha = commitAll(
             scratch.git,
@@ -274,7 +311,8 @@ test("decision-record retirement gate: E2E recovery + negatives + legacy compat 
             `docs: promote ${ID} decision record\n\nTask-Card: ${ID}\n`,
         );
 
-        // Retire: landing proven + every pointer resolved -> DELETED.
+        // Retire: landing proven + every pointer resolved + coverage
+        // content-bound -> DELETED.
         const done = retire(ID);
         assert.equal(done.ok, true, `E2E retire should succeed: ${JSON.stringify(done)}`);
         assert.equal(cardExists(isoRoot, ID), false, "E2E: card must be gone");
@@ -309,6 +347,47 @@ test("decision-record retirement gate: E2E recovery + negatives + legacy compat 
             containsLanding.status === 0 &&
                 containsLanding.stdout.trim() !== "",
             "E2E recovery: the landing commit itself remains branch-reachable (reachability, not object existence)",
+        );
+        // C3 (owner concern, 2026-10-26): a FRESH session knowing ONLY the
+        // card id must retrieve the decision content via BOUNDED git
+        // queries. The chain: (1) trailer grep -> landing sha; (2) read that
+        // commit's body -> the anchored excerpt (verbatim owner-decision
+        // content) is right there. The card and its decision_record are
+        // destroyed; the landing commit body is the self-contained anchor.
+        const c3Shas = scratch
+            .git([
+                "log",
+                "--branches",
+                "--fixed-strings",
+                "--format=%H",
+                `--grep=Task-Card: ${ID}`,
+            ])
+            .stdout.trim()
+            .split(/\r?\n/)
+            .filter(Boolean);
+        assert.ok(
+            c3Shas.length >= 1,
+            "C3 retrieval: card-id trailer grep must find at least one carrier commit",
+        );
+        // Bounded chain: read each trailer hit's body until the decision
+        // content is found (a fresh session cannot know WHICH trailer-
+        // bearing commit carries it — the chain is grep, then per-hit body
+        // reads, and the hit count is small by construction).
+        const c3Bodies = c3Shas.map((sha) =>
+            scratch.git(["log", "-1", "--format=%B", sha]).stdout,
+        );
+        const c3Joined = c3Bodies.join("\n--\n");
+        assert.ok(
+            c3Joined.includes(OWNER_AUTH),
+            "C3 retrieval: owner-authorization provenance recoverable from a trailer-hit commit body (card-id only, bounded queries)",
+        );
+        assert.ok(
+            c3Joined.includes(REJECTED),
+            "C3 retrieval: materially-rejected alternative recoverable from a trailer-hit commit body",
+        );
+        assert.ok(
+            c3Joined.includes(DECISION),
+            "C3 retrieval: consequential decision recoverable from a trailer-hit commit body",
         );
         const ownerAuthRecovered = scratch.gitRaw([
             "log",
@@ -354,9 +433,27 @@ test("decision-record retirement gate: E2E recovery + negatives + legacy compat 
                 artifactBlob.stdout.includes(DECISION) &&
                 artifactBlob.stdout.includes(REJECTED) &&
                 artifactBlob.stdout.includes(
-                    "Measured outcome: gate refuses unpromoted retirement.",
+                    "Measured outcome: gate refuses unpromoted",
                 ),
             "E2E recovery: durable-file content (card-id back-ref + decision + rejected alternative + measured outcome) retrievable from the COMMITTED blob via git show <reachable-sha>:<path>",
+        );
+        // C3 artifact chain (bounded): a fresh session that does not know
+        // the artifact path finds the promoted content via the card-id
+        // pickaxe: the commit whose tree INTRODUCED the card-id string.
+        const pickaxe = scratch.gitRaw([
+            "log",
+            "--branches",
+            "--format=%H",
+            `-S${ID}`,
+        ]);
+        assert.ok(
+            pickaxe.status === 0 &&
+                pickaxe.stdout
+                    .trim()
+                    .split(/\r?\n/)
+                    .filter(Boolean)
+                    .includes(artifactSha),
+            "C3 retrieval: card-id pickaxe (-S) finds the commit that introduced the anchored artifact — the bounded discoverability chain for file-carried content",
         );
 
         // NON-VACUITY fixture (negative control): the same OUTPUT-CONTAINS
@@ -551,9 +648,279 @@ test("decision-record retirement gate: E2E recovery + negatives + legacy compat 
         }
 
         // =====================================================================
-        // Negative (c2): NEW-STYLE routine card whose fields appeared AFTER
-        // closeout (simulated review verdict via last_review + task_reviewed
-        // history) -> refused at retirement, field named.
+        // C1 regression (owner concern, 2026-10-26 — TRIVIAL SATISFACTION).
+        // Card whose owner_notes carry a consequential owner decision (with
+        // provenance) + an important rejected alternative; the stored
+        // decision_record is the v1 in-flight shape — a BARE {kind:"commit"}
+        // entry whose default marker (the card id) the landing trailer itself
+        // satisfies. Pre-v2 (HEAD b788b438, reproduced 2026-10-26) this
+        // RETIRED and the reasoning was unrecoverable (no message search or
+        // pickaxe found it). V2: the entry covers nothing -> retirement
+        // refused naming owner_notes; card + report survive. The same holds
+        // for a v1 MARKER-ONLY entry (an explicit marker proves presence of
+        // an arbitrary string, never that the field's content survived).
+        // =====================================================================
+        {
+            const decisionText =
+                "OWNER 2026-10-26 (chat m0051): approved the bounded-correction path for the retention gate";
+            const rejectedText =
+                "REJECTED ALTERNATIVE: dual-ledger archive — violates the no-new-ledger constraint";
+            // In-flight v1 cards: closed out under the pre-v2 gate (whose
+            // closeout accepted these shapes), carrying the stored record as
+            // written then, now retiring under v2. A fresh v2 closeout
+            // refuses these shapes at declaration (pinned in the closeout
+            // suite); this is the retirement-side pin for the in-flight
+            // population.
+            const cases = [
+                { id: "dr-c1-bare", entries: [{ kind: "commit" }] },
+                {
+                    id: "dr-c1-marker",
+                    entries: [
+                        { kind: "commit", marker: "dr-c1-marker decision" },
+                    ],
+                    // The marker RESOLVES (arbitrary string present in the
+                    // landing body) — the exact trivial-satisfaction shape:
+                    // presence verified, content not covered.
+                    landingBody: `land dr-c1-marker\n\nTask-Card: dr-c1-marker\n\ndr-c1-marker decision\n`,
+                },
+            ];
+            for (const { id, entries, landingBody } of cases) {
+                writeCard(isoRoot, id, {
+                    status: "completed",
+                    owner_notes: [decisionText, rejectedText],
+                    decision_record: { version: 1, entries },
+                });
+                // Landing commit carries the trailer (and, for the marker
+                // case, the marker string) but NO decision content.
+                commitAll(
+                    scratch.git,
+                    scratch.dir,
+                    landingBody || `land ${id}\n\nTask-Card: ${id}\n`,
+                );
+                const refused = retire(id);
+                assert.equal(
+                    refused.ok,
+                    false,
+                    `C1 (${id}): trailer-only landing must NOT satisfy a record with uncovered owner_notes`,
+                );
+                assert.equal(
+                    refused.refusal.code,
+                    "decision_content_unpromoted",
+                    `C1 (${id}): refusal code; got ${JSON.stringify(refused.refusal)}`,
+                );
+                assert.ok(
+                    Array.isArray(refused.refusal.fields) &&
+                        refused.refusal.fields.includes("owner_notes"),
+                    `C1 (${id}): refusal must name owner_notes; got ${JSON.stringify(refused.refusal.fields)}`,
+                );
+                assert.equal(cardExists(isoRoot, id), true, `C1 (${id}): card survives`);
+                assert.equal(
+                    reportExists(isoRoot, id),
+                    true,
+                    `C1 (${id}): report survives`,
+                );
+            }
+        }
+
+        // =====================================================================
+        // C1 negatives (v2): coverage binds CONTENT.
+        //   (n1) carries excerpt declared, closeout-bound, but the landing
+        //        carrier never carries it -> decision_record_unresolved /
+        //        excerpt_not_in_carrier, field NAMED.
+        //   (n2) excerpt present ONLY in an un-anchored commit message (no
+        //        card id) -> refused: every covering carrier must be
+        //        discoverable from the card id (anchor rule).
+        //   (n3) hand-edited stored record with a SHORT excerpt (< floor) ->
+        //        refused by the raw structural re-check, naming the floor.
+        // =====================================================================
+        {
+            const id = "dr-c1n-absent";
+            writeWorkingCard(isoRoot, id, {
+                owner_notes: [
+                    "OWNER 2026-10-26: approved the search-mode carve-out for legacy pointers",
+                ],
+            });
+            closeout(id, [
+                {
+                    kind: "commit",
+                    carries: {
+                        owner_notes:
+                            "approved the search-mode carve-out for legacy pointers",
+                    },
+                },
+            ]);
+            commitAll(scratch.git, scratch.dir, `land ${id}\n\nTask-Card: ${id}\n`);
+            const refused = retire(id);
+            assert.equal(refused.ok, false, "(n1) absent excerpt must refuse");
+            assert.equal(
+                refused.refusal.code,
+                "decision_record_unresolved",
+                `(n1) refusal code; got ${JSON.stringify(refused.refusal.code)}`,
+            );
+            const problems = (refused.refusal.problems || []).map(
+                (p) => `${p.code}`,
+            );
+            assert.ok(
+                problems.includes("excerpt_not_in_carrier"),
+                `(n1) refusal must name excerpt_not_in_carrier; got ${JSON.stringify(problems)}`,
+            );
+            assert.ok(
+                refused.refusal.message.includes("owner_notes"),
+                `(n1) refusal must name the uncovered/missed field; got: ${refused.refusal.message}`,
+            );
+            assert.equal(cardExists(isoRoot, id), true, "(n1) card survives");
+
+            const id2 = "dr-c1n-unanchored";
+            writeWorkingCard(isoRoot, id2, {
+                owner_notes: [
+                    "OWNER 2026-10-26: approved anchoring every carrier to the card id",
+                ],
+            });
+            closeout(id2, [
+                {
+                    kind: "commit",
+                    carries: {
+                        owner_notes: "approved anchoring every carrier to the card id",
+                    },
+                },
+            ]);
+            // The excerpt lands in a commit whose message carries NO card id.
+            commitAll(
+                scratch.git,
+                scratch.dir,
+                "unrelated commit mentioning: approved anchoring every carrier to the card id\n",
+            );
+            commitAll(
+                scratch.git,
+                scratch.dir,
+                `land ${id2}\n\nTask-Card: ${id2}\n`,
+            );
+            const refused2 = retire(id2);
+            assert.equal(
+                refused2.ok,
+                false,
+                "(n2) excerpt in an un-anchored commit must NOT verify coverage",
+            );
+            assert.equal(
+                refused2.refusal.code,
+                "decision_record_unresolved",
+                `(n2) refusal code; got ${JSON.stringify(refused2.refusal.code)}`,
+            );
+            assert.ok(
+                (refused2.refusal.problems || []).some(
+                    (p) => p.code === "excerpt_not_in_carrier",
+                ),
+                `(n2) refusal must name excerpt_not_in_carrier (anchor rule); got ${JSON.stringify(refused2.refusal.problems)}`,
+            );
+            assert.equal(cardExists(isoRoot, id2), true, "(n2) card survives");
+
+            const id3 = "dr-c1n-short";
+            writeCard(isoRoot, id3, {
+                status: "completed",
+                owner_notes: [
+                    "OWNER 2026-10-26: short-excerpt structural refusal case",
+                ],
+                decision_record: {
+                    version: 1,
+                    entries: [
+                        {
+                            kind: "commit",
+                            carries: { owner_notes: "too short excerpt" },
+                        },
+                    ],
+                },
+            });
+            commitAll(
+                scratch.git,
+                scratch.dir,
+                `land ${id3}\n\nTask-Card: ${id3}\n`,
+            );
+            const refused3 = retire(id3);
+            assert.equal(
+                refused3.ok,
+                false,
+                "(n3) short excerpt must be refused by the structural re-check",
+            );
+            assert.equal(refused3.refusal.code, "decision_record_unresolved");
+            assert.ok(
+                refused3.refusal.message.includes("at least") &&
+                    refused3.refusal.message.includes("characters"),
+                `(n3) refusal must name the length floor; got: ${refused3.refusal.message}`,
+            );
+            assert.equal(cardExists(isoRoot, id3), true, "(n3) card survives");
+        }
+
+        // =====================================================================
+        // C2 regression (owner concern, 2026-10-26 — ROUTINE-AFTER-REVIEW
+        // BURDEN), via the REAL sanctioned lifecycle ops: create -> ready ->
+        // working -> closeout (routine record) -> clean-approve review ->
+        // landing -> retirement. Pre-v2 (reproduced 2026-10-26 against
+        // b788b438) this REFUSED: last_review + history.task_reviewed were
+        // unconditionally decision-class, so EVERY reviewed routine task
+        // needed promotion or force. V2 classification: a review that
+        // resolved the card to "completed" is a PROCESS record — routine
+        // tasks retire after a normal review with zero promotion burden.
+        // =====================================================================
+        {
+            const created = saveCoordinationTask(SESSION_ID, {
+                title: "Routine follow-up: dependency bump",
+                task_type: "implementation",
+                coordination_mode: "short",
+                primary_lane: "harness-core",
+                status: "draft",
+                rough_scope: ["go.mod", "go.sum"],
+                files_in_scope: ["go.mod"],
+                success_criteria: ["go test ./... green after the bump"],
+                validation_plan: ["go test ./..."],
+                cwd: "/verification",
+            });
+            const id = created.task.task_id;
+            const digest = computeTaskDesignDigest(created.task, {});
+            readyCoordinationTask(SESSION_ID, id, {
+                f3_design_readiness: {
+                    ownership_hazards: [],
+                    design_digest: digest,
+                },
+                cwd: "/verification",
+            });
+            activateCoordinationTask(SESSION_ID, id, { cwd: "/verification" });
+            closeout(
+                id,
+                [{ kind: "routine", note: "nothing decision-class to preserve" }],
+                { taskStatus: "reported" },
+            );
+            const review = reviewCoordinationTask(SESSION_ID, id, {
+                body: "Approve. Routine dependency bump; tests green; nothing decision-class.",
+                taskStatus: "completed",
+                title: "Coordinator Review",
+                cwd: "/verification",
+            });
+            assert.equal(
+                review.task.status,
+                "completed",
+                "C2 setup: clean-approve review resolves the card to completed",
+            );
+            commitAll(scratch.git, scratch.dir, `land ${id}\n\nTask-Card: ${id}\n`);
+            const done = retire(id);
+            assert.equal(
+                done.ok,
+                true,
+                `C2: routine task with a clean-approve review must retire WITHOUT promotion; got ${JSON.stringify(done.refusal || done)}`,
+            );
+            assert.equal(
+                cardExists(isoRoot, id),
+                false,
+                "C2: reviewed routine card is gone (process record, not decision-class)",
+            );
+        }
+
+        // =====================================================================
+        // Negative (c2): routine record contradicted by a NON-APPROVE review
+        // verdict (last_review.status = blocked + task_reviewed history
+        // events with non-completed statuses) -> refused, BOTH named. The
+        // clean-approve shape (status "completed") is the FLIP pin: the same
+        // fixture with a completed-status review RETIRES (see the C2 real-
+        // lifecycle regression above; pinned here as the minimal card shape).
         // =====================================================================
         {
             const id = "dr-neg-postreview";
@@ -564,29 +931,71 @@ test("decision-record retirement gate: E2E recovery + negatives + legacy compat 
                     path: `.local/coordinator/reports/${id}/review.md`,
                     reviewed_at: "2026-10-26T00:00:00Z",
                     title: "Coordinator Review",
-                    status: "completed",
-                    summary: "verdict: consequential objection stands",
-                    next_action: "retire",
+                    status: "blocked",
+                    summary: "verdict: consequential objection stands; rework required",
+                    next_action: "rework",
                 },
                 history: [
                     ...(readCard(isoRoot, id).history || []),
                     {
                         at: "2026-10-26T00:00:00Z",
                         event: "task_reviewed",
-                        status: "completed",
-                        note: "verdict recorded",
+                        status: "blocked",
+                        note: "verdict recorded: consequential objection stands",
                     },
                 ],
             });
             commitAll(scratch.git, scratch.dir, `land ${id}\n\nTask-Card: ${id}\n`);
             const refused = retire(id);
-            assert.equal(refused.ok, false, "(c2) post-closeout review verdict must block routine retirement");
+            assert.equal(refused.ok, false, "(c2) post-closeout non-approve review verdict must block routine retirement");
             assert.equal(refused.refusal.code, "decision_content_unpromoted");
             assert.ok(
-                refused.refusal.fields.includes("last_review"),
-                `(c2) refusal must name last_review; got ${JSON.stringify(refused.refusal.fields)}`,
+                refused.refusal.fields.includes("last_review") &&
+                    refused.refusal.fields.includes("history.task_reviewed"),
+                `(c2) refusal must name last_review AND history.task_reviewed; got ${JSON.stringify(refused.refusal.fields)}`,
             );
             assert.equal(cardExists(isoRoot, id), true, "(c2) card survives");
+
+            // FLIP pin: the identical card shape with a CLEAN-APPROVE review
+            // (status "completed" — process record) retires routinely.
+            const idOk = "dr-neg-postreview-approve";
+            writeWorkingCard(isoRoot, idOk);
+            closeout(idOk, [{ kind: "routine", note: "nothing decision-class" }]);
+            patchCard(isoRoot, idOk, {
+                last_review: {
+                    path: `.local/coordinator/reports/${idOk}/review.md`,
+                    reviewed_at: "2026-10-26T00:00:00Z",
+                    title: "Coordinator Review",
+                    status: "completed",
+                    summary: "Approve. Routine work; nothing decision-class.",
+                    next_action: "retire",
+                },
+                history: [
+                    ...(readCard(isoRoot, idOk).history || []),
+                    {
+                        at: "2026-10-26T00:00:00Z",
+                        event: "task_reviewed",
+                        status: "completed",
+                        note: "clean approve recorded",
+                    },
+                ],
+            });
+            commitAll(
+                scratch.git,
+                scratch.dir,
+                `land ${idOk}\n\nTask-Card: ${idOk}\n`,
+            );
+            const okRetire = retire(idOk);
+            assert.equal(
+                okRetire.ok,
+                true,
+                `(c2 flip) clean-approve review is a process record; got ${JSON.stringify(okRetire.refusal || okRetire)}`,
+            );
+            assert.equal(
+                cardExists(isoRoot, idOk),
+                false,
+                "(c2 flip) reviewed routine card retired",
+            );
         }
 
         // =====================================================================
@@ -768,12 +1177,15 @@ test("decision-record retirement gate: E2E recovery + negatives + legacy compat 
             const rel = "docs/checkpoints/2026-10-25-dr-pin.md";
             // Prepare BOTH carriers and pin their shas BEFORE closeout
             // (declared-revision entries are how already-committed content is
-            // declared; closeout does not verify, retirement does).
+            // declared; closeout does not verify, retirement does). The
+            // pinned commit message carries the card-id ANCHOR and the
+            // owner-notes excerpt — a covering declared-revision entry
+            // verifies anchor + excerpt at exactly that revision.
             fs.writeFileSync(path.join(scratch.dir, "pin.txt"), "pin\n");
             const pinSha = commitAll(
                 scratch.git,
                 scratch.dir,
-                `decision content for ${id}\n\nMARKER-dr-pin decision text\n`,
+                `decision content for ${id}\n\nTask-Card: ${id}\nOWNER APPROVAL: pinned-revision case.\nMARKER-dr-pin decision text\n`,
             );
             fs.mkdirSync(path.dirname(path.join(scratch.dir, rel)), {
                 recursive: true,
@@ -788,12 +1200,72 @@ test("decision-record retirement gate: E2E recovery + negatives + legacy compat 
                 `docs: pinned artifact for ${id}\n\nTask-Card: ${id}\n`,
             );
             closeout(id, [
-                { kind: "commit", revision: pinSha, marker: "MARKER-dr-pin" },
+                {
+                    kind: "commit",
+                    revision: pinSha,
+                    marker: "MARKER-dr-pin",
+                    carries: { owner_notes: "OWNER APPROVAL: pinned-revision case." },
+                },
                 { kind: "artifact", path: rel, revision: artSha },
             ]);
             const ok = retire(id);
             assert.equal(ok.ok, true, `pinned-revision retire should succeed: ${JSON.stringify(ok)}`);
             assert.equal(cardExists(isoRoot, id), false, "pinned card gone");
+
+            // Declared-revision negative: same shape, but the pinned commit
+            // does NOT carry the excerpt (only the anchor) -> refused naming
+            // excerpt_not_in_carrier; card survives.
+            {
+                const idX = "dr-pin-noexcerpt";
+                writeWorkingCard(isoRoot, idX, {
+                    owner_notes: [
+                        "OWNER APPROVAL: excerpt-missing pinned-revision case.",
+                    ],
+                });
+                fs.writeFileSync(path.join(scratch.dir, "pinx.txt"), "pinx\n");
+                const pinXSha = commitAll(
+                    scratch.git,
+                    scratch.dir,
+                    `decision content for ${idX}\n\nTask-Card: ${idX}\nMARKER-dr-pin-noexcerpt text\n`,
+                );
+                closeout(idX, [
+                    {
+                        kind: "commit",
+                        revision: pinXSha,
+                        carries: {
+                            owner_notes:
+                                "OWNER APPROVAL: excerpt-missing pinned-revision case.",
+                        },
+                    },
+                ]);
+                commitAll(
+                    scratch.git,
+                    scratch.dir,
+                    `land ${idX}\n\nTask-Card: ${idX}\n`,
+                );
+                const refusedX = retire(idX);
+                assert.equal(
+                    refusedX.ok,
+                    false,
+                    "pinned-revision excerpt miss must refuse",
+                );
+                assert.equal(
+                    refusedX.refusal.code,
+                    "decision_record_unresolved",
+                    `pinned-excerpt-miss refusal code; got ${JSON.stringify(refusedX.refusal)}`,
+                );
+                assert.ok(
+                    (refusedX.refusal.problems || []).some(
+                        (p) => p.code === "excerpt_not_in_carrier",
+                    ),
+                    `pinned-excerpt-miss must name excerpt_not_in_carrier; got ${JSON.stringify(refusedX.refusal.problems)}`,
+                );
+                assert.equal(
+                    cardExists(isoRoot, idX),
+                    true,
+                    "pinned-excerpt-miss card survives",
+                );
+            }
 
             // Commit entry, revision OMITTED (search mode), marker never
             // committed in any reachable message -> refused naming
@@ -1414,8 +1886,7 @@ test("decision-record git read helpers (F3/F4): unavailable vs determinate miss 
 // claims a completed negative search). Fail direction unchanged
 // (refusal either way); message accuracy only. Uses the exported
 // verifier directly (test seam), mirroring the D2 technique.
-test("decision-record artifact search walk: unavailable read -> verifier_unavailable, not marker-absent (b-F2)", () => {
-    const repo = makeScratchRepo();
+test("decision-record artifact search walk: unavailable read -> verifier_unavailable, not marker-absent (b-F2)", () => {    const repo = makeScratchRepo();
     try {
         const rel = "docs/decisions/d3.md";
         fs.mkdirSync(path.dirname(path.join(repo.dir, rel)), {
@@ -1469,6 +1940,50 @@ test("decision-record artifact search walk: unavailable read -> verifier_unavail
                 "marker absence is NOT established",
             ),
             `b-F2: detail must state marker absence is not established; got: ${res.problems[0].detail}`,
+        );
+    } finally {
+        fs.rmSync(repo.dir, { recursive: true, force: true });
+    }
+});
+
+// Scatter pin (v2 coverage rule): a covering search-mode commit entry whose
+// excerpts each appear in a DIFFERENT card-id-anchored message, but never
+// together in ONE message, must refuse with carrier_content_scattered — one
+// entry is one carrier; the aggregate never reads as a per-excerpt miss
+// (each part exists somewhere) nor verifies.
+test("decision-record coverage: scattered excerpts across anchored carriers -> carrier_content_scattered", () => {
+    const repo = makeScratchRepo();
+    try {
+        const id = "dr-scatter";
+        const e1 = "OWNER APPROVAL scatter: first excerpt line lives in commit one";
+        const e2 = "OWNER APPROVAL scatter: second excerpt line lives in commit two";
+        commitAll(
+            repo.git,
+            repo.dir,
+            `anchored carrier one\n\nTask-Card: ${id}\n\n${e1}\n`,
+        );
+        commitAll(
+            repo.git,
+            repo.dir,
+            `anchored carrier two\n\nTask-Card: ${id}\n\n${e2}\n`,
+        );
+        const res = verifyDecisionRecordForRetirement(
+            id,
+            {
+                version: 1,
+                entries: [
+                    {
+                        kind: "commit",
+                        carries: { owner_notes: e1, measured_outcome: e2 },
+                    },
+                ],
+            },
+            repo.dir,
+        );
+        assert.equal(res.ok, false, "scatter: must not verify");
+        assert.ok(
+            res.problems.some((p) => p.code === "carrier_content_scattered"),
+            `scatter: refusal must name carrier_content_scattered; got ${JSON.stringify(res.problems)}`,
         );
     } finally {
         fs.rmSync(repo.dir, { recursive: true, force: true });

@@ -249,7 +249,15 @@
                   "marker": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Content marker verified in the commit message or a blob at that committed revision. Defaults to the card id. Must not start with \"-\" (option-injection guard: the retirement verifier hands it to git as a search pattern)."
+                    "description": "Content marker verified in the commit message or a blob at that committed revision. Defaults to the card id. Proves presence only — it covers NO decision-class field. Must not start with \"-\" (option-injection guard: the retirement verifier hands it to git as a search pattern)."
+                  },
+                  "carries": {
+                    "type": "object",
+                    "description": "Coverage declaration (retention gate v2): map of decision-class field name to a verbatim single-line excerpt from that field's content. Keys: owner_notes | measured_outcome | open_questions | last_review | history.task_reviewed. At retirement the SAME committed commit must contain the card-id anchor and EVERY excerpt; an excerpt must be >= 24 chars (trimmed), single-line, drawn from the covered field's content, and must not equal the card id or the marker. The closeout/retirement gate enforces the full excerpt contract.",
+                    "additionalProperties": {
+                      "type": "string",
+                      "minLength": 24
+                    }
                   },
                   "note": { "type": "string" }
                 },
@@ -273,7 +281,15 @@
                   "marker": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Back-reference string verified in the committed blob. Defaults to the card id. Must not start with \"-\" (option-injection guard: the retirement verifier hands it to git as a search pattern)."
+                    "description": "Back-reference string verified in the committed blob. Defaults to the card id. Proves presence only — it covers NO decision-class field. Must not start with \"-\" (option-injection guard: the retirement verifier hands it to git as a search pattern)."
+                  },
+                  "carries": {
+                    "type": "object",
+                    "description": "Coverage declaration (retention gate v2): map of decision-class field name to a verbatim single-line excerpt from that field's content. Keys: owner_notes | measured_outcome | open_questions | last_review | history.task_reviewed. At retirement the SAME committed blob must contain the card-id anchor and EVERY excerpt; an excerpt must be >= 24 chars (trimmed), single-line, drawn from the covered field's content, and must not equal the card id or the marker. The closeout/retirement gate enforces the full excerpt contract.",
+                    "additionalProperties": {
+                      "type": "string",
+                      "minLength": 24
+                    }
                   },
                   "note": { "type": "string" }
                 },

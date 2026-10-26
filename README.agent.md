@@ -1245,14 +1245,19 @@ export default function transform({ context }) {
   reachable from the integration branch, so direct `rm` of a `completed` card is
   NOT equivalent (it bypasses the landing check — see
   `docs/coordination/RECORD_LIFECYCLE.md`). Since the retention-preservation
-  gate (2026-10-25), ordinary `completed` retirement is additionally
-  **decision-record-gated**: after the landing proof, every `commit`/`artifact`
-  entry of the card's closeout-declared `decision_record` must resolve against
-  committed, branch-reachable git state, and a `routine` attestation (or legacy
-  card without a record) must not contradict explicit decision-class card
-  fields (`decision_record_unresolved` / `decision_content_unpromoted`
-  refusals); `force` bypasses it and the result names the destroyed
-  decision-class content (same doc). The Slice-2 retirement CODE will
+  gate (2026-10-25; coverage rule + review classification 2026-10-26),
+  ordinary `completed` retirement is additionally **decision-record-gated**:
+  after the landing proof, every `commit`/`artifact` entry of the card's
+  closeout-declared `decision_record` must resolve against committed,
+  branch-reachable git state, and every non-empty decision-class card field
+  (`owner_notes`, `measured_outcome`, non-empty `open_questions`, NON-APPROVE
+  review signals — a clean-approve review is a process record) must be
+  covered by an entry whose `carries` excerpt — a verbatim line from that
+  field's content — is present, with the card-id anchor, in the same
+  committed carrier (`decision_record_unresolved` / `decision_content_unpromoted`
+  refusals name each item/field); `force` bypasses it and the result names the
+  destroyed decision-class content (same doc). The Slice-2 retirement CODE
+  will
   enforce the reachability check in the sanctioned op; until then a `working`,
   `reported`, `blocked`, or `completed` card is refused without an explicit
   `force` (a `completed` card is additionally landing-gated per the contract

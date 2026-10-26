@@ -5215,13 +5215,19 @@ function verifyLandingProof(taskID, repoOverride) {
 //
 // Honest limits (documented, NOT enforced — no semantic engine, owner
 // condition 4):
-//   - a `routine` attestation is checked ONLY against explicit card fields
-//     (owner_notes, measured_outcome, open_questions, last_review, review
-//     history events); an attestation that contradicts nothing mechanical may
-//     still be dishonest;
-//   - a commit/artifact entry is verified to carry its declared MARKER at a
-//     reachable committed revision — whether the marker-bearing content is
-//     actually the decision the author claims is author + reviewer honesty;
+//   - the field list is MECHANICAL (owner_notes, measured_outcome,
+//     open_questions, and non-process review signals); an author who leaves
+//     decision content out of every listed field can still lose it — the
+//     classifier cannot see unlisted homes;
+//   - excerpt CHOICE is author honesty: the gate proves the excerpt (a
+//     verbatim, length-floored line drawn from the field's own text)
+//     survived in a committed, card-id-anchored carrier — whether the
+//     excerpt carries the SUBSTANCE of the field (vs an innocuous long
+//     line) is author + reviewer judgment;
+//   - a commit/artifact entry without carries is verified to carry its
+//     declared MARKER at a reachable committed revision, but covers NO
+//     field — markers prove presence of an arbitrary string, never that a
+//     field's content survived;
 //   - verification proves LOCAL-repository reachability only. Cross-machine
 //     availability comes from the normal push/release flow; the gate performs
 //     no network operations and claims nothing about remotes (owner
@@ -5237,11 +5243,48 @@ const DECISION_ENTRY_KINDS = Object.freeze(["commit", "artifact", "routine"]);
 // too — the schema is never relaxed to match a lax gate, and the gate is
 // never looser than the schema.
 const DECISION_ENTRY_KEYS_BY_KIND = Object.freeze({
-    commit: Object.freeze(["kind", "revision", "marker", "note"]),
-    artifact: Object.freeze(["kind", "path", "revision", "marker", "note"]),
+    commit: Object.freeze(["kind", "revision", "marker", "carries", "note"]),
+    artifact: Object.freeze([
+        "kind",
+        "path",
+        "revision",
+        "marker",
+        "carries",
+        "note",
+    ]),
     routine: Object.freeze(["kind", "note"]),
 });
 const DECISION_RECORD_KEYS = Object.freeze(["version", "entries"]);
+// Coverage rule (owner-approved 2026-10-26, concern C1): every non-empty
+// decision-class card field must be covered by an entry declaring
+// `carries: { "<field>": "<verbatim excerpt>" }`, and coverage binds
+// CONTENT — the committed carrier must contain a verbatim excerpt taken
+// from the covered field's own text, never just a marker. This is the
+// exact key set collectDecisionClassFields reports; carries keys outside
+// it are refused structurally.
+const DECISION_CLASS_FIELD_NAMES = Object.freeze([
+    "owner_notes",
+    "measured_outcome",
+    "open_questions",
+    "last_review",
+    "history.task_reviewed",
+]);
+// Excerpt guards: an excerpt must be a single line, at least this many
+// characters (trimmed), and must not equal the card id or the entry marker —
+// a trivially short or marker-shaped "excerpt" could satisfy coverage by
+// accident without carrying any real decision content.
+const DECISION_EXCERPT_MIN_LENGTH = 24;
+// Review classification (owner-approved 2026-10-26, concern C2): a review
+// that resolved the card to one of these statuses is a PROCESS record, not
+// decision-class — an ordinary clean approve is not engineering knowledge,
+// and routine tasks must retire after a normal review without promotion
+// burden. Any other recorded verdict (blocked / ready / reported /
+// cancelled / unknown) changed the card's trajectory and IS decision-class.
+// Owner decisions recorded at review time belong in owner_notes (always
+// decision-class) — the verdict shape is the smallest honest mechanical
+// distinction the actual last_review/task_reviewed field shapes support
+// (their `status` is the TASK LIFECYCLE status the review resolved to).
+const DECISION_RECORD_PROCESS_REVIEW_STATUSES = Object.freeze(["completed"]);
 // Search-mode walk cap: `git log --branches -- <path>` on a long-lived repo
 // can return thousands of revisions; the marker is expected near the top of
 // the history of the declared durable path. The cap bounds retirement latency
@@ -5313,16 +5356,118 @@ function normalizeStoredDecisionRecord(source) {
 //              (omitted = search reachable revisions of the path).
 //              Allowed keys: kind | path | revision | marker | note.
 //   routine  — attestation that nothing decision-class needs preserving; must
-//              be the ONLY entry (the mechanical contradiction check below
-//              fires against it). Allowed keys: kind | note ONLY — a routine
-//              attestation carries no marker; nothing is searched in git.
+//              be the ONLY entry (the coverage rule below fires against it).
+//              Allowed keys: kind | note ONLY — a routine attestation carries
+//              no marker and covers nothing; nothing is searched in git.
 // `marker` (commit/artifact only) defaults to the card id — the card-id
-// back-reference the retirement verifier searches for. A marker starting
-// with "-" is REFUSED: the verifier hands the marker to git (git grep -e,
-// log --grep=), and keeping the option-injection class closed structurally
-// (not just at the git call sites) means no user string that git could
-// parse as an option ever reaches a positional slot. The same rule applies
-// to `revision` (rev-parse receives it as a positional).
+// back-reference the retirement verifier searches for. A marker proves only
+// that an arbitrary string is present in a carrier; it covers NO field. A
+// marker starting with "-" is REFUSED: the verifier hands the marker to git
+// (git grep -e, log --grep=), and keeping the option-injection class closed
+// structurally (not just at the git call sites) means no user string that
+// git could parse as an option ever reaches a positional slot. The same rule
+// applies to `revision` (rev-parse receives it as a positional).
+// `carries` (commit/artifact only) is the COVERAGE declaration: a map of
+// decision-class field name -> verbatim single-line excerpt from that
+// field's content (guards in collectDecisionCarriesStructuralErrors). At
+// retirement every covered excerpt must be present — together with the
+// card-id anchor — in the SAME committed carrier, so coverage binds CONTENT,
+// never just presence. Bare/marker-only entries remain structurally valid
+// but cover nothing: they satisfy the gate only when every decision-class
+// field is empty (nothing to lose).
+// Structural guards for an entry's `carries` coverage declaration
+// (owner-approved 2026-10-26, concern C1). A covering entry maps
+// decision-class field names to VERBATIM single-line excerpts drawn from
+// those fields' content. Guards:
+//   - keys must be known decision-class field names;
+//   - an excerpt must be a non-empty single line;
+//   - length-floored (>= DECISION_EXCERPT_MIN_LENGTH trimmed) so a
+//     trivially short or generic string cannot "cover" a field by accident;
+//   - must not equal the card id or the entry's declared marker — those are
+//     presence markers, exactly the trivial-satisfaction path this rule
+//     exists to kill (an excerpt of real field content is never the trailer);
+//   - must not start with "-" (option-injection hygiene: excerpts DO reach
+//     git argv — on the declared-revision commit path a missed message
+//     falls through to treeHit(excerpt) → `git grep -F --quiet -e <excerpt>
+//     <sha> --`. Every such call binds the excerpt with an explicit `-e`,
+//     which consumes the next argument as the pattern whatever it starts
+//     with, so the call is safe whatever the excerpt begins with. The
+//     structural refusal is load-bearing defense-in-depth: it closes the
+//     option-injection class at declaration — not just at the git call
+//     sites — so safety never rests on `-e` discipline alone).
+function collectDecisionCarriesStructuralErrors(entry, taskID, at) {
+    const errors = [];
+    const carries = entry.carries;
+    if (
+        typeof carries !== "object" ||
+        carries === null ||
+        Array.isArray(carries)
+    ) {
+        errors.push(
+            `${at} must be a non-empty object mapping decision-class field names (${DECISION_CLASS_FIELD_NAMES.join(" | ")}) to verbatim excerpts from those fields' content.`,
+        );
+        return errors;
+    }
+    const keys = Object.keys(carries);
+    if (keys.length === 0) {
+        errors.push(
+            `${at} must declare at least one field — an entry that covers nothing needs no carries (declare a marker pointer instead).`,
+        );
+        return errors;
+    }
+    keys.forEach((field) => {
+        const excerpt = carries[field];
+        const atField = `${at}.${field}`;
+        if (!DECISION_CLASS_FIELD_NAMES.includes(field)) {
+            errors.push(
+                `${atField}: "${field}" is not a decision-class field name — known fields are ${DECISION_CLASS_FIELD_NAMES.join(" | ")}.`,
+            );
+            return;
+        }
+        if (typeof excerpt !== "string" || excerpt.trim() === "") {
+            errors.push(
+                `${atField}: the excerpt must be a non-empty string (a verbatim line from the field's content).`,
+            );
+            return;
+        }
+        if (excerpt.includes("\n")) {
+            errors.push(
+                `${atField}: the excerpt must be a single line — the retirement verifier matches it as one line in the committed carrier.`,
+            );
+            return;
+        }
+        const trimmed = excerpt.trim();
+        if (trimmed.startsWith("-")) {
+            errors.push(
+                `${atField}: the excerpt must not start with "-" — the same option-injection class refused for markers/revisions is refused for every user string in a carrier-checking position.`,
+            );
+            return;
+        }
+        if (trimmed.length < DECISION_EXCERPT_MIN_LENGTH) {
+            errors.push(
+                `${atField}: the excerpt must be at least ${DECISION_EXCERPT_MIN_LENGTH} characters (trimmed) — a trivially short or generic string could verify against unrelated content by accident and is not evidence the field's content survived (got ${trimmed.length}: "${trimmed.slice(0, 40)}").`,
+            );
+            return;
+        }
+        if (trimmed === taskID) {
+            errors.push(
+                `${atField}: the excerpt must not equal the card id — the card id is the landing trailer's default marker, exactly the presence-only string that must NOT satisfy content coverage.`,
+            );
+            return;
+        }
+        if (
+            typeof entry.marker === "string" &&
+            entry.marker.trim() !== "" &&
+            trimmed === entry.marker.trim()
+        ) {
+            errors.push(
+                `${atField}: the excerpt must not equal the entry's marker — a marker proves presence of an arbitrary string, not that the covered field's content survived.`,
+            );
+        }
+    });
+    return errors;
+}
+
 function collectDecisionRecordStructuralErrors(record, taskID) {
     const errors = [];
     const where = `decision_record for ${taskID}`;
@@ -5395,6 +5540,14 @@ function collectDecisionRecordStructuralErrors(record, taskID) {
                 );
             }
         }
+        if (allowedKeys.includes("carries") && entry.carries !== undefined) {
+            const carriesErrs = collectDecisionCarriesStructuralErrors(
+                entry,
+                taskID,
+                `${at}: carries`,
+            );
+            errors.push(...carriesErrs);
+        }
         if (entry.note !== undefined && typeof entry.note !== "string") {
             errors.push(`${at}: note, when present, must be a string.`);
         }
@@ -5458,11 +5611,29 @@ function collectDecisionRecordStructuralErrors(record, taskID) {
     return errors;
 }
 
-// Mechanical contradiction check (owner condition 4): the explicit
-// decision-bearing card fields a `routine` attestation (or a legacy record
-// with no decision_record) must not contradict. Returns an array of
-// { field, detail } — empty means no mechanical contradiction. SEMANTIC
-// honesty of the attestation is deliberately NOT evaluated.
+// Mechanical decision-class field scan (owner condition 4): the explicit
+// decision-bearing card fields that must be COVERED by the decision_record's
+// entries (owner-approved 2026-10-26, concern C1: the old routine-only
+// contradiction check is generalized into this coverage rule for ALL entry
+// kinds). Returns an array of { field, detail, content } — content is the
+// field's raw text, the binding source for `carries` excerpts. SEMANTIC
+// honesty (which content is actually important) is deliberately NOT
+// evaluated.
+//
+// Review classification (owner-approved 2026-10-26, concern C2):
+//   - last_review is decision-class ONLY when it did NOT resolve the card to
+//     a process status ("completed" = ordinary clean approve = process
+//     record, not engineering knowledge). A blocked/ready/reported/cancelled
+//     or unknown-status review changed the card's trajectory and its
+//     reasoning is decision-class. The `status` field of last_review (and of
+//     task_reviewed history events) is the TASK LIFECYCLE status the review
+//     resolved to — that is the whole mechanical signal the shapes carry.
+//   - history.task_reviewed is scanned PER EVENT: a later clean approve does
+//     not launder an earlier non-completed review (its reasoning stays
+//     decision-class).
+//   - Owner decisions/objections/risk acceptances recorded at review time
+//     belong in owner_notes (always decision-class); a clean-approve verdict
+//     body is ordinary process prose.
 function collectDecisionClassFields(task, incoming = {}) {
     const found = [];
     const ownerNotes = Array.isArray(task && task.owner_notes)
@@ -5472,6 +5643,7 @@ function collectDecisionClassFields(task, incoming = {}) {
         found.push({
             field: "owner_notes",
             detail: `${ownerNotes.length} non-empty owner note(s), e.g. "${String(ownerNotes[0]).slice(0, 80)}"`,
+            content: ownerNotes.join("\n"),
         });
     }
     const measuredOutcome = incoming.measuredOutcome !== undefined
@@ -5481,6 +5653,7 @@ function collectDecisionClassFields(task, incoming = {}) {
         found.push({
             field: "measured_outcome",
             detail: `"${measuredOutcome.slice(0, 80)}"`,
+            content: measuredOutcome,
         });
     }
     const openQuestions = Array.isArray(task && task.open_questions)
@@ -5490,6 +5663,7 @@ function collectDecisionClassFields(task, incoming = {}) {
         found.push({
             field: "open_questions",
             detail: `${openQuestions.length} non-empty open question(s)`,
+            content: openQuestions.join("\n"),
         });
     }
     if (
@@ -5497,10 +5671,21 @@ function collectDecisionClassFields(task, incoming = {}) {
         task.last_review &&
         typeof task.last_review === "object"
     ) {
-        found.push({
-            field: "last_review",
-            detail: `review verdict recorded (${task.last_review.status || "status unknown"})`,
-        });
+        const reviewStatus = String(task.last_review.status || "").trim();
+        if (!DECISION_RECORD_PROCESS_REVIEW_STATUSES.includes(reviewStatus)) {
+            found.push({
+                field: "last_review",
+                detail: `review verdict recorded (status: ${reviewStatus || "unknown"}) — a review that did not resolve the card to ${DECISION_RECORD_PROCESS_REVIEW_STATUSES.join("/")} changed its trajectory`,
+                content: [
+                    task.last_review.title,
+                    task.last_review.status,
+                    task.last_review.summary,
+                    task.last_review.next_action,
+                ]
+                    .filter((part) => String(part || "").trim() !== "")
+                    .join("\n"),
+            });
+        }
     }
     const reviewEvents = Array.isArray(task && task.history)
         ? task.history.filter(
@@ -5510,13 +5695,99 @@ function collectDecisionClassFields(task, incoming = {}) {
                   entry.event === "task_reviewed",
           )
         : [];
-    if (reviewEvents.length > 0) {
+    const decisionReviewEvents = reviewEvents.filter(
+        (entry) =>
+            !DECISION_RECORD_PROCESS_REVIEW_STATUSES.includes(
+                String(entry.status || "").trim(),
+            ),
+    );
+    if (decisionReviewEvents.length > 0) {
         found.push({
             field: "history.task_reviewed",
-            detail: `${reviewEvents.length} review event(s) in card history`,
+            detail: `${decisionReviewEvents.length} non-approve review event(s) in card history (statuses: ${decisionReviewEvents
+                .map((e) => String(e.status || "unknown"))
+                .join(", ")})`,
+            content: decisionReviewEvents
+                .map((entry) =>
+                    [
+                        entry.note,
+                        entry.status ? `status: ${entry.status}` : "",
+                    ]
+                        .filter((part) => String(part || "").trim() !== "")
+                        .join("\n"),
+                )
+                .join("\n"),
         });
     }
     return found;
+}
+
+// Whitespace normalization for excerpt binding: runs of whitespace (including
+// line wraps) collapse to single spaces on BOTH the field content and the
+// excerpt, so an excerpt may span a wrap in the field's stored text while
+// remaining a verbatim word-sequence. The carrier side applies the same
+// normalization to text it reads in full (commit messages, committed blobs);
+// tree-wide git grep -F checks are line-based by nature and require the
+// excerpt on one line.
+function normalizeExcerptText(value) {
+    return String(value === undefined || value === null ? "" : value)
+        .trim()
+        .replace(/\s+/g, " ");
+}
+
+function normalizedTextContains(content, excerpt) {
+    const haystack = normalizeExcerptText(content);
+    const needle = normalizeExcerptText(excerpt);
+    return needle !== "" && haystack.includes(needle);
+}
+
+// Coverage rule (owner-approved 2026-10-26, concern C1): every non-empty
+// decision-class field must be covered by an entry declaring carries for it,
+// and every declared excerpt must be DRAWN FROM the covered field's current
+// content (the anti-fake-pointer binding). Returns
+// { uncovered: [{field, detail}], unbound: [{index, field, excerpt, detail}] }.
+// A routine attestation covers nothing (uncovered = every decision-class
+// field, exactly the old contradiction check, now one rule for all kinds); a
+// legacy record with no entries covers nothing either. Carrying a field that
+// is NOT currently decision-class is a no-op on the binding side (there is
+// nothing to bind) — the coverage set is what matters.
+function collectDecisionRecordCoverageProblems(task, record, incoming = {}) {
+    const fields = collectDecisionClassFields(task, incoming);
+    const covered = new Set();
+    const unbound = [];
+    const entries =
+        record && Array.isArray(record.entries) ? record.entries : [];
+    entries.forEach((entry, idx) => {
+        if (
+            !entry ||
+            typeof entry !== "object" ||
+            Array.isArray(entry) ||
+            !entry.carries ||
+            typeof entry.carries !== "object" ||
+            Array.isArray(entry.carries)
+        ) {
+            return;
+        }
+        Object.entries(entry.carries).forEach(([field, excerpt]) => {
+            covered.add(field);
+            const target = fields.find((f) => f.field === field);
+            if (!target) {
+                return;
+            }
+            if (!normalizedTextContains(target.content, excerpt)) {
+                unbound.push({
+                    index: idx + 1,
+                    field,
+                    excerpt: String(excerpt),
+                    detail: `entry #${idx + 1} declares carries.${field} with an excerpt that is NOT drawn from that field's current content — the declaration does not bind the card's actual decision content ("${String(excerpt).slice(0, 60)}…")`,
+                });
+            }
+        });
+    });
+    const uncovered = fields
+        .filter((f) => !covered.has(f.field))
+        .map((f) => ({ field: f.field, detail: f.detail }));
+    return { uncovered, unbound };
 }
 
 // --- git verification helpers (spawnSync so expected non-zero exits like a
@@ -5750,6 +6021,18 @@ function committedBlobAt(repo, sha, targetPath) {
 // { ok, problems: [{ index, kind, locator, code, detail }], verified: [...] }.
 // Never throws — the caller maps problems to a structured refusal naming each
 // missing/uncommitted/unreachable item.
+//
+// Coverage entries (owner-approved 2026-10-26, concern C1): an entry with
+// `carries` must verify against ONE committed carrier that contains the
+// card-id ANCHOR (so a fresh session knowing only the card id can find the
+// carrier after the card is destroyed) plus EVERY declared excerpt (the
+// content binding — a verbatim, whitespace-normalized fragment of the covered
+// field's own text). A marker alone — including the card-id default that the
+// landing trailer satisfies — verifies a covering entry for NOTHING. The
+// card-side coverage completeness (every decision-class field covered) and
+// the excerpt-is-drawn-from-the-field binding are enforced by
+// collectDecisionRecordCoverageProblems at closeout AND retirement; this
+// verifier is the pure git side (anchor + excerpt presence in the carrier).
 function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
     const repo = repoOverride || repoRoot();
     const problems = [];
@@ -5800,17 +6083,172 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                 index,
                 kind: "routine",
                 locator: "",
-                how: "attestation (mechanical contradiction check applies, not git)",
+                how: "attestation (coverage rule applies, not git)",
             });
             return;
         }
         if (entry.kind === "commit") {
             const locator = String(entry.revision || "").trim();
+            const carriesPairs =
+                entry.carries &&
+                typeof entry.carries === "object" &&
+                !Array.isArray(entry.carries)
+                    ? Object.entries(entry.carries)
+                    : [];
+            const isCovering = carriesPairs.length > 0;
+            const markerDeclared =
+                typeof entry.marker === "string" && entry.marker.trim() !== "";
             if (locator === "") {
-                // Search mode: the marker must appear in a REACHABLE commit
-                // MESSAGE (fixed string). This is the home of decision content
-                // in the landing commit body, which cannot be pinned by sha at
-                // closeout time (the commit does not exist yet).
+                // Search mode. Non-covering entries: the marker must appear
+                // in a REACHABLE commit MESSAGE (fixed string) — the home of
+                // decision content in the landing commit body, which cannot
+                // be pinned by sha at closeout time (the commit does not
+                // exist yet). Covering entries: the card-id ANCHOR and EVERY
+                // declared excerpt must appear in the SAME reachable commit
+                // message — the anchor keeps the carrier discoverable from
+                // the card id alone after retirement (the landing trailer
+                // makes the landing commit body the natural carrier), and an
+                // excerpt floating in an unrelated, un-anchored message
+                // verifies nothing. This is the C1 fix: the card-id default
+                // marker alone (the landing trailer) no longer satisfies a
+                // covering entry — an excerpt of real field content is not
+                // the trailer.
+                if (isCovering && markerDeclared) {
+                    // A declared marker still resolves on its own — every
+                    // declared pointer resolves.
+                    const markerRes = gitSpawn(repo, [
+                        "log",
+                        "--branches",
+                        "--fixed-strings",
+                        `--grep=${marker}`,
+                        "--format=%H%x1f%B%x1e",
+                    ]);
+                    if (markerRes.status !== 0) {
+                        problems.push({
+                            index,
+                            kind: "commit",
+                            locator: "<reachable history>",
+                            code: "verifier_unavailable",
+                            detail: `git could not read history: ${markerRes.stderr || `exit ${markerRes.status}`}`,
+                        });
+                        return;
+                    }
+                    let markerHit = false;
+                    for (const record_ of markerRes.stdout.split("\x1e")) {
+                        const rec = record_.trim();
+                        if (!rec) continue;
+                        const sep = rec.indexOf("\x1f");
+                        const sha = (sep >= 0 ? rec.slice(0, sep) : rec).trim();
+                        const body = sep >= 0 ? rec.slice(sep + 1) : "";
+                        if (sha && body.includes(marker)) {
+                            markerHit = true;
+                            break;
+                        }
+                    }
+                    if (!markerHit) {
+                        problems.push({
+                            index,
+                            kind: "commit",
+                            locator: "<reachable history>",
+                            code: "marker_not_in_reachable_history",
+                            detail: `no reachable commit message contains the marker "${marker}" (local-repository reachability only)`,
+                        });
+                        return;
+                    }
+                }
+                if (isCovering) {
+                    const anchored = gitSpawn(repo, [
+                        "log",
+                        "--branches",
+                        "--fixed-strings",
+                        `--grep=${taskID}`,
+                        "--format=%H%x1f%B%x1e",
+                    ]);
+                    if (anchored.status !== 0) {
+                        problems.push({
+                            index,
+                            kind: "commit",
+                            locator: "<reachable history>",
+                            code: "verifier_unavailable",
+                            detail: `git could not read history: ${anchored.stderr || `exit ${anchored.status}`}`,
+                        });
+                        return;
+                    }
+                    let anchorSeen = false;
+                    const excerptSeen = new Map(
+                        carriesPairs.map(([field]) => [field, false]),
+                    );
+                    let hit = null;
+                    for (const record_ of anchored.stdout.split("\x1e")) {
+                        const rec = record_.trim();
+                        if (!rec) continue;
+                        const sep = rec.indexOf("\x1f");
+                        const sha = (sep >= 0 ? rec.slice(0, sep) : rec).trim();
+                        const body = sep >= 0 ? rec.slice(sep + 1) : "";
+                        if (!sha || !body.includes(taskID)) {
+                            continue;
+                        }
+                        anchorSeen = true;
+                        // Non-short-circuiting scan: mark EVERY excerpt
+                        // present in this body as seen (a short-circuiting
+                        // .every would skip the later excerpts of a partial
+                        // carrier and misreport them as never-seen).
+                        let allPresent = true;
+                        for (const [field, excerpt] of carriesPairs) {
+                            if (normalizedTextContains(body, excerpt)) {
+                                excerptSeen.set(field, true);
+                            } else {
+                                allPresent = false;
+                            }
+                        }
+                        if (allPresent) {
+                            hit = sha;
+                            break;
+                        }
+                    }
+                    if (hit) {
+                        verified.push({
+                            index,
+                            kind: "commit",
+                            locator: hit,
+                            how: `card-id anchor + ${carriesPairs.length} covered excerpt(s) present in the same reachable commit message`,
+                        });
+                        return;
+                    }
+                    if (!anchorSeen) {
+                        problems.push({
+                            index,
+                            kind: "commit",
+                            locator: "<reachable history>",
+                            code: "anchor_missing",
+                            detail: `no reachable commit message carries the card-id anchor "${taskID}" — every covering carrier must be discoverable from the card id after retirement (the landing trailer makes the landing commit body the natural carrier)`,
+                        });
+                        return;
+                    }
+                    const neverSeen = carriesPairs.filter(
+                        ([field]) => !excerptSeen.get(field),
+                    );
+                    if (neverSeen.length === 0) {
+                        problems.push({
+                            index,
+                            kind: "commit",
+                            locator: "<reachable history>",
+                            code: "carrier_content_scattered",
+                            detail: `card-id-anchored reachable commit messages carry each declared excerpt somewhere, but no single message carries the anchor together with ALL of them — one entry is one carrier; split the coverage across entries`,
+                        });
+                        return;
+                    }
+                    neverSeen.forEach(([field, excerpt]) => {
+                        problems.push({
+                            index,
+                            kind: "commit",
+                            locator: "<reachable history>",
+                            code: "excerpt_not_in_carrier",
+                            detail: `no card-id-anchored reachable commit message carries the excerpt for field "${field}" ("${String(excerpt).slice(0, 60)}…") — the declared carrier does not contain the covered field's content`,
+                        });
+                    });
+                    return;
+                }
                 const res = gitSpawn(repo, [
                     "log",
                     "--branches",
@@ -5884,6 +6322,121 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                 });
                 return;
             }
+            if (isCovering) {
+                // Covering entry at a declared revision: the commit must
+                // carry the card-id ANCHOR (message or any blob at that
+                // revision — with no declared marker this is exactly the old
+                // default-marker check) plus EVERY excerpt (message text is
+                // matched with whitespace normalization so a wrapped body
+                // still verifies; tree blobs go through git grep -F, which
+                // is line-based, so tree-carried excerpts must sit on one
+                // line). A declared marker resolves on its own too.
+                const msg = gitSpawn(repo, ["log", "-1", "--format=%B", sha]);
+                if (msg.status !== 0) {
+                    problems.push({
+                        index,
+                        kind: "commit",
+                        locator,
+                        code: "verifier_unavailable",
+                        detail: `git could not read the commit message at ${sha}: ${msg.stderr || `git log exited ${msg.status}`}`,
+                    });
+                    return;
+                }
+                const messageText = msg.stdout;
+                const treeHit = (needle) =>
+                    treeAtRevisionContains(repo, sha, needle);
+                let anchorOk = messageText.includes(taskID);
+                if (!anchorOk) {
+                    const anchorTree = treeHit(taskID);
+                    if (!anchorTree.available) {
+                        problems.push({
+                            index,
+                            kind: "commit",
+                            locator,
+                            code: "verifier_unavailable",
+                            detail: `git could not search the tree at commit ${sha}: ${anchorTree.stderr}`,
+                        });
+                        return;
+                    }
+                    anchorOk = anchorTree.contains;
+                }
+                let markerOk = true;
+                if (markerDeclared) {
+                    markerOk = messageText.includes(marker);
+                    if (!markerOk) {
+                        const markerTree = treeHit(marker);
+                        if (!markerTree.available) {
+                            problems.push({
+                                index,
+                                kind: "commit",
+                                locator,
+                                code: "verifier_unavailable",
+                                detail: `git could not search the tree at commit ${sha}: ${markerTree.stderr}`,
+                            });
+                            return;
+                        }
+                        markerOk = markerTree.contains;
+                    }
+                }
+                const excerptMisses = [];
+                for (const [field, excerpt] of carriesPairs) {
+                    let ok = normalizedTextContains(messageText, excerpt);
+                    if (!ok) {
+                        const excerptTree = treeHit(excerpt);
+                        if (!excerptTree.available) {
+                            problems.push({
+                                index,
+                                kind: "commit",
+                                locator,
+                                code: "verifier_unavailable",
+                                detail: `git could not search the tree at commit ${sha}: ${excerptTree.stderr}`,
+                            });
+                            return;
+                        }
+                        ok = excerptTree.contains;
+                    }
+                    if (!ok) {
+                        excerptMisses.push([field, excerpt]);
+                    }
+                }
+                if (anchorOk && markerOk && excerptMisses.length === 0) {
+                    verified.push({
+                        index,
+                        kind: "commit",
+                        locator: sha,
+                        how: `card-id anchor${markerDeclared ? ` + marker "${marker}"` : ""} + ${carriesPairs.length} covered excerpt(s) present at the declared revision`,
+                    });
+                    return;
+                }
+                if (!anchorOk) {
+                    problems.push({
+                        index,
+                        kind: "commit",
+                        locator,
+                        code: "anchor_missing",
+                        detail: `commit ${sha} is reachable but carries the card-id anchor "${taskID}" neither in its message nor in any blob at that committed revision — every covering carrier must be discoverable from the card id after retirement`,
+                    });
+                }
+                if (markerDeclared && !markerOk) {
+                    problems.push({
+                        index,
+                        kind: "commit",
+                        locator,
+                        code: "marker_missing",
+                        detail: `commit ${sha} is reachable but carries neither the marker "${marker}" in its message nor in any blob at that committed revision`,
+                    });
+                }
+                excerptMisses.forEach(([field, excerpt]) => {
+                    problems.push({
+                        index,
+                        kind: "commit",
+                        locator,
+                        code: "excerpt_not_in_carrier",
+                        detail: `commit ${sha} (the declared carrier) does not contain the excerpt for field "${field}" ("${String(excerpt).slice(0, 60)}…") in its message or any blob at that committed revision`,
+                    });
+                });
+                return;
+            }
             const inMessage = commitMessageContains(repo, sha, marker);
             if (!inMessage.available) {
                 problems.push({
@@ -5936,6 +6489,87 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
         if (entry.kind === "artifact") {
             const targetPath = String(entry.path || "").trim();
             const declaredRev = String(entry.revision || "").trim();
+            const carriesPairs =
+                entry.carries &&
+                typeof entry.carries === "object" &&
+                !Array.isArray(entry.carries)
+                    ? Object.entries(entry.carries)
+                    : [];
+            const isCovering = carriesPairs.length > 0;
+            const markerDeclared =
+                typeof entry.marker === "string" && entry.marker.trim() !== "";
+            // Covering-blob check: the SAME committed blob must contain the
+            // card-id ANCHOR (the back-reference that keeps the carrier
+            // discoverable from the card id after retirement — with no
+            // declared marker this is exactly the old default-marker check),
+            // every declared excerpt (whitespace-normalized, so wrapped doc
+            // lines still verify), and a declared marker. Returns null on
+            // full verification or a problem describing the miss.
+            const checkCoveringBlob = (sha) => {
+                const read = committedBlobAt(repo, sha, targetPath);
+                if (!read.available) {
+                    return {
+                        code: "verifier_unavailable",
+                        detail: `git could not read "${targetPath}" at commit ${sha}: ${read.stderr}`,
+                    };
+                }
+                if (read.blob === null) {
+                    if (read.missReason) {
+                        return {
+                            code: "path_is_directory_not_file_blob",
+                            detail: read.missReason,
+                        };
+                    }
+                    return {
+                        code: "path_not_tracked_at_revision",
+                        detail: `"${targetPath}" is not tracked as a file blob at commit ${sha}`,
+                    };
+                }
+                const anchorOk = read.blob.includes(taskID);
+                const markerOk = !markerDeclared || read.blob.includes(marker);
+                const excerptMisses = carriesPairs.filter(
+                    ([, excerpt]) =>
+                        !normalizedTextContains(read.blob, excerpt),
+                );
+                if (anchorOk && markerOk && excerptMisses.length === 0) {
+                    verified.push({
+                        index,
+                        kind: "artifact",
+                        locator: `${sha}:${targetPath}`,
+                        how: `card-id anchor${markerDeclared ? ` + marker "${marker}"` : ""} + ${carriesPairs.length} covered excerpt(s) present in the committed blob`,
+                    });
+                    return null;
+                }
+                return {
+                    code: "covering_blob_incomplete",
+                    anchorOk,
+                    markerOk,
+                    excerptMisses,
+                    sha,
+                };
+            };
+            const coveringProblemsFrom = (miss) => {
+                const list = [];
+                if (!miss.anchorOk) {
+                    list.push({
+                        code: "anchor_missing",
+                        detail: `the committed blob of "${targetPath}" at commit ${miss.sha} does not contain the card-id anchor "${taskID}" — every covering carrier must be discoverable from the card id after retirement (the documented back-reference convention)`,
+                    });
+                }
+                if (markerDeclared && !miss.markerOk) {
+                    list.push({
+                        code: "marker_not_in_committed_blob",
+                        detail: `"${targetPath}" is tracked at commit ${miss.sha} but its committed blob does not contain the marker "${marker}" (working-tree modifications never count)`,
+                    });
+                }
+                miss.excerptMisses.forEach(([field, excerpt]) => {
+                    list.push({
+                        code: "excerpt_not_in_carrier",
+                        detail: `the committed blob of "${targetPath}" at commit ${miss.sha} does not contain the excerpt for field "${field}" ("${String(excerpt).slice(0, 60)}…") — the declared carrier does not contain the covered field's content`,
+                    });
+                });
+                return list;
+            };
             const checkBlob = (sha, how) => {
                 const read = committedBlobAt(repo, sha, targetPath);
                 if (!read.available) {
@@ -5999,6 +6633,30 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                     });
                     return;
                 }
+                if (isCovering) {
+                    const miss = checkCoveringBlob(sha);
+                    if (miss === null) {
+                        return;
+                    }
+                    if (miss.code !== "covering_blob_incomplete") {
+                        problems.push({
+                            index,
+                            kind: "artifact",
+                            locator: `${declaredRev}:${targetPath}`,
+                            ...miss,
+                        });
+                        return;
+                    }
+                    coveringProblemsFrom(miss).forEach((problem) => {
+                        problems.push({
+                            index,
+                            kind: "artifact",
+                            locator: `${declaredRev}:${targetPath}`,
+                            ...problem,
+                        });
+                    });
+                    return;
+                }
                 const problem = checkBlob(
                     sha,
                     `marker "${marker}" present in the committed blob at the declared revision`,
@@ -6036,6 +6694,129 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                     code: "path_never_committed",
                     detail: `no reachable commit carries "${targetPath}" — the durable file was never committed (local-only files never count)`,
                 });
+                return;
+            }
+            if (isCovering) {
+                // Covering search walk: the FIRST reachable revision of the
+                // path whose committed blob carries the card-id anchor, the
+                // declared marker, and EVERY excerpt verifies. Per-part
+                // satisfaction is tracked across the whole walk so the
+                // aggregate diagnosis is honest: a part satisfied in one
+                // revision but never together with the others is SCATTERED
+                // coverage (one entry is one carrier), never a false
+                // part-missing claim. Unavailable reads keep b-F2 semantics
+                // (an incomplete negative search is never a confident miss);
+                // directory paths keep b-F1 naming.
+                let unavailableDetail = null;
+                let directoryDetail = null;
+                let anchorEver = false;
+                let markerEver = !markerDeclared;
+                const excerptEver = new Map(
+                    carriesPairs.map(([field]) => [field, false]),
+                );
+                for (const sha of revs) {
+                    const read = committedBlobAt(repo, sha, targetPath);
+                    if (!read.available) {
+                        if (unavailableDetail === null) {
+                            unavailableDetail = `git could not read "${targetPath}" at commit ${sha}: ${read.stderr}`;
+                        }
+                        continue;
+                    }
+                    if (read.blob === null) {
+                        if (read.missReason && directoryDetail === null) {
+                            directoryDetail = read.missReason;
+                        }
+                        continue;
+                    }
+                    let allOk = true;
+                    if (read.blob.includes(taskID)) {
+                        anchorEver = true;
+                    } else {
+                        allOk = false;
+                    }
+                    if (markerDeclared) {
+                        if (read.blob.includes(marker)) {
+                            markerEver = true;
+                        } else {
+                            allOk = false;
+                        }
+                    }
+                    for (const [field, excerpt] of carriesPairs) {
+                        if (normalizedTextContains(read.blob, excerpt)) {
+                            excerptEver.set(field, true);
+                        } else {
+                            allOk = false;
+                        }
+                    }
+                    if (allOk) {
+                        verified.push({
+                            index,
+                            kind: "artifact",
+                            locator: `${sha}:${targetPath}`,
+                            how: `card-id anchor${markerDeclared ? ` + marker "${marker}"` : ""} + ${carriesPairs.length} covered excerpt(s) present in the committed blob at reachable revision ${sha}`,
+                        });
+                        return;
+                    }
+                }
+                if (unavailableDetail !== null) {
+                    problems.push({
+                        index,
+                        kind: "artifact",
+                        locator: targetPath,
+                        code: "verifier_unavailable",
+                        detail: `no reachable revision verified "${targetPath}" and at least one committed-blob read was unavailable — content absence is NOT established: ${unavailableDetail}`,
+                    });
+                    return;
+                }
+                if (directoryDetail !== null) {
+                    problems.push({
+                        index,
+                        kind: "artifact",
+                        locator: targetPath,
+                        code: "path_is_directory_not_file_blob",
+                        detail: directoryDetail,
+                    });
+                    return;
+                }
+                const neverExcerpts = carriesPairs.filter(
+                    ([field]) => !excerptEver.get(field),
+                );
+                if (!anchorEver) {
+                    problems.push({
+                        index,
+                        kind: "artifact",
+                        locator: targetPath,
+                        code: "anchor_missing",
+                        detail: `no reachable revision of "${targetPath}" carries the card-id anchor "${taskID}" in its committed blob — every covering carrier must be discoverable from the card id after retirement (the documented back-reference convention)`,
+                    });
+                }
+                if (markerDeclared && !markerEver) {
+                    problems.push({
+                        index,
+                        kind: "artifact",
+                        locator: targetPath,
+                        code: "marker_not_in_committed_blob",
+                        detail: `"${targetPath}" is committed at ${revs.length} reachable revision(s) but none contains the marker "${marker}" (working-tree modifications never count)`,
+                    });
+                }
+                neverExcerpts.forEach(([field, excerpt]) => {
+                    problems.push({
+                        index,
+                        kind: "artifact",
+                        locator: targetPath,
+                        code: "excerpt_not_in_carrier",
+                        detail: `no reachable revision of "${targetPath}" carries the excerpt for field "${field}" ("${String(excerpt).slice(0, 60)}…") in its committed blob — the declared carrier does not contain the covered field's content`,
+                    });
+                });
+                if (anchorEver && markerEver && neverExcerpts.length === 0) {
+                    problems.push({
+                        index,
+                        kind: "artifact",
+                        locator: targetPath,
+                        code: "carrier_content_scattered",
+                        detail: `reachable revisions of "${targetPath}" carry each declared part somewhere, but no single committed blob carries the card-id anchor together with ALL excerpts — one entry is one carrier; split the coverage across entries or pin the revision`,
+                    });
+                }
                 return;
             }
             let unavailableDetail = null;
@@ -6129,6 +6910,13 @@ function decisionRecordDestructionInventory(task) {
                       (entry && entry.kind === "routine"
                           ? "routine attestation"
                           : ""),
+                  covers:
+                      entry &&
+                      entry.carries &&
+                      typeof entry.carries === "object" &&
+                      !Array.isArray(entry.carries)
+                          ? Object.keys(entry.carries)
+                          : [],
               }))
             : [];
     return { fields, entries };
@@ -6539,19 +7327,42 @@ function deleteCoordinationTask(sessionID, taskIDRaw, options = {}) {
                     },
                 };
             }
-            // A routine attestation must not contradict explicit decision-
-            // class fields as the card stands NOW (fields may have been added
-            // after closeout, e.g. a review verdict via /task-review).
-            if (
-                record.entries.length === 1 &&
-                record.entries[0] &&
-                record.entries[0].kind === "routine"
-            ) {
-                const contradictions = collectDecisionClassFields(parsedCard);
-                if (contradictions.length > 0) {
-                    const named = contradictions
+            // COVERAGE rule (owner-approved 2026-10-26, concern C1): every
+            // decision-class field as the card stands NOW (fields may have
+            // been added after closeout, e.g. a non-approve review verdict
+            // via /task-review) must be covered by an entry declaring
+            // carries for it, and every declared excerpt must still be drawn
+            // from that field's content. This generalizes the old
+            // routine-only contradiction check to ALL entry kinds: a bare
+            // {kind:"commit"} (default marker = card id, satisfied by the
+            // landing trailer itself) or a marker-only entry covers NOTHING,
+            // so the trivial-satisfaction path dies here — an excerpt of real
+            // field content is not the trailer.
+            {
+                const coverage = collectDecisionRecordCoverageProblems(
+                    parsedCard,
+                    record,
+                );
+                if (
+                    coverage.uncovered.length > 0 ||
+                    coverage.unbound.length > 0
+                ) {
+                    const named = coverage.uncovered
                         .map((c) => `  - ${c.field}: ${c.detail}`)
                         .join("\n");
+                    const unboundNamed = coverage.unbound
+                        .map((u) => `  - ${u.detail}`)
+                        .join("\n");
+                    const isRoutine =
+                        record.entries.length === 1 &&
+                        record.entries[0] &&
+                        record.entries[0].kind === "routine";
+                    const fieldNames = [
+                        ...new Set([
+                            ...coverage.uncovered.map((c) => c.field),
+                            ...coverage.unbound.map((u) => u.field),
+                        ]),
+                    ];
                     return {
                         ...actor,
                         ok: false,
@@ -6560,16 +7371,22 @@ function deleteCoordinationTask(sessionID, taskIDRaw, options = {}) {
                             code: "decision_content_unpromoted",
                             task_id: taskID,
                             status: "completed",
-                            fields: contradictions.map((c) => c.field),
+                            fields: fieldNames,
                             force_required: true,
                             message:
-                                `Task ${taskID} carries a routine decision_record (nothing decision-class to preserve) but explicit decision-class card fields are non-empty:\n${named}\n` +
-                                `Promote that content to a reachable commit or a committed durable file and re-declare the decision_record, or re-run with explicit force ONLY for genuine emergency cleanup — force destroys it.`,
+                                (isRoutine
+                                    ? `Task ${taskID} carries a routine decision_record (nothing decision-class to preserve) but explicit decision-class card fields are non-empty:\n${named}\n`
+                                    : `Task ${taskID} declares a decision_record whose entries do not COVER every decision-class card field:\n${named}\n`) +
+                                (unboundNamed !== ""
+                                    ? `Declared coverage that does not bind the field's actual content:\n${unboundNamed}\n`
+                                    : "") +
+                                `Promote that content to a reachable commit or a committed durable file and re-declare the decision_record with carries entries (each excerpt verified in the carrier together with the card-id back-reference), or re-run with explicit force ONLY for genuine emergency cleanup — force destroys it.`,
                         },
                     };
                 }
             }
-            // Landing proven + every pointer resolved: retire.
+            // Landing proven + every pointer resolved + coverage complete:
+            // retire.
         } else {
             // Legacy compatibility (owner condition 5): no decision_record.
             // Refuse ONLY when explicit decision-class fields are non-empty
@@ -8364,10 +9181,10 @@ function saveCoordinationTaskCloseout(sessionID, taskIDRaw, options = {}) {
         );
         // Guard: a JSON body of `null` (or a primitive/array — JSON allows
         // all of them at top level) parses WITHOUT a parse error, and the
-        // structural collector already refuses it above. The routine
-        // contradiction probe below must not dereference it — that raised a
-        // raw TypeError instead of the collected StateError. Only probe a
-        // plausible object shape.
+        // structural collector already refuses it above. The coverage probe
+        // below must not dereference it — that raised a raw TypeError
+        // instead of the collected StateError. Only probe a plausible object
+        // shape.
         const isRoutineAttestation =
             decisionRecord !== null &&
             typeof decisionRecord === "object" &&
@@ -8376,18 +9193,46 @@ function saveCoordinationTaskCloseout(sessionID, taskIDRaw, options = {}) {
             decisionRecord.entries.length === 1 &&
             decisionRecord.entries[0] &&
             decisionRecord.entries[0].kind === "routine";
-        if (isRoutineAttestation) {
-            const contradictions = collectDecisionClassFields(
+        // COVERAGE rule (owner-approved 2026-10-26, concern C1): the old
+        // routine-only contradiction check is generalized to ALL entry kinds.
+        // Every non-empty decision-class card field must be covered by an
+        // entry declaring carries for it, and every declared excerpt must be
+        // drawn from that field's current content. A bare {kind:"commit"}
+        // (whose default card-id marker the landing trailer itself
+        // satisfies) or a marker-only entry covers NOTHING — the presence of
+        // explicit decision-class metadata no longer implies its content
+        // survives retirement. A routine attestation is the empty-coverage
+        // case and stays valid only when there is nothing to cover.
+        const plausibleRecord =
+            decisionRecord !== null &&
+            typeof decisionRecord === "object" &&
+            !Array.isArray(decisionRecord) &&
+            Array.isArray(decisionRecord.entries);
+        if (plausibleRecord) {
+            const coverage = collectDecisionRecordCoverageProblems(
                 loaded.payload,
+                decisionRecord,
                 { measuredOutcome: options.measuredOutcome },
             );
-            if (contradictions.length > 0) {
-                const named = contradictions
+            if (
+                coverage.uncovered.length > 0 ||
+                coverage.unbound.length > 0
+            ) {
+                const named = coverage.uncovered
                     .map((c) => `  - ${c.field}: ${c.detail}`)
                     .join("\n");
+                const unboundNamed = coverage.unbound
+                    .map((u) => `  - ${u.detail}`)
+                    .join("\n");
                 errors.push(
-                    `Task ${loaded.payload.task_id} declares a routine decision_record (nothing decision-class to preserve) but explicit decision-class card fields are non-empty:\n${named}\n` +
-                    "Replace the routine attestation with commit/artifact entries that preserve that content, or clear the fields if they are not decision-class.",
+                    (isRoutineAttestation
+                        ? `Task ${loaded.payload.task_id} declares a routine decision_record (nothing decision-class to preserve) but explicit decision-class card fields are non-empty:\n${named}\n`
+                        : `Task ${loaded.payload.task_id} declares a decision_record whose entries do not COVER every decision-class card field:\n${named}\n`) +
+                    (unboundNamed !== ""
+                        ? `Declared coverage that does not bind the field's actual content:\n${unboundNamed}\n`
+                        : "") +
+                    "Cover each decision-class field with an entry declaring carries: { \"<field>\": \"<verbatim single-line excerpt from that field's content>\" } (the excerpt is verified — together with the card-id back-reference — in the committed carrier at retirement), or clear the fields if they are not decision-class. " +
+                    "Sensitive content that genuinely cannot be promoted must go through the documented operator force path at retirement, never a hollow declaration.",
                 );
             }
         }

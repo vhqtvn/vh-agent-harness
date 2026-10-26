@@ -32,18 +32,26 @@ survive. This is the 2026-08-07 lesson made mechanical: never retire a `complete
 card on review approval alone while the commit may yet fail to land.
 
 Landing proven is necessary but not sufficient: retirement also runs the
-**retention-preservation gate** (owner-approved 2026-10-25). Retirement deletes
-the card AND its report directory — the last local copy of decision-class
-knowledge (owner authorizations, materially-rejected alternatives, review
-verdicts, measured outcomes) — so after the landing proof, every `commit` /
-`artifact` entry of the card's `decision_record` is resolved against committed,
+**retention-preservation gate** (owner-approved 2026-10-25; coverage rule +
+review classification 2026-10-26). Retirement deletes the card AND its report
+directory — the last local copy of decision-class knowledge (owner
+authorizations, materially-rejected alternatives, non-approve review verdicts,
+measured outcomes) — so after the landing proof, every `commit` / `artifact`
+entry of the card's `decision_record` is resolved against committed,
 branch-reachable git state (marker in a reachable commit message/blob; durable
-file git-tracked with the card-id back-reference in the COMMITTED blob).
-Working-tree content and local-report prose never count. Legacy completed cards
-without a `decision_record` follow the compatibility rule: refused only when
-explicit decision-class card fields (`owner_notes`, `measured_outcome`,
-non-empty `open_questions`, `last_review` / `task_reviewed` history) are
-non-empty and unpromoted. See `docs/coordination/RECORD_LIFECYCLE.md` →
+file git-tracked with the card-id back-reference in the COMMITTED blob), and
+the **coverage rule** is enforced: every non-empty decision-class field
+(`owner_notes`, `measured_outcome`, non-empty `open_questions`, NON-APPROVE
+`last_review` / `task_reviewed` signals — a review that resolved the card to
+`completed` is a process record, not decision-class) must be covered by an
+entry declaring `carries: {"<field>": "<verbatim excerpt from that field>"}`,
+and that excerpt must be present — with the card-id anchor — in the SAME
+committed carrier. A bare `{kind:"commit"}` or marker-only entry covers
+NOTHING: the landing trailer's default card-id marker no longer satisfies
+content coverage. Working-tree content and local-report prose never count.
+Legacy completed cards without a `decision_record` follow the compatibility
+rule: refused only when explicit decision-class card fields are non-empty and
+unpromoted. See `docs/coordination/RECORD_LIFECYCLE.md` →
 "Retention preservation".
 
 Task id (exactly one explicit id):
@@ -70,8 +78,8 @@ Workflow:
   - `refusal.code === "active_working_task"` — an actively-owned working card; the operator must decide whether to re-run with an explicit `force`.
   - `refusal.code === "lifecycle_state_protected"` — a card in `working` (stale, no active owner), `reported`, or `blocked` state whose report evidence a coordinator gate may still need. (In-flight protection is NOT weakened by the completed-retirement path: these statuses are refused EVEN IF a landing commit appears.)
   - `refusal.code === "landing_not_confirmed"` — a `completed` card whose landing is not proven: no reachable commit carries the exact `Task-Card: <card-id>` trailer, or the verifier could not read git history (`refusal.reason` is `no_trailer_match` or `verifier_unavailable`; `refusal.query` names the exact command). The remedy is to ensure the work landed on a branch under the trailer, or to re-run with `force` ONLY for genuine legacy/emergency cleanup.
-  - `refusal.code === "decision_record_unresolved"` — a `completed`, landed card whose declared `commit`/`artifact` entries do not resolve against committed, branch-reachable git state (`refusal.problems` names each missing/uncommitted/unreachable item). The remedy is to promote the content (commit the decision content / commit the durable file with the card-id back-reference) — NOT force.
-  - `refusal.code === "decision_content_unpromoted"` — a `routine` attestation (or legacy card with no `decision_record`) contradicted by explicit decision-class card fields (`refusal.fields` names them). The remedy is to promote that content and re-declare, or `force` ONLY for genuine emergency cleanup.
+  - `refusal.code === "decision_record_unresolved"` — a `completed`, landed card whose declared `commit`/`artifact` entries do not resolve against committed, branch-reachable git state, or whose covering `carries` excerpts are not present in an anchored carrier (`refusal.problems` names each missing/uncommitted/unreachable item, incl. `anchor_missing` / `excerpt_not_in_carrier`). The remedy is to promote the content (commit the decision content / commit the durable file with the card-id back-reference and the excerpt) — NOT force.
+  - `refusal.code === "decision_content_unpromoted"` — decision-class card fields are not covered by any entry's `carries` (a `routine` attestation with non-empty fields, a marker-only/bare record, or a legacy card with no `decision_record`; `refusal.fields` names them). The remedy is to promote that content and re-declare with covering entries, or `force` ONLY for genuine emergency cleanup.
   Re-running with `force` is always a separate, deliberate invocation.
 - print the returned `removed` summary (task id, title, status, malformed flag, whether the card and report directory were removed). For a FORCED completed retirement the result also carries `decision_content_destroyed` + `destructive_warning` naming the decision-class content (card fields + declared entries) that was destroyed — surface that warning verbatim to the operator.
 
