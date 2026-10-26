@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"serverInfo":{"name":"vh-agent-harness"},"capabilities":{"approval":true,"jobs":true,"eventNotifications":true}}}

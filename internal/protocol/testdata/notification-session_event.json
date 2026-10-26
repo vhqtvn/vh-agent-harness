@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"session/event","params":{"seq":9,"type":"job/settled","payload":{"jobId":"background-1","kind":"background","owner":"sess-example","result":"completed"}}}

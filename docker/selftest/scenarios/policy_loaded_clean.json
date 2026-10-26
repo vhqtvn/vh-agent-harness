@@ -1,0 +1,4 @@
+[
+  {"tool_calls": [{"id": "call-pol-1", "name": "echo", "args": {"text": "policy-clean-run"}}]},
+  {"text": "policy clean run done"}
+]

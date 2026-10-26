@@ -1,0 +1,281 @@
+// render_test.go — slice P2 step 2 (red): the two renderers. The human
+// renderer draws compact lines on the injected writer (stderr in real
+// wiring); the JSON renderer writes every notification's params
+// VERBATIM as NDJSON (no re-marshal). Both track the last turn/end kind
+// (the one-shot exit mapping depends on it).
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"testing"
+
+	"github.com/vhqtvn/vh-agent-harness/internal/session"
+)
+
+func eventParams(t *testing.T, typ string, payload any) json.RawMessage {
+	t.Helper()
+	ev := session.Event{Seq: 1, Type: typ}
+	if payload != nil {
+		switch p := payload.(type) {
+		case string:
+			ev.Payload = json.RawMessage(p)
+		default:
+			b, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+			ev.Payload = b
+		}
+	}
+	b, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+	return json.RawMessage(b)
+}
+
+func renderAll(t *testing.T, r Renderer, items ...json.RawMessage) {
+	t.Helper()
+	for _, p := range items {
+		r.RenderEvent(p)
+	}
+}
+
+func TestHumanRendererPromptLine(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	r.RenderEvent(eventParams(t, session.TypeSessionPrompt, `{"text":"hello world"}`))
+	if got := buf.String(); got != "→ prompt hello world\n" {
+		t.Fatalf("prompt line = %q", got)
+	}
+}
+
+func TestHumanRendererToolCallWithHint(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	r.RenderEvent(eventParams(t, session.TypeToolCall, `{"id":"c1","name":"echo","args":{"text":"hi there"}}`))
+	r.RenderEvent(eventParams(t, session.TypeToolCall, `{"id":"c2","name":"run_shell","args":{"command":"echo child-shell-ok"}}`))
+	r.RenderEvent(eventParams(t, session.TypeToolCall, `{"id":"c3","name":"read","args":{"path":"a/b.txt"}}`))
+	out := buf.String()
+	for _, want := range []string{
+		"⚙ tool echo text=hi there\n",
+		"⚙ tool run_shell command=echo child-shell-ok\n",
+		"⚙ tool read path=a/b.txt\n",
+	} {
+		if !bytes.Contains([]byte(out), []byte(want)) {
+			t.Fatalf("tool call lines missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestHumanRendererToolResults(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	r.RenderEvent(eventParams(t, session.TypeToolResult, `{"callId":"c1","name":"echo","content":"hello world","isError":false}`))
+	r.RenderEvent(eventParams(t, session.TypeToolResult, `{"callId":"c2","name":"run_shell","content":"boom","isError":true}`))
+	r.RenderEvent(eventParams(t, session.TypeToolResult, `{"callId":"c3","name":"write","content":"","isError":true,"denied":true,"deniedBy":"approval","denyReason":"operator said no"}`))
+	out := buf.String()
+	for _, want := range []string{
+		"✔ tool result (11 bytes)",
+		"✘ tool result run_shell: boom",
+		"⊘ tool denied write (operator said no)",
+	} {
+		if !bytes.Contains([]byte(out), []byte(want)) {
+			t.Fatalf("result lines missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestHumanRendererAssistantIndented(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	r.RenderEvent(eventParams(t, session.TypeLLMResponse, `{"model":"m","content":"line one\nline two","usage":{}}`))
+	out := buf.String()
+	if !bytes.Contains([]byte(out), []byte("● assistant:\n")) {
+		t.Fatalf("missing assistant header:\n%s", out)
+	}
+	if !bytes.Contains([]byte(out), []byte("  line one\n  line two\n")) {
+		t.Fatalf("assistant text must be indented 2 spaces:\n%s", out)
+	}
+}
+
+func TestHumanRendererJobSettlement(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	r.RenderEvent(eventParams(t, session.TypeJobEnqueued, `{"jobId":"echo-1","kind":"echo"}`))
+	r.RenderEvent(eventParams(t, session.TypeJobSettled, `{"jobId":"echo-1","kind":"echo","result":"completed"}`))
+	r.RenderEvent(eventParams(t, session.TypeJobSettled, `{"jobId":"fail-1","kind":"fail","result":"failed","reason":"requested failure"}`))
+	out := buf.String()
+	for _, want := range []string{
+		"… job echo-1 enqueued",
+		"■ job echo-1 settled completed",
+		"■ job fail-1 settled failed — requested failure",
+	} {
+		if !bytes.Contains([]byte(out), []byte(want)) {
+			t.Fatalf("job lines missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestHumanRendererBackgroundReceiptAndTail (P6): a run_shell
+// background-dispatch receipt renders the ↪ background line (not the
+// byte-count line), and a tailed chunk renders the ↧ job line.
+func TestHumanRendererBackgroundReceiptAndTail(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	receipt := `{"background":true,"jobId":"shell-1","command":"for i in 1 2 3; do echo tick $i; done","effectiveTimeoutMs":600000}`
+	r.RenderEvent(eventParams(t, session.TypeToolResult, `{"callId":"c1","name":"run_shell","content":`+escapeJSONString(t, receipt)+`,"isError":false}`))
+	r.RenderJobOutput(JobOutputRecord{Kind: "job-output", JobID: "shell-1", State: "running", Offset: 0, NextOffset: 14, Chunk: "tick 1\ntick 2\n", Written: 14})
+	out := buf.String()
+	for _, want := range []string{
+		"↪ background for i in 1 2 3; do echo tick $i; done → job shell-1",
+		"↧ job shell-1 @0 +14B (running)", // the served delta is rendered, not a literal
+	} {
+		if !bytes.Contains([]byte(out), []byte(want)) {
+			t.Fatalf("background lines missing %q in:\n%s", want, out)
+		}
+	}
+	// A plain (sync) run_shell result keeps the byte-count line.
+	r2 := newHumanRenderer(&buf)
+	r2.RenderEvent(eventParams(t, session.TypeToolResult, `{"callId":"c9","name":"run_shell","content":"{\"cause\":\"exit\"}","isError":false}`))
+	if !bytes.Contains(buf.Bytes(), []byte("✔ tool result (")) {
+		t.Fatalf("sync run_shell result lost the byte-count line:\n%s", buf.String())
+	}
+}
+
+// escapeJSONString marshals s as a JSON string literal (embedding a
+// JSON document as tool-result content).
+func escapeJSONString(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestJSONRendererJobOutputRecord (P6): the synthesized job-output
+// record rides the NDJSON stream with kind:"job-output".
+func TestJSONRendererJobOutputRecord(t *testing.T) {
+	var buf bytes.Buffer
+	r := newJSONRenderer(&buf)
+	r.RenderJobOutput(JobOutputRecord{Kind: "job-output", JobID: "shell-2", State: "settled", Offset: 40, NextOffset: 40, Chunk: "", Written: 40})
+	line := buf.String()
+	if !bytes.Contains([]byte(line), []byte(`"kind":"job-output"`)) || !bytes.Contains([]byte(line), []byte(`"jobId":"shell-2"`)) {
+		t.Fatalf("job-output record = %q", line)
+	}
+	var rec JobOutputRecord
+	if err := json.Unmarshal([]byte(trimNL(line)), &rec); err != nil || rec.State != "settled" {
+		t.Fatalf("record does not round-trip: %v %v", err, rec)
+	}
+}
+
+func trimNL(s string) string {
+	for len(s) > 0 && s[len(s)-1] == '\n' {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+func TestHumanRendererTurnError(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	r.RenderEvent(eventParams(t, session.TypeTurnEnd, `{"kind":"error","reason":"adapter boom"}`))
+	if got := buf.String(); got != "✗ turn error: adapter boom\n" {
+		t.Fatalf("turn error line = %q", got)
+	}
+	if kind, seen := r.LastTurnEnd(); !seen || kind != "error" {
+		t.Fatalf("LastTurnEnd = %q,%v want error,true", kind, seen)
+	}
+}
+
+func TestHumanRendererCleanTurnEndIsSilentButTracked(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	r.RenderEvent(eventParams(t, session.TypeTurnEnd, `{"kind":""}`))
+	if buf.Len() != 0 {
+		t.Fatalf("clean turn/end must render nothing, got %q", buf.String())
+	}
+	if kind, seen := r.LastTurnEnd(); !seen || kind != "" {
+		t.Fatalf("LastTurnEnd = %q,%v want \"\",true", kind, seen)
+	}
+}
+
+func TestHumanRendererUnknownTypeFallback(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	r.RenderEvent(eventParams(t, "future/thing", `{"x":1}`))
+	if !bytes.Contains([]byte(buf.String()), []byte("· future/thing")) {
+		t.Fatalf("fallback line missing:\n%s", buf.String())
+	}
+}
+
+func TestHumanRendererProtocolError(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	r.RenderProtocolError(json.RawMessage(`{"code":-32700,"message":"bad line"}`))
+	if !bytes.Contains([]byte(buf.String()), []byte("⚠ protocol error -32700: bad line")) {
+		t.Fatalf("protocol error line missing:\n%s", buf.String())
+	}
+}
+
+func TestJSONRendererEventsVerbatim(t *testing.T) {
+	var buf bytes.Buffer
+	r := newJSONRenderer(&buf)
+	p := eventParams(t, session.TypeToolCall, `{"id":"c1","name":"echo","args":{"text":"hi"}}`)
+	r.RenderEvent(p)
+	if buf.String() != string(p)+"\n" {
+		t.Fatalf("json renderer must write params verbatim + newline, got %q", buf.String())
+	}
+	// turn/end kind tracking still works in json mode.
+	p2 := eventParams(t, session.TypeTurnEnd, `{"kind":"error","reason":"x"}`)
+	r.RenderEvent(p2)
+	if kind, seen := r.LastTurnEnd(); !seen || kind != "error" {
+		t.Fatalf("LastTurnEnd = %q,%v want error,true", kind, seen)
+	}
+}
+
+func TestJSONRendererApprovalAndProtocolErrorVerbatim(t *testing.T) {
+	var buf bytes.Buffer
+	r := newJSONRenderer(&buf)
+	r.RenderApproval(json.RawMessage(`{"approvalId":"approval-1","call":{"id":"c","name":"write"},"reason":"r"}`))
+	r.RenderProtocolError(json.RawMessage(`{"code":-32700,"message":"m"}`))
+	out := buf.String()
+	if out != "{\"approvalId\":\"approval-1\",\"call\":{\"id\":\"c\",\"name\":\"write\"},\"reason\":\"r\"}\n{\"code\":-32700,\"message\":\"m\"}\n" {
+		t.Fatalf("json approval/protocol-error output = %q", out)
+	}
+}
+
+// TestHumanRendererCompactionLine (P5): the compaction bracket renders
+// ONE honest line at compaction/end — start and summary are silent
+// (an unmatched start — a refused compaction — is surfaced by the
+// daemon's stderr, not invented here), the count comes from the paired
+// summary's citations, and the generation from the end payload. An end
+// without a prior summary (subscription mid-bracket) renders only what
+// it carries.
+func TestHumanRendererCompactionLine(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	r.RenderEvent(eventParams(t, session.TypeCompactionStart, `{"reason":"turn-boundary pressure","pressure":0.93,"shadowedRange":[0,2]}`))
+	if got := buf.String(); got != "" {
+		t.Fatalf("compaction/start must render nothing, got %q", got)
+	}
+	r.RenderEvent(eventParams(t, session.TypeCompactionSummary, `{"text":"condensed","sourceEventSeqs":[3,5,9],"shadowedRange":[0,2],"replaceGeneration":1}`))
+	if got := buf.String(); got != "" {
+		t.Fatalf("compaction/summary must render nothing on its own, got %q", got)
+	}
+	r.RenderEvent(eventParams(t, session.TypeCompactionEnd, `{"summarySeq":12,"replaceGeneration":1}`))
+	if got, want := buf.String(), "⤾ compacted: 3 events shadowed (generation 1)\n"; got != want {
+		t.Fatalf("compaction line = %q, want %q", got, want)
+	}
+}
+
+func TestHumanRendererCompactionEndAlone(t *testing.T) {
+	var buf bytes.Buffer
+	r := newHumanRenderer(&buf)
+	r.RenderEvent(eventParams(t, session.TypeCompactionEnd, `{"summarySeq":12,"replaceGeneration":2}`))
+	if got, want := buf.String(), "⤾ compacted (generation 2)\n"; got != want {
+		t.Fatalf("unpaired compaction/end line = %q, want %q", got, want)
+	}
+}

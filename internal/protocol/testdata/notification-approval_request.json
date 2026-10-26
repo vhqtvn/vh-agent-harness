@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"approval/request","params":{"approvalId":"approval-1","call":{"id":"call-1","name":"write_file","args":{"path":"a.txt"}},"reason":"mutates workspace"}}
