@@ -87,13 +87,9 @@ function rewriteParityBody(contract) {
         "\n```\n\n```decision-record\n" +
         JSON.stringify(
             {
-                version: 1,
-                entries: [
-                    {
-                        kind: "routine",
-                        note: "rewrite-parity fixture; nothing decision-class to preserve",
-                    },
-                ],
+                version: 3,
+                items: [],
+                note: "rewrite-parity fixture; nothing decision-class to preserve",
             },
             null,
             2,
@@ -405,10 +401,9 @@ test("rewrite-parity Stage-2 gate fires through the real saveCoordinationTaskClo
             "# Ordinary closeout\n\nNo rewrite-parity contract declared here.\n\n```decision-record\n" +
                 JSON.stringify(
                     {
-                        version: 1,
-                        entries: [
-                            { kind: "routine", note: "ordinary slice" },
-                        ],
+                        version: 3,
+                        items: [],
+                        note: "ordinary slice",
                     },
                     null,
                     2,

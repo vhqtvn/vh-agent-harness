@@ -159,151 +159,182 @@ Landing proof says the work LANDED; it says nothing about whether
 alternatives, non-approve review verdicts, measured outcomes — SURVIVES
 retirement. Retiring a completed card deletes the card AND its report
 directory, the last local copy of that knowledge. The retention-preservation
-gate (owner-approved 2026-10-25; coverage rule + review classification
-owner-approved 2026-10-26) makes ordinary retirement conditional on that
-knowledge being verifiably preserved in committed git state.
+gate (owner-approved 2026-10-25; v2 coverage 2026-10-26; **v3
+item-enumerated replacement owner-approved 2026-10-27**) makes ordinary
+retirement conditional on that knowledge being verifiably preserved in
+committed git state.
 
-### The decision_record
+### The decision_record (v3: one slot per decision item)
 
 Every closeout saved under the current gate declares ONE fenced
-```decision-record` JSON block (see CLOSEOUT_TEMPLATE.md) whose entries are
-exactly three kinds:
+```decision-record` JSON block (see CLOSEOUT_TEMPLATE.md). The record is an
+**item-enumerated inventory**: the gate mechanically enumerates the card's
+decision ITEMS — every non-empty owner note, every non-empty
+`open_questions` entry, `measured_outcome`, and every NON-PROCESS review signal
+(`last_review` / `task_reviewed` whose status is not `completed`;
+scanned per event) — and the record declares **one slot per item**:
 
-| Kind | Means | Verified at retirement |
-|------|-------|------------------------|
-| `commit` with `revision` DECLARED | decision content lives in that specific git commit | the declared revision resolves to a commit that is reachable from a local branch, and carries the marker (declared, default = card id) in its MESSAGE **or** a blob at that committed revision; a covering entry's card-id ANCHOR and every excerpt must be present in that same commit |
-| `commit` with `revision` OMITTED | the content is expected in a reachable commit MESSAGE — the landing-commit body pattern, which cannot be sha-pinned at closeout time | at least one branch-reachable commit MESSAGE contains the marker (fixed-string search); a covering entry needs one message containing the card-id anchor AND every excerpt |
-| `artifact` | content promoted to a designated durable file (`docs/checkpoints/`, `researches/decisions/`, `researches/sources/`, `docs/planning/`) | the path is git-tracked, the revision is reachable, and the card-id back-reference is present in the COMMITTED blob; a covering entry's excerpts must be present in the same blob |
-| `routine` | attestation that nothing decision-class needs preserving | no git check; valid only under the coverage rule when every decision-class field is empty |
+| Slot field | Meaning |
+|------------|---------|
+| `id` | the CONTENT-BOUND item identity: `owner_notes[fnv1a:<hash>]`, `open_questions[fnv1a:<hash>]`, `measured_outcome[fnv1a:<hash>]`, `last_review[fnv1a:<hash>]`, `task_reviewed[fnv1a:<hash>]` — `<hash>` is an FNV-1a digest of the item's own text; duplicate identical items carry a per-content occurrence suffix (`.2`, `.3`, …; never array position). Reordering items changes no id; replacing an item's text in place mints a new id and refuses at retirement until declared |
+| `disposition` | `verbatim` \| `curated` \| `sanitized` — how the item is represented in its carrier |
+| `carrier` | `{kind:"commit",revision?}` or `{kind:"artifact",path,revision?}` — where the representation lives. There is deliberately **no inline carrier**: content only in the local closeout report is not durable |
+| `handle` | the per-item representation: for `verbatim`, a verbatim single line drawn from THAT item's own content (≥ 24 chars, whitespace-normalized containment — the retained excerpt core); for `curated`/`sanitized`, EXACTLY the canonical label `decision-item: <task-id>#<item-id> (<disposition>)` |
+| `provenance` | required for owner-decision items and sanitized items: who, when, where recorded. For curated/sanitized it must be a **cited reference**, never an invented or AI-paraphrased owner statement |
 
-There is deliberately **no `inline` kind**: content written only in the local
-closeout report is not durable and never satisfies the gate. Working-tree
-content never counts — only committed blobs at reachable revisions.
+An **empty `items` array is the routine attestation** — valid exactly when
+the card carries no decision items (routine work, clean review): zero
+ceremony. `revision` omitted on a carrier means *search mode* (reachable
+commit messages / reachable revisions of the path); a declared `revision` is
+verified precisely.
 
-`revision` is optional on `commit`/`artifact` entries. Omitted means
-*search mode*: the verifier searches reachable commit messages (`commit`) or
-reachable revisions of the path (`artifact`, capped walk) for the marker.
-Search mode exists because the landing/durable commits usually do not exist at
-closeout time; a declared `revision` is verified precisely.
+### Item-to-carrier binding (content, never presence)
 
-### The coverage rule (content, never presence)
+A carrier satisfies an item ONLY if the SAME committed, branch-reachable
+carrier contains BOTH:
 
-A **marker** — including the card-id default that the landing trailer itself
-satisfies — proves only that an arbitrary string is present somewhere. It
-covers NOTHING. The presence of explicit decision-class metadata does not
-imply its content survives retirement. Every non-empty decision-class field
-must be **covered** by an entry declaring `carries`:
+1. the **card-id anchor** — so a fresh session knowing only the card id can
+   find the carrier after the card is destroyed; and
+2. **that item's handle** — the verbatim line (verbatim slots) or the
+   canonical item label (curated/sanitized slots).
 
-```json
-{ "kind": "commit",
-  "carries": {
-    "owner_notes": "OWNER 2026-10-26: approved the bounded correction over a full rewrite"
-  } }
-```
+A commit whose body contains only the card id (the landing trailer)
+satisfies **nothing**. A handle floating in an un-anchored carrier satisfies
+nothing. Each slot names its own carrier; several slots may share one.
 
-- The **field set** is mechanical: `owner_notes`, `measured_outcome`,
-  non-empty `open_questions`, and the decision-class review signals below.
-- The **excerpt** must be a verbatim single line drawn from the covered
-  field's own content (whitespace-normalized binding), at least 24 characters
-  trimmed, and must not equal the card id or the entry marker (a
-  marker-shaped "excerpt" is the trivial-satisfaction path this rule kills).
-- At retirement the excerpt must be present — together with the **card-id
-  anchor** — in the SAME committed carrier (commit message/blob or committed
-  artifact blob). An excerpt floating in an unrelated, unanchored message
-  verifies nothing.
-- A `routine` attestation is the empty-coverage case: valid only when every
-  decision-class field is empty (nothing to lose). A bare `{kind:"commit"}`
-  or marker-only entry is likewise valid only in that nothing-to-lose case.
+**Mechanical vs semantic — what the gate proves:**
 
-### Review classification (process vs decision)
+| Disposition | Mechanical guarantee (gate) | Semantic ceiling (author + reviewer) |
+|-------------|-----------------------------|--------------------------------------|
+| `verbatim` | a length-floored line drawn from the item's own text is present, with the card-id anchor, in a committed, branch-reachable carrier | whether that line carries the SUBSTANCE of the item (the authoring pattern — full decision text in the landing commit body — closes the gap in practice) |
+| `curated` | the canonical item label is present, with the anchor, in a committed carrier — labeled content sits there | whether the labeled content is a USEFUL, faithful curation (what was decided/rejected, why it mattered, key constraints, where authority came from, deliberate omissions) |
+| `sanitized` | same label-scoped check as curated | same — plus whether the sanitization honestly withheld only what it had to (provenance must name what was omitted and the authority for it) |
 
-A review that resolved the card to **`completed`** — the ordinary clean
-approve — is a **process record**, not decision-class: routine tasks retire
-after a normal review with zero promotion burden. What remains decision-class:
+A mechanically valid representation is **never** proof the meaning was
+preserved. If no safe, meaningful representation can be produced for an
+item, do NOT fake one — leave it undeclared: closeout/retirement refuses and
+surfaces the item, and the documented operator force path is the emergency
+exit.
 
-- `last_review` whose status is NOT `completed` (blocked / ready / reported /
-  cancelled / unknown) — a review that changed the card's trajectory, with
-  its reasoning;
-- any `task_reviewed` history event with a non-completed status (scanned per
-  event: a later clean approve does not launder an earlier blocked review);
-- owner decisions, objections, and risk acceptances recorded at review time
-  belong in `owner_notes` (always decision-class) — the verdict shape is the
-  smallest honest mechanical distinction the actual field shapes support.
+### Inventory baseline across the lifecycle
+
+The **stored record is the baseline item inventory**:
+
+- At **closeout**: every decision item on the card must have a declared slot
+  (no missing slots — the primary concern-1 fix: two owner notes cannot be
+  covered by one excerpt); no surplus slots; verbatim handles must bind to
+  their OWN item's text.
+- **Sanctioned amendment is ADD-ONLY**: a re-closeout (an existing,
+  history-logged lifecycle op) may declare the stored slots **verbatim** plus
+  fresh slots for NEW items (e.g. a post-closeout blocked review). Dropping
+  or rewriting a stored slot is refused at closeout — there is no free JSON
+  editing of the inventory. Routine tasks with clean reviews hit **zero
+  ceremony** (empty inventory, retire normally).
+- At **retirement**: any decision item present on the card but NOT in the
+  record is a **new-item mismatch** → refusal naming the item (the remedy is
+  the add-only re-closeout). Items **removed** from card fields do NOT
+  remove their slots — the baseline still verifies every declared slot's
+  carrier, so deletion cannot launder preservation. Because identity is
+  content-bound, an in-place content REPLACEMENT (e.g. `/task-update`
+  rewriting an owner note after closeout) is exactly this shape: the
+  replacement item is undeclared (refused), and the replaced item's slot is
+  a kept slot whose carrier still verifies — a sanctioned rewrite cannot
+  recycle a stored slot onto different content (the B-F1 laundering chain).
+  A benign REORDER of items changes no id (nothing is lost by reordering)
+  and passes.
+- Review classification (process vs decision) survives from v2: a review
+  that resolved the card to `completed` is a **process record** — routine
+  tasks retire after a normal review with zero promotion burden; any other
+  verdict changed the card's trajectory and is decision-class, scanned per
+  history event so a later clean approve cannot launder an earlier blocked
+  review. Owner decisions recorded at review time belong in `owner_notes`.
 
 ### Retrievability (what a fresh session can find after retirement)
 
-Retirement destroys the card and its decision_record; the surviving anchor is
-git itself. A fresh session knowing ONLY the card id recovers the decision
-content with bounded queries:
+Retirement destroys the card and its decision_record; the surviving anchor
+is git itself. A fresh session knowing ONLY the card id recovers per item
+with bounded queries:
 
 1. `git log --branches --fixed-strings --format=%H --grep='Task-Card: <id>'`
-   → the trailer-bearing commit(s);
-2. read each hit's body (`git log -1 --format=%B <sha>`) — a covering
-   `commit` entry guarantees the anchored excerpt (verbatim field content)
-   is there; the documented authoring pattern is to carry the FULL decision
-   text in the landing commit body;
-3. for file-carried content: `git log --branches -S'<id>' --format=%H` (the
-   pickaxe finds the commit that introduced the card-id back-reference) →
-   `git show <sha>:<path>`.
+   → the trailer-bearing carrier commit(s); read each hit's body — verbatim
+   slots carry their item text there;
+2. for file-carried content: `git log --branches -S'<id>' --format=%H` (the
+   pickaxe finds the carrier commit) → `git diff-tree --name-only -r <sha>`
+   → `git show <sha>:<path>` — the committed blob carries the anchor plus
+   each item's handle: verbatim text, or the honest
+   `decision-item: <id>#<item> (curated|sanitized)` label distinguishing
+   curated from verbatim in the recovered record.
 
-The card-id **anchor rule** on every covering carrier is what makes this
-chain work: no index, no archive, no tombstone — the anchored commits are the
-record.
+The card-id **anchor rule** on every carrier is what makes this chain work:
+no index, no archive, no tombstone — the anchored commits are the record.
 
 ### Refusals at retirement
 
 The retirement path (`delete_coordination_task`, completed branch, after
-landing proof) resolves every declared pointer and refuses — naming each
-missing/uncommitted/unreachable item — with:
+landing proof) refuses — naming each item — with:
 
-- `decision_record_unresolved` — a declared commit/artifact entry does not
-  resolve against committed, branch-reachable state, or a covering entry's
-  excerpt/anchor is missing from its carrier (`anchor_missing`,
-  `excerpt_not_in_carrier`, `carrier_content_scattered`);
-- `decision_content_unpromoted` — decision-class card fields are not covered
-  by any entry's `carries` (a `routine` attestation with non-empty fields, a
-  bare/marker-only record, or a legacy card with no decision_record);
-  `refusal.fields` names each uncovered field.
+- `decision_content_unpromoted` — a decision item on the card has no slot
+  (a post-closeout addition, a routine/empty inventory with items present, a
+  legacy card with no decision_record, or a decision-bearing legacy version-1
+  record); `refusal.items` names them. Remedy: the add-only re-closeout
+  amendment (or promotion of the content), never a hollow declaration.
+- `decision_record_unresolved` — a declared slot's carrier does not resolve
+  against committed, branch-reachable state (`revision_not_resolvable`,
+  `revision_not_reachable`, `path_never_committed`,
+  `path_not_tracked_at_revision`, `path_is_directory_not_file_blob`,
+  `anchor_missing`, `handle_not_in_carrier`, `anchor_handle_scattered`,
+  `verifier_unavailable`), or the stored record is structurally degraded.
+  `anchor_handle_scattered` is the split-evidence refusal: the card-id anchor
+  and the item's handle each exist somewhere in the carrier path's reachable
+  history, but never together in ONE committed revision — a fresh session
+  recovering from the anchor-bearing revision would find no representation
+  there, so split evidence never verifies.
 
 ### Compatibility (legacy + in-flight cards)
 
-- New closeouts (post-gate) require the block — including `blocked`/`reported`
-  closeouts; a one-line `routine` entry is the whole burden for routine work.
+- New closeouts (post-v3) require the version-3 block — including
+  `blocked`/`reported` closeouts; an empty `items` array is the whole burden
+  for routine work.
 - In-flight cards (working/reported/blocked) at upgrade are unaffected until
-  they close out; the closeout then runs the current gate.
-- In-flight cards carrying a v1 decision_record (marker-only or bare entries,
-  closed out under the 2026-10-25 gate) retire only under the coverage rule:
-  if decision-class fields are non-empty and uncovered, retirement is refused
-  with `decision_content_unpromoted` — re-declare via a fresh closeout with
-  covering entries.
-- Legacy completed-but-unretired cards without a decision_record retire under
-  the same coverage rule with an empty coverage set: refused if
-  decision-class fields are non-empty, otherwise routine retirement proceeds.
+  they close out; the closeout then runs the v3 gate.
+- **Stored version-1 records (v1 marker/bare, v2 carries) are honored as
+  legacy under the same rule as a card with no decision_record**: retire
+  routinely when the card carries no decision items; refuse — with
+  re-closeout under v3 as the remedy — when decision items are present. The
+  v2 excerpt-coverage machinery is retired and does not run for legacy
+  records; this refuses more than v2 did, never less (fail-closed
+  migration, one re-closeout of burden for decision-bearing legacy cards).
+- Legacy completed-but-unretired cards without a decision_record follow the
+  identical rule (refused iff decision items are present).
 
 ### Force path and private content
 
-The operator force path keeps its semantics but the destructive warning NAMES
-the decision-class content about to be destroyed (card fields + declared
-entries + their coverage claims). Force still bypasses both the landing check
-and the preservation check — it is the explicit emergency route.
+The operator force path keeps its semantics but the destructive warning
+NAMES the content about to be destroyed — current decision items and
+declared slots (id + disposition per slot). Force still bypasses both the
+landing check and the preservation check — it is the explicit emergency
+route, and it is the sanctioned path for content that genuinely cannot be
+safely represented anywhere durable.
 
 **Privacy rule:** never commit sensitive owner notes merely to satisfy the
-gate. If decision-class content genuinely cannot be promoted (private,
-sensitive, or embargoed), the sanctioned path is the documented operator
-force at retirement — the destructive warning names exactly what is being
-destroyed — never a hollow `carries` declaration.
+gate. Prefer a `sanitized` slot whose provenance cites the authority for
+withholding; if no safe, meaningful representation exists at all, leave the
+item undeclared — retirement refuses and surfaces it — and use the
+documented operator force.
 
 ### Honest limits (what this gate does NOT prove)
 
-- **Field-list completeness is mechanical** — the classifier sees
-  `owner_notes`, `measured_outcome`, `open_questions`, and review signals;
-  decision content left in no listed field can still be lost.
-- **Excerpt choice is author honesty** — the gate proves the excerpt (a
-  verbatim, length-floored line drawn from the field's own text) survived in
-  an anchored, committed carrier; whether that excerpt carries the SUBSTANCE
-  of the field (vs an innocuous long line) is author + reviewer judgment.
-  The documented authoring pattern — full decision text in the landing
-  commit body — removes the gap in practice.
+- **Item enumeration is mechanical** — the classifier sees `owner_notes`,
+  `measured_outcome`, `open_questions`, and review signals; decision content
+  left in an unlisted home can still be lost, and no gate defends against a
+  hostile editor of the gitignored card JSON — the goal is sanctioned-path
+  honesty.
+- **Representation quality is author honesty** — the gate proves the handle
+  (a verbatim, length-floored line of the item's own text, or the canonical
+  item label) survived in an anchored, committed carrier; whether the
+  recovered content carries the SUBSTANCE of the item is author + reviewer
+  judgment. The label-scoped check for curated/sanitized slots proves
+  presence of a label, never the fidelity of the content beside it.
 - **Local reachability only** — the gate proves LOCAL-repository
   reachability (`git log --branches` / committed blobs). Cross-machine
   availability comes from the normal push/release flow; the gate performs no
@@ -316,8 +347,8 @@ Pre-existing cards in transport at codification time were grandfathered (retired
 under the prior convention); since the Slice-2 retirement code landed (commit
 `00b5add`), all `completed` retirements are landing-gated regardless of filing
 date. The retention-preservation gate follows the same shape: it binds at
-closeout-time for new closeouts and at retirement-time (contradiction rule
-only) for legacy completed cards.
+closeout-time for new closeouts and at retirement-time (legacy rule above) for
+legacy completed cards.
 
 ## Records
 

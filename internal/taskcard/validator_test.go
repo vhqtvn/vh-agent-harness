@@ -377,6 +377,175 @@ func extraFixtures() []fixture {
 	}
 }
 
+// decisionRecordFixtures pin the decision_record subschema (retention gate
+// v3, owner-approved 2026-10-27) through the REAL draft-07 engine: the null
+// no-record default (anyOf null branch — review F2), the v3 item-enumerated
+// shape (one slot per decision item; empty items = the routine attestation),
+// the legacy version-1 shape still accepted for in-flight cards (anyOf
+// branch), and the schema-level rejections (unknown keys, missing required
+// slot fields, disposition outside the enum, wrong version, v2 entries shape
+// under a v3 version, carrier violations). The
+// GATE-level rules the schema cannot express (canonical curated labels,
+// per-item handle binding, provenance requirements, add-only amendment) are
+// pinned by the node suites over state-lib.
+func decisionRecordFixtures() []fixture {
+	ready := func(t *testing.T) map[string]interface{} { return mustCard(t, baseReadyJSON) }
+
+	withRecord := func(t *testing.T, record map[string]interface{}) map[string]interface{} {
+		c := ready(t)
+		c["decision_record"] = record
+		return c
+	}
+
+	slot := func(id, disposition string, carrier map[string]interface{}, handle string, extra map[string]interface{}) map[string]interface{} {
+		s := map[string]interface{}{
+			"id":          id,
+			"disposition": disposition,
+			"carrier":     carrier,
+			"handle":      handle,
+		}
+		for k, v := range extra {
+			s[k] = v
+		}
+		return s
+	}
+
+	commitCarrier := map[string]interface{}{"kind": "commit"}
+	artifactCarrier := map[string]interface{}{"kind": "artifact", "path": "docs/checkpoints/2026-10-27-x.md"}
+
+	validSlots := []interface{}{
+		slot("owner_notes[fnv1a:0123456789abcdef]", "verbatim", commitCarrier,
+			"OWNER APPROVAL 2026-10-27: approved the v3 item-enumerated contract",
+			map[string]interface{}{"provenance": "owner chat m0066, 2026-10-27"}),
+		slot("owner_notes[fnv1a:fedcba9876543210]", "sanitized", artifactCarrier,
+			"decision-item: task-x#owner_notes[fnv1a:fedcba9876543210] (sanitized)",
+			map[string]interface{}{"provenance": "withholding authorized in owner chat m0066"}),
+		slot("measured_outcome[fnv1a:aaaabbbbccccdddd]", "verbatim",
+			map[string]interface{}{"kind": "artifact", "path": "docs/checkpoints/2026-10-27-x.md", "revision": "0123456789abcdef"},
+			"suite 231/231 green; recovery receipts tree-bound", nil),
+	}
+
+	return []fixture{
+		// validate_ok --------------------------------------------------------
+		// The explicit null row pins review F2 (2026-10-27): decision_record
+		// null is the payload default (cards that have not closed out under
+		// the retention gate) and was valid at HEAD; the v3 anyOf must carry
+		// an explicit null alternative or both object branches reject it.
+		{"decision_record_null", func(t *testing.T) map[string]interface{} {
+			c := ready(t)
+			c["decision_record"] = nil
+			return c
+		}, verdictOK},
+		{"decision_record_v3_routine", func(t *testing.T) map[string]interface{} {
+			return withRecord(t, map[string]interface{}{
+				"version": json.Number("3"),
+				"items":   []interface{}{},
+				"note":    "routine — nothing decision-class to preserve",
+			})
+		}, verdictOK},
+		{"decision_record_v3_slots", func(t *testing.T) map[string]interface{} {
+			return withRecord(t, map[string]interface{}{
+				"version": json.Number("3"),
+				"items":   validSlots,
+			})
+		}, verdictOK},
+		{"decision_record_v3_curated_label", func(t *testing.T) map[string]interface{} {
+			return withRecord(t, map[string]interface{}{
+				"version": json.Number("3"),
+				"items": []interface{}{
+					slot("last_review", "curated", commitCarrier,
+						"decision-item: task-x#last_review[fnv1a:1111222233334444] (curated)", nil),
+				},
+			})
+		}, verdictOK},
+		{"decision_record_legacy_v1_routine", func(t *testing.T) map[string]interface{} {
+			return withRecord(t, map[string]interface{}{
+				"version": json.Number("1"),
+				"entries": []interface{}{
+					map[string]interface{}{"kind": "routine", "note": "legacy in-flight card"},
+				},
+			})
+		}, verdictOK},
+		{"decision_record_legacy_v2_carries", func(t *testing.T) map[string]interface{} {
+			return withRecord(t, map[string]interface{}{
+				"version": json.Number("1"),
+				"entries": []interface{}{
+					map[string]interface{}{
+						"kind": "commit",
+						"carries": map[string]interface{}{
+							"owner_notes": "a verbatim legacy excerpt of at least 24 chars",
+						},
+					},
+				},
+			})
+		}, verdictOK},
+
+		// validate_fail (schema rejects) -------------------------------------
+		{"decision_record_v3_slot_unknown_key", func(t *testing.T) map[string]interface{} {
+			s := slot("owner_notes[fnv1a:0123456789abcdef]", "verbatim", commitCarrier,
+				"OWNER APPROVAL 2026-10-27: approved the slot shape", nil)
+			s["bogus"] = true
+			return withRecord(t, map[string]interface{}{
+				"version": json.Number("3"),
+				"items":   []interface{}{s},
+			})
+		}, verdictFailJSON},
+		{"decision_record_v3_slot_missing_handle", func(t *testing.T) map[string]interface{} {
+			s := slot("owner_notes[fnv1a:0123456789abcdef]", "verbatim", commitCarrier, "dropped", nil)
+			delete(s, "handle")
+			return withRecord(t, map[string]interface{}{
+				"version": json.Number("3"),
+				"items":   []interface{}{s},
+			})
+		}, verdictFailJSON},
+		{"decision_record_v3_bad_disposition", func(t *testing.T) map[string]interface{} {
+			return withRecord(t, map[string]interface{}{
+				"version": json.Number("3"),
+				"items": []interface{}{
+					slot("owner_notes[fnv1a:0123456789abcdef]", "excerpt", commitCarrier, "some handle line", nil),
+				},
+			})
+		}, verdictFailJSON},
+		{"decision_record_wrong_version", func(t *testing.T) map[string]interface{} {
+			return withRecord(t, map[string]interface{}{
+				"version": json.Number("2"),
+				"items":   []interface{}{},
+			})
+		}, verdictFailJSON},
+		{"decision_record_v3_with_entries_key", func(t *testing.T) map[string]interface{} {
+			return withRecord(t, map[string]interface{}{
+				"version": json.Number("3"),
+				"entries": []interface{}{},
+			})
+		}, verdictFailJSON},
+		{"decision_record_v3_record_junk", func(t *testing.T) map[string]interface{} {
+			return withRecord(t, map[string]interface{}{
+				"version": json.Number("3"),
+				"items":   []interface{}{},
+				"junk":    true,
+			})
+		}, verdictFailJSON},
+		{"decision_record_v3_carrier_marker", func(t *testing.T) map[string]interface{} {
+			cc := map[string]interface{}{"kind": "commit", "marker": "m"}
+			return withRecord(t, map[string]interface{}{
+				"version": json.Number("3"),
+				"items": []interface{}{
+					slot("owner_notes[fnv1a:0123456789abcdef]", "verbatim", cc, "OWNER APPROVAL 2026-10-27: no markers in v3", nil),
+				},
+			})
+		}, verdictFailJSON},
+		{"decision_record_v3_carrier_artifact_no_path", func(t *testing.T) map[string]interface{} {
+			cc := map[string]interface{}{"kind": "artifact"}
+			return withRecord(t, map[string]interface{}{
+				"version": json.Number("3"),
+				"items": []interface{}{
+					slot("owner_notes[fnv1a:0123456789abcdef]", "curated", cc, "decision-item: task-x#owner_notes[fnv1a:0123456789abcdef] (curated)", nil),
+				},
+			})
+		}, verdictFailJSON},
+	}
+}
+
 func TestValidateCard_Fixtures(t *testing.T) {
 	schemaBytes, err := SchemaBytes()
 	if err != nil {
@@ -390,6 +559,7 @@ func TestValidateCard_Fixtures(t *testing.T) {
 	var rows []fixture
 	rows = append(rows, portedFixtures()...)
 	rows = append(rows, extraFixtures()...)
+	rows = append(rows, decisionRecordFixtures()...)
 
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
