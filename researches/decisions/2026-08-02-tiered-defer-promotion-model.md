@@ -15,6 +15,21 @@
   §"Source policy" below. The falsification methodology (§4) is the load-bearing
   crux; classes that could not be grounded are dropped or declared
   `not-demonstrable`, never shipped as invented.
+- **Supersession erratum (2026-11-02, add-only — original text below preserved
+  unchanged):** the disposition-contract portions of this memo — the "exactly
+  three legal outputs" front-gate contract cited in §"Source policy", and the
+  §5 STEP R1 routing keyed on `executable-now` with its ELSE "DO IT or DROP"
+  branch — are superseded by
+  `researches/decisions/2026-11-02-post-review-decision-quality-disposition.md`
+  on EXACTLY the disposition-contract point: the front gate now emits FOUR
+  legal outputs; triage is justification-keyed (`justified-and-executable-now`,
+  not merely executable); and `declined-and-closed` is a terminal disposition
+  for valid-but-unjustified optional improvements that leaves no residue (no
+  card, no debt item; inline record only). Mandatory correctness, security,
+  safety, or acceptance requirements are never declinable. Everything else in
+  this memo — the Test-B first-class boundary, tier definitions, §4 promotion
+  classes and gates, trigger grammar, promotion mechanics, release behavior,
+  and all §6 open decisions — is unaffected and stands as written.
 
 ## Source policy (every claim below resolves to one of these)
 
@@ -29,6 +44,9 @@
 - `.opencode/skills/resolve-first/SKILL.md` — front gate: exactly three legal
   outputs (`landed-this-session` / `decided-to-verdict` / `defer-with-trigger`,
   lines 94–98) + the four-tag whitelist (lines 183–205).
+  **[Superseded 2026-11-02 on the disposition-contract point — the front gate
+  now emits four legal outputs; see the header erratum. The whitelist citation
+  stands.]**
 - `.local/coordinator/tasks/` — the live cards (empirical sample of the "global
   pile"). Runtime-derived count in §1.
 - `researches/decisions/2026-08-02-resolve-first-defer-processing.md` lines 200–235
@@ -270,6 +288,14 @@ conditional.
 Pre-condition: the candidate has passed resolve-first **STEP 0** (premise
 verified; ~1/3 evaporate here — `.opencode/skills/resolve-first/SKILL.md`
 lines 128–135).
+
+> **Erratum (2026-11-02, add-only):** STEP R1 below records the superseded
+> three-output form (see the header erratum). Under the corrected contract,
+> R1's first branch keys on `justified-and-executable-now`; the ELSE branch's
+> binary "DO IT or DROP" gains the `declined-and-closed` destination for
+> valid-but-unjustified candidates (mandatory requirements are never
+> declinable). R0, R2, and R3 are unaffected. The original block is preserved
+> unchanged below.
 
 ```
 ROUTING(candidate):
