@@ -5,3 +5,6 @@
 # adopter-declared sockets/logs):
 /sessions/
 /run/
+# Queue-custody fence (lock + generation authority, and their atomic-write temps):
+/queue.custody.*
+/.queue.custody.*
