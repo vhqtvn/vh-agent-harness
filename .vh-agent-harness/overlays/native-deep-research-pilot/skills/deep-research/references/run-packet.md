@@ -30,15 +30,23 @@ per item, and never drop a section — an empty section stays with a one-line
 
 ## Completed queries      (the dedup index — never repeat these)
 | # | query | tool | results | date | notes |
+|---|---|---|---|---|---|
 
 ## Attempted reads        (every locator ever tried, success or not)
 | # | locator | outcome | duplicate_of | source_family | notes |
+|---|---|---|---|---|---|
 
-## Evidence records       (only locators actually read)
-| id | locator | excerpt | read_depth | retrieved_at | source_version |
+## Evidence records       (only locators actually read; read_depth REQUIRED)
+| id | locator | excerpt | read_depth | retrieved_at | source_version | source_family |
+|---|---|---|---|---|---|---|
+
+## Corroboration sightings (labeled; never family-counting evidence)
+| locator | restates | corroborates |
+|---|---|---|
 
 ## Claim classifications
 | claim | classification | evidence_ids | notes |
+|---|---|---|---|
 
 ## Gaps
 - [ ] GAP-<n>: <gap> — ranked #<k> because <flip potential>
@@ -102,12 +110,27 @@ Only locators that were actually read, at a stated depth:
 - `locator` — URL or local path precise enough to refetch
 - `excerpt` — the actually-read passage supporting the claim binding; short
   but verbatim
-- `read_depth` — `full` (whole document) | `skim` (sections) | `snippet`
-  (search-result fragment only). A snippet alone can never back a
-  `supported` classification.
+- `read_depth` — REQUIRED on every evidence record: `full` (whole document)
+  | `skim` (sections). A row without a `read_depth` label is an invalid
+  evidence record. Snippets and search-result fragments are query
+  observations only and may never become evidence records — multi-site
+  snippet corroboration goes to Corroboration sightings below.
 - `retrieved_at` — retrieval date
 - `source_version` — the source's own version/date when it exposes one
   (release tag, "last updated", published date); `unknown` otherwise
+- `source_family` — inherited from the corresponding Attempted-reads row
+  (stable locator join), so per-evidence independence is auditable without
+  re-derivation
+
+### Corroboration sightings
+
+Multi-site corroboration (field logs, Q&A threads, vendor docs restating one
+origin) is recorded here as clearly-labeled rows — NEVER as Evidence records
+and never as family-counting support. A corroboration row (`restates` = the
+underlying content it echoes; `corroborates` = the claim/record it lines up
+with) cannot lift a claim past `partial` (noted as derivative-corroborated);
+only non-derivative Evidence records count toward the ≥2-family
+`supported` threshold.
 
 ### Claim classifications
 

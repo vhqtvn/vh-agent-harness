@@ -28,14 +28,14 @@
       "producer_kind": "overlay_skill",
       "overlay_pack": "native-deep-research-pilot",
       "source_relative_path": "skills/deep-research/SKILL.md",
-      "rendered_digest": "sha256:d2c105c7f25d707d0f205eb018756d231c0d55c8b31c5b041c83e1c77924511a"
+      "rendered_digest": "sha256:554bd25bddb45d70a767e43a97c5b7ca14d68eae4f5dbb682eb963060c1f7213"
     },
     {
       "destination_path": ".opencode/skills/deep-research/references/run-packet.md",
       "producer_kind": "overlay_skill",
       "overlay_pack": "native-deep-research-pilot",
       "source_relative_path": "skills/deep-research/references/run-packet.md",
-      "rendered_digest": "sha256:981771c8bbaeffd494c49c8067e397a170730581f3a8ba311cfa1c305cc74f0e"
+      "rendered_digest": "sha256:038f74d0c770a03a5e2f066c3da47cd44fd741b3065f796cbf013047572928e0"
     },
     {
       "destination_path": ".opencode/skills/formal-verification/SKILL.md",

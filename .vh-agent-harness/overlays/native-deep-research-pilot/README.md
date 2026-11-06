@@ -12,7 +12,7 @@ tools are the search surface.
 |---|---|
 | Bounded procedure | frame → local-first reuse → breadth-first (3–5 material questions) → gap ranking by flip potential → one selective depth pass (≤2 gaps) → claim audit → honest stop |
 | Claim-level evidence records | every consequential claim classified (`supported`/`partial`/`contradicted`/`unsupported`/`inference`) and bound to an actually-read excerpt |
-| Source-level resume | the run packet records completed queries, attempted reads, duplicates, and source-family relationships, so a resumed run never repeats work |
+| Source-level resume | the run packet records completed queries, attempted reads, duplicates, and source-family relationships; a resumed run deduplicates recorded completed work — logical resume, not an exactly-once guarantee |
 | Honest stop reasons | `sufficient_evidence` \| `budget_exhausted` \| `capability_blocked` — surface failure is labeled as capability failure, never as "no evidence found" |
 
 ## vs. existing surfaces

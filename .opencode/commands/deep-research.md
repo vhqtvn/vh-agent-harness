@@ -34,10 +34,14 @@ $ARGUMENTS
   orchestrate; you do not become a second researcher). The vhmcp MCP tools
   (`web_search`, `fetch_url`, `read_document`, `web_answer`, `code_docs`) are
   the primary search surface available to it.
-- NO task card is required, NO workstream or session-start prerequisite, NO
-  automatic backlog promotion. This command is deliberately lightweight.
+- NO task card is required, NO workstream prerequisite, NO automatic backlog
+  promotion; the command adds no session-start prerequisite beyond repo
+  session rules (AGENTS.md still governs non-trivial work). This command is
+  deliberately lightweight.
 - Keep every scratch artifact (run packet, excerpts) under
-  `tmp/agent-runs/<alias>/deep-research/<run-id>/`.
+  `tmp/agent-runs/<alias>/deep-research/<run-id>/`; when no session alias is
+  bound (e.g. ad-hoc/headless invocation), the packet directory is
+  `tmp/agent-runs/deep-research/<run-id>/`.
 - Probe and record search-surface availability FIRST: a tool that cannot run
   is a capability failure, never "no evidence found".
 
@@ -49,6 +53,9 @@ $ARGUMENTS
   `capability_blocked`)
 - pilot-limit usage (queries / reads / gap passes / researcher delegations)
 - promoted artifact path, if and only if the caller asked for promotion
+- the final report must INLINE the locator URL of every evidence record it
+  cites — citing an E-ID or the packet alone is not a citation; the report
+  carries the URL so the reader is zero hops from the source
 
 **Example invocations (synthetic):**
 

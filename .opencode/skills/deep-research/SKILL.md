@@ -101,7 +101,7 @@ gap, then re-assess.
 For every claim that would materially affect the recommendation, classify it
 as exactly one of:
 
-- `supported` — ≥1 independent source family, excerpt read, fresh enough
+- `supported` — ≥2 independent source families, excerpt read, fresh enough
 - `partial` — evidence exists but is thin, dated, single-family, or imprecise
 - `contradicted` — credible sources disagree; record both sides
 - `unsupported` — asserted somewhere, but nothing you actually read backs it
@@ -109,6 +109,15 @@ as exactly one of:
 
 Audit rules:
 
+- **Class precedence (conservative):** `supported` requires ≥2 independent
+  source families. A single-family claim — even one backed by a strong
+  primary source — is `partial`, with the single-family basis noted:
+  ambiguity could silently inflate confidence, and the tie goes to the lower
+  class. Derivative/corroboration-only sources and aggregations of snippets
+  (however many sites the aggregation spans) NEVER count toward the
+  ≥2-family threshold — `supported` requires two independent NON-derivative
+  source families; derivative corroboration lifts a claim to `partial` at
+  best (noted as derivative-corroborated), never to `supported`.
 - **Source-family independence:** derivative sources (aggregators, mirrors,
   syndications, blog posts restating a vendor doc) are NOT independent —
   record the family per evidence record and count families, not URLs.
@@ -117,8 +126,8 @@ Audit rules:
 - **Staleness:** check each consequential claim against the frame's freshness
   requirement, and against the source version/date when available.
 - **Binding:** every consequential claim binds to evidence IDs whose excerpts
-  you actually read at the stated depth. A search-result snippet alone never
-  supports `supported`.
+  you actually read at the stated depth. Claims may not bind to snippet-only
+  locators; a locator that was never fetched is not evidence.
 
 ### 7. Decide & stop
 
