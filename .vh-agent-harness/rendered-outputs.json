@@ -1,6 +1,6 @@
 {
   "manifest_version": "1",
-  "successful_render_id": "350f11afed469153",
+  "successful_render_id": "d80a191bbcb365a5",
   "entries": [
     {
       "destination_path": ".opencode/skills/contract-invariant-audit/SKILL.md",
@@ -22,6 +22,20 @@
       "overlay_pack": "contract-invariant-audit-pilot",
       "source_relative_path": "skills/contract-invariant-audit/scripts/manifest-helper.js",
       "rendered_digest": "sha256:47d6f5d61a212d2627c39647457a0092c0c4ca0de30b975a01913923f7b860b9"
+    },
+    {
+      "destination_path": ".opencode/skills/deep-research/SKILL.md",
+      "producer_kind": "overlay_skill",
+      "overlay_pack": "native-deep-research-pilot",
+      "source_relative_path": "skills/deep-research/SKILL.md",
+      "rendered_digest": "sha256:d2c105c7f25d707d0f205eb018756d231c0d55c8b31c5b041c83e1c77924511a"
+    },
+    {
+      "destination_path": ".opencode/skills/deep-research/references/run-packet.md",
+      "producer_kind": "overlay_skill",
+      "overlay_pack": "native-deep-research-pilot",
+      "source_relative_path": "skills/deep-research/references/run-packet.md",
+      "rendered_digest": "sha256:981771c8bbaeffd494c49c8067e397a170730581f3a8ba311cfa1c305cc74f0e"
     },
     {
       "destination_path": ".opencode/skills/formal-verification/SKILL.md",
