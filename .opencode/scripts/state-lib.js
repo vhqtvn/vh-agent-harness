@@ -440,10 +440,11 @@ function readJson(targetPath, defaultValue) {
 
 // --- Non-reclaiming shared lock protocol (operator-ratified 2026-11-06) ---
 //
-// withLock is the shared per-resource lock behind every state write (session
-// and workstream indexes, session memory stores, coordination task cards,
-// skill proposals). As of the v0.29.0 deleteCoordinationTask TOCTOU repair it
-// is NON-RECLAIMING and OWNERSHIP-SAFE:
+// withLock is the shared per-resource lock behind every PARTICIPATING state
+// write (session and workstream indexes, session memory stores, coordination
+// task card updates, and skill-proposal transport — creation, status
+// transitions, and retirement). As of the v0.29.0 deleteCoordinationTask
+// TOCTOU repair it is NON-RECLAIMING and OWNERSHIP-SAFE:
 //
 //   * NEVER remove another acquisition — not on age (the former 30s
 //     mtime-based stale reclamation is REMOVED: an aged lock may belong to a
@@ -8078,25 +8079,33 @@ function deleteSkillProposal(sessionID, proposalIDRaw, options = {}) {
             "delete_skill_proposal target escapes the transport root; refusing.",
         );
     }
-    const existed = fs.existsSync(targetPath);
-    if (existed) {
-        fs.rmSync(targetPath, { force: true });
-    }
+    // Serialized retirement under the shared NON-RECLAIMING lock (the same
+    // protocol as every other proposal mutation — saveSkillProposal /
+    // setSkillProposalStatus already take this lock). The existence check and
+    // the card removal run INSIDE the locked boundary so they cannot
+    // interleave with a writer mid-transition: previously this function
+    // removed the card UNLOCKED and then unlinked the lock file
+    // UNCONDITIONALLY — destroying another actor's acquisition in the middle
+    // of its critical section (the same TOCTOU family as the
+    // deleteCoordinationTask v0.29.0 defect). The lock here is always
+    // released by its owner (withLock's finally); this function never
+    // touches a lock file it does not own. A contender that cannot acquire
+    // within the bounded wait fails closed (throws) — it never reaps.
     const lockPath = skillProposalLockPath(proposalID);
-    if (fs.existsSync(lockPath)) {
-        try {
-            fs.rmSync(lockPath, { force: true });
-        } catch (_lockErr) {
-            // Non-fatal: a stale lock for a deleted card is harmless.
+    const cardRemoved = withLock(lockPath, () => {
+        const existed = fs.existsSync(targetPath);
+        if (existed) {
+            fs.rmSync(targetPath, { force: true });
         }
-    }
+        return existed && !fs.existsSync(targetPath);
+    });
     return {
         ...actor,
         ok: true,
         operation: "delete_skill_proposal",
         removed: {
             proposal_id: proposalID,
-            card_removed: existed && !fs.existsSync(targetPath),
+            card_removed: cardRemoved,
         },
     };
 }
