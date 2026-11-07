@@ -66,9 +66,19 @@ To see what changed in a release and how to migrate, inspect its migration note
     advances the origin (live-first, then sidecar atomic rename; not a
     cross-object transaction, but a rejected path touches nothing). You do NOT
     edit `origin-hashes.json` (it is
-    binary-owned). Deleting the file alone will NOT work (a deleted managed file
+     binary-owned). Deleting the file alone will NOT work (a deleted managed file
     is also preserved as consumer-deleted). To make an edit canonical across
-    updates, promote it into an overlay pack source. To change managed behavior
+    updates, promote it into an overlay pack source. When the platform's
+    version of an edited file has ALSO changed since the base your edit
+    diverged from ("both moved"), `update` marks the path
+    `[consumer-edit, platform-also-changed]` and prints a stale-preserve
+    warning — the preserved file did NOT receive that update's platform
+    changes, so dependent runtime files or documentation updated by the
+    release may no longer match it — and `doctor` reports
+    `preserved-stale-vs-corpus` at WARN (never a FAIL). Reconcile via
+    `docs/ai/preserved-managed-reconciliation.md`, and never run bare
+    `accept-platform` on such a path before safeguarding the local edit. To
+    change managed behavior
     without editing the file, use a seam: overlay, profile, run-shape, mission,
     project deny-rules, or a raise-only ownership override.
 3. **Edit config under `.vh-agent-harness/`, not the rendered `.opencode/` tree.**
