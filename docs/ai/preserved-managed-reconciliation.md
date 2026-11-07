@@ -113,17 +113,46 @@ base**, so it is no longer stale-preserved and the warning/WARN clears. If
 your re-applied edit happens to equal the platform bytes, the path simply
 converges.
 
-### Option B — port the customization into an overlay pack
+### Option B — promote the customization to a canonical home
 
 Right choice when the edit should become canonical and survive every future
-update without reconciliation (this is the promotion path the drift remedy
-recommends): create the pack under
+update without reconciliation. Which route fits depends on whether the
+customization ADDS new paths or must REPLACE a file the platform already
+renders.
+
+**B1 — additive customization → overlay pack** (this is the promotion path
+the drift remedy recommends): create the pack under
 `.vh-agent-harness/overlays/<pack>/` (agents/, commands/, skills/,
 `opencode-append.jsonc`, …), SELECT it under `overlays:` in
 `.vh-agent-harness/vh-harness-profile.yml`, preview with
 `vh-agent-harness update --dry-run`, then remove the hand edit and re-run
 `update`. See `vh-agent-harness guide` and `/harness` for the overlay
 anatomy.
+
+An overlay pack can only ADD new paths (or merge config) — it cannot
+replace a builtin at the same path. If a pack unit targets a path the
+platform already renders (a core builtin, or an earlier active pack's
+unit), the whole render fails closed with an `ErrShadowBuiltin` error
+naming the colliding paths.
+
+**B2 — same-path replacement → raise the file to `project_owned`** (the
+route the `ErrShadowBuiltin` error itself points to): declare the override
+in `.vh-agent-harness/harness-ownership.yml` and edit the live file
+directly:
+
+```yaml
+overrides:
+  .opencode/scripts/state-lib.js:
+    class: project_owned
+    reason: "local replacement; platform delta re-checked each release"
+```
+
+From then on the platform never touches that path on `update`: your edit
+stands without preservation warnings, but the file no longer receives
+platform changes either. Each future release, re-check the platform delta
+yourself (Step 2's scratch-install diff, with your current live file as
+the baseline) and re-apply the parts you want. `doctor` reports a
+divergent ownership-raised path as non-failing preserved INFO.
 
 For changes that should live in the platform for EVERY adopter, upstream
 them into `templates/core/` (domain-free constraint) instead of keeping a
