@@ -67,7 +67,7 @@ func runTrampoline(ctx context.Context, profile Profile, repoRoot, target string
 	}
 
 	// Build child argv: self __exec_sandbox_child -- <target> <args...>
-	childArgv := []string{"__exec_sandbox_child", "--", target}
+	childArgv := []string{TrampolineVerb, "--", target}
 	childArgv = append(childArgv, args...)
 
 	cmd := exec.CommandContext(ctx, self, childArgv...)
@@ -226,6 +226,19 @@ var highRiskSyscalls = []string{
 	"delete_module",
 	// splice from user memory (can trick write checks)
 	"vmsplice",
+	// io_uring async I/O rings. Since kernel 5.19 io_uring can create
+	// sockets and connect them (IORING_OP_SOCKET/CONNECT et al.): those
+	// operations execute in KERNEL context on io-wq worker threads, so
+	// the syscalls they issue NEVER pass through syscall-entry filtering.
+	// An allowed io_uring_setup is therefore a full net-deny BYPASS under
+	// confinement — seccomp never sees the socket/connect the ring
+	// performs. Block the ring-management entry points (a ring must
+	// exist before enter/register do anything, so blocking setup alone
+	// kills the path; enter/register are listed too so a ring fd handed
+	// over from an unconfined ancestor is equally inert).
+	"io_uring_setup",
+	"io_uring_enter",
+	"io_uring_register",
 }
 
 // networkSyscalls are blocked when NetDeny is active. They cover all standard

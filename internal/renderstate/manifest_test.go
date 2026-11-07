@@ -149,10 +149,22 @@ func TestValidate_RejectsBadRecords(t *testing.T) {
 	}
 }
 
+// requireNonRoot skips the test when running as root (euid 0): root's
+// DAC_OVERRIDE ignores directory permission bits, so the chmod-0500
+// read-only-dir injection cannot make the temp-file create fail (the
+// Write succeeds and the "must fail" assertion mis-fires).
+func requireNonRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: DAC_OVERRIDE bypasses permission bits; cannot inject write failure")
+	}
+}
+
 // TestWrite_Atomic_NoPartialOnFailure confirms that when the manifest directory
 // is unwritable (rename/write cannot complete), the prior manifest on disk is
 // untouched — never a half-written mix. This is the locked atomicity rule.
 func TestWrite_Atomic_NoPartialOnFailure(t *testing.T) {
+	requireNonRoot(t)
 	root := t.TempDir()
 	m := New("r1")
 	m.Entries = []Record{rec(".opencode/skills/a/SKILL.md", "p", "skills/a/SKILL.md", Digest([]byte("a")))}
