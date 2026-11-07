@@ -101,7 +101,10 @@ gap, then re-assess.
 For every claim that would materially affect the recommendation, classify it
 as exactly one of:
 
-- `supported` — ≥2 independent source families, excerpt read, fresh enough
+- `supported` — EITHER (corroboration) ≥2 independent NON-derivative source
+  families, excerpt read, fresh enough, OR (direct support) a normative claim
+  restating an authoritative specification/source-of-record, backed by a
+  `full`-depth read of that source — see the direct-support rule below
 - `partial` — evidence exists but is thin, dated, single-family, or imprecise
 - `contradicted` — credible sources disagree; record both sides
 - `unsupported` — asserted somewhere, but nothing you actually read backs it
@@ -110,14 +113,25 @@ as exactly one of:
 Audit rules:
 
 - **Class precedence (conservative):** `supported` requires ≥2 independent
-  source families. A single-family claim — even one backed by a strong
-  primary source — is `partial`, with the single-family basis noted:
-  ambiguity could silently inflate confidence, and the tie goes to the lower
-  class. Derivative/corroboration-only sources and aggregations of snippets
-  (however many sites the aggregation spans) NEVER count toward the
-  ≥2-family threshold — `supported` requires two independent NON-derivative
-  source families; derivative corroboration lifts a claim to `partial` at
-  best (noted as derivative-corroborated), never to `supported`.
+  NON-derivative source families. A single-family empirical claim — even one
+  backed by a strong primary source — is `partial`, with the single-family
+  basis noted: ambiguity could silently inflate confidence, and the tie goes
+  to the lower class. Derivative/corroboration-only sources and aggregations
+  of snippets (however many sites the aggregation spans) NEVER count toward
+  the ≥2-family threshold; derivative corroboration lifts a claim to
+  `partial` at best (noted as derivative-corroborated), never to
+  `supported`.
+- **Direct support vs corroboration (the one exception):** a **normative**
+  claim — one that restates what an authoritative specification or
+  source-of-record *says* (e.g. "the v2 docs specify four search
+  providers") — may be classed `supported` on a single `full`-depth read of
+  that authoritative source, with the basis note
+  `direct support (authoritative spec, single family)` in the claim's
+  notes. This keeps direct claim support visibly distinct from independent
+  corroboration: derivative duplication never converts direct support into
+  broader independence, and corroboration sightings stay in their labeled
+  section — they add context, never confidence. Empirical/contested claims
+  never qualify; for them the conservative ≥2-family rule above governs.
 - **Source-family independence:** derivative sources (aggregators, mirrors,
   syndications, blog posts restating a vendor doc) are NOT independent —
   record the family per evidence record and count families, not URLs.
@@ -128,8 +142,36 @@ Audit rules:
 - **Binding:** every consequential claim binds to evidence IDs whose excerpts
   you actually read at the stated depth. Claims may not bind to snippet-only
   locators; a locator that was never fetched is not evidence.
+- **Evidence-ID binding rule:** a claim's evidence column may contain ONLY
+  Evidence-record IDs matching `E<digits>`. Attempted reads, snippet or
+  corroboration sightings, and descriptive pseudo-IDs (e.g.
+  `E6-derivative-stale`) are NEVER claim evidence — prose notes may mention
+  them, but never as support. The finalization check (step 7) enforces this
+  mechanically.
 
-### 7. Decide & stop
+### 7. Finalization check (mandatory, before stop)
+
+Run the packet validator on the run packet, fix every reported violation,
+re-run until PASS, and record the result in the packet
+(`finalization_check: PASS <validator invocation> @ <date>` in the
+`## Final report` section):
+
+```sh
+vh-agent-harness exec bash .opencode/skills/deep-research/scripts/validate-packet.sh \
+  tmp/agent-runs/<alias>/deep-research/<run-id>/run-packet.md
+```
+
+(Always through the harness `exec` wrapper — a bare `sh <script>` has no
+allowlist entry in agent sessions and stalls on a permission prompt.)
+
+The check verifies **structural invariants only** — evidence-row shape,
+`E<digits>` referential integrity of claim evidence columns, the
+`direct support` basis note on single-evidence `supported` claims, and
+final-report locator containment — and does NOT change stop-reason
+semantics: `sufficient_evidence` never implies every secondary question
+was resolved.
+
+### 8. Decide & stop
 
 Return a **decision-oriented packet**, not a link dump:
 

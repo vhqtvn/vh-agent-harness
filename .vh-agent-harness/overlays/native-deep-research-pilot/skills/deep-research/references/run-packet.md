@@ -58,6 +58,12 @@ per item, and never drop a section — an empty section stays with a one-line
 - what_would_change_it:
 - remaining_uncertainty:
 - pilot_usage: queries=<n>/6 reads=<n>/12 gap_passes=<n>/1 delegations=<n>/2
+
+## Final report           (verbatim — the exact text returned to the caller)
+<the full final report text lives IN the packet: recommendation,
+what would change it, remaining uncertainty, stop reason, and the exact
+locator of EVERY Evidence record cited by ≥1 claim>
+finalization_check: PASS <validator invocation> @ <date>
 ```
 
 ## Field notes
@@ -106,7 +112,11 @@ One row per locator ever tried, INCLUDING failures and duplicates:
 
 Only locators that were actually read, at a stated depth:
 
-- `id` — stable identifier (`E1`, `E2`, …) referenced by claim rows
+- `id` — stable identifier matching `E<digits>` EXACTLY (`E1`, `E2`, …),
+  referenced by claim rows. An ID is never extended or decorated:
+  `E6-derivative-stale` is NOT an Evidence-record ID and may never appear
+  as claim evidence. A parenthetical annotation may FOLLOW an ID in a
+  claim's evidence column (`E4 (live docs)`) — it is stripped, not parsed.
 - `locator` — URL or local path precise enough to refetch
 - `excerpt` — the actually-read passage supporting the claim binding; short
   but verbatim
@@ -138,7 +148,16 @@ Exactly one classification per consequential claim:
 `supported` | `partial` | `contradicted` | `unsupported` | `inference`
 (definitions in `SKILL.md` → "Claim audit"). `evidence_ids` must reference
 records whose excerpts were read at a depth sufficient for the
-classification. `contradicted` rows carry both sides in notes.
+classification, and may contain ONLY Evidence-record IDs matching
+`E<digits>` (comma- or `+`-separated; a parenthetical annotation directly
+after an ID is allowed and ignored). Attempted reads, snippets, and
+corroboration sightings NEVER appear in `evidence_ids` — prose notes may
+mention them, but never as support. `contradicted` rows carry both sides in
+notes. A `supported` claim citing exactly ONE evidence record (a normative
+claim resting on an authoritative spec read at `full` depth — see
+`SKILL.md` → "Direct support vs corroboration") MUST carry the basis note
+`direct support (authoritative spec, single family)` so direct support
+stays visibly distinct from ≥2-family corroboration.
 
 ### Gaps
 
@@ -155,6 +174,18 @@ a concrete `next_action`.
   decision-oriented closeout
 - `pilot_usage` — the limit counters at stop, recorded so the stop is
   auditable against the pilot limits
+
+### Final report
+
+The verbatim final-report text lives IN the packet under `## Final report`
+(not only in the chat return) so every citation is checkable later. It MUST
+contain the exact locator string of every Evidence record cited by ≥1
+claim — citing an E-ID alone is not a citation. The finalization check
+(`vh-agent-harness exec bash .opencode/skills/deep-research/scripts/validate-packet.sh <packet>`,
+run as the mandatory final step — see `SKILL.md` → "Finalization check")
+verifies this mechanically; the `finalization_check:` line records the PASS
+and date. The check is structural only: it never changes stop-reason
+semantics.
 
 ## Promotion (explicit-only)
 

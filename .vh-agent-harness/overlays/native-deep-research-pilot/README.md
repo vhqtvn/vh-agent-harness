@@ -14,6 +14,26 @@ tools are the search surface.
 | Claim-level evidence records | every consequential claim classified (`supported`/`partial`/`contradicted`/`unsupported`/`inference`) and bound to an actually-read excerpt |
 | Source-level resume | the run packet records completed queries, attempted reads, duplicates, and source-family relationships; a resumed run deduplicates recorded completed work — logical resume, not an exactly-once guarantee |
 | Honest stop reasons | `sufficient_evidence` \| `budget_exhausted` \| `capability_blocked` — surface failure is labeled as capability failure, never as "no evidence found" |
+| Finalization check | a small read-only validator run as the mandatory final step before stop (see below) |
+
+## Finalization check
+
+The skill ships `skills/deep-research/scripts/validate-packet.sh` (rendered
+to `.opencode/skills/deep-research/scripts/validate-packet.sh`), run as
+`vh-agent-harness exec bash <script> <run-packet.md>` before a run stops
+(the harness exec wrapper is the sanctioned form — a bare `sh <script>` has
+no allowlist entry in agent sessions); exit 0 = pass, 1 =
+violations, 2 = usage. It checks **structural invariants only**: Evidence
+rows are well-formed (`E<digits>` ID, non-empty locator, `full`/`skim` read
+depth, non-empty family), claim evidence columns reference only declared
+`E<digits>` records (no attempted reads, snippets, or pseudo-IDs), a
+single-evidence `supported` claim carries the `direct support` basis note,
+and the packet's `## Final report` section contains the exact locator of
+every cited Evidence record. It does NOT check semantic truth, actual
+source independence, whether reads genuinely support claims, freshness, or
+budgets — and a PASS never changes stop-reason semantics
+(`sufficient_evidence` does not imply every secondary question was
+resolved).
 
 ## vs. existing surfaces
 
@@ -68,6 +88,9 @@ renders (unit files render verbatim under `.opencode/`):
 - `skills/deep-research/SKILL.md` → `.opencode/skills/deep-research/SKILL.md`
 - `skills/deep-research/references/run-packet.md` →
   `.opencode/skills/deep-research/references/run-packet.md`
+- `skills/deep-research/scripts/validate-packet.sh` →
+  `.opencode/skills/deep-research/scripts/validate-packet.sh` (invoke via
+  `vh-agent-harness exec bash <script>`; rendered files are not executable)
 
 (The pack `README.md` is pack documentation and is deliberately NOT rendered.)
 

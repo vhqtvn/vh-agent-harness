@@ -53,9 +53,14 @@ $ARGUMENTS
   `capability_blocked`)
 - pilot-limit usage (queries / reads / gap passes / researcher delegations)
 - promoted artifact path, if and only if the caller asked for promotion
-- the final report must INLINE the locator URL of every evidence record it
+- the final report must INLINE the locator of every evidence record it
   cites — citing an E-ID or the packet alone is not a citation; the report
-  carries the URL so the reader is zero hops from the source
+  carries the locator so the reader is zero hops from the source. This is
+  enforced by the finalization check: the report's verbatim text is
+  embedded in the packet under `## Final report`, and
+  `vh-agent-harness exec bash .opencode/skills/deep-research/scripts/validate-packet.sh <packet>`
+  (mandatory final step before returning) verifies every cited Evidence
+  record's exact locator appears in it — fix and re-run until PASS
 
 **Example invocations (synthetic):**
 
