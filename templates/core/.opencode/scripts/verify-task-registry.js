@@ -10,9 +10,9 @@ import {
     computeTaskDesignDigest,
     deleteCoordinationTask,
     listCoordinationTasks,
-    repairCoordinationTask,
     readyCoordinationTask,
     readCoordinationTask,
+    repairCoordinationTask,
     repoRoot,
     reviewCoordinationTask,
     saveCoordinationTask,
@@ -186,12 +186,15 @@ function expectStateError(fn, expectedFragment) {
 // independent child actors (`node <this file> --worker ...`) that run the
 // ordinary public state-lib operations against the SAME isolated coordinator
 // root as this verifier run. No same-process nested-call evidence is used.
-// (The deleteCoordinationTask/review/closeout transaction schedules —
-// writer-wins and delete-wins — are part of the same repair effort and land
-// with the slice that locks those operations end-to-end; until then this
-// harness verifies the lock PRIMITIVE and the skill-proposal retirement
-// serialization that builds on it — the load-bearing preconditions the
-// transaction schedules build on.)
+// Coverage ladder: the lock PRIMITIVE (schedules C/D/E — aged live holder,
+// crash/release safety, initialization-error cleanup), proposal-retirement
+// serialization (schedule P), and the integrated task transactions —
+// writer-wins and delete-wins for deleteCoordinationTask vs review/closeout
+// publication (schedules W/DW, with DW2 repeating delete-wins against
+// PUBLICATION-ELIGIBLE writers via the explicit forced-delete emergency
+// path, proving the no-publication outcome is ordering rather than
+// ineligibility) — plus the controller's own abort-path hygiene probe
+// (schedule F).
 //
 // Determinism mechanism (per schedule):
 //   * acknowledged file barriers — a child writes an ack file at the exact
@@ -304,6 +307,9 @@ function parseWorkerArgs(args) {
                 break;
             case "--pause-hook":
                 opts.pauseHook = value === "true";
+                break;
+            case "--force":
+                opts.force = value === "true";
                 break;
             case "--fail-meta-write":
                 opts.failMetaWrite = value === "true";
@@ -476,6 +482,13 @@ function dispatchWorkerRole(stateLib, opts) {
             if (opts.landingRepo) {
                 options.landingProofRepo = opts.landingRepo;
             }
+            if (opts.force) {
+                // Explicit emergency path (schedules only): force overrides
+                // the active-owner / in-flight / landing guards so a delete
+                // can win against a card a writer is legitimately addressing
+                // (the DW2 eligible-writer scenarios).
+                options.force = true;
+            }
             if (opts.pauseHook) {
                 options.beforeRemove = () => {
                     writeBarrierFile(
@@ -521,6 +534,22 @@ function dispatchWorkerRole(stateLib, opts) {
                 { cwd: "/verification" },
             );
             return removed;
+        }
+        case "sleep": {
+            // ABORT-PROBE-ONLY role (schedule F): acknowledges ENTRY (a
+            // started ack written before the sleep — proving this child
+            // actually reached its role dispatch, so a later rejection
+            // cannot be an unnoticed startup failure), then sleeps past
+            // every barrier deadline ON PURPOSE — it never waits on a
+            // release barrier and writes no result until the sleep elapses
+            // — so the parent's abort sweep must hit its graceful deadline,
+            // SIGKILL this straggler, and await its close. Never use this
+            // role in a green-path schedule.
+            writeBarrierFile(
+                path.join(opts.barrierDir, `${opts.tag}.started`),
+            );
+            workerSleepMs(30000);
+            return { ok: true, slept: true };
         }
         default:
             throw new StateError(`verify worker: unknown role ${opts.role}`);
@@ -1264,6 +1293,543 @@ async function runConcurrencySchedules({
         }
         if (fs.existsSync(proposalCard)) {
             concFail("the refused ghost writer must not recreate the proposal card");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Schedule W — WRITER-WINS task transaction (closeout vs delete).
+    //
+    // The integrated deletion TOCTOU repair (v0.29.0): a real closeout
+    // writer (saveCoordinationTaskCloseout) pauses INSIDE its locked
+    // transaction boundary — at the card-publication rename, with its
+    // closeout report ALREADY published under the same lock. A real
+    // deleteCoordinationTask contender starts, ACTUALLY hits EEXIST on the
+    // exact per-task lock path (acknowledged), and must WAIT — under the
+    // pre-fix code the unlocked delete would destroy the card + report
+    // directory mid-publication and the writer's pending rename would then
+    // recreate the card (zombie). After the writer completes, the delete
+    // acquires, REREADS the card, sees the writer's reported status and
+    // REFUSES lifecycle_state_protected — the writer's decision evidence
+    // (card + closeout report) survives intact. This is the writer-wins
+    // ordering: the deletion outcome is decided by the UPDATED card.
+    // ------------------------------------------------------------------
+    {
+        const dir = path.join(scheduleRoot, "writer-wins");
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.mkdirSync(dir, { recursive: true });
+        const taskRoleArgs = (role, id, extra = []) => [
+            ...baseArgs,
+            "--role",
+            role,
+            "--task-id",
+            id,
+            ...extra,
+        ];
+        const taskID = concSaveFixtureTask(
+            coordinatorSessionID,
+            `Concurrency writer wins ${Date.now()}`,
+        );
+        const cardPath = cardPathOf(taskID);
+        const lockPath = lockPathOf(taskID);
+        const reportsDir = path.join(isolatedRoot, "reports", taskID);
+        // draft → ready → working(+owned by the coordinator alias) so the
+        // closeout writer is a legitimate transaction, not a guard refusal.
+        // The ready→working dispatch crosses the F3 BUILD-READY backstop, so
+        // the ready payload carries the explicit-empty design-readiness
+        // envelope (the same pattern as the functional flow above).
+        const readyPayload = {
+            files_in_scope: [".opencode/scripts/state-lib.js"],
+            success_criteria: [
+                "Deterministic real-process writer-wins interleaving.",
+            ],
+            validation_plan: ["Assert the schedule's pinned outcome."],
+            next_action: "Run the concurrency schedule.",
+        };
+        readyPayload.f3_design_readiness = {
+            ownership_hazards: [],
+            design_digest: computeTaskDesignDigest(
+                readCoordinationTask(coordinatorSessionID, taskID, {
+                    cwd: "/verification",
+                }).task,
+                readyPayload,
+            ),
+        };
+        readyCoordinationTask(coordinatorSessionID, taskID, readyPayload, {
+            cwd: "/verification",
+        });
+        activateCoordinationTask(coordinatorSessionID, taskID, {
+            cwd: "/verification",
+        });
+        const card0 = JSON.parse(fs.readFileSync(cardPath, "utf8"));
+        if (card0.status !== "working" || !card0.active_session_alias) {
+            concFail(
+                "writer-wins fixture must be working and actively owned before contention",
+            );
+        }
+
+        const writerRun = concFloat(
+            concRunWorker(dir, "writer", [
+                ...taskRoleArgs("closeout", taskID),
+                "--pause-rename",
+                cardPath,
+            ]),
+        );
+        await concWaitForFile(
+            path.join(dir, "writer.at-rename"),
+            "closeout writer paused at card rename (lock held)",
+            WORKER_CHILD_BUDGET_MS,
+        );
+        if (!fs.existsSync(lockPath)) {
+            concFail("closeout writer must hold the task lock while paused");
+        }
+        if (!fs.existsSync(reportsDir)) {
+            concFail(
+                "closeout report must already be published (inside the locked boundary)",
+            );
+        }
+
+        const deleteRun = concFloat(
+            concRunWorker(dir, "delete", [
+                ...taskRoleArgs("delete", taskID),
+                "--ack-lock",
+                lockPath,
+                "--expect",
+                "refused",
+            ]),
+        );
+        await concWaitForFile(
+            path.join(dir, "delete.lock-eexist"),
+            "delete contender hitting EEXIST on the exact task lock path",
+            WORKER_CHILD_BUDGET_MS,
+        );
+        if (!fs.existsSync(cardPath) || !fs.existsSync(reportsDir)) {
+            concFail(
+                "card and closeout report must survive while the writer holds the lock (no mid-publication destruction)",
+            );
+        }
+
+        // Writer completes; the delete then acquires and rereads.
+        writeBarrierFile(path.join(dir, "writer.release"));
+        const writerResult = await writerRun;
+        if (!writerResult.ok || writerResult.exit_code !== 0) {
+            concFail(
+                `closeout writer must complete cleanly: ${JSON.stringify(writerResult)}`,
+            );
+        }
+        if (!writerResult.report_path) {
+            concFail("closeout writer must record its published report path");
+        }
+        const deleteResult = await deleteRun;
+        if (
+            deleteResult.ok ||
+            !deleteResult.refusal ||
+            deleteResult.refusal.code !== "lifecycle_state_protected"
+        ) {
+            concFail(
+                `delete must reread the UPDATED card and refuse on the writer's reported status (writer-wins; decision evidence preserved): ${JSON.stringify(deleteResult)}`,
+            );
+        }
+        const card = JSON.parse(fs.readFileSync(cardPath, "utf8"));
+        if (card.status !== "reported") {
+            concFail(
+                `the card must carry the writer's reported status after writer-wins (observed ${card.status})`,
+            );
+        }
+        if (!card.latest_report || card.latest_report.path !== writerResult.report_path) {
+            concFail("the card must reference the writer's closeout report");
+        }
+        const reportFiles = fs.existsSync(reportsDir)
+            ? fs.readdirSync(reportsDir).filter((name) => name.endsWith("-closeout.md"))
+            : [];
+        if (reportFiles.length !== 1) {
+            concFail(
+                `exactly the writer's closeout report must remain on disk (observed ${reportFiles.length})`,
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Schedule DW — DELETE-WINS task transaction (delete vs review AND
+    // closeout publication).
+    //
+    // The mirror ordering: a real deleteCoordinationTask pauses INSIDE its
+    // locked removal transaction (the beforeRemove hook, under its lock).
+    // Real review AND closeout contenders start, ACTUALLY hit EEXIST on
+    // the exact per-task lock path (both acknowledged), and block — under
+    // the pre-fix code both would run their unlocked
+    // load-check-publish-update sequences concurrently with the removal,
+    // publishing orphan reports into a directory being deleted and/or
+    // resurrecting the card. After the delete completes (card + report
+    // directory removed, lock released by its owner), EACH contender
+    // acquires, performs its REQUIRED load, and REFUSES "does not exist" —
+    // BEFORE publishing anything. No orphan reports, no resurrection, no
+    // residual lock.
+    // ------------------------------------------------------------------
+    {
+        const dir = path.join(scheduleRoot, "delete-wins");
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.mkdirSync(dir, { recursive: true });
+        const taskRoleArgs = (role, id, extra = []) => [
+            ...baseArgs,
+            "--role",
+            role,
+            "--task-id",
+            id,
+            ...extra,
+        ];
+        // A DRAFT card: freely disposable (no lifecycle/landing gate), so
+        // the delete transaction reaches its beforeRemove hook cleanly.
+        const taskID = concSaveFixtureTask(
+            coordinatorSessionID,
+            `Concurrency delete wins ${Date.now()}`,
+        );
+        const cardPath = cardPathOf(taskID);
+        const lockPath = lockPathOf(taskID);
+        const reportsDir = path.join(isolatedRoot, "reports", taskID);
+
+        const deleteRun = concFloat(
+            concRunWorker(dir, "delete", [
+                ...taskRoleArgs("delete", taskID),
+                "--pause-hook",
+                "true",
+                "--expect",
+                "ok",
+            ]),
+        );
+        await concWaitForFile(
+            path.join(dir, "delete.at-before-remove"),
+            "delete paused in beforeRemove (removal transaction lock held)",
+            WORKER_CHILD_BUDGET_MS,
+        );
+        if (!fs.existsSync(lockPath)) {
+            concFail("delete must hold the task lock while paused in beforeRemove");
+        }
+
+        const reviewRun = concFloat(
+            concRunWorker(dir, "review", [
+                ...taskRoleArgs("review", taskID),
+                "--ack-lock",
+                lockPath,
+                "--expect",
+                "error",
+            ]),
+        );
+        const closeoutRun = concFloat(
+            concRunWorker(dir, "closeout", [
+                ...taskRoleArgs("closeout", taskID),
+                "--ack-lock",
+                lockPath,
+                "--expect",
+                "error",
+            ]),
+        );
+        await concWaitForFile(
+            path.join(dir, "review.lock-eexist"),
+            "review contender hitting EEXIST on the exact task lock path",
+            WORKER_CHILD_BUDGET_MS,
+        );
+        await concWaitForFile(
+            path.join(dir, "closeout.lock-eexist"),
+            "closeout contender hitting EEXIST on the exact task lock path",
+            WORKER_CHILD_BUDGET_MS,
+        );
+
+        // Delete completes; both contenders then acquire and must refuse.
+        writeBarrierFile(path.join(dir, "delete.release"));
+        const deleteResult = await deleteRun;
+        if (!deleteResult.ok || deleteResult.exit_code !== 0) {
+            concFail(`delete must complete cleanly: ${JSON.stringify(deleteResult)}`);
+        }
+        if (!deleteResult.removed || deleteResult.removed.card_removed !== true) {
+            concFail(
+                `delete-wins delete must remove the card: ${JSON.stringify(deleteResult)}`,
+            );
+        }
+        for (const [label, run] of [
+            ["review", reviewRun],
+            ["closeout", closeoutRun],
+        ]) {
+            const result = await run;
+            if (
+                result.ok ||
+                !result.error ||
+                !result.error.includes("does not exist")
+            ) {
+                concFail(
+                    `${label} contender must refuse 'does not exist' AFTER the delete wins (no publication, no resurrection): ${JSON.stringify(result)}`,
+                );
+            }
+        }
+        if (fs.existsSync(cardPath)) {
+            concFail("card must stay deleted after the refused contenders");
+        }
+        if (fs.existsSync(reportsDir)) {
+            concFail("report directory must be gone (and no orphan report published)");
+        }
+        if (fs.existsSync(lockPath)) {
+            concFail("no residual task lock after the refused contenders");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Schedule DW2 — DELETE-WINS with PUBLICATION-ELIGIBLE writers.
+    //
+    // DW proves the delete-wins refusal mechanics on a draft fixture
+    // (freely disposable, so the delete transaction runs unforced) — but a
+    // draft card's review/closeout contenders would ALSO have failed their
+    // publication eligibility checks, so DW's no-orphan outcome does not by
+    // itself prove the ORDERING (publication behind the lock) rather than
+    // mere ineligibility. DW2 closes that gap with writers that WOULD
+    // publish if they acquired: the delete is the explicit FORCED emergency
+    // path (the only sanctioned way a working/reported card can be
+    // destroyed mid-flight — disclosed as such), paused in beforeRemove
+    // under its lock while each eligible contender is EEXIST-blocked. After
+    // the delete completes, each contender's REQUIRED load refuses "does
+    // not exist" BEFORE publishing anything — and because the contender was
+    // eligible, the absent report directory is real evidence that
+    // publication never HAPPENED, not that it never COULD.
+    //
+    //   A) eligible CLOSEOUT writer — working + actively owned by the very
+    //      session alias the worker binds (owner checks would pass);
+    //   B) eligible REVIEW writer — reported with a latest_report (the
+    //      reviewable-status + report prerequisites would pass).
+    // ------------------------------------------------------------------
+    {
+        const dir = path.join(scheduleRoot, "delete-wins-eligible");
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.mkdirSync(dir, { recursive: true });
+        const taskRoleArgs = (role, id, extra = []) => [
+            ...baseArgs,
+            "--role",
+            role,
+            "--task-id",
+            id,
+            ...extra,
+        ];
+        // Fixture pipeline: draft → ready (explicit-empty F3 envelope, the
+        // same pattern as schedule W) → working + owned by the coordinator
+        // alias the workers bind.
+        const makeWorkingFixture = (title) => {
+            const fixtureID = concSaveFixtureTask(coordinatorSessionID, title);
+            const readyPayload = {
+                files_in_scope: [".opencode/scripts/state-lib.js"],
+                success_criteria: [
+                    "Deterministic real-process delete-wins (eligible writer) interleaving.",
+                ],
+                validation_plan: ["Assert the schedule's pinned outcome."],
+                next_action: "Run the concurrency schedule.",
+            };
+            readyPayload.f3_design_readiness = {
+                ownership_hazards: [],
+                design_digest: computeTaskDesignDigest(
+                    readCoordinationTask(coordinatorSessionID, fixtureID, {
+                        cwd: "/verification",
+                    }).task,
+                    readyPayload,
+                ),
+            };
+            readyCoordinationTask(
+                coordinatorSessionID,
+                fixtureID,
+                readyPayload,
+                { cwd: "/verification" },
+            );
+            activateCoordinationTask(coordinatorSessionID, fixtureID, {
+                cwd: "/verification",
+            });
+            return fixtureID;
+        };
+        const runEligibleScenario = async (label, scenarioID, contenderRole) => {
+            const scenarioCard = cardPathOf(scenarioID);
+            const scenarioLock = lockPathOf(scenarioID);
+            const scenarioReports = path.join(isolatedRoot, "reports", scenarioID);
+            const deleteRun = concFloat(
+                concRunWorker(dir, `delete-${label}`, [
+                    ...taskRoleArgs("delete", scenarioID),
+                    "--force",
+                    "true",
+                    "--pause-hook",
+                    "true",
+                    "--expect",
+                    "ok",
+                ]),
+            );
+            await concWaitForFile(
+                path.join(dir, `delete-${label}.at-before-remove`),
+                `${label}: forced delete paused in beforeRemove (lock held)`,
+                WORKER_CHILD_BUDGET_MS,
+            );
+            if (!fs.existsSync(scenarioLock)) {
+                concFail(`${label}: forced delete must hold the task lock while paused`);
+            }
+            const contenderRun = concFloat(
+                concRunWorker(dir, contenderRole, [
+                    ...taskRoleArgs(contenderRole, scenarioID),
+                    "--ack-lock",
+                    scenarioLock,
+                    "--expect",
+                    "error",
+                ]),
+            );
+            await concWaitForFile(
+                path.join(dir, `${contenderRole}.lock-eexist`),
+                `${label}: ${contenderRole} contender hitting EEXIST on the exact task lock path`,
+                WORKER_CHILD_BUDGET_MS,
+            );
+            writeBarrierFile(path.join(dir, `delete-${label}.release`));
+            const deleteResult = await deleteRun;
+            if (!deleteResult.ok || deleteResult.exit_code !== 0) {
+                concFail(
+                    `${label}: forced delete must complete cleanly: ${JSON.stringify(deleteResult)}`,
+                );
+            }
+            if (
+                !deleteResult.removed ||
+                deleteResult.removed.card_removed !== true
+            ) {
+                concFail(
+                    `${label}: forced delete must remove the card: ${JSON.stringify(deleteResult)}`,
+                );
+            }
+            const contenderResult = await contenderRun;
+            if (
+                contenderResult.ok ||
+                !contenderResult.error ||
+                !contenderResult.error.includes("does not exist")
+            ) {
+                concFail(
+                    `${label}: the ELIGIBLE ${contenderRole} contender must refuse 'does not exist' after delete-wins (no publication, no resurrection): ${JSON.stringify(contenderResult)}`,
+                );
+            }
+            if (fs.existsSync(scenarioCard)) {
+                concFail(`${label}: card must stay deleted after the refused contender`);
+            }
+            if (fs.existsSync(scenarioReports)) {
+                concFail(
+                    `${label}: report directory must be gone — the eligible writer published NOTHING (ordering, not ineligibility)`,
+                );
+            }
+            if (fs.existsSync(scenarioLock)) {
+                concFail(`${label}: no residual task lock`);
+            }
+        };
+
+        // A) Eligible CLOSEOUT writer.
+        {
+            const closeoutID = makeWorkingFixture(
+                `Concurrency delete wins eligible closeout ${Date.now()}`,
+            );
+            const cardA = JSON.parse(
+                fs.readFileSync(cardPathOf(closeoutID), "utf8"),
+            );
+            if (
+                cardA.status !== "working" ||
+                cardA.active_session_alias !== `${prefix}-coord`
+            ) {
+                concFail(
+                    "DW2 closeout fixture must be working and owned by the worker's alias (an eligible writer)",
+                );
+            }
+            await runEligibleScenario("closeout", closeoutID, "closeout");
+        }
+
+        // B) Eligible REVIEW writer (reported + latest_report via a
+        // parent-side closeout first).
+        {
+            const reviewID = makeWorkingFixture(
+                `Concurrency delete wins eligible review ${Date.now()}`,
+            );
+            saveCoordinationTaskCloseout(coordinatorSessionID, reviewID, {
+                cwd: "/verification",
+                title: "DW2 review-eligibility fixture closeout",
+                body: workerCloseoutBody(),
+            });
+            const cardB = JSON.parse(
+                fs.readFileSync(cardPathOf(reviewID), "utf8"),
+            );
+            if (cardB.status !== "reported" || !cardB.latest_report) {
+                concFail(
+                    "DW2 review fixture must be reported with a latest_report (an eligible reviewer)",
+                );
+            }
+            await runEligibleScenario("review", reviewID, "review");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Schedule F — abort-path probe (controller failure hygiene).
+    //
+    // Deterministic coverage of the abort sweep's two branches with a LIVE
+    // paused/straggling worker (discharges the slice-2 b-F2 defer): (a) a
+    // worker paused under its lock is GRACEFULLY released by the sweep's
+    // spawn-time-registered barrier and exits cleanly; (b) a
+    // barrier-ignoring straggler (the sleep role) exhausts the graceful
+    // window, is SIGKILLed, and its close is AWAITED before any fixture
+    // removal; its floated promise's 'produced no result' rejection is
+    // OBSERVED here (concFloat's no-op catch prevented it from ever being
+    // unhandled). Both mechanisms must complete before main()'s finally
+    // could remove the isolated root.
+    // ------------------------------------------------------------------
+    {
+        const dir = path.join(scheduleRoot, "abort-probe");
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.mkdirSync(dir, { recursive: true });
+        const taskID = concSaveFixtureTask(
+            coordinatorSessionID,
+            `Concurrency abort probe ${Date.now()}`,
+        );
+        const lockPath = lockPathOf(taskID);
+
+        const pausedRun = concFloat(
+            concRunWorker(dir, "paused", [
+                ...updateArgs(taskID),
+                "--pause-rename",
+                cardPathOf(taskID),
+            ]),
+        );
+        await concWaitForFile(
+            path.join(dir, "paused.at-rename"),
+            "probe worker paused under its lock",
+            WORKER_CHILD_BUDGET_MS,
+        );
+        const sleeperRun = concFloat(
+            concRunWorker(dir, "sleeper", [
+                ...baseArgs,
+                "--role",
+                "sleep",
+                "--task-id",
+                taskID,
+            ]),
+        );
+        // Ack-based (not sleep-based): the straggler confirms it reached its
+        // role dispatch, so its later 'produced no result' rejection is the
+        // SIGKILL branch, never an unnoticed startup failure.
+        await concWaitForFile(
+            path.join(dir, "sleeper.started"),
+            "straggler confirmed inside its sleep role",
+            WORKER_CHILD_BUDGET_MS,
+        );
+        // The REAL sweep (the same function the failure finally runs).
+        await concAbortActiveWorkers();
+        const pausedResult = await pausedRun;
+        if (!pausedResult.ok || pausedResult.exit_code !== 0) {
+            concFail(
+                `graceful branch: the sweep-released paused worker must exit cleanly: ${JSON.stringify(pausedResult)}`,
+            );
+        }
+        let stragglerRejected = false;
+        try {
+            await sleeperRun;
+        } catch (_expected) {
+            stragglerRejected = true;
+        }
+        if (!stragglerRejected) {
+            concFail(
+                "SIGKILL branch: the straggler's floated promise must reject 'produced no result' (observed here, never unhandled)",
+            );
+        }
+        if (fs.existsSync(lockPath)) {
+            concFail("probe task lock must be released by the resumed worker");
         }
     }
     } finally {
@@ -4720,13 +5286,13 @@ async function main() {
         }
 
         // ------------------------------------------------------------------
-        // Real-process concurrency schedules (the lock-primitive proof for
-        // the TOCTOU repair, plus proposal-retirement serialization; the
-        // task-transaction schedules — writer-wins/delete-wins — land with
-        // the slice that locks those operations). Runs AFTER the functional
-        // cases, INSIDE the same isolated root; every child actor is joined
-        // (or killed on budget) before the finally block removes the
-        // isolated root wholesale.
+        // Real-process concurrency schedules: the lock-primitive proof for
+        // the TOCTOU repair, proposal-retirement serialization, and the
+        // integrated task transactions (writer-wins; delete-wins incl. the
+        // eligible-writer scenarios) + the abort-path probe. Runs AFTER the
+        // functional cases, INSIDE the same isolated root; every child
+        // actor is joined (or killed on budget) before the finally block
+        // removes the isolated root wholesale.
         // ------------------------------------------------------------------
         await runConcurrencySchedules({
             prefix,

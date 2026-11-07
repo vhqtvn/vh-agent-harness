@@ -442,9 +442,10 @@ function readJson(targetPath, defaultValue) {
 //
 // withLock is the shared per-resource lock behind every PARTICIPATING state
 // write (session and workstream indexes, session memory stores, coordination
-// task card updates, and skill-proposal transport — creation, status
-// transitions, and retirement). As of the v0.29.0 deleteCoordinationTask
-// TOCTOU repair it is NON-RECLAIMING and OWNERSHIP-SAFE:
+// task cards — creation, updates, review/closeout report publication, and
+// retirement — and skill-proposal transport: creation, status transitions,
+// retirement). As of the v0.29.0 deleteCoordinationTask TOCTOU repair it
+// is NON-RECLAIMING and OWNERSHIP-SAFE:
 //
 //   * NEVER remove another acquisition — not on age (the former 30s
 //     mtime-based stale reclamation is REMOVED: an aged lock may belong to a
@@ -4064,64 +4065,84 @@ function listCoordinationTaskCards() {
         .map((entry) => entry.task);
 }
 
+// Apply a coordination-task card update INSIDE an already-held per-task
+// lock. This is the private core of updateCoordinationTask and the ONLY
+// sanctioned way for a compound transaction (delete / review / closeout —
+// each of which holds coordinationTaskLockPath across its whole sequence)
+// to mutate the card: re-entering the PUBLIC updater inside such a
+// transaction would deadlock on the non-reentrant withLock.
+//
+// Absent-card semantics (deliberate split): the PUBLIC wrapper loads with
+// required:false (absent → defaults → the create-flow path), but a
+// compound transaction loads REQUIRED by default — a card that vanished
+// while the transaction held its lock must REFUSE (no resurrection from
+// defaults, no zombie publication), never invent a card to update.
+function applyCoordinationTaskUpdateLocked(taskID, updateFn, options = {}) {
+    const current = loadCoordinationTask(taskID, {
+        required: options.allowAbsent === true ? false : true,
+    }).payload;
+    const targetPath = coordinationTaskPath(taskID);
+    const updated = normalizeCoordinationTaskRecord(
+        updateFn({
+            ...current,
+            latest_report: current.latest_report
+                ? { ...current.latest_report }
+                : null,
+            last_review: current.last_review
+                ? { ...current.last_review }
+                : null,
+            history: Array.isArray(current.history)
+                ? current.history.map((entry) => ({ ...entry }))
+                : [],
+        }) || current,
+        taskID,
+    );
+    updated.schema_version = SCHEMA_VERSION;
+    updated.task_id = taskID;
+    updated.created_at = updated.created_at || current.created_at || isoZ();
+    updated.updated_at = isoZ();
+    ensureCoordinationTaskCoreFields(updated);
+    atomicWriteJson(targetPath, updated);
+    // defer-003: any successful canonical coordinator-task WRITE (create,
+    // update, ready, closeout, review, repair, activate — every public op
+    // routes through this single chokepoint) seeds the committed
+    // coordinator-adoption marker (unmanaged — runtime-created,
+    // template-less, never renderer-seeded; idempotent
+    // create-if-absent — NEVER overwrite an existing marker). A WRITE is
+    // the act of adoption (matrix row-2 semantics); mere file presence is
+    // not. Its presence flips the release gate's defer-liveness check from
+    // SKIP (greenfield) to authoritative: a later whole-directory loss of
+    // .local/coordinator/tasks/ then FAILs (fail-closed) instead of
+    // silently SKIPping. Wrapped in try/catch so a marker write failure can
+    // never break a task save that has already succeeded — the marker is a
+    // gate signal, not a correctness precondition for the save itself.
+    try {
+        const markerPath = path.join(repoRoot(), ".vh-agent-harness", "coordinator-adoption.json");
+        if (!fs.existsSync(markerPath)) {
+            ensureDir(path.dirname(markerPath));
+            fs.writeFileSync(
+                markerPath,
+                JSON.stringify({ version: 1, adopted: true }, null, 2) + "\n",
+                "utf8",
+            );
+        }
+    } catch (_markerErr) {
+        // Non-fatal: see comment above.
+    }
+    return updated;
+}
+
 function updateCoordinationTask(taskIDRaw, updateFn) {
     ensureLocalCoordinatorNamespace();
     const taskID = normalizeCoordinationTaskId(taskIDRaw);
-    const targetPath = coordinationTaskPath(taskID);
     const lockPath = coordinationTaskLockPath(taskID);
-    return withLock(lockPath, () => {
-        const current = loadCoordinationTask(taskID, {
-            required: false,
-        }).payload;
-        const updated = normalizeCoordinationTaskRecord(
-            updateFn({
-                ...current,
-                latest_report: current.latest_report
-                    ? { ...current.latest_report }
-                    : null,
-                last_review: current.last_review
-                    ? { ...current.last_review }
-                    : null,
-                history: Array.isArray(current.history)
-                    ? current.history.map((entry) => ({ ...entry }))
-                    : [],
-            }) || current,
-            taskID,
-        );
-        updated.schema_version = SCHEMA_VERSION;
-        updated.task_id = taskID;
-        updated.created_at = updated.created_at || current.created_at || isoZ();
-        updated.updated_at = isoZ();
-        ensureCoordinationTaskCoreFields(updated);
-        atomicWriteJson(targetPath, updated);
-        // defer-003: any successful canonical coordinator-task WRITE (create,
-        // update, ready, closeout, review, repair, activate — every public op
-        // routes through this single chokepoint) seeds the committed
-        // coordinator-adoption marker (unmanaged — runtime-created,
-        // template-less, never renderer-seeded; idempotent
-        // create-if-absent — NEVER overwrite an existing marker). A WRITE is
-        // the act of adoption (matrix row-2 semantics); mere file presence is
-        // not. Its presence flips the release gate's defer-liveness check from
-        // SKIP (greenfield) to authoritative: a later whole-directory loss of
-        // .local/coordinator/tasks/ then FAILs (fail-closed) instead of
-        // silently SKIPping. Wrapped in try/catch so a marker write failure can
-        // never break a task save that has already succeeded — the marker is a
-        // gate signal, not a correctness precondition for the save itself.
-        try {
-            const markerPath = path.join(repoRoot(), ".vh-agent-harness", "coordinator-adoption.json");
-            if (!fs.existsSync(markerPath)) {
-                ensureDir(path.dirname(markerPath));
-                fs.writeFileSync(
-                    markerPath,
-                    JSON.stringify({ version: 1, adopted: true }, null, 2) + "\n",
-                    "utf8",
-                );
-            }
-        } catch (_markerErr) {
-            // Non-fatal: see comment above.
-        }
-        return updated;
-    });
+    return withLock(lockPath, () =>
+        // Public path keeps the historical absent-card semantics (create
+        // flow, metadata updates): absent → defaults via required:false.
+        applyCoordinationTaskUpdateLocked(taskID, updateFn, {
+            allowAbsent: true,
+        }),
+    );
 }
 
 /**
@@ -7028,12 +7049,66 @@ function deleteCoordinationTask(sessionID, taskIDRaw, options = {}) {
     fenceCandidate(cardPath, tasksRootReal, "card");
     fenceCandidate(reportDir, reportsRootReal, "report directory");
 
+    // 2b. Fast-path missing-card refusal BEFORE acquiring the lock: no
+    //     coordinator transport mutation (no card, report, or LOCK file is
+    //     created, rewritten, or removed on this path — not even lock
+    //     creation). (Actor-context resolution earlier in this call may
+    //     still touch session-binding state; that is outside the task
+    //     transport.) The authoritative check runs again INSIDE the locked
+    //     transaction (step 3) — a card removed between the two checks
+    //     refuses there. Missing-card retries refuse deterministically on
+    //     both paths; nothing is ever resurrected.
+    if (!fs.existsSync(cardPath)) {
+        throw new StateError(
+            `delete_coordination_task: card not found for task_id "${taskID}" (expected at ${relativeToRepo(cardPath)}).`,
+        );
+    }
+
+    // 2c. The removal TRANSACTION runs under the shared per-task lock
+    //     (coordinationTaskLockPath) — the v0.29.0 TOCTOU repair. The whole
+    //     sequence — authoritative reread, active-owner / in-flight /
+    //     landing-gated guards, decision-record retention verification, the
+    //     beforeRemove hook, and the removal itself — executes inside ONE
+    //     locked boundary, so a concurrent card writer (review/closeout
+    //     publication, metadata update) CANNOT interleave: previously the
+    //     unlocked read-guard-remove window let a writer publish a report
+    //     and recreate the card AFTER delete returned, or let delete
+    //     destroy a writer's mid-flight state. Contenders serialize on the
+    //     lock; a contender that cannot acquire within the bounded wait
+    //     fails closed (throws). Removal order inside the transaction:
+    //     report directory FIRST, card LAST (a surviving card anchors a
+    //     retry; see step 6).
+    return withLock(
+        coordinationTaskLockPath(taskID),
+        () =>
+            deleteCoordinationTaskLocked(actor, taskID, options, {
+                cardPath,
+                reportDir,
+                forced,
+            }),
+    );
+}
+
+// Steps 3–6 of deleteCoordinationTask, extracted so the ENTIRE removal
+// transaction — authoritative reread → guards → landing/decision-record
+// verification → beforeRemove hook → report-dir-then-card removal — executes
+// inside ONE withLock(coordinationTaskLockPath(taskID)) boundary (see 2c
+// above). Runs ONLY from deleteCoordinationTask under that lock; never call
+// it directly. The refusal `return` objects propagate as the withLock
+// callback's value unchanged.
+function deleteCoordinationTaskLocked(actor, taskID, options, paths) {
+    const { cardPath, reportDir } = paths;
+    const forced = options.force === true;
+
     // 3. Lenient-load. Read the exact card path directly; if it parses,
     //    extract best-effort summary fields. Do NOT require core-field
     //    validation — degraded and malformed cards are precisely the cards an
     //    operator may need to retire, so strict validation here would brick
     //    the retire path. A missing file is a not-found refusal; a parse
     //    failure is classified as malformed and removal proceeds.
+    //    This read is AUTHORITATIVE: it runs under the transaction lock, so
+    //    the guards below decide on exactly the card state that removal will
+    //    act on.
     if (!fs.existsSync(cardPath)) {
         throw new StateError(
             `delete_coordination_task: card not found for task_id "${taskID}" (expected at ${relativeToRepo(cardPath)}).`,
@@ -7462,18 +7537,22 @@ function deleteCoordinationTask(sessionID, taskIDRaw, options = {}) {
         options.beforeRemove(summary);
     }
 
-    // 6. Removal sequence (removeIfExists idiom). Exact card JSON first, then
-    //    the exact report dir recursively. Verify each is gone. Do NOT read
-    //    fields again after deletion.
-    let cardRemoved = false;
-    if (fs.existsSync(cardPath)) {
-        fs.rmSync(cardPath, { recursive: true, force: true });
-        cardRemoved = !fs.existsSync(cardPath);
-    }
+    // 6. Removal sequence (removeIfExists idiom), INSIDE the transaction
+    //    lock. Report directory FIRST, card LAST — the deliberate v0.29.0
+    //    TOCTOU-repair ordering: a card that survives a mid-sequence
+    //    crash/refusal still anchors a retry (its guards re-run on the next
+    //    attempt and re-derive what to remove), whereas card-first would
+    //    leave orphaned report directories nothing points at. Verify each is
+    //    gone. Do NOT read fields again after deletion.
     let reportDirRemoved = false;
     if (fs.existsSync(reportDir)) {
         fs.rmSync(reportDir, { recursive: true, force: true });
         reportDirRemoved = !fs.existsSync(reportDir);
+    }
+    let cardRemoved = false;
+    if (fs.existsSync(cardPath)) {
+        fs.rmSync(cardPath, { recursive: true, force: true });
+        cardRemoved = !fs.existsSync(cardPath);
     }
 
     return {
@@ -9074,7 +9153,30 @@ function repairCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) 
 
 function saveCoordinationTaskCloseout(sessionID, taskIDRaw, options = {}) {
     const actor = coordinationActorContext(sessionID, options);
-    const loaded = loadCoordinationTask(taskIDRaw);
+    const taskID = normalizeCoordinationTaskId(taskIDRaw);
+    // Publication transaction (v0.29.0 TOCTOU repair): the working/owner
+    // checks, the decision-record gate, the closeout-report publication, and
+    // the card update all run inside ONE per-task locked boundary — the
+    // same boundary deleteCoordinationTask's removal transaction uses. A
+    // concurrent delete cannot interleave: previously the unlocked
+    // load-check-publish-update window could publish an orphan closeout
+    // report into a report directory a concurrent delete was already
+    // removing, or recreate a card the delete had already removed. A
+    // contender that finds the card missing after a completed delete
+    // REFUSES at the required load inside the lock — it never publishes
+    // and never resurrects.
+    return withLock(
+        coordinationTaskLockPath(taskID),
+        () =>
+            saveCoordinationTaskCloseoutLocked(actor, taskID, sessionID, options),
+    );
+}
+
+// The body of saveCoordinationTaskCloseout; runs ONLY under that function's
+// per-task lock (never call directly). The load is REQUIRED — a card that
+// vanished under the lock refuses instead of resurrecting.
+function saveCoordinationTaskCloseoutLocked(actor, taskID, sessionID, options) {
+    const loaded = loadCoordinationTask(taskID);
     const errors = [];
     if (loaded.payload.status !== "working") {
         errors.push(
@@ -9268,7 +9370,10 @@ function saveCoordinationTaskCloseout(sessionID, taskIDRaw, options = {}) {
         options.measuredOutcome !== undefined
             ? normalizeOptionalText(options.measuredOutcome)
             : null;
-    const saved = updateCoordinationTask(loaded.payload.task_id, (current) => ({
+    // In-transaction card update — the PRIVATE already-locked core (the
+    // public updateCoordinationTask would re-enter the same non-reentrant
+    // per-task lock this transaction already holds).
+    const saved = applyCoordinationTaskUpdateLocked(loaded.payload.task_id, (current) => ({
         ...current,
         status: taskStatus,
         report_envelope: reportEnvelope,
@@ -9338,7 +9443,28 @@ function saveCoordinationTaskCloseout(sessionID, taskIDRaw, options = {}) {
 
 function reviewCoordinationTask(sessionID, taskIDRaw, options = {}) {
     const actor = coordinationActorContext(sessionID, options);
-    const loaded = loadCoordinationTask(taskIDRaw);
+    const taskID = normalizeCoordinationTaskId(taskIDRaw);
+    // Publication transaction (v0.29.0 TOCTOU repair): the reviewable-status
+    // checks, the review-report publication, and the card update all run
+    // inside ONE per-task locked boundary. A concurrent deleteCoordinationTask
+    // (or any other card writer) cannot interleave: previously the unlocked
+    // load-check-publish-update window could publish an orphan review report
+    // into a report directory a concurrent delete was already removing, or
+    // update a card the delete had already removed (resurrecting it from
+    // under a refused refusal). A contender that finds the card missing
+    // after a completed delete REFUSES at the required load inside the lock
+    // — it never publishes and never resurrects.
+    return withLock(
+        coordinationTaskLockPath(taskID),
+        () => reviewCoordinationTaskLocked(actor, taskID, sessionID, options),
+    );
+}
+
+// The body of reviewCoordinationTask; runs ONLY under that function's
+// per-task lock (never call directly). The load is REQUIRED — a card that
+// vanished under the lock refuses instead of resurrecting.
+function reviewCoordinationTaskLocked(actor, taskID, sessionID, options) {
+    const loaded = loadCoordinationTask(taskID);
     const errors = [];
     if (!COORDINATION_REVIEWABLE_STATUSES.has(loaded.payload.status)) {
         errors.push(
@@ -9400,7 +9526,10 @@ function reviewCoordinationTask(sessionID, taskIDRaw, options = {}) {
         }),
     );
     const storedReviewPath = relativeToRepo(reviewPath);
-    const saved = updateCoordinationTask(loaded.payload.task_id, (current) => ({
+    // In-transaction card update — the PRIVATE already-locked core (the
+    // public updateCoordinationTask would re-enter the same non-reentrant
+    // per-task lock this transaction already holds).
+    const saved = applyCoordinationTaskUpdateLocked(loaded.payload.task_id, (current) => ({
         ...current,
         status: taskStatus,
         next_action:
