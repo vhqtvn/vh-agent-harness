@@ -15,7 +15,6 @@ import { readPauseState, formatRefusal } from "./pause-new-work.js";
 const SCHEMA_VERSION = 1;
 const LOCK_TIMEOUT_MS = 5000;
 const LOCK_RETRY_MS = 50;
-const STALE_LOCK_MS = 30000;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -439,25 +438,152 @@ function readJson(targetPath, defaultValue) {
     }
 }
 
+// --- Non-reclaiming shared lock protocol (operator-ratified 2026-11-06) ---
+//
+// withLock is the shared per-resource lock behind every state write (session
+// and workstream indexes, session memory stores, coordination task cards,
+// skill proposals). As of the v0.29.0 deleteCoordinationTask TOCTOU repair it
+// is NON-RECLAIMING and OWNERSHIP-SAFE:
+//
+//   * NEVER remove another acquisition — not on age (the former 30s
+//     mtime-based stale reclamation is REMOVED: an aged lock may belong to a
+//     live holder mid-callback, and reaping it silently destroys exclusion),
+//     not on PID liveness (PID reuse and cross-namespace liveness make any
+//     such inference unsound), and not on malformed/empty metadata (a crashed
+//     or killed holder can leave an empty lock; content is DIAGNOSTIC ONLY
+//     and never gates acquisition or release).
+//   * Ownership-safe release: the owner unlinks the lock pathname only while
+//     that pathname still resolves to the file THIS acquisition created
+//     (fstat/stat inode identity). A predecessor whose lock was removed
+//     externally — the only sanctioned actor is an operator, after verified
+//     quiescence — must never unlink a successor's acquisition.
+//   * Initialization-error cleanup removes ONLY the acquisition just created
+//     (inode-proven); when ownership is uncertain it fails closed and leaves
+//     the file for manual recovery.
+//   * Bounded acquisition waiting is PRESERVED: a contender that cannot
+//     acquire within LOCK_TIMEOUT_MS fails closed with an actionable
+//     diagnostic. Recovery of an abandoned lock is MANUAL: verify the holder
+//     process is really gone / all participants are quiescent (note:
+//     already-loaded old-version modules remain unsafe participants until
+//     restarted), then remove the lock file by hand. This availability cost —
+//     bounded refusal after a crash, contender timeouts during long holders —
+//     was accepted (2026-11-06 debate) as preferable to silent
+//     reclamation-based decision-content destruction.
+function lockFileIdentity(stats) {
+    return stats ? `${stats.dev}:${stats.ino}` : "";
+}
+
+function readLockHolderDiagnostic(lockPath) {
+    // Holder metadata (pid + acquisition time) is DIAGNOSTIC ONLY: it
+    // identifies an acquisition in error messages and never authorizes
+    // reclamation or release.
+    try {
+        return fs.readFileSync(lockPath, "utf8").trim();
+    } catch {
+        return "<unreadable>";
+    }
+}
+
+function describeLockWaitTimeout(lockPath, startedAt) {
+    const waitedMs = Date.now() - startedAt;
+    const holder = readLockHolderDiagnostic(lockPath);
+    return (
+        `Timed out waiting for session state lock: ${lockPath} ` +
+        `(waited ${waitedMs}ms; lock content: "${holder}"). Locks are never ` +
+        `reclaimed automatically — an aged, empty, or malformed lock may ` +
+        `still belong to a live holder, so this process refuses to guess. ` +
+        `If the holder is verifiably gone (all participants stopped or ` +
+        `restarted; already-loaded old-version modules remain unsafe ` +
+        `participants), recover manually by removing the lock file after ` +
+        `confirming quiescence.`
+    );
+}
+
+function releaseOwnedLockFile(fd, lockPath) {
+    // Ownership-safe release. fstat(fd) MUST precede closeSync(fd): after the
+    // descriptor is closed, ownership can no longer be proven from this side.
+    //
+    // KNOWN RESIDUAL WINDOW (deliberate, ratified): the identity check
+    // (stat → inode compare) and the unlink are two separate operations, so a
+    // narrow stat→unlink interleaving exists in which an EXTERNAL actor
+    // removes our lock and a successor acquires the pathname between our
+    // matching stat and our unlink, and this release would then remove the
+    // successor's acquisition. POSIX path-based fs APIs offer no atomic
+    // owner-conditional unlink (and conditional-unlink primitives were
+    // explicitly rejected in the 2026-11-06 design debate as unsound for the
+    // same reason), so this window cannot be closed in code — it is closed by
+    // the PROTOCOL: no cooperating actor ever removes another acquisition,
+    // and the only sanctioned external removal is an operator acting after
+    // verified QUIESCENCE (no live participants), at which point no successor
+    // can exist. The inode comparison below is therefore defense-in-depth
+    // diagnostics for out-of-protocol interference (it catches the common
+    // predecessor/successor overlap), not the protocol's primary guarantee —
+    // the absence of any reaping actor is.
+    let owned = false;
+    let observed = "missing";
+    try {
+        let fdStats = null;
+        try {
+            fdStats = fs.fstatSync(fd);
+        } catch (fstatError) {
+            if (fstatError.code !== "EBADF") {
+                throw fstatError;
+            }
+        }
+        if (fdStats) {
+            try {
+                const pathStats = fs.statSync(lockPath);
+                observed = lockFileIdentity(pathStats);
+                owned = lockFileIdentity(fdStats) === observed;
+            } catch (statError) {
+                if (statError.code !== "ENOENT") {
+                    throw statError;
+                }
+                observed = "missing";
+            }
+            if (owned) {
+                try {
+                    fs.unlinkSync(lockPath);
+                } catch (error) {
+                    if (error.code !== "ENOENT") {
+                        throw error;
+                    }
+                }
+            }
+        }
+    } finally {
+        // The descriptor is closed on EVERY path (including release-side
+        // errors above) so a failed release can never leak it.
+        try {
+            fs.closeSync(fd);
+        } catch (error) {
+            if (error.code !== "EBADF") {
+                throw error;
+            }
+        }
+    }
+    return { owned, observed };
+}
+
 function withLock(lockPath, fn) {
     ensureDir(path.dirname(lockPath));
     const startedAt = Date.now();
     let fd = null;
 
     while (fd === null) {
+        let created = null;
         try {
-            fd = fs.openSync(lockPath, "wx");
-            fs.writeFileSync(fd, `${process.pid} ${isoZ()}\n`, "utf8");
+            created = fs.openSync(lockPath, "wx");
         } catch (error) {
             if (error.code !== "EEXIST") {
                 throw error;
             }
+            // The lock exists (or vanished between the failed create and this
+            // stat). NEVER unlink it: a lock that disappeared on its own (the
+            // holder released it) is immediately retryable; a lock that still
+            // exists is respected regardless of its age or content.
             try {
-                const stats = fs.statSync(lockPath);
-                if (Date.now() - stats.mtimeMs > STALE_LOCK_MS) {
-                    fs.unlinkSync(lockPath);
-                    continue;
-                }
+                fs.statSync(lockPath);
             } catch (statError) {
                 if (statError.code === "ENOENT") {
                     continue;
@@ -466,30 +592,38 @@ function withLock(lockPath, fn) {
             }
             if (Date.now() - startedAt > LOCK_TIMEOUT_MS) {
                 throw new StateError(
-                    `Timed out waiting for session state lock: ${lockPath}`,
+                    describeLockWaitTimeout(lockPath, startedAt),
                 );
             }
             sleep(LOCK_RETRY_MS);
+            continue;
         }
+        try {
+            // Publish owner metadata immediately after the exclusive create.
+            // The content is diagnostics-only (see protocol comment above).
+            fs.writeFileSync(created, `${process.pid} ${isoZ()}\n`, "utf8");
+        } catch (writeError) {
+            // Initialization-error cleanup: remove ONLY the acquisition just
+            // created, proven by inode identity; when ownership is uncertain,
+            // fail closed (leave the file for manual recovery) and rethrow.
+            try {
+                releaseOwnedLockFile(created, lockPath);
+            } catch (_cleanupError) {
+                try {
+                    fs.closeSync(created);
+                } catch {
+                    // best-effort cleanup; the original error is rethrown below
+                }
+            }
+            throw writeError;
+        }
+        fd = created;
     }
 
     try {
         return fn();
     } finally {
-        try {
-            fs.closeSync(fd);
-        } catch (error) {
-            if (error.code !== "EBADF") {
-                throw error;
-            }
-        }
-        try {
-            fs.unlinkSync(lockPath);
-        } catch (error) {
-            if (error.code !== "ENOENT") {
-                throw error;
-            }
-        }
+        releaseOwnedLockFile(fd, lockPath);
     }
 }
 

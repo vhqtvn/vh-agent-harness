@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
+import { spawn } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "url";
 import {
     StateError,
     activateCoordinationTask,
@@ -18,6 +19,9 @@ import {
     saveCoordinationTaskCloseout,
     updateCoordinationTaskMetadata,
 } from "./state-lib.js";
+
+const __verifySelfPath = fileURLToPath(import.meta.url);
+const __verifyDirname = path.dirname(__verifySelfPath);
 
 function removeIfExists(targetPath) {
     if (fs.existsSync(targetPath)) {
@@ -173,7 +177,865 @@ function expectStateError(fn, expectedFragment) {
     }
 }
 
-function main() {
+// =============================================================================
+// Real-process concurrency verification (worker dispatch + parent controller)
+// =============================================================================
+// These schedules prove the SHARED LOCK PROTOCOL behind state writes with
+// REAL process interleavings — an asynchronous parent controller spawning
+// independent child actors (`node <this file> --worker ...`) that run the
+// ordinary public state-lib operations against the SAME isolated coordinator
+// root as this verifier run. No same-process nested-call evidence is used.
+// (The deleteCoordinationTask/review/closeout transaction schedules —
+// writer-wins and delete-wins — are part of the same repair effort and land
+// with the slice that locks those operations end-to-end; until then this
+// harness verifies the lock PRIMITIVE only, which is the load-bearing
+// precondition the transaction schedules build on.)
+//
+// Determinism mechanism (per schedule):
+//   * acknowledged file barriers — a child writes an ack file at the exact
+//     moment it reaches a scheduled point; the parent polls for the ack and
+//     only then advances the schedule (never sleep-based ordering);
+//   * exact-path fs instrumentation — the child patches fs.openSync (ack an
+//     actual EEXIST on the exact lock path: REAL lock-contention evidence),
+//     fs.renameSync (pause at an exact publication path: the actor holds
+//     the per-resource lock while paused inside its critical section), and —
+//     for the initialization-error schedule — fs.writeFileSync (fail the
+//     exclusive-create metadata publication);
+//   * the existing `beforeRemove` hook on deleteCoordinationTask pauses the
+//     delete actor between verification and removal, under its lock;
+//   * synchronous children wait on bounded file release barriers (a patched
+//     sync fs call cannot await); every barrier carries a deadline so a hung
+//     schedule fails loudly instead of hanging the verifier.
+//
+// Worker dispatch bypasses main() entirely (no isolated-root creation or
+// startup cleanup — the PARENT owns the isolated root) and must never grow
+// production semantics: these controls live in the verifier only.
+
+// Sync pause budget inside a patched fs call / beforeRemove hook. Generous
+// relative to the parent's step deadlines but far below any outer budget.
+const WORKER_BARRIER_DEADLINE_MS = 15000;
+// Parent-side per-child wall-clock budget (spawn → exit). A schedule that
+// would exceed this is killed and reported as a failed schedule.
+const WORKER_CHILD_BUDGET_MS = 25000;
+
+function workerSleepMs(ms) {
+    const shared = new SharedArrayBuffer(4);
+    const view = new Int32Array(shared);
+    Atomics.wait(view, 0, 0, ms);
+}
+
+function writeBarrierFile(filePath) {
+    try {
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, `${Date.now()}\n`, { flag: "wx" });
+    } catch (error) {
+        if (error.code !== "EEXIST") {
+            throw error;
+        }
+    }
+}
+
+function waitSyncForFile(filePath) {
+    const deadline = Date.now() + WORKER_BARRIER_DEADLINE_MS;
+    while (!fs.existsSync(filePath)) {
+        if (Date.now() > deadline) {
+            throw new StateError(
+                `verify worker: barrier deadline exceeded while waiting for ${filePath}`,
+            );
+        }
+        workerSleepMs(20);
+    }
+}
+
+function parseWorkerArgs(args) {
+    const opts = { expect: "ok", pauseHook: false };
+    for (let index = 0; index < args.length; index += 2) {
+        const flag = args[index];
+        const value = args[index + 1];
+        if (value === undefined) {
+            throw new StateError(
+                `verify worker: missing value for ${flag}`,
+            );
+        }
+        switch (flag) {
+            case "--role":
+                opts.role = value;
+                break;
+            case "--coordinator-root":
+                opts.coordinatorRoot = value;
+                break;
+            case "--barrier-dir":
+                opts.barrierDir = value;
+                break;
+            case "--tag":
+                opts.tag = value;
+                break;
+            case "--task-id":
+                opts.taskId = value;
+                break;
+            case "--session-id":
+                opts.sessionId = value;
+                break;
+            case "--session-alias":
+                opts.sessionAlias = value;
+                break;
+            case "--landing-repo":
+                opts.landingRepo = value;
+                break;
+            case "--pause-rename":
+                opts.pauseRename = value;
+                break;
+            case "--ack-lock":
+                opts.ackLock = value;
+                break;
+            case "--expect":
+                opts.expect = value;
+                break;
+            case "--review-status":
+                opts.reviewStatus = value;
+                break;
+            case "--closeout-status":
+                opts.closeoutStatus = value;
+                break;
+            case "--pause-hook":
+                opts.pauseHook = value === "true";
+                break;
+            case "--fail-meta-write":
+                opts.failMetaWrite = value === "true";
+                break;
+            default:
+                throw new StateError(
+                    `verify worker: unknown argument ${flag}`,
+                );
+        }
+    }
+    return opts;
+}
+
+// Patch the SHARED fs module object (the same object state-lib imported) so
+// the ordinary public operations of state-lib hit the barriers as they run.
+// Patches are additive: the real operation always runs (after any pause).
+function installWorkerInstrumentation(opts) {
+    const realOpenSync = fs.openSync;
+    const realRenameSync = fs.renameSync;
+    if (opts.ackLock) {
+        const ackLockPath = path.resolve(opts.ackLock);
+        const ackFile = path.join(opts.barrierDir, `${opts.tag}.lock-eexist`);
+        fs.openSync = function patchedOpenSyncForAck(target, flags, ...rest) {
+            try {
+                return realOpenSync.call(fs, target, flags, ...rest);
+            } catch (error) {
+                if (
+                    error &&
+                    error.code === "EEXIST" &&
+                    String(flags) === "wx" &&
+                    path.resolve(String(target)) === ackLockPath
+                ) {
+                    writeBarrierFile(ackFile);
+                }
+                throw error;
+            }
+        };
+    }
+    if (opts.pauseRename) {
+        const pausePath = path.resolve(opts.pauseRename);
+        const ackFile = path.join(opts.barrierDir, `${opts.tag}.at-rename`);
+        const releaseFile = path.join(opts.barrierDir, `${opts.tag}.release`);
+        fs.renameSync = function patchedRenameSyncForPause(from, to, ...rest) {
+            if (path.resolve(String(to)) === pausePath) {
+                writeBarrierFile(ackFile);
+                waitSyncForFile(releaseFile);
+            }
+            return realRenameSync.call(fs, from, to, ...rest);
+        };
+    }
+    if (opts.failMetaWrite) {
+        // Fail the metadata publication of the TASK lock specifically (the
+        // fd-based writeFileSync of "<pid> <iso>\n" right after the exclusive
+        // create of this task's lock). The fd is captured by an openSync
+        // wrapper on the exact lock path so unrelated locks taken earlier
+        // (e.g. the session-index lock during bindSessionName) are NOT
+        // failed. One-shot: only the first matching write throws. This
+        // exercises withLock's initialization-error cleanup branch: it must
+        // remove ONLY the acquisition just created (inode-proven) and
+        // propagate the original error. No pause is needed — the ack file is
+        // post-hoc evidence the patched path fired.
+        const failLockPath = path.join(
+            opts.coordinatorRoot,
+            "tasks",
+            `.${opts.taskId}.lock`,
+        );
+        const realWriteFileSync = fs.writeFileSync;
+        const chainedOpenSync = fs.openSync;
+        const ackFile = path.join(opts.barrierDir, `${opts.tag}.at-meta-write`);
+        let failFd = null;
+        fs.openSync = function patchedOpenSyncForMetaFail(
+            target,
+            flags,
+            ...rest
+        ) {
+            const fd = chainedOpenSync.call(fs, target, flags, ...rest);
+            if (path.resolve(String(target)) === path.resolve(failLockPath)) {
+                failFd = fd;
+            }
+            return fd;
+        };
+        fs.writeFileSync = function patchedWriteFileSyncForMetaFail(
+            target,
+            data,
+            ...rest
+        ) {
+            if (
+                target === failFd &&
+                typeof data === "string" &&
+                /^\d+ \d{4}-\d{2}-\d{2}T\S+\n$/.test(data)
+            ) {
+                failFd = null;
+                writeBarrierFile(ackFile);
+                throw new StateError(
+                    "injected metadata-write failure (worker instrumentation)",
+                );
+            }
+            return realWriteFileSync.call(fs, target, data, ...rest);
+        };
+    }
+}
+
+const WORKER_REVIEW_BODY = [
+    "Real-process concurrency-schedule review verdict.",
+    "Issued from an independent child process contending on the per-task lock.",
+].join("\n\n");
+
+function workerCloseoutBody() {
+    return [
+        "1. Real-process concurrency-schedule closeout from an independent child process.",
+        "2. The routine (empty) decision-record attestation matches a card with no decision items.",
+        "",
+        "```decision-record",
+        JSON.stringify(
+            {
+                version: 3,
+                items: [],
+                note: "concurrency schedule fixture; routine inventory",
+            },
+            null,
+            2,
+        ),
+        "```",
+    ].join("\n");
+}
+
+function dispatchWorkerRole(stateLib, opts) {
+    switch (opts.role) {
+        case "update": {
+            const saved = stateLib.updateCoordinationTaskMetadata(
+                opts.sessionId,
+                opts.taskId,
+                { next_action: `worker-update ${opts.tag}` },
+                { cwd: "/verification" },
+            );
+            return { ok: true, next_action: saved.task.next_action };
+        }
+        case "review": {
+            const reviewed = stateLib.reviewCoordinationTask(
+                opts.sessionId,
+                opts.taskId,
+                {
+                    cwd: "/verification",
+                    title: `Concurrency review ${opts.tag}`,
+                    body: WORKER_REVIEW_BODY,
+                    ...(opts.reviewStatus
+                        ? { taskStatus: opts.reviewStatus }
+                        : {}),
+                },
+            );
+            return { ok: true, report_path: reviewed.review.path };
+        }
+        case "closeout": {
+            const closed = stateLib.saveCoordinationTaskCloseout(
+                opts.sessionId,
+                opts.taskId,
+                {
+                    cwd: "/verification",
+                    title: `Concurrency closeout ${opts.tag}`,
+                    body: workerCloseoutBody(),
+                    ...(opts.closeoutStatus
+                        ? { taskStatus: opts.closeoutStatus }
+                        : {}),
+                },
+            );
+            return { ok: true, report_path: closed.report.path };
+        }
+        case "delete": {
+            const options = { cwd: "/verification" };
+            if (opts.landingRepo) {
+                options.landingProofRepo = opts.landingRepo;
+            }
+            if (opts.pauseHook) {
+                options.beforeRemove = () => {
+                    writeBarrierFile(
+                        path.join(opts.barrierDir, `${opts.tag}.at-before-remove`),
+                    );
+                    waitSyncForFile(
+                        path.join(opts.barrierDir, `${opts.tag}.release`),
+                    );
+                };
+            }
+            // Returns a structured outcome: { ok:true, removed } or
+            // { ok:false, refusal } — both are valid schedule results.
+            return deleteCoordinationTask(
+                opts.sessionId,
+                opts.taskId,
+                options,
+            );
+        }
+        default:
+            throw new StateError(`verify worker: unknown role ${opts.role}`);
+    }
+}
+
+async function runWorkerMode(args) {
+    const opts = parseWorkerArgs(args);
+    const missing = [
+        "role",
+        "coordinatorRoot",
+        "barrierDir",
+        "tag",
+        "sessionId",
+        "sessionAlias",
+        "taskId",
+    ].filter((name) => !opts[name]);
+    if (missing.length) {
+        throw new StateError(
+            `verify worker: missing required arguments: ${missing.join(", ")}`,
+        );
+    }
+    process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = opts.coordinatorRoot;
+    installWorkerInstrumentation(opts);
+    const stateLib = await import(
+        pathToFileURL(path.join(__verifyDirname, "state-lib.js")).href
+    );
+    stateLib.bindSessionName(opts.sessionId, opts.sessionAlias, {
+        cwd: "/verification",
+    });
+    const startedAt = Date.now();
+    const result = {
+        role: opts.role,
+        tag: opts.tag,
+        ok: false,
+        elapsed_ms: 0,
+    };
+    try {
+        const outcome = dispatchWorkerRole(stateLib, opts);
+        result.ok = !(outcome && outcome.ok === false);
+        if (outcome && outcome.refusal) {
+            result.refusal = outcome.refusal;
+        }
+        if (outcome && outcome.removed) {
+            result.removed = outcome.removed;
+        }
+        if (outcome && outcome.report_path) {
+            result.report_path = outcome.report_path;
+        }
+    } catch (error) {
+        result.ok = false;
+        result.error = error instanceof Error ? error.message : String(error);
+        result.timed_out = /Timed out waiting for session state lock/.test(
+            result.error,
+        );
+    }
+    result.elapsed_ms = Date.now() - startedAt;
+    fs.mkdirSync(opts.barrierDir, { recursive: true });
+    fs.writeFileSync(
+        path.join(opts.barrierDir, `${opts.tag}.result.json`),
+        JSON.stringify(result, null, 2) + "\n",
+    );
+    const matched =
+        opts.expect === "ok"
+            ? result.ok
+            : opts.expect === "timeout"
+              ? result.timed_out === true
+              : opts.expect === "refused"
+                ? result.ok === false && Boolean(result.refusal)
+                : opts.expect === "error"
+                  ? result.ok === false && result.timed_out !== true
+                  : false;
+    if (!matched) {
+        console.error(
+            `verify worker ${opts.tag}: expectation "${opts.expect}" not met: ` +
+                JSON.stringify(result),
+        );
+        process.exitCode = 1;
+    }
+}
+
+// --- parent controller (async) -----------------------------------------------
+//
+// Every spawned worker is registered. On a schedule FAILURE the abort sweep
+// releases every pending pause barrier, waits briefly for clean exits, and
+// SIGKILLs stragglers — so main()'s finally can never remove the isolated
+// root under a still-running child (which would leave that child writing
+// into a deleted tree). On success the sweep is a no-op (all workers done).
+
+const concActiveWorkers = [];
+
+function concDelay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function concAbortActiveWorkers() {
+    for (const entry of concActiveWorkers) {
+        if (!entry.done) {
+            for (const releasePath of entry.pendingReleases) {
+                writeBarrierFile(releasePath);
+            }
+        }
+    }
+    const deadline = Date.now() + 5000;
+    while (
+        concActiveWorkers.some((entry) => !entry.done) &&
+        Date.now() < deadline
+    ) {
+        await concDelay(50);
+    }
+    for (const entry of concActiveWorkers) {
+        if (!entry.done) {
+            entry.child.kill("SIGKILL");
+        }
+    }
+    await concDelay(200);
+}
+
+async function concWaitForFile(filePath, label, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (!fs.existsSync(filePath)) {
+        if (Date.now() > deadline) {
+            throw new StateError(
+                `concurrency schedule: timed out after ${timeoutMs}ms waiting for ${label} (${filePath})`,
+            );
+        }
+        await concDelay(15);
+    }
+    return filePath;
+}
+
+async function concSpawnWorker(workerArgs, timeoutMs) {
+    const child = spawn(
+        process.execPath,
+        [__verifySelfPath, "--worker", ...workerArgs],
+        {
+            cwd: repoRoot(),
+            stdio: ["ignore", "pipe", "pipe"],
+        },
+    );
+    const entry = { child, pendingReleases: [], done: false };
+    concActiveWorkers.push(entry);
+    child.on("close", () => {
+        entry.done = true;
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+        stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+    });
+    const killTimer = setTimeout(() => {
+        child.kill("SIGKILL");
+    }, timeoutMs);
+    let code = null;
+    try {
+        code = await new Promise((resolve) => {
+            child.on("close", (exitCode) => resolve(exitCode));
+        });
+    } finally {
+        clearTimeout(killTimer);
+    }
+    return { code, stdout, stderr, entry };
+}
+
+async function concRunWorker(scheduleDir, tag, workerArgs) {
+    const releasePath = path.join(scheduleDir, `${tag}.release`);
+    const ran = await concSpawnWorker(
+        [...workerArgs, "--tag", tag, "--barrier-dir", scheduleDir],
+        WORKER_CHILD_BUDGET_MS,
+    );
+    // Register this worker's pause barrier with the abort sweep (a worker
+    // already exited has a no-op entry; registration order vs exit does not
+    // matter because the sweep only touches !done entries).
+    if (ran.entry && ran.entry.pendingReleases) {
+        ran.entry.pendingReleases.push(releasePath);
+    }
+    const resultPath = path.join(scheduleDir, `${tag}.result.json`);
+    if (!fs.existsSync(resultPath)) {
+        throw new StateError(
+            `concurrency schedule: worker ${tag} produced no result ` +
+                `(exit ${ran.code}); stderr: ${ran.stderr.slice(0, 800)}`,
+        );
+    }
+    const result = JSON.parse(fs.readFileSync(resultPath, "utf8"));
+    return { ...result, exit_code: ran.code, stderr: ran.stderr };
+}
+
+function concFail(message) {
+    throw new StateError(`concurrency schedule: ${message}`);
+}
+
+function concSaveFixtureTask(sessionID, title) {
+    return saveCoordinationTask(
+        sessionID,
+        {
+            title,
+            task_type: "study",
+            coordination_mode: "short",
+            primary_lane: "concurrency",
+            files_in_scope: [".opencode/scripts/state-lib.js"],
+            constraints: ["Concurrency-schedule verifier fixture only."],
+            non_goals: ["No implementation work."],
+            success_criteria: ["Deterministic real-process interleaving."],
+            validation_plan: ["Assert the schedule's pinned outcome."],
+        },
+        { cwd: "/verification" },
+    ).task.task_id;
+}
+
+async function runConcurrencySchedules({
+    prefix,
+    isolatedRoot,
+    coordinatorSessionID,
+}) {
+    if (process.env.OPENCODE_LOCAL_COORDINATOR_ROOT !== isolatedRoot) {
+        concFail("isolated coordinator root is not active");
+    }
+    const scheduleRoot = path.join(isolatedRoot, "concurrency");
+    fs.mkdirSync(scheduleRoot, { recursive: true });
+    const tasksDir = path.join(isolatedRoot, "tasks");
+    const cardPathOf = (taskID) => path.join(tasksDir, `${taskID}.json`);
+    const lockPathOf = (taskID) => path.join(tasksDir, `.${taskID}.lock`);
+    const baseArgs = [
+        "--coordinator-root",
+        isolatedRoot,
+        "--session-id",
+        coordinatorSessionID,
+        "--session-alias",
+        `${prefix}-coord`,
+    ];
+    const updateArgs = (taskID, extra = []) => [
+        ...baseArgs,
+        "--role",
+        "update",
+        "--task-id",
+        taskID,
+        ...extra,
+    ];
+
+    // Every schedule runs inside this try/finally: on ANY failure the abort
+    // sweep releases paused workers, awaits their exit, and kills stragglers
+    // BEFORE main()'s finally removes the isolated root wholesale — a child
+    // must never keep writing into a deleted tree.
+    try {
+    // ------------------------------------------------------------------
+    // Schedule C — aged LIVE holder (INJECTED AGE).
+    //
+    // A real holder process pauses INSIDE its critical section (at its
+    // card-publication rename, per-task lock held). The parent BACKDATES that
+    // live lock's mtime beyond the REMOVED 30s stale threshold — injected-age
+    // evidence that a contender refuses to reclaim a lock which looks
+    // abandoned under every former heuristic; it is NOT a measurement of a
+    // holder actually holding >30s. While the holder is LIVE and paused, the
+    // contender must burn its ENTIRE bounded wait (with a real EEXIST on the
+    // exact lock path), fail closed, and leave the live holder's lock
+    // byte-identical and still backdated. The holder then releases NORMALLY
+    // (no manual removal anywhere): its own release must remove its own lock
+    // despite the aged appearance, and a fresh acquisition must succeed.
+    // ------------------------------------------------------------------
+    {
+        const dir = path.join(scheduleRoot, "aged-live-holder");
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.mkdirSync(dir, { recursive: true });
+        const taskID = concSaveFixtureTask(
+            coordinatorSessionID,
+            `Concurrency aged live holder ${Date.now()}`,
+        );
+        const lockPath = lockPathOf(taskID);
+        const cardPath = cardPathOf(taskID);
+        const holderRun = concRunWorker(dir, "holder", [
+            ...updateArgs(taskID),
+            "--pause-rename",
+            cardPath,
+        ]);
+        await concWaitForFile(
+            path.join(dir, "holder.at-rename"),
+            "holder paused at card rename (lock held)",
+            WORKER_CHILD_BUDGET_MS,
+        );
+        if (!fs.existsSync(lockPath)) {
+            concFail("live holder must hold the lock while paused");
+        }
+        const holderContent = fs.readFileSync(lockPath, "utf8");
+        const agedDate = new Date(Date.now() - 120000);
+        fs.utimesSync(lockPath, agedDate, agedDate);
+
+        const contender = await concRunWorker(dir, "contender", [
+            ...updateArgs(taskID),
+            "--ack-lock",
+            lockPath,
+            "--expect",
+            "timeout",
+        ]);
+        if (!fs.existsSync(path.join(dir, "contender.lock-eexist"))) {
+            concFail("contender must have actually hit EEXIST on the exact lock path");
+        }
+        if (!contender.timed_out || contender.ok) {
+            concFail(
+                `aged-live-holder contender must time out refusing the aged live lock: ${JSON.stringify(contender)}`,
+            );
+        }
+        if (contender.elapsed_ms < 4500) {
+            concFail(
+                `aged-live-holder contender must exhaust its full bounded wait (observed ${contender.elapsed_ms}ms)`,
+            );
+        }
+        if (!fs.existsSync(lockPath)) {
+            concFail("live holder's aged lock must survive the contender (no reclamation)");
+        }
+        const statsAfter = fs.statSync(lockPath);
+        if (statsAfter.mtimeMs > Date.now() - 60000) {
+            concFail("live holder's aged lock mtime must remain backdated (no unlink/recreate)");
+        }
+        if (fs.readFileSync(lockPath, "utf8") !== holderContent) {
+            concFail("live holder's lock content must be untouched by the contender");
+        }
+        if (!contender.error || !contender.error.includes(lockPath)) {
+            concFail("timeout diagnostic must name the lock path");
+        }
+
+        // Normal holder release — NO manual recovery in this schedule.
+        writeBarrierFile(path.join(dir, "holder.release"));
+        const holderResult = await holderRun;
+        if (!holderResult.ok || holderResult.exit_code !== 0) {
+            concFail(
+                `live holder must complete cleanly after the aged interlude: ${JSON.stringify(holderResult)}`,
+            );
+        }
+        if (fs.existsSync(lockPath)) {
+            concFail(
+                "holder's own release must remove its own lock (aged appearance justifies neither reclamation nor retention)",
+            );
+        }
+        const fresh = await concRunWorker(dir, "fresh-update", [
+            ...updateArgs(taskID),
+            "--expect",
+            "ok",
+        ]);
+        if (!fresh.ok || fresh.exit_code !== 0) {
+            concFail(
+                `fresh acquisition after the holder's normal release must succeed: ${JSON.stringify(fresh)}`,
+            );
+        }
+        const card = JSON.parse(fs.readFileSync(cardPath, "utf8"));
+        if (card.next_action !== "worker-update fresh-update") {
+            concFail("post-release update must persist next_action");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Schedule D — crash/release safety.
+    //
+    // (i)+(ii) An EMPTY lock (crash between exclusive create and metadata
+    // publication) and a MALFORMED lock are leftovers no actor may reclaim:
+    // both contenders must burn their full bounded wait, fail closed, and
+    // leave the leftovers byte-identical. The two contenders run CONCURRENTLY
+    // (independent lock paths) so the two full waits overlap.
+    //
+    // (iii) Successor ownership through release/acquisition ordering: U1
+    // holds the task lock paused at its card-publication rename; the parent
+    // (standing in for the operator — the only sanctioned external actor)
+    // removes U1's lock; U2 acquires the freed pathname and pauses; U1 then
+    // finishes and releases — U1's release MUST NOT unlink U2's acquisition;
+    // U2's own release then removes it.
+    // ------------------------------------------------------------------
+    {
+        const dir = path.join(scheduleRoot, "crash-release");
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.mkdirSync(dir, { recursive: true });
+
+        const emptyID = concSaveFixtureTask(
+            coordinatorSessionID,
+            `Concurrency empty lock ${Date.now()}`,
+        );
+        const emptyLock = lockPathOf(emptyID);
+        fs.writeFileSync(emptyLock, "", { flag: "wx" });
+        const malformedID = concSaveFixtureTask(
+            coordinatorSessionID,
+            `Concurrency malformed lock ${Date.now()}`,
+        );
+        const malformedLock = lockPathOf(malformedID);
+        const malformedContent = "\u0000\u0001not-a-lock\n";
+        fs.writeFileSync(malformedLock, malformedContent, { flag: "wx" });
+
+        const [emptyRes, malformedRes] = await Promise.all([
+            concRunWorker(dir, "empty", [
+                ...updateArgs(emptyID),
+                "--ack-lock",
+                emptyLock,
+                "--expect",
+                "timeout",
+            ]),
+            concRunWorker(dir, "malformed", [
+                ...updateArgs(malformedID),
+                "--ack-lock",
+                malformedLock,
+                "--expect",
+                "timeout",
+            ]),
+        ]);
+        for (const [label, res, lockPath, expected] of [
+            ["empty", emptyRes, emptyLock, ""],
+            ["malformed", malformedRes, malformedLock, malformedContent],
+        ]) {
+            if (!fs.existsSync(path.join(dir, `${label}.lock-eexist`))) {
+                concFail(`${label}-lock contender must have actually hit EEXIST on the exact lock path`);
+            }
+            if (!res.timed_out || res.ok) {
+                concFail(
+                    `${label}-lock contender must time out (bounded refusal): ${JSON.stringify(res)}`,
+                );
+            }
+            if (res.elapsed_ms < 4500) {
+                concFail(
+                    `${label}-lock contender must exhaust its full bounded wait (observed ${res.elapsed_ms}ms)`,
+                );
+            }
+            if (!fs.existsSync(lockPath)) {
+                concFail(`${label} lock leftover must survive (no reclamation)`);
+            }
+            if (fs.readFileSync(lockPath, "utf8") !== expected) {
+                concFail(`${label} lock leftover must be byte-identical`);
+            }
+        }
+        fs.unlinkSync(emptyLock);
+        fs.unlinkSync(malformedLock);
+
+        const succID = concSaveFixtureTask(
+            coordinatorSessionID,
+            `Concurrency successor ownership ${Date.now()}`,
+        );
+        const succCard = cardPathOf(succID);
+        const succLock = lockPathOf(succID);
+        const u1Run = concRunWorker(dir, "u1", [
+            ...updateArgs(succID),
+            "--pause-rename",
+            succCard,
+        ]);
+        await concWaitForFile(
+            path.join(dir, "u1.at-rename"),
+            "u1 paused at card rename (lock held)",
+            WORKER_CHILD_BUDGET_MS,
+        );
+        if (!fs.existsSync(succLock)) {
+            concFail("u1 must hold the lock while paused at its rename");
+        }
+        const u1LockContent = fs.readFileSync(succLock, "utf8");
+        fs.unlinkSync(succLock);
+        const u2Run = concRunWorker(dir, "u2", [
+            ...updateArgs(succID),
+            "--pause-rename",
+            succCard,
+        ]);
+        await concWaitForFile(
+            path.join(dir, "u2.at-rename"),
+            "u2 paused at card rename (acquired the freed lock pathname)",
+            WORKER_CHILD_BUDGET_MS,
+        );
+        if (!fs.existsSync(succLock)) {
+            concFail("u2 must hold the lock while paused at its rename");
+        }
+        const u2LockContent = fs.readFileSync(succLock, "utf8");
+        if (u2LockContent === u1LockContent) {
+            concFail("u2's acquisition must be a distinct acquisition");
+        }
+        writeBarrierFile(path.join(dir, "u1.release"));
+        const u1Result = await u1Run;
+        if (!u1Result.ok || u1Result.exit_code !== 0) {
+            concFail(
+                `u1 must complete cleanly after external lock removal: ${JSON.stringify(u1Result)}`,
+            );
+        }
+        if (!fs.existsSync(succLock)) {
+            concFail("u1's release must NOT unlink u2's successor acquisition");
+        }
+        if (fs.readFileSync(succLock, "utf8") !== u2LockContent) {
+            concFail("u2's lock must be untouched by u1's release");
+        }
+        writeBarrierFile(path.join(dir, "u2.release"));
+        const u2Result = await u2Run;
+        if (!u2Result.ok || u2Result.exit_code !== 0) {
+            concFail(`u2 must complete cleanly: ${JSON.stringify(u2Result)}`);
+        }
+        if (fs.existsSync(succLock)) {
+            concFail("u2's own release must remove its lock");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Schedule E — initialization-error cleanup (fail-closed ownership).
+    //
+    // The lock's metadata publication (the fd-based writeFileSync immediately
+    // after the exclusive create) is failed by exact-shape instrumentation.
+    // withLock's initialization-error cleanup must then (a) remove ONLY the
+    // acquisition just created — the lock file must NOT be left behind as an
+    // abandoned leftover — and (b) propagate the ORIGINAL error. A subsequent
+    // normal acquisition on the same resource must succeed, proving the
+    // cleanup left the pathname free.
+    // ------------------------------------------------------------------
+    {
+        const dir = path.join(scheduleRoot, "init-error");
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.mkdirSync(dir, { recursive: true });
+        const taskID = concSaveFixtureTask(
+            coordinatorSessionID,
+            `Concurrency init error ${Date.now()}`,
+        );
+        const lockPath = lockPathOf(taskID);
+        const failed = await concRunWorker(dir, "meta-fail", [
+            ...updateArgs(taskID),
+            "--fail-meta-write",
+            "true",
+            "--expect",
+            "error",
+        ]);
+        if (!fs.existsSync(path.join(dir, "meta-fail.at-meta-write"))) {
+            concFail("instrumented metadata-write failure must actually fire");
+        }
+        if (failed.ok || !failed.error || !failed.error.includes("injected metadata-write failure")) {
+            concFail(
+                `the ORIGINAL metadata-write error must propagate: ${JSON.stringify(failed)}`,
+            );
+        }
+        if (fs.existsSync(lockPath)) {
+            concFail(
+                "initialization-error cleanup must remove the just-created acquisition (no abandoned leftover)",
+            );
+        }
+        const after = await concRunWorker(dir, "after", [
+            ...updateArgs(taskID),
+            "--expect",
+            "ok",
+        ]);
+        if (!after.ok || after.exit_code !== 0) {
+            concFail(
+                `a normal acquisition after init-error cleanup must succeed: ${JSON.stringify(after)}`,
+            );
+        }
+    }
+    } finally {
+        await concAbortActiveWorkers();
+    }
+}
+
+async function main() {
     const args = process.argv.slice(2);
     // PID-scoped default so two concurrent no-arg runs (e.g. a test and an
     // operator invocation) get DISTINCT isolated roots — the second run's
@@ -3621,6 +4483,18 @@ function main() {
             }
         }
 
+        // ------------------------------------------------------------------
+        // Real-process concurrency schedules (the TOCTOU repair proof). Runs
+        // AFTER the functional cases, INSIDE the same isolated root; every
+        // child actor is joined (or killed on budget) before the finally
+        // block removes the isolated root wholesale.
+        // ------------------------------------------------------------------
+        await runConcurrencySchedules({
+            prefix,
+            isolatedRoot,
+            coordinatorSessionID,
+        });
+
         console.log("verification: ok");
         console.log(`primary_task_id: ${primary.task.task_id}`);
         console.log(`overlap_task_id: ${overlap.task.task_id}`);
@@ -3657,15 +4531,27 @@ export { validateIsolatedRoot };
 // Only invoke main() when this file is the entry point (node .../verify-task-registry.js),
 // not when it is imported (e.g. by the isolation regression tests importing
 // validateIsolatedRoot). ESM has no require.main === module, so compare the
-// resolved entry path against this module's own URL.
+// resolved entry path against this module's own URL. The --worker dispatch is
+// the real-process concurrency-schedule actor mode: it bypasses main()
+// entirely (no isolated-root creation/cleanup — the parent verifier run owns
+// the isolated root) and must never gain production semantics.
 const __entryPath =
     process.argv[1] !== undefined ? path.resolve(process.argv[1]) : "";
-const __modulePath = fileURLToPath(import.meta.url);
+const __modulePath = __verifySelfPath;
 if (__entryPath === __modulePath) {
-    try {
-        main();
-    } catch (error) {
-        console.error(error instanceof Error ? error.message : String(error));
-        process.exit(1);
+    if (process.argv[2] === "--worker") {
+        try {
+            await runWorkerMode(process.argv.slice(3));
+        } catch (error) {
+            console.error(error instanceof Error ? error.message : String(error));
+            process.exit(1);
+        }
+    } else {
+        try {
+            await main();
+        } catch (error) {
+            console.error(error instanceof Error ? error.message : String(error));
+            process.exit(1);
+        }
     }
 }
