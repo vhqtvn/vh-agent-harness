@@ -235,7 +235,7 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 	// the signal a consumer needs to know the tokens are unresolved.)
 	warnUnresolvedProjectConfigTokens(os.Stderr, abs)
 
-	report, err := seamApply(abs, answers, updateDryRun, nil)
+	report, stalePreserved, err := seamApply(abs, answers, updateDryRun, nil)
 	if err != nil {
 		return err
 	}
@@ -260,7 +260,7 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 
 	fmt.Fprintf(out, "update: seam reconciled %d file(s) in %s\n", len(report.Outcomes), abs)
 	fmt.Fprintln(out, summarizeOutcomes(report.Outcomes))
-	if sp := summarizePreservedPaths(report.Outcomes); sp != "" {
+	if sp := summarizePreservedPaths(report.Outcomes, stalePreserved); sp != "" {
 		fmt.Fprintln(out, sp)
 	}
 	if sp := summarizeProposals(report.Proposals); sp != "" {

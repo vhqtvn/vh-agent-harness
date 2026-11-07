@@ -427,6 +427,97 @@ func TestAcceptPlatform_ConsumerDeletedSh_RestoredWithExecMode(t *testing.T) {
 	}
 }
 
+// TestUpdate_PreservedListing_SplitsStaleFromCurrent locks the S2 both-moved
+// precision rule on the update listing surface (creation-time warning):
+//
+//   - both-moved (staged != origin AND live != origin): the consumer-edit
+//     listing splits — the path is marked `[consumer-edit,
+//     platform-also-changed]` and the stale-preserve consequence warning is
+//     emitted; preservation mechanics are unchanged (the edit still survives
+//     byte-for-byte);
+//   - ordinary edit (staged == origin, live != incoming): the standard
+//     preservation summary only — live != incoming ALONE must NOT trigger the
+//     stale warning;
+//   - honesty: the warning states the functional consequence and never
+//     asserts a specific gate.
+//
+// The both-moved state is created exactly as an adopter creates it (platform
+// corpus advanced relative to a preserved edit's recorded base), simulated
+// without a second binary by rebasing that one origin entry onto bytes the
+// current corpus never renders (tamperOriginToFakeBase).
+func TestUpdate_PreservedListing_SplitsStaleFromCurrent(t *testing.T) {
+	// --- Tree A: both-moved → the warning is emitted. -----------------------
+	rootA := t.TempDir()
+	seamInstallInto(t, rootA)
+
+	p := findLiveStaleFixtureManagedPath(t, rootA)
+	liveA := filepath.Join(rootA, filepath.FromSlash(p))
+	const consumerEdit = "// CONSUMER HAND-EDIT — stale-preserve listing fixture\n"
+	if err := os.WriteFile(liveA, []byte(consumerEdit), 0o644); err != nil {
+		t.Fatalf("consumer-edit %s: %v", p, err)
+	}
+	tamperOriginToFakeBase(t, rootA, p, consumerEdit)
+
+	upd, uerr := seamUpdateOut(t, rootA)
+	if uerr != nil {
+		t.Fatalf("update on the both-moved tree: %v (out=%q)", uerr, upd)
+	}
+	if !strings.Contains(upd, "preserved/stalled") || !strings.Contains(upd, "consumer-edit") || !strings.Contains(upd, p) {
+		t.Fatalf("update must still list the preserved path with its typed reason; got:\n%s", upd)
+	}
+	if !strings.Contains(upd, "platform-also-changed") || !strings.Contains(upd, "stale-preserve warning") {
+		t.Errorf("a both-moved preserved path must carry the platform-also-changed marker + stale-preserve warning; got:\n%s", upd)
+	}
+	if !strings.Contains(upd, "did NOT receive") || !strings.Contains(upd, "may no longer match") {
+		t.Errorf("the warning must state the functional consequence; got:\n%s", upd)
+	}
+	// Honesty (rule 2): the warning line itself must not assert a specific gate.
+	for _, line := range strings.Split(upd, "\n") {
+		if !strings.Contains(line, "stale-preserve warning") {
+			continue
+		}
+		for _, banned := range []string{"gate", "retention", "decision-record", "state-lib"} {
+			if strings.Contains(line, banned) {
+				t.Errorf("the stale-preserve warning must NOT assert a specific gate (%q found): %q", banned, line)
+			}
+		}
+	}
+	// The warning changes nothing about preservation: the edit survives.
+	if got, _ := os.ReadFile(liveA); string(got) != consumerEdit {
+		t.Fatalf("update must still preserve the edited bytes under the warning; got=%q", got)
+	}
+	// Detection-time parity on the SAME tree: doctor's managed-drift surfaces
+	// preserved-stale-vs-corpus at WARN while staying HEALTHY.
+	doc := seamDoctorOut(t, rootA)
+	if !strings.Contains(doc, "preserved-stale-vs-corpus") || !strings.Contains(doc, "result: HEALTHY") {
+		t.Errorf("doctor must surface preserved-stale-vs-corpus at WARN while staying HEALTHY; got:\n%s", doc)
+	}
+
+	// --- Tree B: ordinary edit (staged == origin) → NO warning. ------------
+	rootB := t.TempDir()
+	seamInstallInto(t, rootB)
+	pB := findLiveStaleFixtureManagedPath(t, rootB)
+	liveB := filepath.Join(rootB, filepath.FromSlash(pB))
+	if err := os.WriteFile(liveB, []byte(consumerEdit), 0o644); err != nil {
+		t.Fatalf("consumer-edit %s: %v", pB, err)
+	}
+
+	upd2, uerr2 := seamUpdateOut(t, rootB)
+	if uerr2 != nil {
+		t.Fatalf("update on the ordinary-edit tree: %v (out=%q)", uerr2, upd2)
+	}
+	if !strings.Contains(upd2, "preserved/stalled") || !strings.Contains(upd2, "consumer-edit") || !strings.Contains(upd2, pB) {
+		t.Fatalf("an ordinary consumer edit must keep the standard preservation summary; got:\n%s", upd2)
+	}
+	if strings.Contains(upd2, "stale-preserve warning") || strings.Contains(upd2, "platform-also-changed") {
+		t.Errorf("an ordinary edit (staged==origin; live!=incoming alone) must NOT trigger the stale-preserve warning; got:\n%s", upd2)
+	}
+	doc2 := seamDoctorOut(t, rootB)
+	if strings.Contains(doc2, "preserved-stale-vs-corpus") {
+		t.Errorf("doctor must not report preserved-stale for an ordinary edit; got:\n%s", doc2)
+	}
+}
+
 // seamAcceptPlatformBatchOut runs the accept-platform command in batch mode
 // (--all and optionally --stale-only) against root, with optional extra
 // positional paths unioned into the candidate set. It restores all four flag

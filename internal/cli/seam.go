@@ -12,6 +12,7 @@ import (
 	"text/template"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/lineage"
+	"github.com/vhqtvn/vh-agent-harness/internal/managedfile"
 	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/overlay"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
@@ -216,10 +217,17 @@ func prepareSeamStaging(target string, answers map[string]string, bootstrap []by
 // live profile. It is ignored whenever a live profile exists, so recurring
 // reconciliation (update/doctor/accept-platform) is untouched by bootstrap
 // selection.
-func seamApply(target string, answers map[string]string, dryRun bool, bootstrap []byte) (*substrate.ApplyReport, error) {
+//
+// The second return value is the stale-preserve set from stalePreservedPaths:
+// the consumer-edit-preserved paths whose incoming (staged corpus) hash ALSO
+// differs from their recorded origin ("both moved" — the platform version
+// changed while the consumer edit stands). Callers surface it as a consequence
+// warning (see summarizePreservedPaths). It is nil/empty on every path where
+// the state cannot be proven (no ConsumerEdit stalls, unreadable inputs).
+func seamApply(target string, answers map[string]string, dryRun bool, bootstrap []byte) (*substrate.ApplyReport, []string, error) {
 	ps, cleanup, err := prepareSeamStaging(target, answers, bootstrap)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer cleanup()
 
@@ -282,8 +290,19 @@ func seamApply(target string, answers map[string]string, dryRun bool, bootstrap 
 		RegeneratedPlatformPaths: ps.effectiveRegen,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("seam: apply: %w", err)
+		return nil, nil, fmt.Errorf("seam: apply: %w", err)
 	}
+
+	// Stale-preserve cohort-skew capture (origin-hash both-moved). This MUST
+	// run while the staging dir is still alive — cleanup (deferred above)
+	// removes it when seamApply returns, and the staged bytes are the incoming
+	// corpus this warning is about. The origin store read is tolerant and
+	// AFTER Apply: for every ConsumerEdit-preserved path the store carries the
+	// SAME origin planOutcome measured against (dry-run leaves it untouched; a
+	// fully-applied generation carries the prior origin forward for diverged
+	// paths; a partially-failed generation returns before the store rewrite),
+	// so re-reading here observes exactly the divergence baseline Apply used.
+	stalePreserved := stalePreservedPaths(target, report.Outcomes, ps.staging)
 
 	// Orphan detection (P1-LINEAGE-002, report-only v1). Load the prior
 	// rendered-outputs manifest recorded at the PREVIOUS successful render and
@@ -325,9 +344,9 @@ func seamApply(target string, answers map[string]string, dryRun bool, bootstrap 
 	// Dry-run: substrate.Apply wrote nothing (it returned the plan only). Skip
 	// every side-effecting post-apply step too — the proposal ledger append, the
 	// run-shape seed, and the AGENTS.md compose all WRITE to the live tree. The
-	// returned report is a pure preview.
+	// returned report is a pure preview (the stale-preserve set is part of it).
 	if dryRun {
-		return report, nil
+		return report, stalePreserved, nil
 	}
 
 	// Slice 5.3: record every armed-file conflict the apply surfaced but did not
@@ -425,7 +444,7 @@ func seamApply(target string, answers map[string]string, dryRun bool, bootstrap 
 			paths[i] = o.Path
 		}
 		fmt.Fprintf(os.Stderr, "seam: warning: generation did not fully apply — %d live write(s) failed (%s); lineage NOT advanced and rendered-outputs manifest NOT persisted (prior records left intact). Re-run after fixing the underlying write failure.\n", len(failed), strings.Join(paths, ", "))
-		return report, nil
+		return report, stalePreserved, nil
 	}
 
 	renderID := ""
@@ -436,7 +455,60 @@ func seamApply(target string, answers map[string]string, dryRun bool, bootstrap 
 	if werr := next.Write(target); werr != nil {
 		fmt.Fprintf(os.Stderr, "seam: warning: rendered-outputs manifest write failed (%v); orphan reporting will be stale until the next successful update\n", werr)
 	}
-	return report, nil
+	return report, stalePreserved, nil
+}
+
+// stalePreservedPaths returns the "both-moved" subset of ConsumerEdit-preserved
+// outcomes: paths where the incoming staged (corpus) hash differs from the
+// recorded origin hash. Per the precision rule, BOTH sides must have moved —
+// incoming != origin AND live != origin. live != origin is implied by the
+// ConsumerEdit classification itself (ClassifyPreserved only returns
+// ConsumerEdit when the live hash diverged from the recorded origin), so the
+// additional test here is incoming != origin. A mere live != incoming
+// difference (staged == origin: the platform re-rendered the same bytes the
+// consumer's base was recorded from) is an ordinary preserved edit and does
+// NOT enter this set.
+//
+// LIFECYCLE CONTRACT: the staged bytes only exist while the seam staging dir
+// is alive. Call this from inside seamApply (after substrate.Apply, before
+// the deferred cleanup runs) — never from a caller holding only the report,
+// whose StagingDir has already been removed.
+//
+// Origin-store truth across apply modes: the tolerant re-read AFTER Apply
+// observes the same origin planOutcome measured against for these paths
+// (dry-run: untouched store; fully applied: diverged origins carried forward
+// verbatim; partially failed: Apply returns before rewriting the store). A
+// missing/unreadable store or an unreadable staged file simply yields no
+// entry (the warning is silent when staleness cannot be proven — the ordinary
+// preservation listing still prints).
+//
+// Doctor's checkManagedDrift derives the SAME both-moved split independently
+// (its staging is its own re-render), so update-time creation and
+// detection-time observation agree on the condition while sharing the
+// managedfile classification.
+func stalePreservedPaths(target string, outcomes []substrate.FileOutcome, staging string) []string {
+	originStore, _ := originhash.Read(target)
+	if originStore == nil {
+		return nil
+	}
+	var stale []string
+	for _, o := range outcomes {
+		if o.Action != substrate.ActionManagedDiverged || o.PreservedReason != managedfile.ConsumerEdit {
+			continue
+		}
+		origin, ok := originStore.Lookup(o.Path)
+		if !ok || origin == "" {
+			continue
+		}
+		staged, err := os.ReadFile(filepath.Join(staging, filepath.FromSlash(o.Path)))
+		if err != nil {
+			continue
+		}
+		if originhash.Digest(staged) != origin {
+			stale = append(stale, o.Path)
+		}
+	}
+	return stale
 }
 
 // failedWriteOutcomes returns the subset of outcomes whose typed live-write

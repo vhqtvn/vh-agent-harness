@@ -55,7 +55,7 @@ var doctorCmd = &cobra.Command{
 
   lineage         .vh-agent-harness/lineage.yml present + parseable     FAIL if leaked/unparseable
   armed-schema    every platform_armed file schema-conformant           FAIL if schema-invalid
-  managed-drift   every platform_managed file matches re-rendered bytes  FAIL if drifted/missing
+  managed-drift   every platform_managed file matches re-rendered bytes  FAIL if drifted/missing; WARN if a preserved consumer edit lags the corpus (preserved-stale-vs-corpus)
   agents-composition root AGENTS.md matches composed core+mission body  WARN if drifted/absent (SKIP when no mission source)
   overlay-perm    active overlay permission-packs resolved in opencode.jsonc FAIL if resolver not run
   capability-coherence gated-commit selection vs live wiring coherent      WARN if selected-but-unwired; INFO residue/unreadable (advisory only; NEVER FAIL)
@@ -1154,10 +1154,12 @@ func checkManagedDrift(target string) checkResult {
 	// respects; F1).
 	drifted, missing, preserved := 0, 0, 0
 	consumerPreservedEdit, consumerPreservedDelete := 0, 0
+	consumerPreservedStale := 0
 	migrationStalled := 0
 	checked := 0
 	var driftedPaths, missingPaths []string
 	var consumerPreservedEditPaths, consumerPreservedDeletePaths []string
+	var consumerPreservedStalePaths []string
 	var migrationStalledPaths []string
 	for path := range defaults {
 		// Resolve seeds every default path, so eff[path] is always present; its
@@ -1283,11 +1285,31 @@ func checkManagedDrift(target string) checkResult {
 				origin, hadOrigin = originStore.Lookup(path)
 			}
 			liveState := managedfile.LiveState{IsRegular: true, Readable: true, Hash: originhash.Digest(live)}
+			stagedDigest := originhash.Digest(staged)
 			reason := managedfile.ClassifyPreserved(regenerated, hadOrigin, origin,
-				liveState, originhash.Digest(staged))
+				liveState, stagedDigest)
 			if reason == managedfile.ConsumerEdit {
-				consumerPreservedEdit++
-				consumerPreservedEditPaths = append(consumerPreservedEditPaths, path)
+				// Both-moved split (stale-preserve cohort skew). ConsumerEdit
+				// already proves live != origin; when the CURRENT corpus digest
+				// ALSO differs from the recorded origin, the platform moved on
+				// while the consumer edit stands — the preserved file did not
+				// receive the platform's newer bytes. That subset is surfaced as
+				// preserved-stale-vs-corpus at WARN (distinct from the ordinary
+				// consumer-preserved INFO, and NEVER a FAIL: the edit is still a
+				// sanctioned preserved state — this is a reporting-escalation,
+				// not a drift verdict). live != staged alone (staged == origin)
+				// stays plain consumer-preserved: the platform merely re-rendered
+				// the bytes the consumer's base was recorded from. An empty origin
+				// entry is never stale (mirrors stalePreservedPaths' guard):
+				// staleness must be PROVEN, and an unprovable baseline falls to
+				// the ordinary preserved report.
+				if origin != "" && stagedDigest != origin {
+					consumerPreservedStale++
+					consumerPreservedStalePaths = append(consumerPreservedStalePaths, path)
+				} else {
+					consumerPreservedEdit++
+					consumerPreservedEditPaths = append(consumerPreservedEditPaths, path)
+				}
 				continue
 			}
 			if reason == managedfile.UnknownBaseline {
@@ -1329,7 +1351,7 @@ func checkManagedDrift(target string) checkResult {
 			detail: formatManagedDriftFail(
 				fmt.Sprintf("%d missing of %d managed", missing, checked),
 				driftedPaths, missingPaths)}
-	case consumerPreservedEdit > 0 || consumerPreservedDelete > 0 || preserved > 0 || migrationStalled > 0:
+	case consumerPreservedStale > 0 || consumerPreservedEdit > 0 || consumerPreservedDelete > 0 || preserved > 0 || migrationStalled > 0:
 		// Non-failing: all checked managed files are either in sync OR in a
 		// sanctioned preserved state. consumer-preserved-edit = consumer hand-
 		// edits update preserves by origin-hash (NOT drift update would repair);
@@ -1340,7 +1362,23 @@ func checkManagedDrift(target string) checkResult {
 		// recorded origin (F6 adoption-migration — update preserves, awaiting
 		// baseline resolution). Name the consumer-preserved paths so the
 		// operator can find/re-baseline them.
+		//
+		// preserved-stale-vs-corpus (the both-moved subset of consumer-preserved
+		// edits: the current corpus digest differs from the recorded origin)
+		// escalates the tier to WARN while keeping doctor HEALTHY (WARNs never
+		// increment the problem count and never block G0c): the skew class
+		// where a preserved file lags the corpus while its sibling docs/schema
+		// advanced used to be indistinguishable-at-a-glance INFO. NEVER FAIL
+		// for this class — the edit remains a sanctioned preserved state; the
+		// WARN wording states the functional consequence only (the preserved
+		// file did not receive the platform's changes; dependent runtime files
+		// or documentation may no longer match it), never a specific-gate
+		// claim the hashes cannot carry.
 		parts := []string{fmt.Sprintf("%d managed file(s) in sync", checked)}
+		if consumerPreservedStale > 0 {
+			parts = append(parts, fmt.Sprintf("%d preserved-stale-vs-corpus (update preserved your edit, but the platform's version has since changed — the preserved file did NOT receive those platform changes; dependent runtime files or documentation may no longer match it)", consumerPreservedStale))
+			parts = append(parts, capPathList("preserved-stale-vs-corpus", consumerPreservedStalePaths))
+		}
 		if consumerPreservedEdit > 0 {
 			parts = append(parts, fmt.Sprintf("%d consumer-preserved edit(s) (origin-hash: update preserves your edit)", consumerPreservedEdit))
 			parts = append(parts, capPathList("consumer-preserved-edit", consumerPreservedEditPaths))
@@ -1356,7 +1394,11 @@ func checkManagedDrift(target string) checkResult {
 		if preserved > 0 {
 			parts = append(parts, fmt.Sprintf("%d project-preserved (ownership override)", preserved))
 		}
-		return checkResult{name: "managed-drift", tier: tierInfo,
+		tier := tierInfo
+		if consumerPreservedStale > 0 {
+			tier = tierWarn
+		}
+		return checkResult{name: "managed-drift", tier: tier,
 			detail: strings.Join(parts, "; ")}
 	default:
 		return checkResult{name: "managed-drift", tier: tierPass,

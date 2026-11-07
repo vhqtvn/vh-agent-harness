@@ -341,7 +341,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 
 	printInstallSelection(out, target, bootstrap, selectionSource)
 
-	report, err := seamApply(target, answers, installFl.dryRun, bootstrap)
+	report, stalePreserved, err := seamApply(target, answers, installFl.dryRun, bootstrap)
 	if err != nil {
 		return err
 	}
@@ -357,7 +357,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 
 	fmt.Fprintf(out, "install: seam applied %d file(s) into %s\n", len(report.Outcomes), target)
 	fmt.Fprintln(out, summarizeOutcomes(report.Outcomes))
-	if sp := summarizePreservedPaths(report.Outcomes); sp != "" {
+	if sp := summarizePreservedPaths(report.Outcomes, stalePreserved); sp != "" {
 		fmt.Fprintln(out, sp)
 	}
 	if sp := summarizeProposals(report.Proposals); sp != "" {
@@ -431,10 +431,21 @@ func summarizeOutcomes(outcomes []substrate.FileOutcome) string {
 // reasons are grouped and ordered by the taxonomy's stable enum order so the
 // surface is deterministic across runs.
 //
+// The consumer-edit group is SPLIT when stalePreserved (from
+// stalePreservedPaths — the "both-moved" set where the incoming corpus ALSO
+// differs from the recorded origin) is non-empty: stale paths get a distinct
+// `[consumer-edit, platform-also-changed]` line plus the consequence warning
+// (the preserved file did not receive this update's platform changes, so
+// dependent runtime files or documentation may no longer match it), while
+// still-current edits keep the standard preservation summary. The warning
+// names the functional CONSEQUENCE only — it never asserts which specific
+// gate or behavior the hashes lack (that is corpus-version knowledge the
+// hashes cannot carry).
+//
 // This is the F2 live-UX counterpart to doctor's non-failing stall report: both
 // consume the SAME shared typed-reason model (managedfile.PreservedReason) so
 // they never disagree on why a path stalled.
-func summarizePreservedPaths(outcomes []substrate.FileOutcome) string {
+func summarizePreservedPaths(outcomes []substrate.FileOutcome, stalePreserved []string) string {
 	var stalled []substrate.FileOutcome
 	for _, o := range outcomes {
 		if o.Action == substrate.ActionManagedDiverged && o.PreservedReason != "" {
@@ -444,6 +455,10 @@ func summarizePreservedPaths(outcomes []substrate.FileOutcome) string {
 	if len(stalled) == 0 {
 		return ""
 	}
+	staleSet := make(map[string]bool, len(stalePreserved))
+	for _, p := range stalePreserved {
+		staleSet[p] = true
+	}
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("preserved/stalled managed file(s) — %d path(s) NOT overwritten; run `vh-agent-harness accept-platform <path>` to adopt the platform version (writes platform bytes + advances the origin, live-first then sidecar rename):",
 		len(stalled)))
@@ -452,19 +467,41 @@ func summarizePreservedPaths(outcomes []substrate.FileOutcome) string {
 		managedfile.ConsumerEdit, managedfile.ConsumerDelete,
 		managedfile.Unreadable, managedfile.UnknownBaseline,
 	} {
-		var paths []string
+		var paths, stalePaths []string
 		for _, o := range stalled {
-			if o.PreservedReason == reason {
-				paths = append(paths, o.Path)
+			if o.PreservedReason != reason {
+				continue
 			}
+			// Split the consumer-edit set: both-moved (platform-also-changed)
+			// paths carry the consequence warning; still-current edits keep
+			// the standard summary. Other reasons never enter the stale set.
+			if reason == managedfile.ConsumerEdit && staleSet[o.Path] {
+				stalePaths = append(stalePaths, o.Path)
+				continue
+			}
+			paths = append(paths, o.Path)
 		}
-		if len(paths) == 0 {
-			continue
+		if len(paths) > 0 {
+			sb.WriteString(fmt.Sprintf("\n  [%s] %s", reason, strings.Join(paths, ", ")))
 		}
-		sb.WriteString(fmt.Sprintf("\n  [%s] %s", reason, strings.Join(paths, ", ")))
+		if len(stalePaths) > 0 {
+			sb.WriteString(fmt.Sprintf("\n  [%s, platform-also-changed] %s", reason, strings.Join(stalePaths, ", ")))
+			sb.WriteString("\n  " + stalePreserveWarning)
+		}
 	}
 	return sb.String()
 }
+
+// stalePreserveWarning is the consequence warning appended after the
+// platform-also-changed line in the preserved/stalled listing. Wording
+// contract (debate-fixed): it states the FUNCTIONAL CONSEQUENCE — the
+// preserved file did not receive this update's platform changes, and
+// dependent runtime files or documentation updated by this release may no
+// longer match it — and never asserts a specific gate or behavior is missing
+// from the hashes (that claim is corpus-version knowledge the origin hash
+// cannot carry). Reconciliation guidance mirrors the runbook order: inspect
+// the delta, safeguard the local edit, then re-baseline or port.
+const stalePreserveWarning = "stale-preserve warning: the preserved file(s) above did NOT receive this update's platform changes (the platform's version has changed since the base your edit diverged from); dependent runtime files or documentation updated by this release may no longer match them. Inspect the delta with `vh-agent-harness diff`, safeguard your local edit, then reconcile — `vh-agent-harness accept-platform <path>` and re-apply the edit, or port the customization into an overlay pack."
 
 // summarizeProposals returns a short human list of armed-proposal conflicts so
 // the operator knows which armed file needs a decision (and that the project

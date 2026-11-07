@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -130,6 +131,55 @@ func findLiveDefaultNonManagedPath(t *testing.T, root string) string {
 	return ""
 }
 
+// findLiveStaleFixtureManagedPath returns a DETERMINISTIC repo-relative slash
+// path suitable for stale-preserve fixtures (both-moved consumer-edit trees
+// that also run full doctor / update for end-to-end assertions):
+// platform_managed, NOT platform-regenerated, and NOT under .opencode/skills/
+// (a whole-file consumer rewrite of a SKILL.md can independently FAIL doctor's
+// skills frontmatter check and blur a HEALTHY assertion — the fixture must
+// isolate the managed-drift signal). Sorted because CoreOwnershipDefaults is a
+// map (random iteration order would make the fixture nondeterministic).
+func findLiveStaleFixtureManagedPath(t *testing.T, root string) string {
+	t.Helper()
+	var cands []string
+	for _, p := range findLivePlatformManagedPaths(t, root) {
+		if regeneratedPlatformPaths[p] {
+			continue
+		}
+		if strings.HasPrefix(p, ".opencode/skills/") {
+			continue
+		}
+		cands = append(cands, p)
+	}
+	if len(cands) == 0 {
+		t.Fatalf("no authored non-skill platform_managed path found under %s", root)
+	}
+	sort.Strings(cands)
+	return cands[0]
+}
+
+// tamperOriginToFakeBase rewrites the recorded origin entry for rel to a
+// digest of bytes the current corpus never renders — simulating "the platform
+// version advanced since the edit's base was recorded" without needing a
+// second binary. After this, for a consumer-edited live file: staged != origin
+// (both-moved) AND live != origin, while live != staged still holds (the edit
+// stands) — the exact stale-preserve cohort-skew state.
+func tamperOriginToFakeBase(t *testing.T, root, rel, consumerEdit string) {
+	t.Helper()
+	store, err := originhash.Read(root)
+	if err != nil {
+		t.Fatalf("read origin store: %v", err)
+	}
+	fakeBase := originhash.Digest([]byte("// prior platform base the current corpus no longer renders\n"))
+	if fakeBase == originhash.Digest([]byte(consumerEdit)) {
+		t.Fatalf("degenerate fixture: fake base digest collides with the live edit digest")
+	}
+	store.OriginHashes[rel] = fakeBase
+	if err := store.Write(root); err != nil {
+		t.Fatalf("write origin store: %v", err)
+	}
+}
+
 // TestManagedDrift_NoOverride_Pass: a clean seam install with no
 // harness-ownership.yml must report managed-drift as PASS with "in sync" detail.
 // This is the unchanged-behavior baseline: the override-awareness path must be a
@@ -230,6 +280,86 @@ func TestManagedDrift_ConsumerEdit_Preserved_NotDrift(t *testing.T) {
 	}
 	if !strings.Contains(r.detail, p) {
 		t.Errorf("INFO detail should name the consumer-preserved path %q; got %q", p, r.detail)
+	}
+	// S2 stale-preserve split lock (staged == origin here: the same binary
+	// re-renders the install-recorded origin bytes): the ordinary edit must
+	// NOT escalate. live != incoming alone is not both-moved.
+	if r.tier == tierWarn {
+		t.Errorf("ordinary consumer edit (staged==origin) must stay tierInfo, got WARN: %s", r.detail)
+	}
+	if strings.Contains(r.detail, "preserved-stale") {
+		t.Errorf("ordinary consumer edit (staged==origin) must NOT escalate to preserved-stale; got %q", r.detail)
+	}
+}
+
+// TestManagedDrift_BothMoved_Preserved_WarnsNotFail is the S2 detection-time
+// crux: a consumer-preserved edit whose recorded origin ALSO differs from the
+// current corpus (both moved — the platform advanced while the edit stands) is
+// surfaced as a DISTINCT non-failing WARN (`preserved-stale-vs-corpus`), not a
+// perpetual INFO indistinguishable-at-a-glance from healthy and never a FAIL
+// (the edit remains a sanctioned preserved state; WARN keeps doctor HEALTHY
+// and never blocks release G0c). The message must name the path, state the
+// functional CONSEQUENCE (the preserved file did not receive the platform's
+// changes; dependent runtime files or documentation may no longer match it),
+// and carry NO gate-specific claim (the hashes cannot know which gate a
+// corpus version carries — asserting one would be fabrication).
+func TestManagedDrift_BothMoved_Preserved_WarnsNotFail(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	p := findLiveStaleFixtureManagedPath(t, root)
+	live := filepath.Join(root, filepath.FromSlash(p))
+	const consumerEdit = "// CONSUMER HAND-EDIT — both-moved fixture (platform also moved)\n"
+	if err := os.WriteFile(live, []byte(consumerEdit), 0o644); err != nil {
+		t.Fatalf("consumer-edit %s: %v", p, err)
+	}
+	tamperOriginToFakeBase(t, root, p, consumerEdit)
+
+	r := checkManagedDrift(root)
+	// Exactly WARN: not FAIL (sanctioned preserved state), not INFO (the skew
+	// signal must be distinguishable-at-a-glance), not PASS.
+	if r.tier != tierWarn {
+		t.Fatalf("both-moved preserved edit must WARN (not FAIL, not INFO); got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "preserved-stale-vs-corpus") {
+		t.Errorf("WARN detail must carry the preserved-stale-vs-corpus signal; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, p) {
+		t.Errorf("WARN detail must name the stale-preserved path %q; got %q", p, r.detail)
+	}
+	// Consequence wording present…
+	if !strings.Contains(r.detail, "did NOT receive") || !strings.Contains(r.detail, "may no longer match") {
+		t.Errorf("WARN detail must state the functional consequence (did-not-receive / may-no-longer-match); got %q", r.detail)
+	}
+	// …and honesty: no gate-specific claim. The warning SENTENCE must not name
+	// any concrete gate or the state-lib cohort — the origin hash cannot know
+	// which behavior a corpus version carries. (Scoped to the sentence, not
+	// the whole detail, so a future fixture path carrying a banned substring
+	// cannot false-trip this assertion.)
+	for _, part := range strings.Split(r.detail, "; ") {
+		if !strings.Contains(part, "did NOT receive") {
+			continue
+		}
+		for _, banned := range []string{"gate", "retention", "decision-record", "state-lib"} {
+			if strings.Contains(part, banned) {
+				t.Errorf("WARN sentence must NOT assert a specific gate (%q found); got %q", banned, part)
+			}
+		}
+	}
+	// The stale path must not ALSO be reported in the ordinary bucket.
+	if strings.Contains(r.detail, "consumer-preserved-edit") {
+		t.Errorf("the stale path must not ALSO appear as ordinary consumer-preserved-edit; got %q", r.detail)
+	}
+
+	// End-to-end: the WARN row is visible in the doctor report AND keeps the
+	// command HEALTHY (WARN never increments the problem count; exit stays 0;
+	// release G0c is never blocked by this class).
+	doc := seamDoctorOut(t, root)
+	if !strings.Contains(doc, "result: HEALTHY") {
+		t.Errorf("preserved-stale WARN must keep doctor HEALTHY; got:\n%s", doc)
+	}
+	if !strings.Contains(doc, "preserved-stale-vs-corpus") {
+		t.Errorf("doctor report must surface the preserved-stale-vs-corpus row; got:\n%s", doc)
 	}
 }
 
