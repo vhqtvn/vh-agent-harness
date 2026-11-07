@@ -57,10 +57,13 @@ $ARGUMENTS
   cites — citing an E-ID or the packet alone is not a citation; the report
   carries the locator so the reader is zero hops from the source. This is
   enforced by the finalization check: the report's verbatim text is
-  embedded in the packet under `## Final report`, and
+  embedded in the packet under `## Final report` inside a fenced code
+  block (bare ```` ≥4-backtick fence; 3-backtick/language-tagged lines
+  and headings inside the fence are literal report content), and
   `vh-agent-harness exec bash .opencode/skills/deep-research/scripts/validate-packet.sh <packet>`
-  (mandatory final step before returning) verifies every cited Evidence
-  record's exact locator appears in it — fix and re-run until PASS
+  (mandatory final step before returning) verifies the fence and every
+  cited Evidence record's exact locator inside it — fix and re-run until
+  PASS
 
 **Example invocations (synthetic):**
 

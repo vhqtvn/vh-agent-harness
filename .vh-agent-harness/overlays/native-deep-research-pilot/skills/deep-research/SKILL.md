@@ -154,7 +154,8 @@ Audit rules:
 Run the packet validator on the run packet, fix every reported violation,
 re-run until PASS, and record the result in the packet
 (`finalization_check: PASS <validator invocation> @ <date>` in the
-`## Final report` section):
+`## Final report` section, OUTSIDE the report fence — it is packet
+metadata appended after validation, not text returned to the caller):
 
 ```sh
 vh-agent-harness exec bash .opencode/skills/deep-research/scripts/validate-packet.sh \
@@ -165,11 +166,15 @@ vh-agent-harness exec bash .opencode/skills/deep-research/scripts/validate-packe
 allowlist entry in agent sessions and stalls on a permission prompt.)
 
 The check verifies **structural invariants only** — evidence-row shape,
-`E<digits>` referential integrity of claim evidence columns, the
-`direct support` basis note on single-evidence `supported` claims, and
-final-report locator containment — and does NOT change stop-reason
-semantics: `sufficient_evidence` never implies every secondary question
-was resolved.
+`E<digits>` referential integrity of claim evidence columns, `supported`
+validity (the single-record `direct support` basis note + full depth, OR
+≥2 cited records spanning ≥2 distinct `source_family` values), a fenced
+`## Final report` section (the verbatim report inside a bare ````
+≥4-backtick fence — 3-backtick and language-tagged lines inside it are
+literal content), and fenced-report locator
+containment — and does NOT change stop-reason semantics:
+`sufficient_evidence` never implies every secondary question was
+resolved.
 
 ### 8. Decide & stop
 

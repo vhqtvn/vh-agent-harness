@@ -22,11 +22,19 @@
 #       doc)"); standalone or misplaced parenthesized content is a
 #       violation. A claim classified supported|partial with ZERO valid
 #       evidence tokens (empty cell / gap markers only) is a violation.
-#   C3  a claim classified `supported` citing exactly ONE evidence record
-#       must carry the exact basis note "direct support (authoritative
-#       spec, single family)" in notes — as the whole trimmed notes value
-#       or a "—"/";"-delimited segment, never a substring of a larger
-#       phrase — AND that record's read_depth must start with "full".
+#   C3  a claim classified `supported` is structurally valid ONLY as one
+#       of exactly two routes (a clean disjunction):
+#       (direct support) exactly ONE cited evidence record, carrying the
+#       exact basis note "direct support (authoritative spec, single
+#       family)" in notes — as the whole trimmed notes value or a
+#       "—"/";"-delimited segment, never a substring of a larger phrase —
+#       AND that record's read_depth starting with "full"; OR
+#       (corroboration) >=2 cited evidence records with >=2 DISTINCT
+#       non-empty source_family values among them (duplicate families do
+#       not count; an empty family never counts). The remedy for a
+#       single-family multi-evidence claim is reclassifying to `partial`,
+#       not a broader note. Distinct recorded family identifiers are NOT
+#       proven semantic independence — see the honesty boundary below.
 #   Claim-table headers must likewise match "claim | classification |
 #   evidence_ids | notes" (4 columns) exactly before any data row is
 #   interpreted.
@@ -36,12 +44,35 @@
 #   violation — such a row is otherwise silently excluded by the row
 #   selector and every check above would ride past it. Lines without any
 #   "|" (prose, bullets) are not table rows and are left alone.
-#   C4  a "## Final report" section exists and contains the exact locator
-#       string of every Evidence record cited by >=1 claim.
+#   C4  a "## Final report" section exists, contains the verbatim report
+#       inside ONE fenced code block whose OUTER fence is a BARE
+#       4+-backtick line (only backticks, optionally trailing spaces/
+#       tabs — never a 3-backtick or language-tagged line): the opening
+#       fence records its backtick count N, and only a bare >=N-backtick
+#       line closes it (CommonMark delimiter tracking). Three-backtick
+#       lines, language-tagged fences (```json, ````json), and any
+#       backtick line with words after the backticks are LITERAL report
+#       content — they never toggle the parser, so inner code blocks
+#       inside the report are safe and a pseudo-closing line cannot
+#       close the report. After the closing fence the report is
+#       COMPLETE: later lines and fenced blocks in the section are
+#       packet metadata, never appended report content and never able to
+#       satisfy locator containment (extra blocks are excluded, not
+#       violations). A missing or never-closed fence is a violation, and
+#       the fenced report content must contain the exact locator string
+#       of every Evidence record cited by >=1 claim. Headings (`#`/`##`/
+#       `###`) inside an OPEN fence are literal report content and never
+#       end the section; the section ends at the closing fence or at the
+#       next `## ` heading outside any open fence. Lines outside the
+#       fence in this section (e.g. the finalization_check line) are
+#       packet metadata, never locator-checked report content.
 #
 # NOT checked (by design — the honesty boundary of this script):
 #   semantic truth of claims; whether source families are ACTUALLY
-#   independent (family labels are trusted as recorded); whether a read
+#   independent (family labels are trusted as recorded — the C3
+#   cardinality check counts distinct recorded source_family strings,
+#   and distinct recorded identifiers are NOT proven semantic
+#   independence); whether a read
 #   genuinely supports a claim (excerpt-vs-claim semantics); freshness;
 #   budgets; stop-reason semantics — a PASS never implies every secondary
 #   question was resolved. PASS certifies structure, not substance.
@@ -87,7 +118,11 @@ function cells(line, f,   n, raw, i, j) {
   }
   return j
 }
-/^## / {
+# A `## ` heading terminates a section ONLY outside an open Final-report
+# fence (repf): inside the fence a heading is literal report content, so
+# an ordinary Markdown heading in the report cannot end locator
+# collection early.
+/^## / && !repf {
   h = tolower($0)
   inev = (h ~ /^## evidence records/)
   incl = (h ~ /^## claim classifications/)
@@ -98,7 +133,32 @@ function cells(line, f,   n, raw, i, j) {
   tb = 0
   next
 }
-irep { rep = rep $0 "\n"; next }
+# Final-report section: the verbatim report lives inside ONE fenced code
+# block, delimited CommonMark-proper. The OUTER fence is a BARE 4+-
+# backtick line (^````+[ \t]*$ — nothing after the backticks): the
+# opening fence records its backtick count N (repop), and only a bare
+# >=N-backtick line closes it (repf -> 0). Three-backtick lines,
+# language-tagged fences (```json), and any backtick line with words
+# after the backticks are LITERAL report content — they never toggle
+# state, so inner code blocks inside the report are safe and a
+# pseudo-closing line cannot close the report. After the closing fence
+# the report is COMPLETE: later lines and fenced blocks in this section
+# (a second block, the finalization_check line) are packet metadata —
+# never appended to the report, never able to satisfy locator
+# containment. Lines between the section heading and the opening fence
+# are metadata too; ONLY lines inside the OPEN fence are report content
+# (locator-checked).
+irep {
+  if ($0 ~ /^````+[ \t]*$/) {
+    t = $0; sub(/[ \t]+$/, "", t); nb = length(t)
+    if (!repop) { repop = 1; repf = 1; repn = nb }
+    else if (repf && nb >= repn) repf = 0
+    else if (repf) rep = rep $0 "\n"
+    next
+  }
+  if (repf) rep = rep $0 "\n"
+  next
+}
 # A table row missing its LEADING pipe (e.g. "A claim | partial | E999 |
 # dangling reference |") is silently excluded by the leading-pipe row selector
 # below — evidence-binding violations ride in the unselected row. Any
@@ -157,6 +217,7 @@ irep { rep = rep $0 "\n"; next }
     if (fam == "") bad("evidence row " ne ": empty source_family")
     ev[id] = loc
     evd[id] = depth                               # retained for C3 full-depth check
+    evf[id] = fam                                 # retained for C3 family-cardinality check
   }
   if (incl && clhdr) {                            # C2+C3: claim data row
     nc++
@@ -187,6 +248,7 @@ irep { rep = rep $0 "\n"; next }
     gsub(/[,+;&]/, " ", ecell)                    # separators -> spaces
     m = split(ecell, tk, /[ \t]+/)
     d = 0; dtid = ""
+    split("", dl)                                 # per-row distinct cited ids
     for (i = 1; i <= m; i++) {
       t = tk[i]
       if (t == "" || t !~ /[A-Za-z0-9]/) continue # gap markers like —
@@ -198,21 +260,33 @@ irep { rep = rep $0 "\n"; next }
         bad("claim row " nc ": evidence id " t " is not declared in Evidence records")
         continue
       }
-      if (!((nc SUBSEP t) in dt)) { dt[nc SUBSEP t] = 1; d++; dtid = t }
+      if (!((nc SUBSEP t) in dt)) { dt[nc SUBSEP t] = 1; d++; dl[d] = t; dtid = t }
       cited[t] = 1
     }
     # a supported/partial claim with ZERO valid evidence tokens is a
     # vacuous pass (empty cell / gap markers only) — a violation.
     if ((cls ~ /^supported([^A-Za-z]|$)/ || cls ~ /^partial([^A-Za-z]|$)/) && d == 0)
       bad("claim row " nc ": classification \"" cls "\" cites zero valid Evidence-record ids (evidence column empty or gap markers only)")
-    # F3: the direct-support basis must be the FULL literal note (a bare
-    # "direct support" substring matched negations and shortenings), and
-    # the single cited record must have been read at full depth.
+    # C3: `supported` is structurally valid ONLY as the clean disjunction
+    # (direct support) exactly 1 cited record + full literal basis-note
+    # segment + that record read at full depth, OR (corroboration) >=2
+    # cited records + >=2 distinct non-empty source_family values among
+    # them. Reclassifying to `partial` is the remedy for a single-family
+    # multi-evidence claim — not a broader note.
     if (cls ~ /^supported([^A-Za-z]|$)/ && d == 1) {
       if (!seg_match(notes, "direct support (authoritative spec, single family)"))
         bad("claim row " nc ": supported on a single evidence record must carry the exact basis note \"direct support (authoritative spec, single family)\" in notes")
       if (substr(evd[dtid], 1, 4) != "full")
         bad("claim row " nc ": direct support requires the single cited record " dtid " to be read at full depth (read_depth \"" evd[dtid] "\" does not start with \"full\")")
+    }
+    if (cls ~ /^supported([^A-Za-z]|$)/ && d >= 2) {
+      split("", sfam); nfam = 0
+      for (i = 1; i <= d; i++) {
+        fv = evf[dl[i]]
+        if (fv != "" && !(fv in sfam)) { sfam[fv] = 1; nfam++ }
+      }
+      if (nfam < 2)
+        bad("claim row " nc ": classification \"supported\" cites " d " evidence records but only " nfam " distinct non-empty source_family value(s) — corroboration requires >=2 distinct families (distinct recorded family identifiers are not proven semantic independence); reclassify as partial or cite records from >=2 families")
     }
   }
 }
@@ -220,9 +294,15 @@ END {
   if (!have_evs) bad("missing required section \"## Evidence records\"")
   if (!have_cls) bad("missing required section \"## Claim classifications\"")
   if (!have_rep) bad("missing required section \"## Final report\" (cited-locator containment not checked)")
-  else for (id in cited) {
-    loc = ev[id]
-    if (index(rep, loc) == 0) bad("final report is missing the exact locator of " id ": " loc)
+  else {
+    if (!repop)
+      bad("\"## Final report\" section is missing its fenced code block (```` fence of 4+ bare backticks) — the verbatim report must live inside the outer fence; 3-backtick and language-tagged lines are literal report content, not fences; headings inside the fence are literal report content")
+    else if (repf)
+      bad("\"## Final report\" fenced code block is never closed (no closing fence: a bare line of at least as many backticks as the opening ```` fence — 3-backtick and language-tagged lines never close it)")
+    for (id in cited) {
+      loc = ev[id]
+      if (index(rep, loc) == 0) bad("final report is missing the exact locator of " id ": " loc)
+    }
   }
   if (nf > 0) { print "validate-packet: FAIL (" nf " violation(s))"; exit 1 }
   print "validate-packet: PASS"

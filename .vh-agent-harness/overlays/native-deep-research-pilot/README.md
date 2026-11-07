@@ -27,9 +27,14 @@ violations, 2 = usage. It checks **structural invariants only**: Evidence
 rows are well-formed (`E<digits>` ID, non-empty locator, `full`/`skim` read
 depth, non-empty family), claim evidence columns reference only declared
 `E<digits>` records (no attempted reads, snippets, or pseudo-IDs), a
-single-evidence `supported` claim carries the `direct support` basis note,
-and the packet's `## Final report` section contains the exact locator of
-every cited Evidence record. It does NOT check semantic truth, actual
+`supported` claim is valid only as (single record + `direct support`
+basis note + `full` depth) or (≥2 records spanning ≥2 distinct
+`source_family` values), and the packet's `## Final report` section
+carries the verbatim report inside a fenced code block (bare ```` fence
+of 4+ backticks — a missing or unclosed fence is a violation;
+3-backtick/language-tagged lines and headings inside the fence are
+literal report content) containing the exact locator of every cited
+Evidence record. It does NOT check semantic truth, actual
 source independence, whether reads genuinely support claims, freshness, or
 budgets — and a PASS never changes stop-reason semantics
 (`sufficient_evidence` does not imply every secondary question was

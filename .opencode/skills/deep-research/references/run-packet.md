@@ -11,7 +11,7 @@ per item, and never drop a section — an empty section stays with a one-line
 
 ## Skeleton
 
-```markdown
+`````markdown
 # Deep-research run packet — <run-id>
 
 ## Frame
@@ -60,11 +60,21 @@ per item, and never drop a section — an empty section stays with a one-line
 - pilot_usage: queries=<n>/6 reads=<n>/12 gap_passes=<n>/1 delegations=<n>/2
 
 ## Final report           (verbatim — the exact text returned to the caller)
-<the full final report text lives IN the packet: recommendation,
-what would change it, remaining uncertainty, stop reason, and the exact
-locator of EVERY Evidence record cited by ≥1 claim>
+````
+<the full final report text lives IN the packet inside this fenced code
+block: recommendation, what would change it, remaining uncertainty, stop
+reason, and the exact locator of EVERY Evidence record cited by ≥1 claim.
+The outer fence is a BARE 4+-backtick line (only backticks, nothing
+after them): it opens the report block, and only another bare line with
+at least as many backticks closes it. Inside the report, 3-backtick and
+language-tagged lines (```json) are LITERAL report content — inner code
+blocks never toggle the fence — and Markdown headings inside the fence
+are LITERAL report content and never end the report. After the closing
+fence the report is complete: later lines in the section (like the
+finalization_check below) are packet metadata, never report content>
+````
 finalization_check: PASS <validator invocation> @ <date>
-```
+`````
 
 ## Field notes
 
@@ -157,7 +167,13 @@ notes. A `supported` claim citing exactly ONE evidence record (a normative
 claim resting on an authoritative spec read at `full` depth — see
 `SKILL.md` → "Direct support vs corroboration") MUST carry the basis note
 `direct support (authoritative spec, single family)` so direct support
-stays visibly distinct from ≥2-family corroboration.
+stays visibly distinct from ≥2-family corroboration. A `supported` claim
+citing TWO OR MORE records MUST span ≥2 distinct `source_family` values
+among them — duplicate or empty families do not count, and the remedy for
+a single-family multi-evidence claim is reclassifying to `partial`, never
+a broader note. (Distinct recorded family identifiers are a structural
+proxy the validator can count — they are not proof of semantic
+independence.)
 
 ### Gaps
 
@@ -178,14 +194,30 @@ a concrete `next_action`.
 ### Final report
 
 The verbatim final-report text lives IN the packet under `## Final report`
-(not only in the chat return) so every citation is checkable later. It MUST
-contain the exact locator string of every Evidence record cited by ≥1
-claim — citing an E-ID alone is not a citation. The finalization check
+(not only in the chat return) so every citation is checkable later. The
+report MUST sit inside ONE fenced code block in that section, delimited by
+a BARE 4+-backtick outer fence (a line of only backticks — nothing after
+them — with at least 4; the opening fence's backtick count is the minimum
+a closing fence must meet): fenced lines are the report; 3-backtick lines
+and language-tagged fences (```json) inside the block are LITERAL report
+content and never toggle it, and Markdown headings (`#`/`##`/`###`)
+inside the fence are LITERAL report content and never end it — the report
+ends at the closing fence (or the next `##` heading outside an open
+fence). After the closing fence the report is complete: anything later in
+the section — including a second fenced block — is packet metadata and is
+never locator-checked. The `finalization_check:` line stays OUTSIDE the
+fence (it is packet metadata appended after validation, not text returned
+to the caller).
+The report MUST contain the exact locator string of every Evidence record
+cited by ≥1 claim — citing an E-ID alone is not a citation. The
+finalization check
 (`vh-agent-harness exec bash .opencode/skills/deep-research/scripts/validate-packet.sh <packet>`,
 run as the mandatory final step — see `SKILL.md` → "Finalization check")
-verifies this mechanically; the `finalization_check:` line records the PASS
-and date. The check is structural only: it never changes stop-reason
-semantics.
+verifies this mechanically — a missing or never-closed fence is itself a
+violation (a 3-backtick or language-tagged line never closes the report;
+an unterminated report fails rather than passing as closed); the
+`finalization_check:` line records the PASS and date. The check is
+structural only: it never changes stop-reason semantics.
 
 ## Promotion (explicit-only)
 

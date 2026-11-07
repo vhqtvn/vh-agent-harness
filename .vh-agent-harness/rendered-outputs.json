@@ -28,21 +28,21 @@
       "producer_kind": "overlay_skill",
       "overlay_pack": "native-deep-research-pilot",
       "source_relative_path": "skills/deep-research/SKILL.md",
-      "rendered_digest": "sha256:fd18669d74ec3828a6bd9b7a02def5e07bf904876ada2011a7fefc2bde7d137b"
+      "rendered_digest": "sha256:d77c8cb572e5ce53d76c137c81f486474d8facba5a656cd83a2ae96b65a3fab2"
     },
     {
       "destination_path": ".opencode/skills/deep-research/references/run-packet.md",
       "producer_kind": "overlay_skill",
       "overlay_pack": "native-deep-research-pilot",
       "source_relative_path": "skills/deep-research/references/run-packet.md",
-      "rendered_digest": "sha256:e17eb1378ab142e15d0496727b26386a4a53d9d17c9e5e125df23858a60da451"
+      "rendered_digest": "sha256:f834163791950e5e462e10a1fcdc1d59dc38d2258b14435d22df5e67bcb5a5c3"
     },
     {
       "destination_path": ".opencode/skills/deep-research/scripts/validate-packet.sh",
       "producer_kind": "overlay_skill",
       "overlay_pack": "native-deep-research-pilot",
       "source_relative_path": "skills/deep-research/scripts/validate-packet.sh",
-      "rendered_digest": "sha256:3be465ecf05a354007d6946a2a6bc18e3a0305ae46bc058a68bfb7ce7ee8908a"
+      "rendered_digest": "sha256:46934a34eb915af26beba90b98660a9c9f4475ea28ce10e09ee90ff54463a5a1"
     },
     {
       "destination_path": ".opencode/skills/formal-verification/SKILL.md",
