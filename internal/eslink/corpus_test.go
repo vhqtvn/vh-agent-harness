@@ -4,22 +4,28 @@ package eslink
 // the 49-edge ledger), gate 4 (revision/hash-bound golden pins), gate 5
 // (mixed preserved-tree skew, REQUIRED), gate 6 (disaggregated counters).
 //
-// PIN SET (the family-5 grammar-freeze AMENDMENT, operator-ratified
-// 2026-11-08; measured derivation in the S1′ escalation report §2B):
+// PIN SET (stage-4 option-2 hub-token normalization, operator-ratified
+// 2026-11-09: decision record researches/decisions/2026-11-09-eslink-o4-
+// stage4-normalization-option2.md; measured receipt researches/sources/
+// 2026-11-09-eslink-stage4-candidate-measurement.md @ f2c3700, candidate-2
+// run, digest-bound):
 //
-//	modules 61 · FIT 45 · ledger edges 49 · L0/L1/L3 = 17/22/10
+//	modules 61 · FIT 46 · ledger edges 49 · L0/L1/L3 = 14/3/32
 //	dynamic unknowns 5 · clean-tree broken 0
 //	mixed-tree broken = 1: verify-task-registry.js → state-lib.js
 //	missing collectDecisionItems
 //
-// Cross-check vs the O3 packet census (d4ae991): every pin matches the
-// packet EXCEPT FIT 46 → 45; the single-module delta is
+// The normalization (state-lib.js:5554 `i++` → `i += 1`, the file's sole
+// update-op, for-update slot/value unused — behavior-identical) flips the
+// hub UNKNOWN → FIT (closed, 73 named exports), recovering 19 incoming
+// consumer edges L1→L3 + 3 hub-outgoing edges L0→L3; the 10 baseline L3
+// edges are untouched (none touch the hub). Remaining module debt: the 14
+// update-op files below (the packet §B table minus the hub) plus
 // plugins/compaction-primitives.js, which is objectively invalid JavaScript
 // (`node --check` → SyntaxError: missing ) after argument list, template
-// opened line 11 terminated by unescaped backticks line 18 — re-derived
-// fresh this slice). The packet's reference lexer mis-lexed it as balanced
-// and the census counted it FIT. The corpus defect is carded separately at
-// .local/coordinator/tasks/task-2026-11-08t16-27-14-corpus-defect-…json;
+// opened line 11 terminated by unescaped backticks line 18 — the packet
+// census's mis-lexed-FIT artifact). The corpus defect is carded separately
+// at .local/coordinator/tasks/task-2026-11-08t16-27-14-corpus-defect-…json;
 // the successor pins its honest verdict: reason-coded UNKNOWN.
 
 import (
@@ -161,8 +167,8 @@ func TestGate3_SuccessorLedgerMatchesReferenceAudit(t *testing.T) {
 	for _, e := range edges {
 		lc[e.LClass]++
 	}
-	if lc["L0"] != 17 || lc["L1"] != 22 || lc["L3"] != 10 {
-		t.Fatalf("L-join = L0:%d L1:%d L3:%d, want 17/22/10", lc["L0"], lc["L1"], lc["L3"])
+	if lc["L0"] != 14 || lc["L1"] != 3 || lc["L3"] != 32 {
+		t.Fatalf("L-join = L0:%d L1:%d L3:%d, want 14/3/32", lc["L0"], lc["L1"], lc["L3"])
 	}
 }
 
@@ -249,16 +255,16 @@ func corpusDigest(tree map[string][]byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-const pinnedCorpusDigest = "fea47acd172c81a28d42112135033d567f4bd0e47d30f45f13f4bc667834f095"
+const pinnedCorpusDigest = "70ceca3c646734bcb3b64b4000316e1ee29f4256b42d66f60997f183c020a4e9"
 
-// updateOpDebtFiles are the packet §B per-file table's 15 modules (the only
-// corpus grammar debt: `++`/`--` update operators).
+// updateOpDebtFiles are the packet §B per-file table's post-normalization
+// remainder: 14 modules still carrying `++`/`--` update operators (the
+// table's 15 minus the hub, normalized by the ratified option-2 rewrite).
 var updateOpDebtFiles = []string{
 	".opencode/plugins/shell-guard-core.js",
 	".opencode/plugins/shell-guard.js",
 	".opencode/scripts/check-defer-triggers.mjs",
 	".opencode/scripts/complexity-signal-lib.js",
-	".opencode/scripts/state-lib.js",
 	".opencode/scripts/check-s2-holds.mjs",
 	".opencode/scripts/verify-f3-authoring-surfaces.js",
 	".opencode/scripts/verify-no-source-tree-only-paths.js",
@@ -278,19 +284,27 @@ func TestGate4_CorpusGoldenPins(t *testing.T) {
 	}
 
 	s := Summarize(tree)
-	if s.Modules != 61 || s.ModulesFit != 45 || s.ModulesUnknown != 16 {
-		t.Fatalf("modules 61/45/16 pin: got %d/%d/%d", s.Modules, s.ModulesFit, s.ModulesUnknown)
+	if s.Modules != 61 || s.ModulesFit != 46 || s.ModulesUnknown != 15 {
+		t.Fatalf("modules 61/46/15 pin: got %d/%d/%d", s.Modules, s.ModulesFit, s.ModulesUnknown)
 	}
 	if s.Edges != 49 || s.EdgesBroken != 0 || s.DynamicUnknowns != 5 {
 		t.Fatalf("edges 49 / broken 0 / dynUnknowns 5 pin: got %d/%d/%d", s.Edges, s.EdgesBroken, s.DynamicUnknowns)
 	}
-	if s.L0Edges != 17 || s.L1Edges != 22 || s.L3Edges != 10 {
-		t.Fatalf("L-join 17/22/10 pin: got %d/%d/%d", s.L0Edges, s.L1Edges, s.L3Edges)
+	if s.L0Edges != 14 || s.L1Edges != 3 || s.L3Edges != 32 {
+		t.Fatalf("L-join 14/3/32 pin: got %d/%d/%d", s.L0Edges, s.L1Edges, s.L3Edges)
 	}
 
-	// Per-module verdicts: the 15 update-op debt files degrade with the
-	// update-op reason; compaction-primitives.js degrades (known corpus
-	// defect: invalid JS, carded separately); every other module is FIT.
+	// Per-module verdicts: the 14 update-op debt files degrade with the
+	// update-op reason; the hub (state-lib.js) is post-normalization FIT —
+	// closed, 73 named exports; compaction-primitives.js degrades (known
+	// corpus defect: invalid JS, carded separately); every other module is
+	// FIT.
+	const hub = ".opencode/scripts/state-lib.js"
+	if m := Parse(hub, tree[hub]); m.Unparseable {
+		t.Fatalf("%s: post-normalization hub must be FIT, got UNKNOWN(%s)", hub, m.UnparseableWhy)
+	} else if len(m.NamedExports) != 73 {
+		t.Fatalf("%s: post-normalization hub surface = %d export names, want 73", hub, len(m.NamedExports))
+	}
 	debt := map[string]bool{}
 	for _, p := range updateOpDebtFiles {
 		debt[p] = true
@@ -314,8 +328,8 @@ func TestGate4_CorpusGoldenPins(t *testing.T) {
 			t.Fatalf("%s: unexpected UNKNOWN(%q) — pin set says FIT", p, m.UnparseableWhy)
 		}
 	}
-	if fit != 45 {
-		t.Fatalf("FIT modules = %d, want 45", fit)
+	if fit != 46 {
+		t.Fatalf("FIT modules = %d, want 46", fit)
 	}
 }
 
@@ -380,14 +394,14 @@ func TestGate4b_RenderedVariantLintParity(t *testing.T) {
 
 	// Aggregate parity: the rendered tree carries the same pins.
 	raw, ren := Summarize(tree), Summarize(rendered)
-	if ren.Modules != 61 || ren.ModulesFit != 45 || ren.ModulesUnknown != 16 {
-		t.Fatalf("rendered modules 61/45/16 pin: got %d/%d/%d", ren.Modules, ren.ModulesFit, ren.ModulesUnknown)
+	if ren.Modules != 61 || ren.ModulesFit != 46 || ren.ModulesUnknown != 15 {
+		t.Fatalf("rendered modules 61/46/15 pin: got %d/%d/%d", ren.Modules, ren.ModulesFit, ren.ModulesUnknown)
 	}
 	if ren.Edges != 49 || ren.EdgesBroken != 0 || ren.DynamicUnknowns != 5 {
 		t.Fatalf("rendered edges 49 / broken 0 / dynUnknowns 5 pin: got %d/%d/%d", ren.Edges, ren.EdgesBroken, ren.DynamicUnknowns)
 	}
-	if ren.L0Edges != 17 || ren.L1Edges != 22 || ren.L3Edges != 10 {
-		t.Fatalf("rendered L-join 17/22/10 pin: got %d/%d/%d", ren.L0Edges, ren.L1Edges, ren.L3Edges)
+	if ren.L0Edges != 14 || ren.L1Edges != 3 || ren.L3Edges != 32 {
+		t.Fatalf("rendered L-join 14/3/32 pin: got %d/%d/%d", ren.L0Edges, ren.L1Edges, ren.L3Edges)
 	}
 	if raw.Edges != ren.Edges || raw.L0Edges != ren.L0Edges || raw.L1Edges != ren.L1Edges || raw.L3Edges != ren.L3Edges {
 		t.Fatalf("raw/rendered ledger divergence: %+v vs %+v", raw, ren)
@@ -436,15 +450,17 @@ func TestGate4b_RenderedVariantLintParity(t *testing.T) {
 // surface missing exactly the symbol verify-task-registry.js requires. The
 // successor must fire L3 enforcement: broken=1 on exactly that edge.
 //
-// The older hub is DERIVED from the current bytes by two era-representable
-// surgeries: (1) remove the collectDecisionItems export (both export-list
-// entries — the pre-cccf1b0 surface), (2) lift the current-era update-op
-// debt at L5554 with the packet's sanctioned mechanical rewrite (`i++` →
-// `i += 1` — restoring the pre-trilogy hub's 0-update-op conformance). The
-// LITERAL b788b43^ blob (68 exports, FIT) was additionally run during
-// development via the packet's runmixed.sh method and produced the
-// identical broken=1 (receipt in the S1′ closeout; the blob is packet-local
-// and not committable).
+// The older hub is DERIVED from the current bytes by one era-representable
+// surgery: remove the collectDecisionItems export (both export-list
+// entries — the pre-cccf1b0 surface). The current hub is already
+// 0-update-op conformant at the fnv1a loop (the ratified option-2
+// normalization rewrote L5554 `i++` → `i += 1`), so the derived older hub
+// keeps the pre-trilogy conformance BY CONSTRUCTION — the normalized anchor
+// is asserted, not re-derived. The LITERAL b788b43^ blob (68 exports, FIT)
+// was additionally run during development via the packet's runmixed.sh
+// method and produced the identical broken=1 (receipt in the S1′ closeout;
+// the blob is packet-local and not committable; the optional literal-blob
+// receipt test below still exercises it when the packet is present).
 func TestGate5_MixedTreeSkewRequired(t *testing.T) {
 	tree := corpusTree(t)
 	const hub = ".opencode/scripts/state-lib.js"
@@ -454,11 +470,10 @@ func TestGate5_MixedTreeSkewRequired(t *testing.T) {
 		t.Fatalf("hub export-list shape moved: %d occurrences of the export line, want 2 — re-derive the skew fixture", n)
 	}
 	older := strings.ReplaceAll(cur, exportLine, "")
-	const debtLine = "    for (let i = 0; i < s.length; i++) {\n"
-	if strings.Count(older, debtLine) != 1 {
-		t.Fatalf("hub update-op anchor moved; re-derive the skew fixture")
+	const normLine = "    for (let i = 0; i < s.length; i += 1) {\n"
+	if strings.Count(older, normLine) != 1 {
+		t.Fatalf("hub normalized fnv1a anchor moved; re-derive the skew fixture")
 	}
-	older = strings.Replace(older, debtLine, "    for (let i = 0; i < s.length; i += 1) {\n", 1)
 	tree[hub] = []byte(older)
 
 	// The preserved hub itself stays conformant with a CLOSED surface.
@@ -535,24 +550,24 @@ func TestGate6_DisaggregatedCounters(t *testing.T) {
 	if s.UnknownByClass[ClassDynamicImport] != 5 {
 		t.Fatalf("dynamic-import unknowns = %d, want 5 (the 5-pin class)", s.UnknownByClass[ClassDynamicImport])
 	}
-	if s.UnknownByClass[ClassUnsupportedSyntax] != 16 {
-		t.Fatalf("unsupported-syntax unknowns = %d, want 16 (15 update-op + 1 invalid-JS module)", s.UnknownByClass[ClassUnsupportedSyntax])
+	if s.UnknownByClass[ClassUnsupportedSyntax] != 15 {
+		t.Fatalf("unsupported-syntax unknowns = %d, want 15 (14 update-op + 1 invalid-JS module)", s.UnknownByClass[ClassUnsupportedSyntax])
 	}
-	if s.UnknownByClass[ClassOpenSurface] != 22 {
-		t.Fatalf("open-surface unknowns = %d, want 22 (the L1 provider-open edges)", s.UnknownByClass[ClassOpenSurface])
+	if s.UnknownByClass[ClassOpenSurface] != 3 {
+		t.Fatalf("open-surface unknowns = %d, want 3 (the remaining L1 edges: shell-guard/eval.js → shell-guard-core + the two complexity-signal-lib consumers)", s.UnknownByClass[ClassOpenSurface])
 	}
 	if s.DynamicUnknowns != s.UnknownByClass[ClassDynamicImport] {
 		t.Fatalf("DynamicUnknowns (%d) must equal the dynamic class counter (%d)", s.DynamicUnknowns, s.UnknownByClass[ClassDynamicImport])
 	}
 	// Closed obligations are their own counter (L3), never folded into
 	// unknowns or edges totals.
-	if s.L3Edges != 10 {
-		t.Fatalf("closed obligations (L3) = %d, want 10", s.L3Edges)
+	if s.L3Edges != 32 {
+		t.Fatalf("closed obligations (L3) = %d, want 32", s.L3Edges)
 	}
 	if s.L0Edges+s.L1Edges+s.L3Edges != s.Edges {
 		t.Fatalf("L0+L1+L3 (%d) must equal the ledger edge count (%d)", s.L0Edges+s.L1Edges+s.L3Edges, s.Edges)
 	}
-	// Module-level reason histogram: 15 update-op reasons (one per debt
+	// Module-level reason histogram: 14 update-op reasons (one per debt
 	// file, line-numbered) + 1 compaction-primitives parse reason.
 	updateReasons, otherReasons := 0, 0
 	for why, n := range s.UnknownReasons {
@@ -562,7 +577,7 @@ func TestGate6_DisaggregatedCounters(t *testing.T) {
 			otherReasons += n
 		}
 	}
-	if updateReasons != 15 || otherReasons != 1 {
-		t.Fatalf("module reason histogram = %d update-op + %d other, want 15 + 1", updateReasons, otherReasons)
+	if updateReasons != 14 || otherReasons != 1 {
+		t.Fatalf("module reason histogram = %d update-op + %d other, want 14 + 1", updateReasons, otherReasons)
 	}
 }
