@@ -825,3 +825,49 @@ decision itself.
 - No repo, git, backlog, or coordination state was modified by this pass. All
   outputs live under `tmp/agent-runs/o4-d-pass/`. Read-only throughout; the
   only writes were this artifact.
+
+---
+
+## Amendment 2026-11-08 — Family 5 correction (module-top await; probe miss)
+
+> Appended by the grammar-freeze amendment record
+> (`researches/decisions/2026-11-08-eslink-o4-grammar-freeze-amendment-tla.md`,
+> operator-ratified Option 1, 2026-11-08). The D-pass body above is the
+> record AS MEASURED and is preserved unedited (byte-verbatim landing pin at
+> `2f5b304` unaffected); this section is the dated correction the amendment
+> ratifies.
+
+- **What was wrong:** the Family 5 row "top-level await | ABSENT (probe
+  `^await\s` → none)" is a **probe miss**, not a corpus fact. The probe is
+  line-start anchored and structurally cannot see mid-statement or indented
+  module-top await — exactly the probe-strength risk this packet's
+  "Honest gaps" section pre-flagged. The S1′ build escalation of 2026-11-08
+  surfaced the contradiction; the miss was in the census inputs, not in the
+  S1′ build.
+- **The corpus fact (amended):** module-top top-level await EXISTS in 6 of
+  the 61 modules, all `node --check`-legal (each re-verified by direct line
+  read for the amendment record):
+
+  | Module (corpus path) | Line(s) | Form |
+  |---|---|---|
+  | `templates/core/.opencode/repo-configs/forbidden-patterns.js` | 39 | `const mod = await import("./forbidden-patterns.project.js")` in top-level `try` |
+  | `templates/overlays/repo-mail/plugins/repo-mail-egress-wiring.js` | 280, 283 | `const { gateEgressMessage } = await import(…)`, `const { scrubCredentials } = await import(…)` in `if (__isMain)` at module scope |
+  | `templates/core/.opencode/scripts/verify-chunk-timeout-backstop.js` | 225 | `try { await main(); } catch` epilogue |
+  | `templates/core/.opencode/scripts/verify-coordination-hints.js` | 701 | same epilogue |
+  | `templates/core/.opencode/scripts/verify-skill-sentinel.js` | 575 | same epilogue |
+  | `templates/core/.opencode/scripts/verify-task-registry.js` | 5349 | `try { await runWorkerMode(…) }` in `if (__entryPath === __modulePath)` |
+
+- **Amended clause (Family 5):** `AwaitExpr := 'await' UnaryExpr` is
+  admitted inside async function/arrow/method bodies **and at module top
+  level** (module top is an [Await] context). Unchanged: `for await … of`
+  stays excluded; `await` in a non-async function stays rejected.
+- **Fixture verdict flip:** F5-FB(a) (module with top-level `await fetch(x);`
+  at module scope) flips `UNKNOWN(reason: top-level await not admitted)` →
+  `FIT`. F5-FB(b) (`for await`) is unchanged.
+- **Carried pin correction (same amendment):** the packet-era FIT pin
+  46/61 is corrected to **45/61** — the delta module
+  (`templates/core/.opencode/plugins/compaction-primitives.js`) is invalid
+  JavaScript (unescaped backticks, line 18; the only module of 61 that
+  `node --check` rejects) that the reference lexer mis-lexed as balanced.
+  See the amendment record for the full measured reconciliation and the
+  hash-pinned reference-implementation binding.
