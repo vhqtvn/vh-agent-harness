@@ -193,8 +193,11 @@ func TestF2_FB_ExcludedControlForms(t *testing.T) {
 // (verify-recurrence-dedup.js:544 `!("recurrence" in onDisk)` — a live FIT
 // module in the ratified pin set; the operator is on no enumerated exclusion
 // list). The for-in STATEMENT rejection stays pinned in F2-FB(c). Known
-// corpus-absent permissiveness (documented, unpinned): ES forbids a bare
-// 'in' in a classic for-head's first slot; this parser does not model that.
+// corpus-absent permissiveness (documented, deliberately unpinned): ES
+// forbids a BARE 'in' in a classic for-head's first slot; this parser does
+// not model that — pinning that form would pin a defect. The PARENTHESIZED
+// for-head initializer below is legal ES (the parens disambiguate the slot)
+// and is pinned FIT here (card defer-eslink-binaryin-forhead-fixture).
 func TestF2_Repertoire_BinaryIn(t *testing.T) {
 	src := "const onDisk = { recurrence: 1 };\n" +
 		"const ok = !(\"recurrence\" in onDisk);\n" +
@@ -203,6 +206,22 @@ func TestF2_Repertoire_BinaryIn(t *testing.T) {
 	fitModule(t, ".opencode/scripts/binin.js", src)
 	requireCleanScan(t, Scan(treeOf(map[string]string{
 		".opencode/scripts/binin.js": src,
+	})))
+
+	// The for-head initializer slot: binary 'in' inside a parenthesized
+	// initializer (corpus-absent, admitted, pinned). The initializer's
+	// paren group keeps the 'in' operand off the for-head dispatch path
+	// (parseForOfIn sees ';'), so the classic-for reading holds.
+	srcFor := "const obj = { a: 1 };\n" +
+		"let i = 0;\n" +
+		"for (let hit = (\"a\" in obj); i < 3; i += 1) { i += 1; }\n" +
+		"export const outFor = i;\n"
+	mFor := fitModule(t, ".opencode/scripts/binin-forhead.js", srcFor)
+	if !mFor.NamedExports["outFor"] {
+		t.Fatalf("expected outFor exported, got %v", mFor.NamedExports)
+	}
+	requireCleanScan(t, Scan(treeOf(map[string]string{
+		".opencode/scripts/binin-forhead.js": srcFor,
 	})))
 }
 
