@@ -340,6 +340,75 @@ func TestF5_FO_PluginAwaitPattern(t *testing.T) {
 	}
 }
 
+// TestF5_DynImport_EscapedLiteralDegrades mirrors expectFrom semantics on
+// the dynamic path (card defer-eslink-dynimport-escaped-literal): the lexer
+// does not decode escape sequences, so a dynamic-import specifier carrying
+// escapes degrades the module to a reason-coded not-decodable UNKNOWN —
+// the raw bytes are NEVER admitted as a literal specifier. False-direction
+// pins: the finding must SURFACE (an escape in the relative prefix makes
+// IsRelativeSpecifier misjudge the raw bytes, which would vanish from the
+// report silently) and must never ground broken (U6). node --check receipts
+// confirm escaped-literal dynamic imports are legal ES — the degrade is
+// the same parser-limitation stance the STATIC specifier path takes
+// (expectFrom), not a syntax judgment; parity is pinned in the static arm.
+func TestF5_DynImport_EscapedLiteralDegrades(t *testing.T) {
+	// Dynamic, sole argument (escaped slash — decodes to "./dep.js").
+	src := "import { dep } from \"./dep.js\";\n" +
+		"export const load = async () => import(\".\\x2fdep.js\");\n"
+	unknownModule(t, ".opencode/plugins/dynesc.js", src,
+		"module specifier with escape sequences (not decodable)")
+	r := Scan(treeOf(map[string]string{
+		".opencode/plugins/dynesc.js": src,
+		".opencode/plugins/dep.js":    "export const dep = 1;\n",
+	}))
+	if r.HasBroken() {
+		t.Fatalf("degraded module must never ground broken (U6): %+v", r.Broken)
+	}
+	if findUnknownContaining(r, ".opencode/plugins/dynesc.js", "module UNKNOWN") == nil {
+		t.Fatalf("expected module-UNKNOWN finding for the not-decodable dynamic specifier: %+v", r.Unknown)
+	}
+	for _, u := range r.Unknown {
+		if strings.Contains(u.Specifier, "\\") {
+			t.Fatalf("raw escaped bytes must never surface as a specifier finding: %+v", u)
+		}
+	}
+
+	// Dynamic, FIRST of two arguments (escaped extension): the literal
+	// discriminator covers the followed-by-',' shape identically.
+	unknownModule(t, ".opencode/plugins/dynesc2.js",
+		"export const load2 = async () => import(\"./dep\\x2ejs\", null);\n",
+		"module specifier with escape sequences (not decodable)")
+
+	// Static-parity arm (expectFrom alignment): the static specifier path
+	// degrades the same way — one uniform not-decodable stance.
+	unknownModule(t, ".opencode/plugins/staticesc.js",
+		"import { dep } from \".\\x2fdep.js\";\nexport const out = dep;\n",
+		"module specifier with escape sequences (not decodable)")
+}
+
+// TestF5_DynImport_ConsumerGuardSynthetic exercises the graph-layer
+// defense-in-depth branch DIRECTLY (unreachable via Parse since the parser
+// degrades the module before the DynamicImports append): a synthetic
+// literal DynamicImport carrying escape sequences must surface as a
+// reason-coded dynamic unknown — never silently vanish, never ground
+// broken. The raw specifier text is kept in the finding (the consumer
+// cannot decode; the bytes are the diagnostic), distinct from the
+// parser-path pin above where raw bytes never get that far.
+func TestF5_DynImport_ConsumerGuardSynthetic(t *testing.T) {
+	m := &Module{Path: ".opencode/plugins/dynconsumer.js", NamedExports: map[string]bool{}}
+	m.DynamicImports = append(m.DynamicImports, DynamicImport{Specifier: ".\\x2fdep.js", Line: 3})
+	r := scanParsed(
+		map[string][]byte{m.Path: []byte("export const x = 1;\n")},
+		map[string]*Module{m.Path: m},
+	)
+	if r.HasBroken() {
+		t.Fatalf("consumer guard must never ground broken (U6): %+v", r.Broken)
+	}
+	if u := findUnknownContaining(r, m.Path, "escape sequences (not decodable)"); u == nil {
+		t.Fatalf("expected not-decodable dynamic unknown from the consumer guard: %+v", r.Unknown)
+	}
+}
+
 func TestF5_FB_AwaitBoundaries(t *testing.T) {
 	// (a) AMENDED verdict: module-top await is ADMITTED (module-top
 	// [+Await], operator-ratified 2026-11-08). Pre-amendment this was

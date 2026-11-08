@@ -272,6 +272,22 @@ func scanParsed(tree map[string][]byte, parsed map[string]*Module) *Report {
 					Path: m, Specifier: "(computed)",
 					Reason: fmt.Sprintf("dynamic import with a computed (non-literal) specifier at line %d; excluded from the required-edge set", di.Line),
 				})
+			} else if hasEscape(di.Specifier) {
+				// Consuming-side mirror of the parser's not-decodable
+				// guard (parseDynamicImport): a literal specifier that
+				// carries escape sequences cannot be produced by Parse
+				// anymore (the module degrades first), but if one ever
+				// reaches here the raw bytes must still never be treated
+				// as a decodable literal — an escape in the relative
+				// prefix can make IsRelativeSpecifier misjudge the raw
+				// bytes (silent vanish); later escapes keep the prefix
+				// but stay undecodable. Surface reason-coded instead.
+				// (Exercised by the synthetic scanParsed fixture — see
+				// TestF5_DynImport_ConsumerGuardSynthetic.)
+				r.Unknown = append(r.Unknown, UnknownFinding{
+					Path: m, Specifier: di.Specifier,
+					Reason: fmt.Sprintf("dynamic import specifier at line %d carries escape sequences (not decodable); excluded from the required-edge set", di.Line),
+				})
 			} else if IsRelativeSpecifier(di.Specifier) {
 				r.Unknown = append(r.Unknown, UnknownFinding{
 					Path: m, Specifier: di.Specifier,

@@ -1501,6 +1501,20 @@ func (p *parser) parseDynamicImport() {
 		literal = p.tok.Text
 		nx := p.peekTok()
 		isLiteral = nx.Kind == tkPunct && (nx.Text == ")" || nx.Text == ",")
+		if isLiteral && hasEscape(literal) {
+			// Not-decodable guard, mirroring expectFrom's static-path
+			// stance: the lexer keeps string bytes raw (escapes are NOT
+			// decoded), so raw bytes must never be admitted as a literal
+			// specifier edge input. An escape in the relative prefix can
+			// make IsRelativeSpecifier misjudge the raw bytes (the
+			// finding would vanish silently); later escapes keep the
+			// prefix but stay undecodable. node --check confirms an
+			// escaped-literal dynamic import is legal ES — this is a
+			// reason-coded parser-limitation degradation (U5), the same
+			// uniform stance the static specifier path takes, never a
+			// syntax-error call.
+			p.failAt(p.tok.Line, "module specifier with escape sequences (not decodable)")
+		}
 	}
 	if p.isPunct(")") {
 		p.advance()
