@@ -83,4 +83,5 @@ __pycache__/
 *.pyc
 .local/coordinator/
 .local/config/
+.local/backups/
 .opencode/node_modules/
