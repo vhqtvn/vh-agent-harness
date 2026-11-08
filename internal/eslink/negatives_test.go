@@ -52,9 +52,14 @@ func findingSet(r *Report) map[string]int {
 	return out
 }
 
-// assertDelta pins the exact finding delta (as a MULTISET — duplicate
-// findings count): every added/removed finding is one of
-// wantAdded/wantRemoved (substring match), nothing else moves.
+// assertDelta pins the exact finding delta as an ORDER-INSENSITIVE,
+// MULTISET-EXACT comparison (cascade-3 t1c-F2): findings are counted
+// individually (duplicates matter), each wantAdded/wantRemoved entry
+// (substring match) CONSUMES exactly one delta member, a want with no
+// unconsumed match fails (missing), two wants cannot consume the same
+// member, and any unconsumed delta member fails (unexpected). The
+// pre-fix gap: the substring filter let ONE want absorb arbitrarily many
+// duplicate findings.
 func assertDelta(t *testing.T, base, mutated *Report, wantAdded, wantRemoved []string) {
 	t.Helper()
 	b, m := findingSet(base), findingSet(mutated)
@@ -75,48 +80,34 @@ func assertDelta(t *testing.T, base, mutated *Report, wantAdded, wantRemoved []s
 	}
 	sort.Strings(added)
 	sort.Strings(removed)
-	keep := func(list []string, wants []string) []string {
-		var rest []string
-		for _, k := range list {
-			matched := false
-			for _, w := range wants {
-				if strings.Contains(k, w) {
-					matched = true
+	consume := func(kind string, members, wants []string) {
+		used := make([]bool, len(members))
+		for _, w := range wants {
+			hit := -1
+			for i, k := range members {
+				if !used[i] && strings.Contains(k, w) {
+					hit = i
 					break
 				}
 			}
-			if !matched {
+			if hit < 0 {
+				t.Fatalf("expected %s finding %q not present (each want consumes exactly one member); delta was:\n%s",
+					kind, w, strings.Join(members, "\n"))
+			}
+			used[hit] = true
+		}
+		var rest []string
+		for i, k := range members {
+			if !used[i] {
 				rest = append(rest, k)
 			}
 		}
-		return rest
-	}
-	if rest := keep(added, wantAdded); len(rest) != 0 {
-		t.Fatalf("unexpected ADDED findings (not in expected delta):\n%s", strings.Join(rest, "\n"))
-	}
-	if rest := keep(removed, wantRemoved); len(rest) != 0 {
-		t.Fatalf("unexpected REMOVED findings (not in expected delta):\n%s", strings.Join(rest, "\n"))
-	}
-	// Every expected delta member must actually appear.
-	for _, w := range wantAdded {
-		if !containsAny(added, w) {
-			t.Fatalf("expected ADDED finding %q not present; delta was:\n%s", w, strings.Join(added, "\n"))
+		if len(rest) != 0 {
+			t.Fatalf("unexpected %s findings (no matching want):\n%s", kind, strings.Join(rest, "\n"))
 		}
 	}
-	for _, w := range wantRemoved {
-		if !containsAny(removed, w) {
-			t.Fatalf("expected REMOVED finding %q not present; delta was:\n%s", w, strings.Join(removed, "\n"))
-		}
-	}
-}
-
-func containsAny(list []string, substr string) bool {
-	for _, k := range list {
-		if strings.Contains(k, substr) {
-			return true
-		}
-	}
-	return false
+	consume("ADDED", added, wantAdded)
+	consume("REMOVED", removed, wantRemoved)
 }
 
 // Negative 1 — removed-export: dropping a provider's named export must flip

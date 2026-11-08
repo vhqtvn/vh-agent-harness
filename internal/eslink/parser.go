@@ -11,21 +11,44 @@ type ImportSpec struct {
 	LocalName  string // local alias; equal to ImportName without rename
 }
 
-// ImportDecl is one parsed static `import` declaration.
+// ImportDecl is one parsed static `import` declaration. Line is the
+// 1-based line of the `import` keyword; SpecLine is the line of the
+// module-specifier string (the importer-side source span of the edge —
+// they differ on multi-line import lists).
 type ImportDecl struct {
 	Specifier  string
 	Default    bool
 	Namespace  bool
 	SideEffect bool
 	Named      []ImportSpec
+	Line       int
+	SpecLine   int
 }
 
 // ReexportEdge is one `export { a as b } from "m"` entry: ExportedName joins
 // this module's surface and ImportName becomes a required edge against m.
+// Line/SpecLine are the `export` keyword and specifier-string lines.
 type ReexportEdge struct {
 	Specifier    string
 	ImportName   string
 	ExportedName string
+	Line         int
+	SpecLine     int
+}
+
+// StarReexport is one `export * from "m"` declaration with its source span.
+type StarReexport struct {
+	Specifier string
+	Line      int
+	SpecLine  int
+}
+
+// NamespaceReexport is one `export * as ns from "m"` declaration with its
+// source span.
+type NamespaceReexport struct {
+	Specifier string
+	Line      int
+	SpecLine  int
 }
 
 // DynamicImport records one `import(...)` expression. Dynamic imports are
@@ -48,8 +71,8 @@ type Module struct {
 	HasDefault         bool
 	NamedExports       map[string]bool
 	ReexportEdges      []ReexportEdge
-	StarReexports      []string
-	NamespaceReexports []string
+	StarReexports      []StarReexport
+	NamespaceReexports []NamespaceReexport
 
 	DynamicImports []DynamicImport
 
@@ -117,8 +140,8 @@ type parser struct {
 	mod          *Module
 	asyncStack   []bool
 	lastSpec     string
+	lastSpecLine int
 	wasAsyncHead bool
-	coverReason  string // tryArrowParen's recorded parameter-failure reason
 	// justClosedBlock is true exactly when the last consumed token was the
 	// '}' closing a BLOCK BODY (function/arrow/method/constructor body,
 	// class body, or a bare block statement) — family 8: "declarations
@@ -290,13 +313,15 @@ func (p *parser) expectSemi() {
 // --- module-level declarations ----------------------------------------------
 
 func (p *parser) parseImport() {
+	declLine := p.tok.Line
 	p.advance() // past 'import'
-	d := ImportDecl{}
+	d := ImportDecl{Line: declLine}
 	if p.tok.Kind == tkString {
 		if hasEscape(p.tok.Text) {
 			p.failAt(p.tok.Line, "module specifier with escape sequences (not decodable)")
 		}
 		d.Specifier = p.tok.Text
+		d.SpecLine = p.tok.Line
 		d.SideEffect = true
 		p.advance()
 		p.expectSemi()
@@ -332,6 +357,7 @@ func (p *parser) parseImport() {
 	}
 	p.expectFrom()
 	d.Specifier = p.lastSpec
+	d.SpecLine = p.lastSpecLine
 	p.expectSemi()
 	if !d.Default && !d.Namespace && !d.SideEffect && len(d.Named) == 0 {
 		// `import {} from "m"` is valid ES: presence-only edge.
@@ -375,7 +401,8 @@ func (p *parser) parseImportList(d *ImportDecl) {
 	}
 }
 
-// expectFrom consumes `from "spec"`, recording the specifier in lastSpec.
+// expectFrom consumes `from "spec"`, recording the specifier and its line
+// in lastSpec/lastSpecLine.
 func (p *parser) expectFrom() {
 	if !p.isIdent("from") {
 		p.failAt(p.tok.Line, "expected 'from'")
@@ -388,10 +415,12 @@ func (p *parser) expectFrom() {
 		p.failAt(p.tok.Line, "module specifier with escape sequences (not decodable)")
 	}
 	p.lastSpec = p.tok.Text
+	p.lastSpecLine = p.tok.Line
 	p.advance()
 }
 
 func (p *parser) parseExport() {
+	declLine := p.tok.Line
 	p.advance() // past 'export'
 	switch {
 	case p.isIdent("default"):
@@ -433,6 +462,7 @@ func (p *parser) parseExport() {
 		if p.isIdent("from") {
 			p.expectFrom()
 			spec := p.lastSpec
+			specLine := p.lastSpecLine
 			for _, e := range entries {
 				exported := e.exported()
 				if exported == "default" {
@@ -442,11 +472,12 @@ func (p *parser) parseExport() {
 				}
 				p.mod.ReexportEdges = append(p.mod.ReexportEdges, ReexportEdge{
 					Specifier: spec, ImportName: e.first, ExportedName: exported,
+					Line: declLine, SpecLine: specLine,
 				})
 			}
 			if len(entries) == 0 {
 				// `export {} from "m"`: presence-only edge (reference parity).
-				p.mod.Imports = append(p.mod.Imports, ImportDecl{Specifier: spec, SideEffect: true})
+				p.mod.Imports = append(p.mod.Imports, ImportDecl{Specifier: spec, SideEffect: true, Line: declLine, SpecLine: specLine})
 			}
 			p.expectSemi()
 		} else {
@@ -479,11 +510,15 @@ func (p *parser) parseExport() {
 			} else {
 				p.mod.NamedExports[ns] = true
 			}
-			p.mod.NamespaceReexports = append(p.mod.NamespaceReexports, spec)
+			p.mod.NamespaceReexports = append(p.mod.NamespaceReexports, NamespaceReexport{
+				Specifier: spec, Line: declLine, SpecLine: p.lastSpecLine,
+			})
 			p.expectSemi()
 		} else {
 			p.expectFrom()
-			p.mod.StarReexports = append(p.mod.StarReexports, p.lastSpec)
+			p.mod.StarReexports = append(p.mod.StarReexports, StarReexport{
+				Specifier: p.lastSpec, Line: declLine, SpecLine: p.lastSpecLine,
+			})
 			p.expectSemi()
 		}
 	default:
@@ -566,7 +601,7 @@ func (p *parser) parseDeclarators(mode declMode) {
 			}
 			p.mod.NamedExports[p.tok.Text] = true
 		}
-		p.parseBindingPattern()
+		p.parseBindingPattern(false)
 		if p.isPunct("=") {
 			p.advance()
 			p.operandize()
@@ -585,21 +620,37 @@ func (p *parser) parseDeclarators(mode declMode) {
 }
 
 // parseBindingPattern parses Ident | ObjectPattern | ArrayPattern (binding
-// position: var/let/const declarators, for-of heads, parameters).
-func (p *parser) parseBindingPattern() {
+// position: var/let/const declarators, for-of heads, parameters). In
+// PARAMETER position (paramCtx) the AMB-1 restricted-default rule binds
+// through the whole pattern: every element default is a Param-level
+// Default, so the sequence-root rejection applies to it exactly as to a
+// top-level param default (the tier1_d F1 bypass fix).
+func (p *parser) parseBindingPattern(paramCtx bool) {
 	switch {
 	case p.tok.Kind == tkIdent:
 		p.advance()
 	case p.isPunct("{"):
-		p.parseObjectPattern()
+		p.parseObjectPattern(paramCtx)
 	case p.isPunct("["):
-		p.parseArrayPattern()
+		p.parseArrayPattern(paramCtx)
 	default:
 		p.failAt(p.tok.Line, "expected binding, found %q", p.describe())
 	}
 }
 
-func (p *parser) parseObjectPattern() {
+// parsePatternDefault parses one binding-pattern element default and
+// enforces the AMB-1 sequence-root rejection in parameter position (shared
+// by object shorthand `{ a = … }` and array element `[a = …]` defaults).
+func (p *parser) parsePatternDefault(paramCtx bool) {
+	p.advance() // past '='
+	p.operandize()
+	d := p.parseAssign()
+	if paramCtx && isSeqRoot(d) {
+		p.failAt(p.tok.Line, "%s", ReasonArrowDefault)
+	}
+}
+
+func (p *parser) parseObjectPattern(paramCtx bool) {
 	p.expect("{")
 	for {
 		if p.isPunct("}") {
@@ -623,12 +674,10 @@ func (p *parser) parseObjectPattern() {
 		p.advance()
 		if p.isPunct(":") {
 			p.advance()
-			p.parseBindingPattern()
+			p.parseBindingPattern(paramCtx)
 		} else if p.isPunct("=") {
 			// shorthand with default: `{ a = 1 }`
-			p.advance()
-			p.operandize()
-			p.parseAssign()
+			p.parsePatternDefault(paramCtx)
 		} else if p.tok.Kind != tkIdent && !p.isPunct(",") && !p.isPunct("}") {
 			p.failAt(p.tok.Line, "shorthand binding requires identifier property")
 		}
@@ -640,7 +689,7 @@ func (p *parser) parseObjectPattern() {
 	}
 }
 
-func (p *parser) parseArrayPattern() {
+func (p *parser) parseArrayPattern(paramCtx bool) {
 	p.expect("[")
 	for {
 		if p.isPunct("]") {
@@ -653,17 +702,15 @@ func (p *parser) parseArrayPattern() {
 		}
 		if p.isPunct("...") {
 			p.advance()
-			p.parseBindingPattern()
+			p.parseBindingPattern(paramCtx)
 			if p.isPunct(",") {
 				p.failAt(p.tok.Line, "rest element must be the final element")
 			}
 			continue
 		}
-		p.parseBindingPattern()
+		p.parseBindingPattern(paramCtx)
 		if p.isPunct("=") {
-			p.advance()
-			p.operandize()
-			p.parseAssign()
+			p.parsePatternDefault(paramCtx)
 		}
 		if p.isPunct(",") {
 			p.advance()
@@ -769,7 +816,7 @@ func (p *parser) parseParams() {
 			p.expect(")")
 			return
 		}
-		p.parseBindingPattern()
+		p.parseBindingPattern(true)
 		if p.isPunct("=") {
 			p.advance()
 			p.operandize()
@@ -1095,7 +1142,7 @@ func (p *parser) parseAssign() *exprNode {
 		// fall back to the plain expression read.
 		c := p.save()
 		p.advance()
-		if a, ok := p.tryArrowParen(true); ok {
+		if a, _, ok := p.tryArrowParen(true); ok {
 			return a
 		}
 		p.restore(c)
@@ -1331,18 +1378,21 @@ func (p *parser) parsePrimary() *exprNode {
 	case tkPunct:
 		switch p.tok.Text {
 		case "(":
-			if a, ok := p.tryArrowParen(false); ok {
+			a, attemptReason, ok := p.tryArrowParen(false)
+			if ok {
 				return a
 			}
-			// tryArrowParen restored the cursor to '(': advance past it and
-			// let the group flow back into the normal pipeline so
-			// postfix/binary/ternary continuations all proceed.
+			// The attempt's own failure reason is held LOCALLY: a nested
+			// group's attempt during the re-parse below cannot clobber
+			// it (outermost-attempt-wins, the cascade-3 fix).
 			p.advance()
 			p.operandize()
-			inner := p.parseExpression()
+			inner := p.parseGroupInterior(attemptReason)
 			p.expect(")")
 			if p.isPunct("=>") {
-				reason := p.coverReason
+				// '=>' after the close: a cover-grammar form the freeze
+				// REJECTS — degrade citing THIS group's attempt reason.
+				reason := attemptReason
 				if reason == "" {
 					reason = "not a valid restricted parameter list"
 				}
@@ -1428,13 +1478,15 @@ func (p *parser) asyncSingleArrowAhead() bool {
 
 // tryArrowParen attempts the RESTRICTED arrow parameter production (AMB-1)
 // for a '(' group at the cursor. On success (valid restricted binding list
-// followed by '=>') the arrow is parsed and (node, true) is returned. On
-// failure the cursor is RESTORED to '(' and the recorded parameter-failure
-// reason is left in p.coverReason — the caller parses the group as a
-// parenthesized expression; if '=>' follows, this was a cover-grammar form
-// the freeze REJECTS and the caller degrades with that reason (the F1-FB
-// false-ok guard: never a silent re-read).
-func (p *parser) tryArrowParen(isAsync bool) (*exprNode, bool) {
+// followed by '=>') the arrow is parsed and (node, "", true) is returned.
+// On failure the cursor is RESTORED to '(' and the attempt's OWN failure
+// reason is returned alongside (nil, reason, false) — the caller holds it
+// locally across the cover re-parse, so a nested group's attempt cannot
+// clobber it: if '=>' follows the group close, this was a cover-grammar
+// form the freeze REJECTS and the caller degrades citing THIS group's
+// outermost attempt reason (the F1-FB false-ok guard: never a silent
+// re-read).
+func (p *parser) tryArrowParen(isAsync bool) (*exprNode, string, bool) {
 	c := p.save()
 	reason := ""
 	failed := false
@@ -1453,17 +1505,37 @@ func (p *parser) tryArrowParen(isAsync bool) (*exprNode, bool) {
 	}()
 	if !failed && p.isPunct("=>") {
 		p.parseArrowRest(isAsync)
-		return &exprNode{}, true
+		return &exprNode{}, "", true
 	}
 	p.restore(c)
-	// Preserve the most recent NON-EMPTY parameter-failure reason: a
-	// nested (valid-as-params, non-arrow) group attempt must not clobber
-	// the outer list's binding-failure reason — the F1-FB pin requires the
-	// comma-default reason to survive the cover re-parse.
-	if reason != "" {
-		p.coverReason = reason
+	return nil, reason, false
+}
+
+// parseGroupInterior parses a parenthesized group's interior as a plain
+// expression AFTER a failed restricted-parameter attempt (attemptReason is
+// that attempt's own failure reason, "" when the interior parsed as a
+// valid binding list but no '=>' followed). If the expression reading
+// ALSO fails and the param attempt had failed, the group cannot be read
+// either way — the attempt's reason is the informative cover explanation
+// and replaces the expression-side failure (U5; e.g. `({ a = (b, c) })`
+// fails the attempt on the AMB-1 default rule and the object-literal
+// re-read on `=` — the arrow-params form is the honest verdict). When the
+// attempt succeeded as a binding list (attemptReason == "") the original
+// expression failure propagates untouched.
+func (p *parser) parseGroupInterior(attemptReason string) *exprNode {
+	if attemptReason == "" {
+		return p.parseExpression()
 	}
-	return nil, false
+	defer func() {
+		if r := recover(); r != nil {
+			_, isF := r.(*parseFailure)
+			if !isF {
+				panic(r)
+			}
+			panic(&parseFailure{reason: fmt.Sprintf("%s: %s", ReasonArrowParams, attemptReason)})
+		}
+	}()
+	return p.parseExpression()
 }
 
 func (p *parser) parseNew() {

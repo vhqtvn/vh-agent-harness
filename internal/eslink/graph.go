@@ -146,7 +146,8 @@ func scanParsed(tree map[string][]byte, parsed map[string]*Module) *Report {
 			}
 			r.checkRequirement(m, e.Specifier, e.ImportName, tree, parsed, resolve)
 		}
-		for _, spec := range mod.NamespaceReexports {
+		for _, nsr := range mod.NamespaceReexports {
+			spec := nsr.Specifier
 			if !IsRelativeSpecifier(spec) {
 				continue
 			}
@@ -168,7 +169,8 @@ func scanParsed(tree map[string][]byte, parsed map[string]*Module) *Report {
 				})
 			}
 		}
-		for _, spec := range mod.StarReexports {
+		for _, sr := range mod.StarReexports {
+			spec := sr.Specifier
 			if !IsRelativeSpecifier(spec) {
 				continue
 			}
@@ -373,7 +375,8 @@ func resolveSurface(m *Module, tree map[string][]byte, resolve func(string, map[
 	// name: two DISTINCT targets → ambiguous; duplicate stars of the SAME
 	// target stay ok (ESM dedupes a single module's star re-export).
 	providedBy := map[string]string{}
-	for _, spec := range m.StarReexports {
+	for _, sr := range m.StarReexports {
+		spec := sr.Specifier
 		if specifierNotAssessable(spec) || !IsRelativeSpecifier(spec) {
 			s.open = true
 			continue
@@ -514,7 +517,9 @@ func Summarize(tree map[string][]byte) *LintSummary {
 // EdgeRecord is one row of the per-edge audit ledger (gates 3–4): the
 // L-classification mirrors the packet's L-chain (L0 importer unrecognized;
 // L1 importer FIT, provider not assessable/open; L3 both FIT, provider
-// surface closed).
+// surface closed). Line/SpecLine are the importer-side source span of the
+// declaration that produced the edge (decl keyword line → specifier
+// string line; they differ on multi-line import lists).
 type EdgeRecord struct {
 	Type            string
 	Importer        string
@@ -526,6 +531,8 @@ type EdgeRecord struct {
 	ProviderFit     bool
 	ProviderClosed  bool
 	LClass          string // "L0" | "L1" | "L3"
+	Line            int    // 1-based line of the declaring keyword
+	SpecLine        int    // 1-based line of the specifier string
 }
 
 // EdgeLedger re-derives the per-edge ledger with L-classes over a parsed
@@ -559,7 +566,7 @@ func EdgeLedger(tree map[string][]byte) (parsed map[string]*Module, edges []Edge
 		surfaces[m] = s
 		return s
 	}
-	add := func(typ, importer, spec string, symbols []string, presence bool) {
+	add := func(typ, importer, spec string, symbols []string, presence bool, line, specLine int) {
 		provider := ResolveSpecifier(importer, spec)
 		_, present := tree[provider]
 		ps := resolve(provider, map[string]bool{})
@@ -581,6 +588,7 @@ func EdgeLedger(tree map[string][]byte) (parsed map[string]*Module, edges []Edge
 			Symbols: symbols, Presence: presence,
 			ProviderPresent: present, ProviderFit: providerFit,
 			ProviderClosed: closed, LClass: lc,
+			Line: line, SpecLine: specLine,
 		})
 	}
 	for _, m := range sortedModuleKeys(parsed) {
@@ -589,17 +597,17 @@ func EdgeLedger(tree map[string][]byte) (parsed map[string]*Module, edges []Edge
 		// pre-failure edges join as L0 rows (see function comment).
 		for _, e := range mod.ReexportEdges {
 			if IsRelativeSpecifier(e.Specifier) {
-				add("reexport", m, e.Specifier, []string{e.ImportName}, false)
+				add("reexport", m, e.Specifier, []string{e.ImportName}, false, e.Line, e.SpecLine)
 			}
 		}
-		for _, spec := range mod.NamespaceReexports {
-			if IsRelativeSpecifier(spec) {
-				add("ns-reexport", m, spec, nil, true)
+		for _, nsr := range mod.NamespaceReexports {
+			if IsRelativeSpecifier(nsr.Specifier) {
+				add("ns-reexport", m, nsr.Specifier, nil, true, nsr.Line, nsr.SpecLine)
 			}
 		}
-		for _, spec := range mod.StarReexports {
-			if IsRelativeSpecifier(spec) {
-				add("star", m, spec, nil, true)
+		for _, sr := range mod.StarReexports {
+			if IsRelativeSpecifier(sr.Specifier) {
+				add("star", m, sr.Specifier, nil, true, sr.Line, sr.SpecLine)
 			}
 		}
 	}
@@ -617,7 +625,7 @@ func EdgeLedger(tree map[string][]byte) (parsed map[string]*Module, edges []Edge
 				syms = append(syms, n.ImportName)
 			}
 			presence := d.Namespace || d.SideEffect || len(syms) == 0
-			add("import", m, d.Specifier, syms, presence)
+			add("import", m, d.Specifier, syms, presence, d.Line, d.SpecLine)
 		}
 	}
 	return parsed, edges

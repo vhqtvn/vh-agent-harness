@@ -119,12 +119,151 @@ func TestF1_FB_ArrowParamCommaDefault(t *testing.T) {
 		"const f = (a = (b, c)(x)) => a;\nexport const okCall = f;\n")
 	// False-direction counterpart: the sequence AT the root — through
 	// two paren layers, with no composing operation — still degrades
-	// (cover-grammar rejection; the nested `((…))` group's own
-	// binding failure is the recorded cover reason). The unary/postfix
+	// (cover-grammar rejection). The group's OWN attempt failure — the
+	// isSeqRoot default reason — is the recorded cover reason (the
+	// outermost-attempt-wins rule, pinned by
+	// TestF1_FB_CoverReasonOutermostWins). The unary/postfix
 	// compositions admit a sequence OPERAND, never a sequence ROOT
 	// (paren transparency is unchanged).
 	unknownModule(t, ".opencode/plugins/cover-seqroot2.js",
 		"const s = (a = ((b, c))) => a;\n", ReasonArrowParams)
+}
+
+// TestF1_FB_CoverReasonOutermostWins pins the cover-reason rule on nested
+// failing paren groups (cascade-3 reported-unfixed deviation): when a
+// group's restricted-parameter attempt fails and a NESTED group's attempt
+// also fails during the cover re-parse, the OUTERMOST failing attempt's
+// reason is the one the degrade cites — a nested attempt must not clobber
+// it (pre-fix, most-recent-non-empty won instead).
+func TestF1_FB_CoverReasonOutermostWins(t *testing.T) {
+	// Outer attempt fails at the SECOND param position ("expected
+	// binding, found '('"); the nested `(b = (c, d))` group's own
+	// attempt fails with the arrow-default reason during the re-parse.
+	// The degrade must cite the OUTER binding failure.
+	unknownModule(t, ".opencode/plugins/cover-nested.js",
+		"const f = (a, (b = (c, d))) => a;\n", "expected binding")
+	// Mirror direction: the outer attempt fails the isSeqRoot default
+	// check; the nested `((b, c))` group's attempt fails with a binding
+	// error during the re-parse. The degrade must cite the OUTER
+	// arrow-default reason (and not the nested binding failure).
+	unknownModule(t, ".opencode/plugins/cover-seqroot3.js",
+		"const s = (a = ((b, c))) => a;\n", ReasonArrowDefault)
+	// The plain comma-default pin (F1-FB above) is the non-nested
+	// baseline: its reason survives a nested VALID-as-params group.
+	unknownModule(t, ".opencode/plugins/cover-base.js",
+		"const f = (a = (b, c)) => a;\n", ReasonArrowDefault)
+}
+
+// TestF1_FB_PatternDefaultSeqRoot pins the AMB-1 restriction through
+// NESTED binding-pattern element defaults (cascade-3 tier1_d F1): the
+// freeze's Param production admits BindingPattern with defaults, and the
+// Default restriction ("root through parentheses is not a sequence")
+// applies to pattern-element defaults in PARAMETER position exactly as it
+// does to top-level param defaults — the check must not be bypassable by
+// nesting the default inside `{…}`/`[…]`. Declarator-position pattern
+// defaults (no arrow cover at stake) stay admitted — pinned as the
+// non-regression direction.
+func TestF1_FB_PatternDefaultSeqRoot(t *testing.T) {
+	// The bypass (RED pre-fix, tier1_d F1): pattern-element defaults with
+	// a sequence root degrade with the same reason as top-level ones.
+	unknownModule(t, ".opencode/plugins/patdef-obj.js",
+		"const f = ({ a = (b, c) }) => a;\n", ReasonArrowDefault)
+	unknownModule(t, ".opencode/plugins/patdef-arr.js",
+		"const g = ([a = (b, c)]) => a;\n", ReasonArrowDefault)
+	unknownModule(t, ".opencode/plugins/patdef-nested.js",
+		"const h = ({ k: { a = ((b, c)) } }) => a;\n", ReasonArrowDefault)
+	// Non-sequence pattern defaults stay admitted (F1-FO repertoire arm).
+	fitModule(t, ".opencode/plugins/patdef-ok.js",
+		"const f = ({ a = (b + c), m = \"ro\" }) => a;\nexport const ok = f;\n")
+	// Declarator position: no arrow-parameter cover grammar at stake —
+	// sequence-rooted pattern defaults stay admitted (non-regression).
+	fitModule(t, ".opencode/plugins/patdef-decl.js",
+		"const obj = { q: 1 };\nconst { a = (b, c) } = obj;\nexport const out = a;\n")
+	// for-of head: array-pattern defaults stay admitted (no cover
+	// ambiguity; object-destructured heads are rejected wholesale
+	// elsewhere) — SEQUENCE-ROOTED default, so the arm discriminates:
+	// a paramCtx leak into for-of heads would degrade this module
+	// (cascade-3 B3/C3).
+	fitModule(t, ".opencode/plugins/patdef-forof.js",
+		"for (const [a = (b, c)] of [[1]]) { use(a); }\nexport const out = 1;\n")
+}
+
+// TestF1_FO_ComposedChainUnaryOverMemberOverSeq pins the COMPOSED chain
+// (cascade-3 F3, corpus-absent): a unary root over a member continuation
+// over a parenthesized-sequence primary — `(a = -(b, c).x) => a`. Each
+// composition layer resets the descriptor root (unary note in parseUnary,
+// member note in parsePostfix), so the admitted root is the composed
+// operation, never the sequence underneath. Pinning this guards against a
+// descriptor refactor that propagates ekParen/ekSeq through EITHER layer.
+func TestF1_FO_ComposedChainUnaryOverMemberOverSeq(t *testing.T) {
+	src := "const pick = (a = -(b, c).x) => a;\n" +
+		"const deep = (a = -((b, c).x).y) => a;\n" + // unary over member over paren-grouped member chain
+		"export const out = pick + deep;\n"
+	m := fitModule(t, ".opencode/plugins/composed.js", src)
+	if !m.NamedExports["out"] {
+		t.Fatalf("expected out exported, got %v", m.NamedExports)
+	}
+	requireCleanScan(t, Scan(treeOf(map[string]string{
+		".opencode/plugins/composed.js": src,
+	})))
+}
+
+// TestF1_FO_OptionalChainArms pins both admitted optional-chain arms
+// (cascade-3 F5, corpus-absent): `?.ident` member access and `?.[expr]`
+// computed access. The third arm — optional CALL `?.(` — is an explicit
+// freeze exclusion (D-2): it degrades reason-coded (the false direction —
+// admitting it would extend the grammar).
+func TestF1_FO_OptionalChainArms(t *testing.T) {
+	src := "const box = { meta: { tags: [\"a\"] } };\n" +
+		"const tag = box?.meta?.tags?.[0];\n" + // ?.ident chains + ?.[…]
+		"const orNull = box?.missing;\n" +
+		"export const out = tag ?? orNull;\n"
+	m := fitModule(t, ".opencode/plugins/optchain.js", src)
+	if !m.NamedExports["out"] {
+		t.Fatalf("expected out exported, got %v", m.NamedExports)
+	}
+	requireCleanScan(t, Scan(treeOf(map[string]string{
+		".opencode/plugins/optchain.js": src,
+	})))
+	// False direction: the optional-call arm stays excluded.
+	unknownModule(t, ".opencode/plugins/optcall.js",
+		"const f = (o) => o?.();\nexport const out = 1;\n", "optional call")
+}
+
+// TestF1_FO_LineSeparatorIdentifierBoundary pins U+2028/U+2029 at
+// IDENTIFIER boundaries (cascade-3 t1b-F1, corpus-absent): as a statement
+// separator directly after an identifier-terminated statement, and
+// immediately after an identifier before a punctuator. Both code points
+// are ES line terminators; the lexer consumes them as such at token
+// boundaries after PUNCTUATION (next()'s isLineTerm check runs BEFORE
+// lexToken). IDENTIFIER-ADJACENT separators are a different matter: the
+// coarse >= 0x80 identifier-part scan absorbs them (known defect, see
+// the last arm) - pinned honestly there, not claimed correct.
+func TestF1_FO_LineSeparatorIdentifierBoundary(t *testing.T) {
+	src := "const a = 1;\n\u2028const b = 2;\n\u2028export const out = a + b;\n" // U+2028 separators after ';'
+	m := fitModule(t, ".opencode/plugins/lssep.js", src)
+	if !m.NamedExports["out"] {
+		t.Fatalf("expected out exported through U+2028 separators, got %v", m.NamedExports)
+	}
+	requireCleanScan(t, Scan(treeOf(map[string]string{
+		".opencode/plugins/lssep.js": src,
+	})))
+	// U+2029: same shape.
+	fitModule(t, ".opencode/plugins/pssep.js",
+		"const a = 1;\u2029const b = 2;\nexport const out = a + b;\n")
+	// KNOWN-DEFECT arm (cascade-3 B1/C2 ground truth, probed): an
+	// identifier-ADJACENT separator is currently ABSORBED into the
+	// identifier text by the coarse >= 0x80 identifier-continuation
+	// scan (isIdentPart) - "export const out" + U+2028 + "= 1" records
+	// the exported name as out+U+2028 (code-point probe receipt). This
+	// is a latent lexer defect (surface-corrupting), carded separately
+	// (defer-eslink-u2028-ident-absorption); the verdict-level FIT below
+	// holds only because the absorbed identifier stays surface-INVISIBLE
+	// in this shape - pinned as the current honest verdict, NOT as
+	// correct boundary behavior. The token-boundary arms above (after
+	// punctuation) are the correct pins.
+	fitModule(t, ".opencode/plugins/lsident.js",
+		"const v = 1;\nconst w = v\u2028;\nexport const out = w;\n")
 }
 
 // --- Family 2: control flow (map table: 11 PRESENT variants) --------------------
@@ -558,6 +697,79 @@ func TestF8_FB_AsiBoundary(t *testing.T) {
 // --- Gate 7: XS-1…XS-8 export-star fixtures (map PART 2 pinned verdicts) ---------
 
 func xsTree(files map[string]string) map[string][]byte { return treeOf(files) }
+
+// TestXS_SpanRecording asserts the importer-side source-span recorder on
+// the re-export forms the corpus does NOT exercise (cascade-3 C4): export
+// star, namespace re-export, and named re-export — multi-line layouts
+// included — through the EdgeLedger, so Line/SpecLine drift on these
+// paths fails even though the 49-row golden carries no such rows.
+func TestXS_SpanRecording(t *testing.T) {
+	tree := treeOf(map[string]string{
+		".opencode/span/mod.js": "export const dep = 1;\n" +
+			"export {\n" + // named re-export below: decl line 2, spec line 4
+			"    dep as renamed\n" +
+			"} from \"./mod.js\";\n" +
+			"export * from \"./mod.js\";\n" + // star: line 5
+			"export * as ns\n" + // ns re-export: decl line 6, spec line 7
+			"    from \"./mod.js\";\n" +
+			"import {\n" + // multi-line import: decl line 8, spec line 10
+			"    dep as local\n" +
+			"} from \"./mod.js\";\n" +
+			"export const out = local + renamed + ns;\n",
+	})
+	m := Parse(".opencode/span/mod.js", tree[".opencode/span/mod.js"])
+	if m.Unparseable {
+		t.Fatalf("span fixture must parse: %s", m.UnparseableWhy)
+	}
+	if len(m.ReexportEdges) != 1 || m.ReexportEdges[0].Line != 2 || m.ReexportEdges[0].SpecLine != 4 {
+		t.Fatalf("named reexport span: got %+v, want Line=2 SpecLine=4", m.ReexportEdges)
+	}
+	if len(m.StarReexports) != 1 || m.StarReexports[0].Line != 5 || m.StarReexports[0].SpecLine != 5 {
+		t.Fatalf("star reexport span: got %+v, want Line=5 SpecLine=5", m.StarReexports)
+	}
+	if len(m.NamespaceReexports) != 1 || m.NamespaceReexports[0].Line != 6 || m.NamespaceReexports[0].SpecLine != 7 {
+		t.Fatalf("namespace reexport span: got %+v, want Line=6 SpecLine=7", m.NamespaceReexports)
+	}
+	if len(m.Imports) != 1 || m.Imports[0].Line != 8 || m.Imports[0].SpecLine != 10 {
+		t.Fatalf("multi-line import span: got %+v, want Line=8 SpecLine=10", m.Imports)
+	}
+	_, edges := EdgeLedger(tree)
+	if len(edges) != 4 {
+		t.Fatalf("ledger rows = %d, want exactly 4 (reexport+star+ns+import): %+v", len(edges), edges)
+	}
+	seen := map[string]bool{}
+	for _, e := range edges {
+		if e.Importer != ".opencode/span/mod.js" {
+			t.Fatalf("unexpected ledger row: %+v", e)
+		}
+		seen[e.Type] = true
+		switch e.Type {
+		case "reexport":
+			if e.Line != 2 || e.SpecLine != 4 {
+				t.Fatalf("ledger reexport span: %+v", e)
+			}
+		case "star":
+			if e.Line != 5 || e.SpecLine != 5 {
+				t.Fatalf("ledger star span: %+v", e)
+			}
+		case "ns-reexport":
+			if e.Line != 6 || e.SpecLine != 7 {
+				t.Fatalf("ledger ns-reexport span: %+v", e)
+			}
+		case "import":
+			if e.Line != 8 || e.SpecLine != 10 {
+				t.Fatalf("ledger import span: %+v", e)
+			}
+		default:
+			t.Fatalf("unexpected ledger edge type %q: %+v", e.Type, e)
+		}
+	}
+	for _, typ := range []string{"reexport", "star", "ns-reexport", "import"} {
+		if !seen[typ] {
+			t.Fatalf("ledger missing %s row (emission omitted): %+v", typ, edges)
+		}
+	}
+}
 
 func TestXS1_TransitiveClosureClosedAndOpenTerminal(t *testing.T) {
 	// (a) all terminal closed.

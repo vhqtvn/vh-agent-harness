@@ -29,6 +29,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -106,19 +107,25 @@ func corpusCollect(fsys fs.FS, destKey, p string, d fs.DirEntry, err error, tree
 }
 
 // goldenEdge is one row of the frozen reference ledger (generated file
-// ledger_golden_test.go).
+// ledger_golden_test.go). Line/SpecLine are the importer-side source span
+// of the declaring import/export (decl keyword line → specifier-string
+// line) — the span columns added by the cascade-3 t1c-F1 hardening so a
+// span drift (e.g. an off-by-one line recorder) fails gate 3 even when
+// the edge SET is unchanged.
 type goldenEdge struct {
 	Type     string
 	Importer string
 	Provider string
 	Presence bool
 	Symbols  []string
+	Line     int
+	SpecLine int
 }
 
 func edgeKey(e goldenEdge) string {
 	syms := append([]string(nil), e.Symbols...)
 	sort.Strings(syms)
-	return fmt.Sprintf("%s|%s|%s|%v|%s", e.Type, e.Importer, e.Provider, e.Presence, strings.Join(syms, ","))
+	return fmt.Sprintf("%s|%s|%s|%v|%s|%d-%d", e.Type, e.Importer, e.Provider, e.Presence, strings.Join(syms, ","), e.Line, e.SpecLine)
 }
 
 // --- gate 3: independent audit of the 49-edge ledger ---------------------------
@@ -133,7 +140,7 @@ func TestGate3_SuccessorLedgerMatchesReferenceAudit(t *testing.T) {
 	for _, e := range edges {
 		var syms []string
 		syms = append(syms, e.Symbols...)
-		got[edgeKey(goldenEdge{Type: e.Type, Importer: e.Importer, Provider: e.Provider, Presence: e.Presence, Symbols: syms})]++
+		got[edgeKey(goldenEdge{Type: e.Type, Importer: e.Importer, Provider: e.Provider, Presence: e.Presence, Symbols: syms, Line: e.Line, SpecLine: e.SpecLine})]++
 	}
 	want := map[string]int{}
 	for _, e := range goldenEdges {
@@ -309,6 +316,112 @@ func TestGate4_CorpusGoldenPins(t *testing.T) {
 	}
 	if fit != 45 {
 		t.Fatalf("FIT modules = %d, want 45", fit)
+	}
+}
+
+// --- rendered-variant corpus coverage (cascade-3 t1b-F3) ------------------------
+
+// renderTokens mirrors the corpus's token-substitution seam, test-local:
+// the real render pipeline lives in the harness binary; this test only
+// needs the BYTE-LEVEL effect adopters see — every {{TOKEN}} replaced by
+// a concrete value. The lint must hold identically over the rendered
+// variants, not just the raw templates/ source (tokens occur only in
+// comments and string literals, never in specifiers — parity is exact).
+var renderTokens = map[string]string{
+	"{{COORDINATOR_DIR}}": "coordinator",
+	"{{PROJECT_SLUG}}":    "vh-agent-harness",
+	"{{PROJECT_NAME}}":    "VH Agent Harness",
+}
+
+// tokenRe matches render-token-shaped text only ({{UPPER_CASE}}): the
+// corpus legitimately carries non-token doubled braces inside strings
+// (e.g. Go composite-literal examples in f3-design-readiness.js).
+var tokenRe = regexp.MustCompile(`\{\{[A-Z][A-Z0-9_]*\}\}`)
+
+func renderCorpusTree(t *testing.T, tree map[string][]byte) map[string][]byte {
+	t.Helper()
+	out := make(map[string][]byte, len(tree))
+	replaced := 0
+	for k, v := range tree {
+		s := string(v)
+		for tok, val := range renderTokens {
+			replaced += strings.Count(s, tok)
+			s = strings.ReplaceAll(s, tok, val)
+		}
+		if i := tokenRe.FindStringIndex(s); i != nil {
+			t.Fatalf("%s: unknown render token %q — extend renderTokens", k, s[i[0]:i[1]])
+		}
+		out[k] = []byte(s)
+	}
+	if replaced == 0 {
+		t.Fatalf("substitution replaced nothing — the corpus token inventory moved; re-derive renderTokens")
+	}
+	return out
+}
+
+// TestGate4b_RenderedVariantLintParity runs the lint over the
+// token-substituted corpus (the variants adopters actually receive) and
+// pins EXACT parity with the raw-template lint: identical module verdicts
+// per module, identical aggregate counters (the gate-4 pin set), zero
+// broken. A token ever landing inside a relative specifier or shifting
+// syntax would break this parity and fail here.
+func TestGate4b_RenderedVariantLintParity(t *testing.T) {
+	tree := corpusTree(t)
+	rendered := renderCorpusTree(t, tree)
+
+	// Per-module verdict parity.
+	for _, p := range sortedKeys(tree) {
+		a := Parse(p, tree[p])
+		b := Parse(p, rendered[p])
+		if a.Unparseable != b.Unparseable {
+			t.Fatalf("%s: verdict changed under token substitution: raw=%v rendered=%v (%s)", p, a.Unparseable, b.Unparseable, b.UnparseableWhy)
+		}
+	}
+
+	// Aggregate parity: the rendered tree carries the same pins.
+	raw, ren := Summarize(tree), Summarize(rendered)
+	if ren.Modules != 61 || ren.ModulesFit != 45 || ren.ModulesUnknown != 16 {
+		t.Fatalf("rendered modules 61/45/16 pin: got %d/%d/%d", ren.Modules, ren.ModulesFit, ren.ModulesUnknown)
+	}
+	if ren.Edges != 49 || ren.EdgesBroken != 0 || ren.DynamicUnknowns != 5 {
+		t.Fatalf("rendered edges 49 / broken 0 / dynUnknowns 5 pin: got %d/%d/%d", ren.Edges, ren.EdgesBroken, ren.DynamicUnknowns)
+	}
+	if ren.L0Edges != 17 || ren.L1Edges != 22 || ren.L3Edges != 10 {
+		t.Fatalf("rendered L-join 17/22/10 pin: got %d/%d/%d", ren.L0Edges, ren.L1Edges, ren.L3Edges)
+	}
+	if raw.Edges != ren.Edges || raw.L0Edges != ren.L0Edges || raw.L1Edges != ren.L1Edges || raw.L3Edges != ren.L3Edges {
+		t.Fatalf("raw/rendered ledger divergence: %+v vs %+v", raw, ren)
+	}
+
+	// The ledger itself (with spans AND specifiers) is identical over both
+	// variants — the parity key carries the raw specifier text so a token
+	// landing inside a relative specifier cannot evade the check by
+	// path-cleaning to the same provider (cascade-3 C5).
+	_, rawEdges := EdgeLedger(tree)
+	_, renEdges := EdgeLedger(rendered)
+	if len(rawEdges) != len(renEdges) {
+		t.Fatalf("ledger size changed under substitution: %d vs %d", len(rawEdges), len(renEdges))
+	}
+	edgeParityKey := func(e EdgeRecord) string {
+		syms := append([]string(nil), e.Symbols...)
+		sort.Strings(syms)
+		return fmt.Sprintf("%s|%s|%q|%s|%v|%s|%d-%d", e.Type, e.Importer, e.Specifier, e.Provider, e.Presence, strings.Join(syms, ","), e.Line, e.SpecLine)
+	}
+	rawKeys := map[string]int{}
+	for _, e := range rawEdges {
+		rawKeys[edgeParityKey(e)]++
+	}
+	for _, e := range renEdges {
+		k := edgeParityKey(e)
+		rawKeys[k]--
+		if rawKeys[k] < 0 {
+			t.Fatalf("rendered ledger carries an edge the raw tree lacks: %s", k)
+		}
+	}
+	for k, n := range rawKeys {
+		if n != 0 {
+			t.Fatalf("raw ledger carries an edge the rendered tree lacks: %s (%d)", k, n)
+		}
 	}
 }
 
