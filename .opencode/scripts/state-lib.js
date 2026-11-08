@@ -5551,7 +5551,7 @@ const DECISION_ITEM_HASH_TAG = "fnv1a:";
 function fnv1a32Hex(text, offsetBasis) {
     let h = offsetBasis >>> 0;
     const s = String(text === undefined || text === null ? "" : text);
-    for (let i = 0; i < s.length; i++) {
+    for (let i = 0; i < s.length; i += 1) {
         h ^= s.charCodeAt(i);
         h = Math.imul(h, 0x01000193) >>> 0;
     }
