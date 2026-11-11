@@ -460,7 +460,7 @@ func summarizePreservedPaths(outcomes []substrate.FileOutcome, stalePreserved []
 		staleSet[p] = true
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("preserved/stalled managed file(s) — %d path(s) NOT overwritten; run `vh-agent-harness accept-platform <path>` to adopt the platform version (writes platform bytes + advances the origin, live-first then sidecar rename):",
+	sb.WriteString(fmt.Sprintf("preserved/stalled managed file(s) — %d path(s) NOT overwritten; safeguard any local edit FIRST (back up the live file if present, e.g. `cp <path> <path>.bak`; inspect with `vh-agent-harness diff`), and only then reconcile via `vh-agent-harness accept-platform <path>` (writes platform bytes + advances the origin, live-first then sidecar rename; full procedure: `vh-agent-harness docs preserved-managed-reconciliation`):",
 		len(stalled)))
 	// Group by reason in the taxonomy's stable order for a deterministic surface.
 	for _, reason := range []managedfile.PreservedReason{
@@ -494,14 +494,22 @@ func summarizePreservedPaths(outcomes []substrate.FileOutcome, stalePreserved []
 
 // stalePreserveWarning is the consequence warning appended after the
 // platform-also-changed line in the preserved/stalled listing. Wording
-// contract (debate-fixed): it states the FUNCTIONAL CONSEQUENCE — the
-// preserved file did not receive this update's platform changes, and
-// dependent runtime files or documentation updated by this release may no
-// longer match it — and never asserts a specific gate or behavior is missing
-// from the hashes (that claim is corpus-version knowledge the origin hash
-// cannot carry). Reconciliation guidance mirrors the runbook order: inspect
-// the delta, safeguard the local edit, then re-baseline or port.
-const stalePreserveWarning = "stale-preserve warning: the preserved file(s) above did NOT receive this update's platform changes (the platform's version has changed since the base your edit diverged from); dependent runtime files or documentation updated by this release may no longer match them. Inspect the delta with `vh-agent-harness diff`, safeguard your local edit, then reconcile — `vh-agent-harness accept-platform <path>` and re-apply the edit, or port the customization into an overlay pack."
+// contract (debate-fixed; safeguard-first + routing correction): it states
+// the FUNCTIONAL CONSEQUENCE — the preserved file did not receive this
+// update's platform changes, and dependent runtime files or documentation
+// updated by this release may no longer match it — and never asserts a
+// specific gate or behavior is missing from the hashes (that claim is
+// corpus-version knowledge the origin hash cannot carry). Reconciliation
+// guidance mirrors the runbook order (vh-agent-harness docs
+// preserved-managed-reconciliation): SAFEGUARD the local edit first, then
+// inspect the delta, then re-baseline or promote — a bare accept-platform
+// before safeguarding destroys the edit it was supposed to reconcile.
+// Promotion routing follows the corrected runbook B1/B2: an overlay pack
+// fits ADDITIVE customization only (a pack cannot replace a builtin at the
+// same path — ErrShadowBuiltin fails closed); same-path replacement goes
+// through a project_owned override in harness-ownership.yml with the
+// per-release platform-delta re-apply burden.
+const stalePreserveWarning = "stale-preserve warning: the preserved file(s) above did NOT receive this update's platform changes (the platform's version has changed since the base your edit diverged from); dependent runtime files or documentation updated by this release may no longer match them. Safeguard your local edit FIRST (byte backup before anything else), inspect with `vh-agent-harness diff`, then reconcile — `vh-agent-harness accept-platform <path>` and re-apply the edit. To make the customization permanent: an overlay pack fits additions only (new paths — a pack cannot replace a builtin at the same path); to replace a rendered file, raise it to project_owned in .vh-agent-harness/harness-ownership.yml and re-check platform deltas, re-applying the changes you want, each release. Full runbook: `vh-agent-harness docs preserved-managed-reconciliation`."
 
 // summarizeProposals returns a short human list of armed-proposal conflicts so
 // the operator knows which armed file needs a decision (and that the project

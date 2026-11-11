@@ -471,6 +471,47 @@ func TestUpdate_PreservedListing_SplitsStaleFromCurrent(t *testing.T) {
 	if !strings.Contains(upd, "did NOT receive") || !strings.Contains(upd, "may no longer match") {
 		t.Errorf("the warning must state the functional consequence; got:\n%s", upd)
 	}
+	// Safeguard-first ordering: every stale-preserve warning line AND the
+	// preserved/stalled listing header must name the safeguard step BEFORE
+	// accept-platform (runbook Step 1 — a bare accept-platform on an
+	// unsafeguarded stale path destroys the local edit it was supposed to
+	// reconcile). The header was the original bare-accept-platform
+	// invitation, so its ordering is pinned separately.
+	for _, line := range strings.Split(upd, "\n") {
+		isWarning := strings.Contains(line, "stale-preserve warning")
+		isHeader := strings.Contains(line, "preserved/stalled managed file(s)")
+		if !isWarning && !isHeader {
+			continue
+		}
+		sg := strings.Index(strings.ToLower(line), "safeguard")
+		ap := strings.Index(line, "accept-platform")
+		if sg < 0 || ap < 0 {
+			t.Errorf("%s must name both the safeguard step and accept-platform; got:\n%s", map[bool]string{true: "the stale-preserve warning", false: "the preserved/stalled header"}[isWarning], line)
+		} else if sg > ap {
+			t.Errorf("%s must be safeguard-first (safeguard before any accept-platform mention); got:\n%s", map[bool]string{true: "the stale-preserve warning", false: "the preserved/stalled header"}[isWarning], line)
+		}
+	}
+	if !strings.Contains(upd, "preserved/stalled managed file(s)") || !strings.Contains(strings.ToLower(upd), "safeguard any local edit first") {
+		t.Errorf("the listing header itself must carry the safeguard-first wording; got:\n%s", upd)
+	}
+	// Routing (corrected runbook B1/B2): the refuted "port into an overlay
+	// pack" same-path route must be gone; additive vs same-path routing and
+	// the full-runbook docs pointer must be present.
+	if strings.Contains(upd, "port the customization into an overlay pack") {
+		t.Errorf("the refuted overlay same-path route must not survive in the warning; got:\n%s", upd)
+	}
+	if !strings.Contains(upd, "overlay pack") || !strings.Contains(upd, "cannot replace a builtin at the same path") {
+		t.Errorf("routing must state the overlay pack is additions-only; got:\n%s", upd)
+	}
+	if !strings.Contains(upd, "project_owned") || !strings.Contains(upd, "harness-ownership.yml") {
+		t.Errorf("routing must name the same-path project_owned route (harness-ownership.yml); got:\n%s", upd)
+	}
+	if !strings.Contains(upd, "re-applying the changes you want") {
+		t.Errorf("the project_owned route must state the per-release re-apply burden; got:\n%s", upd)
+	}
+	if !strings.Contains(upd, "docs preserved-managed-reconciliation") {
+		t.Errorf("the warning must point at the full runbook via `vh-agent-harness docs preserved-managed-reconciliation`; got:\n%s", upd)
+	}
 	// Honesty (rule 2): the warning line itself must not assert a specific gate.
 	for _, line := range strings.Split(upd, "\n") {
 		if !strings.Contains(line, "stale-preserve warning") {
