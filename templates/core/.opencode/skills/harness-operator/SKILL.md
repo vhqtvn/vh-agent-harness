@@ -129,5 +129,9 @@ authority for the live state.
 ## Pointers
 
 - `vh-agent-harness guide` — dynamic, state-aware operating manual (authority).
-- `README.agent.md` — long-form operating reference rendered into the repo.
+- `vh-agent-harness docs <key>` — embedded long-form docs (memory model, session
+  workflow, prompt guide, skills, tmp hygiene, the stale-preserve reconciliation
+  runbook); `vh-agent-harness docs` lists the keys. (The long-form
+  `README.agent.md` reference exists only in the harness's own development
+  repo — it does not render into consumer repos.)
 - `/harness` — recipe for **extending** the harness (agents/commands/skills/overlays).

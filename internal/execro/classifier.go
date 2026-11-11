@@ -8,7 +8,8 @@
 // exec-ro is allowlisted in opencode.jsonc as `vh-agent-harness exec-ro *`, so
 // opencode NEVER prompts for it — exec-ro itself is the ONLY gate for its
 // payload and MUST hard-deny dangerous inner commands. See internal/cli/exec_ro.go
-// and the exec-ro section of README.agent.md.
+// and the exec-family contract in docs/ai/shell-execution.md (rendered into
+// consumer repos by `vh-agent-harness update`).
 package execro
 
 import (

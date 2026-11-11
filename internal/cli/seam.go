@@ -1085,7 +1085,9 @@ func renderSeamStaging(staging string, renderer substrate.Renderer, renderAnswer
 	// shell-guard runtime hook (which imports it as a JS module at exec time)
 	// stays in sync with the emitted permission blocks. Single-source: the Go
 	// tables own both the opencode.jsonc permission content and this compat
-	// artifact. The file is platform_managed; see README.agent.md.
+	// artifact. The file is platform_managed AND regenerated on every apply —
+	// a consumer edit there is overwritten (genuine drift, not preservation);
+	// see the runbook: vh-agent-harness docs preserved-managed-reconciliation.
 	acDir := filepath.Join(staging, ".opencode", "repo-configs")
 	if err := os.MkdirAll(acDir, 0o755); err != nil {
 		return nil, nil, nil, fmt.Errorf("seam: ensure repo-configs dir: %w", err)

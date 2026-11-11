@@ -91,9 +91,9 @@ Runtime
 The exec family (exec, exec-ro, exec-sandbox, shell) is intentionally kept as
 DISTINCT verbs — do not unify them. exec and shell dispatch through the runtime
 backend; exec-ro is a host-side read-only classifier; exec-sandbox is a
-host-local Landlock+seccomp trampoline that never reaches the backend. See
-README.agent.md (the exec-family / "two execution planes" section) for the full
-model and when to reach for each.
+host-local Landlock+seccomp trampoline that never reaches the backend. See each
+verb's --help and docs/ai/shell-execution.md (rendered into your repo by
+vh-agent-harness update) for the full model and when to reach for each.
 
 Upgrade loop (after a new binary or config change):
   vh-agent-harness self-update

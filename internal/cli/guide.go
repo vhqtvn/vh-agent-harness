@@ -164,9 +164,8 @@ func nextSteps(st harnessState) []string {
 		}
 		if slices.Contains(st.Overlays, "auto-classifier-pilot") {
 			steps = append(steps, "Auto-classifier active: configure `.opencode/repo-configs/auto-gate-config.json` "+
-				"(set `mode`) and optionally `auto-gate-llm.json` (LLM endpoint/model). See "+
-				"README.agent.md → 'Auto-classifier configuration' section, or run "+
-				"`vh-agent-harness overlay docs auto-classifier-pilot` for the full reference. "+
+				"(set `mode`) and optionally `auto-gate-llm.json` (LLM endpoint/model). Run "+
+				"`vh-agent-harness overlay docs auto-classifier-pilot` for the full configuration reference. "+
 				"Verify config health with `vh-agent-harness doctor`.")
 		}
 		// UNGATED discovery hint (incident 2026-08-06): surface shipped (embedded)
@@ -268,7 +267,7 @@ func writeGuide(out io.Writer, st harnessState, steps []string) {
 	fmt.Fprintln(out, "Extending the harness? `/harness` is the full add-an-agent / add-command /")
 	fmt.Fprintln(out, "add-skill recipe and overlay anatomy; `vh-agent-harness example` lists")
 	fmt.Fprintln(out, "configurable files plus a pack skeleton. `vh-agent-harness overlay new <name>`")
-	fmt.Fprintln(out, "scaffolds a pack skeleton in one command (see README.agent.md → Scaffolding an overlay pack).")
+	fmt.Fprintln(out, "scaffolds a pack skeleton in one command.")
 	// Skill-cache staleness (D1): after `update` adds/changes skills under
 	// .opencode/skills/, a running opencode session will not see them until it is
 	// restarted (opencode caches the skill list per-process). `vh-agent-harness
