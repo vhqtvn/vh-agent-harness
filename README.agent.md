@@ -1388,8 +1388,9 @@ export default function transform({ context }) {
   These docs describe harness machinery identical for every adopter (the session,
   memory, prompt, and skill model) and ship inside the binary rather than into
   your repo — current keys include `opencode-memory-model`,
-  `opencode-session-workflow`, `opencode-prompt-guide`, `opencode-skills`, and
-  `temporary-files` (run `vh-agent-harness docs` to see the live set). It is
+  `opencode-session-workflow`, `opencode-prompt-guide`, `opencode-skills`,
+  `temporary-files`, and `preserved-managed-reconciliation` (the stale-preserve
+  reconciliation runbook; run `vh-agent-harness docs` to see the live set). It is
   **read-only**: it only writes to stdout and never modifies files. This repo
   dogfoods live source by mapping keys to repo-relative files in
   `.vh-agent-harness/docs-overrides.yml`; adopters with no overrides file always

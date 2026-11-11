@@ -16,3 +16,4 @@ overrides:
   opencode-prompt-guide: templates/docs/opencode-prompt-guide.md
   opencode-skills: templates/docs/opencode-skills.md
   temporary-files: templates/docs/temporary-files.md
+  preserved-managed-reconciliation: templates/docs/preserved-managed-reconciliation.md

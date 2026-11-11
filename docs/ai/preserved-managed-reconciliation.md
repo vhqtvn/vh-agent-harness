@@ -3,6 +3,11 @@
 > Audience: operators and agents of repos managed by `vh-agent-harness`.
 > Use this when `update` printed a `[consumer-edit, platform-also-changed]`
 > stale-preserve warning, or `doctor` reported `preserved-stale-vs-corpus`.
+>
+> Twin note: `templates/docs/preserved-managed-reconciliation.md` is the
+> binary-embed twin served to adopters as `vh-agent-harness docs
+> preserved-managed-reconciliation` — this file is the source of truth;
+> keep the two in sync in the same change.
 
 ## When this state occurs
 

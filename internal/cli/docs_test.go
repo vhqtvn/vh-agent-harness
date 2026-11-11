@@ -18,6 +18,7 @@ var wantDocKeys = []string{
 	"opencode-prompt-guide",
 	"opencode-session-workflow",
 	"opencode-skills",
+	"preserved-managed-reconciliation",
 	"temporary-files",
 }
 
