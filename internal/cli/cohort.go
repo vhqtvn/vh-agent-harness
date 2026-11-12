@@ -76,8 +76,8 @@ var errCohortRefusal = fmt.Errorf("cohort-link refusal")
 // both remain members; a deleted path simply cannot endpoint a proven broken
 // edge (the scanner's provider-presence precondition).
 //
-// Shared by the seamApply preflight, the acceptOnePath gate, and (Slice 3)
-// doctor's cohort-links check, so all three sites partition edges against the
+// Shared by the seamApply preflight, the acceptOnePath gate, and doctor's
+// cohort-links check (#28), so all three sites partition edges against the
 // SAME active set derived from the SAME staging walk.
 func ActivePlatformPaths(stagingDir string, inactive map[string]bool, classifier *substrate.Classifier) map[string]bool {
 	out := map[string]bool{}

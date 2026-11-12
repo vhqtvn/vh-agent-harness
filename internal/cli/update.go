@@ -92,7 +92,7 @@ var updateAllowStaleCorpus bool
 // import/export link touching a platform-managed file, update refuses with
 // ZERO writes; this flag prints ALL diagnostics as WARN and proceeds. It is
 // never persisted (no lineage/profile/state write) and never suppresses the
-// doctor cohort-links finding (Slice 3).
+// doctor cohort-links check #28 finding.
 var updateAllowBrokenCohort bool
 
 // The uninitialized-target confirmation guard (interactive-only pre-flight gate)

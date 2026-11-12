@@ -1467,7 +1467,7 @@ export default function transform({ context }) {
   staged-errata-content, behavioral-closure, dev-stale-embed, f1-envelope,
   f1-f2-consistency, f2-pairs, head-progress, complexity-advisory,
   recurrence-state, exec-sandbox-floor, shipped-pilots, closeout-reach,
-  rewrite-parity, dead-grants). The `dead-grants` check is the inter-layer
+  rewrite-parity, dead-grants, cohort-links). The `dead-grants` check is the inter-layer
   permission-grant liveness lint: it parses the live `opencode.jsonc` and
   cross-checks every per-agent `permission.bash` grant against the
   shell-guard engine's reachable forms (the shared `internal/permconfig`
@@ -1498,6 +1498,27 @@ export default function transform({ context }) {
   to ask, so the table can rescue), ordinary `vh-agent-harness <verb>`
   self-forms (the harness auto-allow branch), and the static
   `bash -n`/`cmp`/`accept-platform`/`diff` gate-inspection forms. The
+  `cohort-links` check (#28) scans the LIVE installed `.opencode/` JS tree
+  (scripts, plugins, overlays, adopter files — the bytes the runtime loads,
+  never staging bytes) with eslink and FAILs doctor when a PROVEN broken
+  import edge touches the active platform set — either endpoint (importer or
+  provider) is a path the current render would produce, which includes
+  preserved/diverged platform files (a skewed preserved `state-lib.js` that
+  no longer exports a symbol a platform importer requires is exactly the FAIL
+  case). Proven broken edges with BOTH endpoints adopter-internal, and all
+  unknown findings (dynamic imports, unparseable/unsupported syntax), are
+  WARN-side only — unknown never FAILs (U6). An uninitialized directory (no
+  `.opencode/` tree) SKIPs. The membership oracle is the staged render (the
+  same shared pipeline the pre-write refusal gate uses), so doctor and the
+  update-time refusal agree on the boundary; a FAIL blocks release G0c
+  (`scripts/release-tag.sh` doctor-HEALTHY gate) and fails adopter CI running
+  doctor — deliberate, ratified enforcement. `--allow-broken-cohort` never
+  suppresses it. Scope is stated on every FAIL/WARN line: link integrity
+  only; behavior of preserved files is not verified. Dogfood note: this
+  repo's own installed tree carries known unknowns (update-op debt +
+  compaction-primitives, plus vendored third-party deps under
+  `.opencode/node_modules`), so doctor here WARNs permanently — documented,
+  never suppressed, no expected count hardcoded. The
   `head-progress` check reads the commit-gate's
   durable closeout ledger (`.git/commit-gate/closeouts.log`) and WARNs when the
   last N (default 3, env `COMMIT_GATE_STALE_HEAD_THRESHOLD`) successful closeouts

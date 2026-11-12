@@ -81,6 +81,7 @@ var doctorCmd = &cobra.Command{
   closeout-reach  ledger reconciles with branch reachability     WARN if committed entry post_commit_head unreachable from any branch; INFO if unledgered branch commits; SKIP greenfield
   redlines        private-redlines registry hygiene (applicability-gated) FAIL if sensitive registry tracked/unignored; WARN if unreadable/insecure-mode; PASS with opaque binding ids; OMITTED (no section) when no registry
   dead-grants     per-agent grants reachable past the shell-guard engine   FAIL if a dead allow/ask grant exists (an ask is an interaction promise that can never fire); INFO if only redundant dead deny grants; SKIP no opencode.jsonc — Grants denied only by project-owned forbidden-pattern rules are out of scope and not counted here.
+  cohort-links    installed .opencode/ JS tree ES-module link integrity   FAIL if a proven broken import edge touches the active platform set (importer or provider currently renders — includes preserved/diverged platform files; blocks release G0c); WARN if adopter-internal proven edges or unknown findings (dynamic imports, unsupported syntax — unknown never FAILs); SKIP uninitialized — link integrity only; behavior of preserved files is not verified
 
 Exits non-zero if any FAIL is found. WARNs (armed file absent, lineage absent)
 do not fail. This is the seam doctor surface; the legacy manifest model is
@@ -545,6 +546,33 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	dgr := checkDeadGrants(abs)
 	fmt.Fprintln(out, "    "+dgr.String())
 	applyTier(dgr.tier, &problems, &warns)
+
+	// Check #28 — cohort-links (installed-tree ES-module link integrity; O4
+	// Slice 3, ratified §C + Decision 2/O3). Scans the LIVE installed
+	// .opencode/ JS tree (scripts, plugins, overlays, adopter files — the
+	// bytes the runtime actually loads, never staging bytes) with eslink and
+	// tiers findings by the O3 boundary predicate against the ACTIVE platform
+	// set, whose membership oracle is the staged render via the shared
+	// prepareSeamStaging front-half (the same pipeline seamApply,
+	// accept-platform, and checkManagedDrift re-render through — all sites
+	// partition edges against the identical active set). The two roles are
+	// strictly separate: live bytes are what gets scanned; the staged set
+	// only decides edge severity. A FAIL here blocks release via the
+	// doctor-HEALTHY gate G0c (scripts/release-tag.sh:642-644), NOT
+	// release_gate.go; an adopter CI running doctor fails on a proven
+	// platform-bound broken link in the installed tree — deliberate,
+	// ratified §C (intended enforcement). --allow-broken-cohort on
+	// update/install/accept-platform never suppresses this check.
+	//
+	// DOGFOOD NOISE (ratified no-suppression): this repo's own installed
+	// tree carries known unknowns (update-op debt + compaction-primitives,
+	// plus vendored third-party deps under .opencode/node_modules) — doctor
+	// here will WARN permanently. Documented, never suppressed, and no
+	// expected count is hardcoded.
+	fmt.Fprintln(out, "  cohort-links:")
+	clr := checkCohortLinks(abs)
+	fmt.Fprintln(out, "    "+clr.String())
+	applyTier(clr.tier, &problems, &warns)
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)
@@ -1022,6 +1050,113 @@ func checkDeadGrants(target string) checkResult {
 	}
 	return checkResult{name: name, tier: tierPass,
 		detail: "no dead-lettered permission grants (every per-agent grant is engine-reachable or table-rescuable)"}
+}
+
+// checkCohortLinks is doctor check #28 (O4 Slice 3, ratified §C): installed-tree
+// ES-module link integrity via eslink + the O3 boundary predicate.
+//
+// SCAN INPUT = LIVE INSTALLED bytes: the whole .opencode/ JS tree
+// (sweepLiveCohortTree — scripts, plugins, overlays, adopter files), never
+// staging bytes. MEMBERSHIP ORACLE = STAGED RENDER: the same shared
+// prepareSeamStaging front-half seamApply and accept-platform use, so the
+// active set (ActivePlatformPaths: staged walk minus inactive-capability
+// residue, keeping {platform_managed, overlay_extension}) agrees with the
+// pre-write refusal gate byte-for-byte on the same inputs. The two roles stay
+// strictly separate: live bytes are what gets scanned; the staged set only
+// decides edge severity.
+//
+// Severity (O3, exact):
+//   - FAIL: any PROVEN broken edge where EITHER endpoint (importer or
+//     provider) is in the active platform set. The set INCLUDES
+//     preserved/diverged platform paths — they would render, and divergence
+//     is the FAIL side (the state-lib skew family is the case this check
+//     exists for). Consumer-deleted platform paths remain members but cannot
+//     endpoint a broken edge (the scanner's provider-presence precondition).
+//   - WARN: proven broken edges with BOTH endpoints adopter-internal, and ALL
+//     unknown findings (dynamic imports, unparseable/unsupported syntax —
+//     U6: unknown never justifies FAIL).
+//   - PASS: clean tree (0 broken, 0 unknown).
+//   - SKIP: uninitialized directory (no .opencode/ tree). Any OTHER stat
+//     error (EACCES, ELOOP, I/O) or a non-directory .opencode is an
+//     inspection FAIL carrying the rider — never a silent SKIP of an
+//     installed but unassessable tree.
+//
+// A FAIL blocks release via the doctor-HEALTHY gate G0c
+// (scripts/release-tag.sh:642-644 — the release-tag ceremony, NOT
+// release_gate.go) and fails any adopter CI that runs doctor on a proven
+// platform-bound broken link: deliberate enforcement, ratified §C.
+// --allow-broken-cohort never suppresses this check.
+//
+// Every FAIL and WARN detail carries the mandatory literal rider
+// (cohortRider): link integrity only; behavior of preserved files is not
+// verified. No semantic or behavior claims are made anywhere.
+//
+// Dogfood note (ratified no-suppression): this repo's own installed tree
+// carries known unknowns (update-op debt + compaction-primitives, plus the
+// vendored third-party deps under .opencode/node_modules the frozen grammar
+// cannot parse), so doctor here WARNs permanently — documented, never
+// suppressed, no hardcoded expected counts.
+func checkCohortLinks(target string) checkResult {
+	const name = "cohort-links"
+	opPath := filepath.Join(target, ".opencode")
+	fi, serr := os.Stat(opPath)
+	if serr != nil {
+		if os.IsNotExist(serr) {
+			return checkResult{name: name, tier: tierSkip,
+				detail: "no .opencode/ tree (uninitialized directory; nothing to link-check)"}
+		}
+		// A stat error other than absence (EACCES, ELOOP, I/O) on an
+		// INSTALLED tree is an inspection failure, not "uninitialized" —
+		// fail loud; never silently skip an unassessable tree.
+		return checkResult{name: name, tier: tierFail,
+			detail: fmt.Sprintf("stat .opencode/: %v. Scope: %s", serr, cohortRider)}
+	}
+	if !fi.IsDir() {
+		return checkResult{name: name, tier: tierFail,
+			detail: fmt.Sprintf(".opencode exists but is not a directory; the installed JS tree cannot be scanned. Scope: %s", cohortRider)}
+	}
+	// Membership oracle: re-render staging through the shared seam front-half
+	// (checkManagedDrift precedent). A render failure is a platform/template
+	// bug, not an adopter finding — FAIL, exactly like managed-drift.
+	ps, cleanup, err := prepareSeamStaging(target, installRenderAnswers(target), nil)
+	if err != nil {
+		return checkResult{name: name, tier: tierFail,
+			detail: fmt.Sprintf("render staging for membership oracle: %v. Scope: %s", err, cohortRider)}
+	}
+	defer cleanup()
+
+	tree, err := sweepLiveCohortTree(target)
+	if err != nil {
+		return checkResult{name: name, tier: tierFail,
+			detail: fmt.Sprintf("%s. Scope: %s", err.Error(), cohortRider)}
+	}
+	c := scanCohortTree(tree, ActivePlatformPaths(ps.staging, ps.inactiveLive, ps.cls))
+
+	if len(c.Refuse) > 0 {
+		parts := make([]string, 0, len(c.Refuse))
+		for _, e := range c.Refuse {
+			parts = append(parts, fmt.Sprintf("%s imports %q from %s (missing symbol %s: %s)",
+				e.Importer, e.Specifier, e.Provider, e.Symbol, oneLine(e.Reason)))
+		}
+		return checkResult{name: name, tier: tierFail,
+			detail: fmt.Sprintf("%d proven broken link(s) touching the active platform set (importer or provider currently renders; %d module(s) scanned): %s. Repair one path at a time (accept-platform <path> --allow-broken-cohort) or fix the importer; --allow-broken-cohort never suppresses this check. Scope: %s",
+				len(c.Refuse), c.Scanned, strings.Join(parts, "; "), cohortRider)}
+	}
+	if c.HasWarnSide() {
+		parts := make([]string, 0, len(c.Warn)+len(c.Unknown))
+		for _, e := range c.Warn {
+			parts = append(parts, fmt.Sprintf("%s imports %q from %s (missing symbol %s: %s)",
+				e.Importer, e.Specifier, e.Provider, e.Symbol, oneLine(e.Reason)))
+		}
+		for _, u := range c.Unknown {
+			parts = append(parts, fmt.Sprintf("%s %q: %s", u.Path, u.Specifier, oneLine(u.Reason)))
+		}
+		return checkResult{name: name, tier: tierWarn,
+			detail: fmt.Sprintf("%d adopter-internal proven broken link(s), %d unknown finding(s) (unknown findings are never a failure basis — U6; %d module(s) scanned): %s. Scope: %s",
+				len(c.Warn), len(c.Unknown), c.Scanned, strings.Join(parts, "; "), cohortRider)}
+	}
+	return checkResult{name: name, tier: tierPass,
+		detail: fmt.Sprintf("%d module(s) scanned, 0 broken link(s), 0 unknown finding(s)", c.Scanned)}
 }
 
 // additionalSchemaPaths lists the non-core-platform_armed schema'd authorities
