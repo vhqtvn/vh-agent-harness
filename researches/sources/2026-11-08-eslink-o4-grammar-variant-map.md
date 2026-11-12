@@ -871,3 +871,16 @@ decision itself.
   `node --check` rejects) that the reference lexer mis-lexed as balanced.
   See the amendment record for the full measured reconciliation and the
   hash-pinned reference-implementation binding.
+
+---
+
+## Amendment 2026-11-13 — Slice-0 U+2028/U+2029 identifier-boundary fix admits no new grammar variant
+
+> Appended per the ratified wiring-scope record
+> (`researches/decisions/2026-11-12-eslink-o4-s2-s4-wiring-scope.md`,
+> Section A, operator-ratified 2026-11-13). One line of substance: the
+> lexer fix that stops identifier scanning at `isLineTerm` positions
+> (U+2028/U+2029 lex as ES line terminators at identifier boundaries)
+> is a tokenization-boundary correction only — it admits NO new grammar
+> variant; the freeze (`12d8195`) and the TLA amendment (`8b1bd58`)
+> are intact and the gate-4 pins are unchanged.

@@ -344,8 +344,18 @@ func (l *lexer) scanTemplatePart() (text string, tail, sub bool, err error) {
 
 // isIdentStart reports whether a rune starting at i can begin an identifier.
 // Non-ASCII bytes are accepted coarsely (they lex as identifier characters;
-// there is no unicode class table, matching the reference lexer's stance).
+// there is no unicode class table, matching the reference lexer's stance) —
+// except the UTF-8 line separators U+2028/U+2029, which are ES line
+// terminators and must never join identifier text: identifier scanning
+// stops at isLineTerm positions so next()'s line-terminator handler
+// consumes them. Valid UTF-8 never nests E2 80 A8/A9 inside another rune
+// (0xE2 is always a lead byte), so the stop always lands on a rune
+// boundary and all other legitimate >= 0x80 usage (unicode identifiers,
+// comments, strings) is unaffected.
 func isIdentStart(src []byte, i int) bool {
+	if isLineTerm(src, i) {
+		return false
+	}
 	c := src[i]
 	return c == '$' || c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80
 }

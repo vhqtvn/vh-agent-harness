@@ -234,11 +234,15 @@ func TestF1_FO_OptionalChainArms(t *testing.T) {
 // IDENTIFIER boundaries (cascade-3 t1b-F1, corpus-absent): as a statement
 // separator directly after an identifier-terminated statement, and
 // immediately after an identifier before a punctuator. Both code points
-// are ES line terminators; the lexer consumes them as such at token
-// boundaries after PUNCTUATION (next()'s isLineTerm check runs BEFORE
-// lexToken). IDENTIFIER-ADJACENT separators are a different matter: the
-// coarse >= 0x80 identifier-part scan absorbs them (known defect, see
-// the last arm) - pinned honestly there, not claimed correct.
+// are ES line terminators; identifier scanning stops at isLineTerm
+// positions (Slice-0 boundary fix, ratified 2026-11-13 — researches/
+// decisions/2026-11-12-eslink-o4-s2-s4-wiring-scope.md Section A), so
+// they lex as line terminators at EVERY boundary — including directly
+// after an exported NAME and after the export KEYWORD itself. The strict
+// arms below assert the exported surface is exactly [out]: the pre-fix
+// lexer absorbed identifier-adjacent separators into identifier text
+// (exported name out+U+2028; export<LS>const degraded valid modules to
+// UNKNOWN), the defect the honest-defect pin here used to record.
 func TestF1_FO_LineSeparatorIdentifierBoundary(t *testing.T) {
 	src := "const a = 1;\n\u2028const b = 2;\n\u2028export const out = a + b;\n" // U+2028 separators after ';'
 	m := fitModule(t, ".opencode/plugins/lssep.js", src)
@@ -251,19 +255,26 @@ func TestF1_FO_LineSeparatorIdentifierBoundary(t *testing.T) {
 	// U+2029: same shape.
 	fitModule(t, ".opencode/plugins/pssep.js",
 		"const a = 1;\u2029const b = 2;\nexport const out = a + b;\n")
-	// KNOWN-DEFECT arm (cascade-3 B1/C2 ground truth, probed): an
-	// identifier-ADJACENT separator is currently ABSORBED into the
-	// identifier text by the coarse >= 0x80 identifier-continuation
-	// scan (isIdentPart) - "export const out" + U+2028 + "= 1" records
-	// the exported name as out+U+2028 (code-point probe receipt). This
-	// is a latent lexer defect (surface-corrupting), carded separately
-	// (defer-eslink-u2028-ident-absorption); the verdict-level FIT below
-	// holds only because the absorbed identifier stays surface-INVISIBLE
-	// in this shape - pinned as the current honest verdict, NOT as
-	// correct boundary behavior. The token-boundary arms above (after
-	// punctuation) are the correct pins.
-	fitModule(t, ".opencode/plugins/lsident.js",
+	// STRICT boundary arms (Slice-0 fix): identifier-ADJACENT separators
+	// lex as ES line terminators — both separators (U+2028/U+2029), both
+	// adjacency positions (exported-name, export-keyword). The exported
+	// surface must be exactly [out] with no separator absorption into
+	// identifier text (pre-fix: name recorded as out+U+2028, and
+	// export<LS>const degraded to UNKNOWN — cascade-3 B1/C2 probe
+	// receipts).
+	strictExport := func(name, src string) {
+		t.Helper()
+		m := fitModule(t, name, src)
+		if !m.NamedExports["out"] || len(m.NamedExports) != 1 {
+			t.Fatalf("%s: exported surface must be exactly [out], got %v", name, m.NamedExports)
+		}
+	}
+	strictExport(".opencode/plugins/lsident.js",
 		"const v = 1;\nconst w = v\u2028;\nexport const out = w;\n")
+	strictExport(".opencode/plugins/lsname.js", "export const out\u2028 = 1;\n")
+	strictExport(".opencode/plugins/psname.js", "export const out\u2029 = 1;\n")
+	strictExport(".opencode/plugins/lskw.js", "export\u2028const out = 1;\n")
+	strictExport(".opencode/plugins/pskw.js", "export\u2029const out = 1;\n")
 }
 
 // --- Family 2: control flow (map table: 11 PRESENT variants) --------------------
