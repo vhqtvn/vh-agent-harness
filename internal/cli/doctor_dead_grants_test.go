@@ -234,6 +234,33 @@ func TestDeadGrants_WordingContract(t *testing.T) {
 	}
 }
 
+// deadGrantsWarningBlock extracts the dead-grants warning block (the text
+// starting at the "vh-agent-harness WARNING:" line containing
+// "dead-lettered" through the following blank line) from a captured update
+// stderr. The wording contract's forbidden-token scan applies to THIS block —
+// the remedy wording — not to unrelated diagnostics on the same stream.
+func deadGrantsWarningBlock(stderr string) string {
+	lines := strings.Split(stderr, "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.HasPrefix(l, "vh-agent-harness WARNING:") && strings.Contains(l, "dead-lettered") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	var block []string
+	for _, l := range lines[start:] {
+		if l == "" && len(block) > 0 {
+			break
+		}
+		block = append(block, l)
+	}
+	return strings.Join(block, "\n")
+}
+
 // TestDeadGrants_FullDoctorIntegration drives the real surface end-to-end:
 // seam install into a scratch root, a config-transform that injects a dead
 // allow (build: "pytest *") plus a dead ask (researcher: "make *"), a seam
@@ -284,12 +311,17 @@ func TestDeadGrants_FullDoctorIntegration(t *testing.T) {
 	}
 	// The update-path warning surface obeys the same wording contract as the
 	// doctor FAIL detail (review finding D2): no allowlist-addition suggestion
-	// via overlay, no active-agent attribution.
+	// via overlay, no active-agent attribution. The contract is scoped to the
+	// DEAD-GRANTS warning block itself (the remedy wording), not to update's
+	// entire stderr: other update-path diagnostics (e.g. the cohort-link
+	// preflight WARN block, O4 Slice 2) legitimately name corpus file paths
+	// such as .opencode/repo-configs/forbidden-patterns.js, which a global
+	// token ban would misread as a remediation suggestion.
 	for _, bad := range []string{
 		"overlay", "allowlist", "allowed-commands", "forbidden-patterns", "permission-pack",
 		"current agent", "active agent", "was denied by", "attempted", "session",
 	} {
-		if strings.Contains(strings.ToLower(stderr), bad) {
+		if strings.Contains(strings.ToLower(deadGrantsWarningBlock(stderr)), bad) {
 			t.Errorf("update stderr wording violation: contains forbidden token %q;\n%s", bad, stderr)
 		}
 	}

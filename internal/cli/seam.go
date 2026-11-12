@@ -118,6 +118,12 @@ type seamStaging struct {
 	effectiveRegen map[string]bool
 	overlayFiles   []string
 	skillRecords   []renderstate.Record
+	// inactiveLive is the capability-residue set (core LIVE paths owned by
+	// UNSELECTED capabilities). The classifier is already built with it
+	// (CoreOwnershipDefaultsWithExclusion), and the cohort-link preflight
+	// re-applies it explicitly when deriving the active platform set
+	// (ActivePlatformPaths) — the ratified formula, defense in depth.
+	inactiveLive map[string]bool
 }
 
 // prepareSeamStaging renders the embedded core corpus + active overlay packs
@@ -207,8 +213,24 @@ func prepareSeamStaging(target string, answers map[string]string, bootstrap []by
 		effectiveRegen: effectiveRegeneratedPaths(regeneratedPlatformPaths, originStoreForRegen),
 		overlayFiles:   overlayFiles,
 		skillRecords:   skillRecords,
+		inactiveLive:   inactiveLive,
 	}
 	return ps, cleanup, nil
+}
+
+// SeamApplyOptions carries the seamApply inputs. The options struct replaced
+// the former positional signature (O4 Slice 2) so the cohort-link escape flag
+// reaches the seam without a growing positional list.
+type SeamApplyOptions struct {
+	Target    string
+	Answers   map[string]string
+	DryRun    bool
+	Bootstrap []byte
+	// AllowBrokenCohort is the one-shot --allow-broken-cohort escape: with a
+	// proven platform-bound broken link, the pre-write cohort check prints
+	// ALL diagnostics as WARN and proceeds instead of refusing. It is never
+	// persisted (no lineage/profile/state write) and never suppresses doctor.
+	AllowBrokenCohort bool
 }
 
 // seamApply renders, classifies, and applies the embedded core corpus into
@@ -224,8 +246,9 @@ func prepareSeamStaging(target string, answers map[string]string, bootstrap []by
 // changed while the consumer edit stands). Callers surface it as a consequence
 // warning (see summarizePreservedPaths). It is nil/empty on every path where
 // the state cannot be proven (no ConsumerEdit stalls, unreadable inputs).
-func seamApply(target string, answers map[string]string, dryRun bool, bootstrap []byte) (*substrate.ApplyReport, []string, error) {
-	ps, cleanup, err := prepareSeamStaging(target, answers, bootstrap)
+func seamApply(opts SeamApplyOptions) (*substrate.ApplyReport, []string, error) {
+	target := opts.Target
+	ps, cleanup, err := prepareSeamStaging(target, opts.Answers, opts.Bootstrap)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -241,7 +264,7 @@ func seamApply(target string, answers map[string]string, dryRun bool, bootstrap 
 	// WARNING, not a refusal: the file is platform_managed (free-overwrite by
 	// contract), and refusing would block legitimate version upgrades whenever
 	// the Go tables change.
-	if !dryRun {
+	if !opts.DryRun {
 		warnIfAllowedCommandsCustomized(target, ps.staging)
 	}
 
@@ -267,7 +290,48 @@ func seamApply(target string, answers map[string]string, dryRun bool, bootstrap 
 	// unselected-residue states in the emitted output before they ship. The
 	// bootstrap blob is threaded so a greenfield full install lints against
 	// the selection that actually drove the render.
-	warnIfGatedCommitIncoherent(target, ps.staging, bootstrap)
+	warnIfGatedCommitIncoherent(target, ps.staging, opts.Bootstrap)
+
+	// Pre-write cohort-link check (O4 Slice 2). Two-phase by design: a
+	// plan-only (dry-run) Apply derives the per-path classes WITHOUT taking
+	// any bytes from that plan's execution state; the effective .opencode/ JS
+	// tree is then assembled from those classes (advancing/seeded → staged
+	// bytes; preserved/diverged → the ACTUAL retained live bytes; adopter/
+	// unmanaged files → live sweep; consumer-deleted paths omitted) and
+	// scanned with eslink. The O3 boundary predicate refuses ONLY on proven
+	// broken edges with a platform endpoint; unknowns never refuse (U6).
+	//
+	// A live refusal prints the full 6-element contract and returns
+	// errCohortRefusal with ZERO writes performed (the refusal site precedes
+	// the live Apply). Under --dry-run the same evidence prints as WOULD
+	// REFUSE and the run continues to the normal plan preview, exiting 0
+	// (Decision 1B). --allow-broken-cohort converts the refusal into a
+	// full WARN printout and proceeds. The scan runs on BOTH dry-run and
+	// live applies so a dry-run previews the refusal, mirroring
+	// warnIfDeadGrants.
+	applyOpts := substrate.ApplyOptions{
+		ProjectRoot:              target,
+		StagingDir:               ps.staging,
+		Classifier:               ps.cls,
+		HarnessVersion:           Version,
+		TemplateSource:           corpus.CoreDir,
+		Ref:                      "harness/" + Version,
+		Answers:                  opts.Answers,
+		DryRun:                   true, // phase 1: classes only; bytes come from staging/live, never the plan
+		RegeneratedPlatformPaths: ps.effectiveRegen,
+	}
+	plan, planErr := substrate.Apply(ps.renderer, applyOpts)
+	if planErr != nil {
+		return nil, nil, fmt.Errorf("seam: cohort preflight plan: %w", planErr)
+	}
+	cohort, cerr := scanSeamCohort(target, ps, plan.Outcomes)
+	if cerr != nil {
+		return nil, nil, cerr
+	}
+	if emitSeamCohortDiagnostics(os.Stderr, cohort, opts.DryRun, opts.AllowBrokenCohort) {
+		return nil, nil, fmt.Errorf("seam: refusing to apply: %d proven broken cohort link(s) touch platform-managed files (full diagnostic above; recovery: %s; override: --allow-broken-cohort): %w",
+			len(cohort.Refuse), cohortDocsPointer, errCohortRefusal)
+	}
 
 	// Lineage (S1) records the INSTALL answers (project_name/slug) for the
 	// answer-digest drift check; the S3 profile (features/overlays) is a separate
@@ -278,17 +342,16 @@ func seamApply(target string, answers map[string]string, dryRun bool, bootstrap 
 	// are REGENERATED canonically on every apply — see ps.effectiveRegen and
 	// effectiveRegeneratedPaths for the F6 coordination hook that gates
 	// opencode.jsonc's regenerated admission on a recorded origin entry.
-	report, err := substrate.Apply(ps.renderer, substrate.ApplyOptions{
-		ProjectRoot:              target,
-		StagingDir:               ps.staging,
-		Classifier:               ps.cls,
-		HarnessVersion:           Version,
-		TemplateSource:           corpus.CoreDir,
-		Ref:                      "harness/" + Version,
-		Answers:                  answers,
-		DryRun:                   dryRun,
-		RegeneratedPlatformPaths: ps.effectiveRegen,
-	})
+	var report *substrate.ApplyReport
+	if opts.DryRun {
+		// The phase-1 plan IS the dry-run report (Apply with DryRun:true
+		// already returned exactly what a dry-run apply returns: the full
+		// outcome plan with WriteNotAttempted states and zero writes).
+		report = plan
+	} else {
+		applyOpts.DryRun = false
+		report, err = substrate.Apply(ps.renderer, applyOpts)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("seam: apply: %w", err)
 	}
@@ -345,7 +408,7 @@ func seamApply(target string, answers map[string]string, dryRun bool, bootstrap 
 	// every side-effecting post-apply step too — the proposal ledger append, the
 	// run-shape seed, and the AGENTS.md compose all WRITE to the live tree. The
 	// returned report is a pure preview (the stale-preserve set is part of it).
-	if dryRun {
+	if opts.DryRun {
 		return report, stalePreserved, nil
 	}
 

@@ -47,6 +47,10 @@ type installFlags struct {
 	full    bool
 	minimal bool
 	profile string
+	// allowBrokenCohort is the one-shot --allow-broken-cohort escape for the
+	// pre-write cohort-link refusal (O4 Slice 2). Never persisted; never
+	// suppresses doctor.
+	allowBrokenCohort bool
 }
 
 // newInstallFlags returns the flag set with defaults resolved against cwd
@@ -126,6 +130,8 @@ func init() {
 		"greenfield only: seed the historical MINIMAL profile (8-agent baseline); rejected on an existing install")
 	installCmd.Flags().StringVar(&installFl.profile, "profile", "",
 		"greenfield only: seed the embedded default with preset "+strings.Join(knownInstallPresets(), "|")+"; rejected on an existing install")
+	installCmd.Flags().BoolVar(&installFl.allowBrokenCohort, "allow-broken-cohort", false,
+		"proceed despite proven cohort-link breakage touching platform-managed files (all diagnostics printed as warnings; one-shot, not persisted; doctor still reports)")
 }
 
 // knownInstallPresets returns the selectable `profile:` presets, sorted. It
@@ -341,7 +347,13 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 
 	printInstallSelection(out, target, bootstrap, selectionSource)
 
-	report, stalePreserved, err := seamApply(target, answers, installFl.dryRun, bootstrap)
+	report, stalePreserved, err := seamApply(SeamApplyOptions{
+		Target:            target,
+		Answers:           answers,
+		DryRun:            installFl.dryRun,
+		Bootstrap:         bootstrap,
+		AllowBrokenCohort: installFl.allowBrokenCohort,
+	})
 	if err != nil {
 		return err
 	}

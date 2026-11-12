@@ -87,6 +87,14 @@ var updatePruneOrphans bool
 // renders with older bytes), so it gets its own explicit opt-in.
 var updateAllowStaleCorpus bool
 
+// updateAllowBrokenCohort is the one-shot escape for the pre-write
+// cohort-link refusal (O4 Slice 2): when the eslink preflight proves a broken
+// import/export link touching a platform-managed file, update refuses with
+// ZERO writes; this flag prints ALL diagnostics as WARN and proceeds. It is
+// never persisted (no lineage/profile/state write) and never suppresses the
+// doctor cohort-links finding (Slice 3).
+var updateAllowBrokenCohort bool
+
 // The uninitialized-target confirmation guard (interactive-only pre-flight gate)
 // is wired through two injectable seams so unit tests can drive both the
 // prompt-fires path and every bypass path without a real TTY or os.Stdin:
@@ -124,6 +132,8 @@ func init() {
 		"delete byte-identical orphan rendered files whose overlay source was removed (refuses hand-edited or project-owned ones; composes with --dry-run)")
 	updateCmd.Flags().BoolVar(&updateAllowStaleCorpus, "allow-stale-corpus", false,
 		"proceed even when the binary's embedded corpus differs from the checkout's templates/core (may overwrite rendered files using a differing corpus; prefer 'make update' which rebuilds the binary first)")
+	updateCmd.Flags().BoolVar(&updateAllowBrokenCohort, "allow-broken-cohort", false,
+		"proceed despite proven cohort-link breakage touching platform-managed files (all diagnostics printed as warnings; one-shot, not persisted; doctor still reports)")
 }
 
 func runUpdate(cmd *cobra.Command, _ []string) (err error) {
@@ -235,7 +245,12 @@ func runUpdate(cmd *cobra.Command, _ []string) (err error) {
 	// the signal a consumer needs to know the tokens are unresolved.)
 	warnUnresolvedProjectConfigTokens(os.Stderr, abs)
 
-	report, stalePreserved, err := seamApply(abs, answers, updateDryRun, nil)
+	report, stalePreserved, err := seamApply(SeamApplyOptions{
+		Target:            abs,
+		Answers:           answers,
+		DryRun:            updateDryRun,
+		AllowBrokenCohort: updateAllowBrokenCohort,
+	})
 	if err != nil {
 		return err
 	}

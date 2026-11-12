@@ -73,6 +73,10 @@ var (
 	acceptPlatformDryRun    bool
 	acceptPlatformAll       bool
 	acceptPlatformStaleOnly bool
+	// acceptPlatformAllowBrokenCohort is the one-shot --allow-broken-cohort
+	// escape for the prospective cohort-link gate in acceptOnePath (O4
+	// Slice 2). Never persisted; never suppresses doctor.
+	acceptPlatformAllowBrokenCohort bool
 )
 
 var acceptPlatformCmd = &cobra.Command{
@@ -136,6 +140,8 @@ func init() {
 		"accept every drifted/stalled platform-managed path in one invocation (no positional paths needed)")
 	acceptPlatformCmd.Flags().BoolVar(&acceptPlatformStaleOnly, "stale-only", false,
 		"with --all, restrict to the drifted+missing set `vh-agent-harness diff` reports (the visibly stale paths; does NOT candidate the migration-stalled-but-in-sync F6 paths). Selects by render-bytes: a consumer-preserved edit IS included if its live bytes differ from the render; ignored without --all")
+	acceptPlatformCmd.Flags().BoolVar(&acceptPlatformAllowBrokenCohort, "allow-broken-cohort", false,
+		"proceed despite proven cohort-link breakage touching platform-managed files in the prospective tree (all diagnostics printed as warnings; one-shot, not persisted; doctor still reports)")
 }
 
 // persistAcceptOriginStore is the SEAM over the batch origin-store persist in
@@ -230,12 +236,14 @@ func runAcceptPlatform(cmd *cobra.Command, args []string) (err error) {
 	// form benignSkip stays a failure for backward compatibility (you named a path
 	// that did not need accepting).
 	batchMode := acceptPlatformAll
-	var accepted, failed, skipped []acceptResult
+	var accepted, failed, skipped, refused []acceptResult
 	for _, rel := range rels {
-		res := acceptOnePath(ps, store, abs, rel, acceptPlatformDryRun)
+		res := acceptOnePath(ps, store, abs, rel, acceptPlatformDryRun, acceptPlatformAllowBrokenCohort)
 		switch {
 		case res.ok:
 			accepted = append(accepted, res)
+		case res.wouldRefuse:
+			refused = append(refused, res)
 		case batchMode && res.benignSkip:
 			skipped = append(skipped, res)
 		default:
@@ -288,6 +296,23 @@ func runAcceptPlatform(cmd *cobra.Command, args []string) (err error) {
 			fmt.Fprintf(out, "  %s  — %s\n", r.rel, r.reason)
 		}
 	}
+	// Cohort would-refusal previews (dry-run only): a DISTINCT outcome from
+	// "would accept" — exit 0 means the inspection completed, never that the
+	// repair succeeded. The full 6-element diagnostic + disclaimer already
+	// went to stderr; this stdout block is the summary mirror. The tail is
+	// conditioned on the failed bucket: with other errors present the run
+	// still exits non-zero (rider 1), so the section must not claim a
+	// blanket exit 0.
+	if len(refused) > 0 {
+		tail := "preview completed with exit 0; nothing written; a live run refuses non-zero"
+		if len(failed) > 0 {
+			tail = "this cohort preview is non-failing, but other errors in this run still cause a non-zero exit; nothing written; a live run refuses non-zero"
+		}
+		fmt.Fprintf(out, "accept-platform (dry-run): WOULD REFUSE %d path(s) — cohort-link preflight (diagnostic on stderr; %s):\n", len(refused), tail)
+		for _, r := range refused {
+			fmt.Fprintf(out, "  %s  — %s\n", r.rel, r.reason)
+		}
+	}
 	if len(failed) > 0 {
 		fmt.Fprintf(out, "accept-platform: %d path(s) NOT accepted:\n", len(failed))
 		for _, r := range failed {
@@ -295,9 +320,15 @@ func runAcceptPlatform(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 	// Batch summary: a one-line N accepted / M skipped / K failed so an operator
-	// (or automation) can confirm the batch outcome at a glance.
+	// (or automation) can confirm the batch outcome at a glance. The would-refuse
+	// count joins the line only when that bucket is non-empty (dry-run cohort
+	// previews), so the pinned 3-part shape is unchanged on every other run.
 	if batchMode {
-		fmt.Fprintf(out, "accept-platform summary: %d accepted, %d skipped, %d failed\n", len(accepted), len(skipped), len(failed))
+		if len(refused) > 0 {
+			fmt.Fprintf(out, "accept-platform summary: %d accepted, %d skipped, %d would-refuse (dry-run preview), %d failed\n", len(accepted), len(skipped), len(refused), len(failed))
+		} else {
+			fmt.Fprintf(out, "accept-platform summary: %d accepted, %d skipped, %d failed\n", len(accepted), len(skipped), len(failed))
+		}
 	}
 	if !acceptPlatformDryRun && len(accepted) > 0 {
 		fmt.Fprintln(out, "Re-run `vh-agent-harness update` or `doctor` to confirm convergence.")
@@ -410,6 +441,14 @@ type acceptResult struct {
 	reason     string
 	ok         bool
 	benignSkip bool
+	// wouldRefuse marks the DRY-RUN-ONLY cohort would-refusal preview
+	// (Decision-1B parity): the full WOULD REFUSE contract + verbatim
+	// disclaimer already printed to stderr; nothing was written. It routes
+	// to a DISTINCT reporting bucket (never the "would accept" summary) and
+	// does NOT contribute to the command's failure exit — a dry-run exit 0
+	// here means "inspection completed", never "repair succeeded". Live
+	// refusals never set this field; they stay ordinary failures.
+	wouldRefuse bool
 }
 
 // acceptOnePath validates one path, then (live) writes its platform bytes and
@@ -423,7 +462,10 @@ type acceptResult struct {
 // stalled. A path that is NOT currently preserved (already converged, or
 // platform-regenerated and managed canonically by update) is rejected —
 // accept-platform is a focused recovery tool, not a general write tool.
-func acceptOnePath(ps *seamStaging, store *originhash.Store, target, rel string, dryRun bool) acceptResult {
+//
+// allowBrokenCohort is the --allow-broken-cohort escape for the prospective
+// cohort-link gate below (O4 Slice 2).
+func acceptOnePath(ps *seamStaging, store *originhash.Store, target, rel string, dryRun, allowBrokenCohort bool) acceptResult {
 	// 1. Classify the path (fail-closed for unknown paths).
 	co, ok := ps.cls.Classify(rel)
 	if !ok {
@@ -451,6 +493,52 @@ func acceptOnePath(ps *seamStaging, store *originhash.Store, target, rel string,
 	reason := managedfile.ClassifyPreserved(regenerated, hadOrigin, origin, live, stagedHash)
 	if reason == "" {
 		return acceptResult{rel: rel, reason: "not currently preserved (already converged or platform-regenerated); run `update` to reconcile", ok: false, benignSkip: true}
+	}
+
+	// 3b. Prospective cohort-link gate (O4 Slice 2): before the dry-run
+	// early return AND the direct live write, scan the tree THIS acceptance
+	// alone would produce — the current disk bytes with ONLY this path's
+	// staged bytes substituted — and apply the same O3 boundary predicate as
+	// the update preflight. A plain acceptance proceeds only when that single
+	// substitution leaves no platform-bound broken link; when other cohort
+	// links remain broken the acceptance refuses (zero writes) and
+	// --allow-broken-cohort is the sanctioned escape — sequential single-path
+	// repair WITH the flag is the ratified path (no batch mechanism).
+	//
+	// Dry-run semantics (operator-granted Decision-1B parity flip, cross-verb
+	// parity with update --dry-run): a COHORT would-refusal previews as
+	// WOULD REFUSE + full diagnostic + the verbatim 1B disclaimer and exits 0
+	// (inspection completed), carried in a DISTINCT wouldRefuse result
+	// disposition — never the "would accept" summary path. This exit-0
+	// exception is COHORT-FINDINGS-ONLY: every other dry-run failure category
+	// (malformed/unknown/out-of-scope path, absent/unreadable staged bytes,
+	// not-currently-preserved, scan errors, setup errors) keeps its existing
+	// non-zero failure behavior exactly.
+	cohort, cohErr := scanProspectiveCohort(target, ps, store, rel, stagedBytes)
+	if cohErr != nil {
+		return acceptResult{rel: rel, reason: fmt.Sprintf("cohort preflight: %v", cohErr), ok: false}
+	}
+	if len(cohort.Refuse) > 0 {
+		if allowBrokenCohort {
+			subject := fmt.Sprintf(" (accepting %s)", rel)
+			if dryRun {
+				subject = fmt.Sprintf(" (dry-run preview; would accept %s)", rel)
+			}
+			fmt.Fprint(os.Stderr, formatCohortDiagnostic(cohort, cohortModeOverride, subject, cohortClaimAcceptOverride))
+		} else if dryRun {
+			fmt.Fprint(os.Stderr, formatCohortDiagnostic(cohort, cohortModeWouldRefuse, fmt.Sprintf(" to accept %s", rel), cohortClaimAcceptRefused))
+			fmt.Fprintf(os.Stderr, "  %s\n", cohortDryRunDisclaimer)
+			return acceptResult{rel: rel, reason: fmt.Sprintf(
+				"WOULD REFUSE (dry-run preview): cohort-link refusal: the prospective tree (current bytes with only %s substituted) still carries %d proven broken link(s) touching platform-managed files (full diagnostic above; docs: %s; override: --allow-broken-cohort)",
+				rel, len(cohort.Refuse), cohortDocsPointer), ok: false, wouldRefuse: true}
+		} else {
+			fmt.Fprint(os.Stderr, formatCohortDiagnostic(cohort, cohortModeRefuse, fmt.Sprintf(" to accept %s", rel), cohortClaimAcceptRefused))
+			return acceptResult{rel: rel, reason: fmt.Sprintf(
+				"cohort-link refusal: the prospective tree (current bytes with only %s substituted) still carries %d proven broken link(s) touching platform-managed files (full diagnostic above; docs: %s; override: --allow-broken-cohort)",
+				rel, len(cohort.Refuse), cohortDocsPointer), ok: false}
+		}
+	} else if cohort.HasWarnSide() {
+		fmt.Fprint(os.Stderr, formatCohortWarnBlock(cohort))
 	}
 
 	if dryRun {

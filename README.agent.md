@@ -1341,6 +1341,26 @@ export default function transform({ context }) {
 - **Refresh after a new binary or config change:** `vh-agent-harness update`
   (preview with `--dry-run`). Armed-file conflicts are recorded — list them with
   `vh-agent-harness proposals`.
+- **Cohort-link preflight (refusal + `--allow-broken-cohort`):** before any
+  write, `install` and `update` scan the EFFECTIVE `.opencode/` JS tree the
+  apply would leave behind (advancing files at staged bytes, preserved/diverged
+  files at their ACTUAL retained live bytes, adopter files swept in) with the
+  static link checker. A PROVEN broken import/export edge touching a
+  platform-managed file (either endpoint) REFUSES with zero writes and a full
+  diagnostic (broken edges + symbols, SHA-256 of the assessed bytes,
+  preservation confirmation, recovery via `vh-agent-harness docs
+  preserved-managed-reconciliation`, the doctor-not-suppressed caveat, and the
+  scope rider *link integrity only; behavior of preserved files is not
+  verified*). `--allow-broken-cohort` (on `update`, `install`, and
+  `accept-platform`) prints all diagnostics as WARN and proceeds — one-shot,
+  never persisted, never suppresses doctor. `accept-platform <path>` runs the
+  same gate on the prospective tree (current bytes with only that path
+  substituted); a plain acceptance proceeds only when that single substitution
+  heals every platform-bound broken link, otherwise it needs the flag —
+  sequential single-path repair is the intended path. `update --dry-run` (and
+  install/accept-platform `--dry-run`, for the cohort refusal specifically)
+  previews a refusal as `WOULD REFUSE` and still exits 0. Unparseable/unknown
+  findings are WARN-side only and never refuse.
 - **In a dev/dogfood repo that edits `templates/core/` (this one), prefer
   `make update` over a bare `vh-agent-harness update`.** `update` renders only
   from the corpus embedded in the running binary, never from the working tree; the
