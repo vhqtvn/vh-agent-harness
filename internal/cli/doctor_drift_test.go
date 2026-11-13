@@ -703,9 +703,14 @@ func TestManagedDrift_Divergent_NamesPathAndBothRemedies(t *testing.T) {
 	if !strings.Contains(r.detail, "vh-agent-harness update") {
 		t.Errorf("FAIL detail should name the destructive `update` remedy; got %q", r.detail)
 	}
-	// Non-destructive overlay-promotion remedy.
-	if !strings.Contains(r.detail, "overlay pack source") || !strings.Contains(r.detail, ".vh-agent-harness/overlays/<pack>/") {
-		t.Errorf("FAIL detail should name the non-destructive overlay-pack remedy; got %q", r.detail)
+	// Deliberate-edit remedy with the corrected routing vocabulary (S4
+	// driftRecoverySuffix repair): additions-only overlay pack + the
+	// project_owned harness-ownership.yml route for existing paths.
+	if !strings.Contains(r.detail, ".vh-agent-harness/overlays/<pack>/") || !strings.Contains(r.detail, "ADDITIONS only") {
+		t.Errorf("FAIL detail should name the additions-only overlay-pack remedy; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "project_owned") || !strings.Contains(r.detail, "harness-ownership.yml") {
+		t.Errorf("FAIL detail should name the project_owned route for existing paths; got %q", r.detail)
 	}
 }
 
@@ -757,8 +762,14 @@ func TestFormatManagedDriftFail(t *testing.T) {
 	if !strings.Contains(got, "vh-agent-harness update") || !strings.Contains(got, "DESTRUCTIVE") {
 		t.Errorf("destructive remedy must appear; got %q", got)
 	}
-	if !strings.Contains(got, "overlay pack source") {
-		t.Errorf("non-destructive remedy must appear; got %q", got)
+	// Deliberate-edit remedy carries the corrected routing vocabulary (S4
+	// driftRecoverySuffix repair): additions-only overlay pack + the
+	// project_owned harness-ownership.yml route for existing rendered paths.
+	if !strings.Contains(got, ".vh-agent-harness/overlays/<pack>/") || !strings.Contains(got, "ADDITIONS only") {
+		t.Errorf("additions-only overlay-pack remedy must appear; got %q", got)
+	}
+	if !strings.Contains(got, "project_owned") || !strings.Contains(got, "harness-ownership.yml") {
+		t.Errorf("project_owned harness-ownership.yml route must appear; got %q", got)
 	}
 }
 

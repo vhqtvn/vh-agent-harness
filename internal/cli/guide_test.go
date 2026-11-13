@@ -254,13 +254,18 @@ func TestPrintDryRunPlan_ListsDivergedPaths(t *testing.T) {
 	if !strings.Contains(out, "PRESERVE (consumer-edited managed)") || !strings.Contains(out, "origin-hash") {
 		t.Errorf("DIVERGED header must flag origin-hash preservation; got:\n%s", out)
 	}
-	// (3) The non-destructive remedy (re-baseline via accept-platform +
-	// overlay promotion) appears. The re-baseline MUST point at the
+	// (3) The durable-edit remedy (re-baseline via accept-platform + the
+	// corrected routing vocabulary) appears. The re-baseline MUST point at the
 	// `accept-platform` operation, NOT at hand-editing the sidecar and NOT at
 	// deleting the file (deleting the file is self-defeating: a deleted managed
-	// file is also preserved as consumer-deleted, not re-seeded).
-	if !strings.Contains(out, "overlay pack source") || !strings.Contains(out, ".vh-agent-harness/overlays/<pack>/") {
-		t.Errorf("DIVERGED section must offer the overlay-promotion remedy; got:\n%s", out)
+	// file is also preserved as consumer-deleted, not re-seeded). The routing
+	// vocabulary is the corrected one (S4/89ea161): overlay packs are
+	// additions-only; existing paths go through project_owned.
+	if !strings.Contains(out, ".vh-agent-harness/overlays/<pack>/") || !strings.Contains(out, "cannot shadow a builtin at the same path") {
+		t.Errorf("DIVERGED section must offer the additions-only overlay-pack remedy; got:\n%s", out)
+	}
+	if !strings.Contains(out, "project_owned") || !strings.Contains(out, "harness-ownership.yml") {
+		t.Errorf("DIVERGED section must offer the project_owned route for existing paths; got:\n%s", out)
 	}
 	if !strings.Contains(out, "accept-platform") {
 		t.Errorf("DIVERGED re-baseline remedy must point at `accept-platform` (the sanctioned recovery op); got:\n%s", out)

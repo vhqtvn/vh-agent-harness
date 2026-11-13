@@ -105,9 +105,15 @@ func TestPreflight_CheckDrift_NamesPathAndBothRemedies(t *testing.T) {
 	if !strings.Contains(r.detail, "vh-agent-harness update") || !strings.Contains(r.detail, "DESTRUCTIVE") {
 		t.Errorf("FAIL detail should name the destructive `update` remedy; got %q", r.detail)
 	}
-	// Non-destructive overlay-promotion remedy.
-	if !strings.Contains(r.detail, "overlay pack source") || !strings.Contains(r.detail, ".vh-agent-harness/overlays/<pack>/") {
-		t.Errorf("FAIL detail should name the non-destructive overlay-pack remedy; got %q", r.detail)
+	// Deliberate-edit remedy with the corrected routing vocabulary (S4
+	// driftRecoverySuffix repair): safeguard-first, overlay pack for
+	// ADDITIONS only (a pack cannot shadow a builtin at the same path), and
+	// the project_owned harness-ownership.yml route for existing paths.
+	if !strings.Contains(r.detail, ".vh-agent-harness/overlays/<pack>/") || !strings.Contains(r.detail, "ADDITIONS only") {
+		t.Errorf("FAIL detail should name the additions-only overlay-pack remedy; got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "project_owned") || !strings.Contains(r.detail, "harness-ownership.yml") {
+		t.Errorf("FAIL detail should name the project_owned harness-ownership.yml route for existing paths; got %q", r.detail)
 	}
 }
 
@@ -162,7 +168,11 @@ func TestPreflight_CheckDrift_OnlyUnexpected_StillAppendsRemedies(t *testing.T) 
 	if !strings.Contains(r.detail, "vh-agent-harness update") || !strings.Contains(r.detail, "DESTRUCTIVE") {
 		t.Errorf("FAIL detail should still name the destructive remedy (advisory A4 noise); got %q", r.detail)
 	}
-	if !strings.Contains(r.detail, "overlay pack source") {
-		t.Errorf("FAIL detail should still name the non-destructive remedy (advisory A4 noise); got %q", r.detail)
+	// Corrected deliberate-edit routing (S4 driftRecoverySuffix repair).
+	if !strings.Contains(r.detail, ".vh-agent-harness/overlays/<pack>/") || !strings.Contains(r.detail, "ADDITIONS only") {
+		t.Errorf("FAIL detail should still name the additions-only overlay-pack remedy (advisory A4 noise); got %q", r.detail)
+	}
+	if !strings.Contains(r.detail, "project_owned") || !strings.Contains(r.detail, "harness-ownership.yml") {
+		t.Errorf("FAIL detail should still name the project_owned route (advisory A4 noise); got %q", r.detail)
 	}
 }

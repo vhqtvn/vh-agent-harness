@@ -1544,8 +1544,8 @@ func checkManagedDrift(target string) checkResult {
 // driftRecoverySuffix is the self-routing remedy block appended to every
 // managed-drift / drift FAIL detail. It surfaces BOTH remedies because the
 // harness cannot programmatically distinguish bit-rot (fix = destructive
-// `update`) from a deliberate local edit (fix = non-destructive promotion into
-// the overlay pack source). This is the surface-at-friction principle
+// `update`) from a deliberate local edit (fix = safeguard, then a
+// durability route). This is the surface-at-friction principle
 // (researches/decisions/2026-08-04-capability-discovery-audit.md §6 entry 1,
 // the SIGNED OFF entry): a fail-closed result must name the sanctioned
 // alternative inline so the operator routes without losing a deliberate edit.
@@ -1557,15 +1557,21 @@ func checkManagedDrift(target string) checkResult {
 // bit-rot / stale-but-unedited / bootstrap drift that `update` WILL overwrite:
 // the DESTRUCTIVE claim is accurate for this set. A deliberate edit that ended
 // up in this set (e.g. pre-origin-hash bootstrap, no recorded origin) should be
-// routed to remedy (2) so promotion makes it canonical rather than reverted.
+// safeguarded and routed to remedy (2) so it becomes durable rather than
+// reverted.
 //
 // (1) DESTRUCTIVE: `update` re-renders drifted/missing files from the corpus,
 // discarding local edits (this is the bit-rot fix and the incident-2026-08-06
-// hazard when applied to a deliberate edit). (2) NON-DESTRUCTIVE: promote the
-// edit into the overlay pack source so `update` renders it as canonical content
-// — the file stops being "drift" and stops being reverted. The overlay source
-// path convention mirrors .opencode/ under .vh-agent-harness/overlays/<pack>/.
-const driftRecoverySuffix = " — remedies: (1) run `vh-agent-harness update` to re-render drifted/missing files from the corpus (DESTRUCTIVE: overwrites those files; consumer-edited managed files are preserved separately by origin-hash and are NOT in this set); (2) if a drift is a deliberate edit, promote it into the overlay pack source at .vh-agent-harness/overlays/<pack>/ (unit files mirror .opencode/: agents/<name>.md, skills/<name>/SKILL.md, commands/<name>.md) then `vh-agent-harness update` renders it as canonical content instead of reverting it. Inspect exact bytes with `vh-agent-harness diff`."
+// hazard when applied to a deliberate edit). (2) SAFEGUARD-FIRST, then route
+// BY SHAPE (the corrected vocabulary from 89ea161 — the same-path overlay
+// promotion this block taught until S4 is refuted: overlay packs are
+// ADDITIVE-ONLY, and a pack unit at a path a builtin already renders fails
+// closed with ErrShadowBuiltin, internal/overlay/shadow.go): an overlay pack
+// fits NEW paths only; keeping a deliberate edit at an EXISTING rendered path
+// requires raising that path to project_owned in harness-ownership.yml and
+// taking on the per-release re-check + re-apply burden. The runbook docs key
+// carries the full procedure.
+const driftRecoverySuffix = " — remedies: (1) run `vh-agent-harness update` to re-render drifted/missing files from the corpus (DESTRUCTIVE: overwrites those files; consumer-edited managed files are preserved separately by origin-hash and are NOT in this set); (2) if a drift is a deliberate edit you must keep, SAFEGUARD it first (back up the live bytes; inspect with `vh-agent-harness diff`), then route by shape: an overlay pack (.vh-agent-harness/overlays/<pack>/) fits ADDITIONS only — a NEW unit path, because a pack cannot shadow a builtin at the same path (fail-closed) — while keeping the edit at an EXISTING rendered path requires raising that path to project_owned in .vh-agent-harness/harness-ownership.yml and re-checking platform deltas, re-applying your changes, each release. Runbook: `vh-agent-harness docs preserved-managed-reconciliation`."
 
 // driftDetailPathCap is the maximum number of paths per category (drifted /
 // missing) embedded inline in a FAIL detail. The detail renders as a single

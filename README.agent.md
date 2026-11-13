@@ -60,16 +60,20 @@ To see what changed in a release and how to migrate, inspect its migration note
     edit.** `update` overwrites a `platform_managed` file **only when it is still
     the bytes the platform last wrote** (the recorded origin hash). If you have
     edited it, `update` **preserves your edit** (`managed-diverged` — ownership
-    has effectively transferred to you) and will not clobber it. To re-baseline
-    (accept the platform's version again for one path): run
-    `vh-agent-harness accept-platform <path>` — it writes the platform bytes and
-    advances the origin (live-first, then sidecar atomic rename; not a
-    cross-object transaction, but a rejected path touches nothing). You do NOT
-    edit `origin-hashes.json` (it is
-     binary-owned). Deleting the file alone will NOT work (a deleted managed file
-    is also preserved as consumer-deleted). To make an edit canonical across
-    updates, promote it into an overlay pack source. When the platform's
-    version of an edited file has ALSO changed since the base your edit
+     has effectively transferred to you) and will not clobber it. To re-baseline
+     (accept the platform's version again for one path): run
+     `vh-agent-harness accept-platform <path>` — it writes the platform bytes and
+     advances the origin (live-first, then sidecar atomic rename; not a
+     cross-object transaction, but a rejected path touches nothing). You do NOT
+     edit `origin-hashes.json` (it is binary-owned). Deleting the file alone
+     will NOT work (a deleted managed file is also preserved as
+     consumer-deleted). To keep an edit durable across updates, route by shape:
+     an overlay pack (`.vh-agent-harness/overlays/<pack>/`) fits NEW unit paths
+     only (a pack cannot shadow a builtin at the same path — fail-closed); an
+     edit at an EXISTING rendered path needs a raise to `project_owned` in
+     `.vh-agent-harness/harness-ownership.yml` with the per-release re-check +
+     re-apply burden. When the platform's
+     version of an edited file has ALSO changed since the base your edit
     diverged from ("both moved"), `update` marks the path
     `[consumer-edit, platform-also-changed]` and prints a stale-preserve
     warning — the preserved file did NOT receive that update's platform
@@ -1353,7 +1357,9 @@ export default function transform({ context }) {
   scope rider *link integrity only; behavior of preserved files is not
   verified*). `--allow-broken-cohort` (on `update`, `install`, and
   `accept-platform`) prints all diagnostics as WARN and proceeds — one-shot,
-  never persisted, never suppresses doctor. `accept-platform <path>` runs the
+  never persisted anywhere under `.vh-agent-harness/` (lineage, profile,
+  origin store, state), and never suppresses doctor (see the sequential
+  procedure below). `accept-platform <path>` runs the
   same gate on the prospective tree (current bytes with only that path
   substituted); a plain acceptance proceeds only when that single substitution
   heals every platform-bound broken link, otherwise it needs the flag —
@@ -1361,6 +1367,18 @@ export default function transform({ context }) {
   install/accept-platform `--dry-run`, for the cohort refusal specifically)
   previews a refusal as `WOULD REFUSE` and still exits 0. Unparseable/unknown
   findings are WARN-side only and never refuse.
+- **Sequential recovery from a cohort refusal (the sanctioned procedure):**
+  (1) safeguard first — back up any preserved file you care about and inspect
+  with `vh-agent-harness diff` / `--dry-run` (adopting platform bytes
+  DISCARDS local edits); (2) repair one path at a time —
+  `vh-agent-harness accept-platform <path> --allow-broken-cohort` when a
+  single plain acceptance cannot yet heal every platform-bound broken link
+  (each acceptance is gated on the tree IT alone would produce, so the flag is
+  expected on all-but-the-last acceptance of a multi-file migration); (3) run
+  `vh-agent-harness doctor` afterward — the bypass flag NEVER suppresses
+  doctor check #28, which keeps reporting the same findings until the links
+  are actually healed (and blocks release G0c while any platform-bound broken
+  edge remains). Dry-run previews at every step make no writes and say so.
 - **In a dev/dogfood repo that edits `templates/core/` (this one), prefer
   `make update` over a bare `vh-agent-harness update`.** `update` renders only
   from the corpus embedded in the running binary, never from the working tree; the
@@ -1515,9 +1533,13 @@ export default function transform({ context }) {
   doctor — deliberate, ratified enforcement. `--allow-broken-cohort` never
   suppresses it. Scope is stated on every FAIL/WARN line: link integrity
   only; behavior of preserved files is not verified. Dogfood note: this
-  repo's own installed tree carries known unknowns (update-op debt +
-  compaction-primitives, plus vendored third-party deps under
-  `.opencode/node_modules`), so doctor here WARNs permanently — documented,
+  repo's own installed tree WARNs permanently — the observed volume driver
+  is the vendored `.opencode/node_modules/` tree (frozen-grammar unknowns
+  across `effect/`, `@ai-sdk/`, `yaml/`, and friends account for the bulk of
+  the unknown findings, plus the handful of proven adopter-internal broken
+  edges — all inside `node_modules/yaml`, where `dist/cli.mjs` requires
+  symbols sibling builds do not export), on top of the known update-op
+  `++/--` debt + `compaction-primitives.js` unknowns — documented,
   never suppressed, no expected count hardcoded. The
   `head-progress` check reads the commit-gate's
   durable closeout ledger (`.git/commit-gate/closeouts.log`) and WARNs when the
@@ -2489,11 +2511,12 @@ operator release-prep. The ceremony produces THREE sequential single-path
 (manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`.
 The release-tag wrapper's deterministic gates refuse the tag unless each
 commit binds to its predecessor exactly. The wrapper also runs **G0c**
-  (`vh-agent-harness doctor` — all 25 checks, including #12 defer-liveness,
+  (`vh-agent-harness doctor` — all 28 checks, including #12 defer-liveness,
   #13 staged-errata-content, #14 behavioral-closure, #15 dev-stale-embed,
   #16 f1-envelope, #17 f1-f2-consistency, #18 f2-pairs, #19 head-progress,
   #20 complexity-advisory, #21 recurrence-state, #22 exec-sandbox-floor,
-  #23 shipped-pilots, #24 closeout-reach, and #25 rewrite-parity)
+  #23 shipped-pilots, #24 closeout-reach, #25 rewrite-parity,
+  #26 private-redlines, #27 dead-grants, and #28 cohort-links)
   as a hard machine gate
   AFTER the clean-worktree
 gate (G0b) and BEFORE the readiness-pass artifact gate (G1-G5). A

@@ -440,6 +440,26 @@ const (
 	cohortClaimAcceptOverride = "the proceeding acceptance writes ONLY this path's staged platform bytes; every other preserved file is retained byte-for-byte — not modified, clobbered, or deleted (accept-platform is per-path, not transactional)"
 )
 
+// The DRY-RUN preview variants (S4 honesty polish, the S2-F3 advisory): a
+// preview makes NO writes, so its element-3 claim must never borrow live-write
+// wording — a dry-run override does not proceed into any write ("the
+// proceeding apply/acceptance writes ..." is a live-run fact), and a dry-run
+// refusal must not assert live-run landing facts either ("earlier accepted
+// path(s) already landed" cannot be stated by a preview that wrote nothing).
+// Every variant still describes what a LIVE run would do, so the operator can
+// weigh the override decision on preview evidence alone.
+const (
+	// seam site, override, DRY-RUN: the preview writes nothing; a live run
+	// would write only advancing platform files, never preserved files.
+	cohortClaimSeamOverridePreview = "this dry-run preview writes nothing; a live run would write only advancing (platform-managed) files — preserved files are never modified, clobbered, or deleted"
+	// accept site, refused/would-refused, DRY-RUN: per-path zero-write claim
+	// scoped to the preview.
+	cohortClaimAcceptRefusedPreview = "this preview wrote nothing: a dry-run makes no writes (a live acceptance writes only the accepted path's staged platform bytes; accept-platform is per-path, not transactional)"
+	// accept site, override, DRY-RUN (would-accept preview): describes the
+	// write a live run would make without claiming it happened.
+	cohortClaimAcceptOverridePreview = "this dry-run preview writes nothing — a live run would write ONLY this path's staged platform bytes, retaining every other preserved file byte-for-byte (accept-platform is per-path, not transactional)"
+)
+
 // formatCohortWarnBlock renders the compact WARN-side report used when nothing
 // refuses but adopter-internal proven broken edges and/or unknown findings
 // exist. It is deliberately lighter than the full refusal contract (no hashes,
@@ -469,7 +489,14 @@ func formatCohortWarnBlock(c *cohortCheck) string {
 func emitSeamCohortDiagnostics(w io.Writer, c *cohortCheck, dryRun, allowBrokenCohort bool) (refuse bool) {
 	if len(c.Refuse) > 0 {
 		if allowBrokenCohort {
-			fmt.Fprint(w, formatCohortDiagnostic(c, cohortModeOverride, "", cohortClaimSeamOverride))
+			// S4/S2-F3: a dry-run override preview makes no writes, so the
+			// element-3 claim (and the subject) must say PREVIEW, not the
+			// live-write wording the live override framing carries.
+			claim, subject := cohortClaimSeamOverride, ""
+			if dryRun {
+				claim, subject = cohortClaimSeamOverridePreview, " (dry-run preview)"
+			}
+			fmt.Fprint(w, formatCohortDiagnostic(c, cohortModeOverride, subject, claim))
 			return false
 		}
 		if dryRun {

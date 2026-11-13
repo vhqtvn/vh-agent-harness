@@ -100,9 +100,13 @@ The bytes accept-platform writes are byte-identical to what the next
 ` + "`update`" + ` would write (it shares the seam's render front-half), so accepting a
 path and then running ` + "`update`" + ` converges immediately — the path no longer stalls.
 
-To make a consumer edit canonical ACROSS updates instead of discarding it,
-promote the edit into an overlay pack source at
-.vh-agent-harness/overlays/<pack>/ rather than accepting the platform version.
+To keep a consumer edit across updates instead of re-reconciling it each
+release, route by shape: an overlay pack (.vh-agent-harness/overlays/<pack>/)
+fits NEW unit paths only (a pack cannot shadow a builtin at the same path —
+fail-closed); keeping an edit at an EXISTING rendered path requires raising
+that path to project_owned in .vh-agent-harness/harness-ownership.yml and
+re-applying your changes after each update (runbook: vh-agent-harness docs
+preserved-managed-reconciliation).
 
 Batch mode: --all accepts every drifted/stalled platform-managed path in one
 invocation (no positional paths needed). It enumerates the full platform-managed
@@ -520,13 +524,19 @@ func acceptOnePath(ps *seamStaging, store *originhash.Store, target, rel string,
 	}
 	if len(cohort.Refuse) > 0 {
 		if allowBrokenCohort {
+			// S4/S2-F3: under dry-run the override framing is a WOULD-accept
+			// preview — the element-3 claim must say the preview writes
+			// nothing, never the live-write wording ("the proceeding
+			// acceptance writes ...").
 			subject := fmt.Sprintf(" (accepting %s)", rel)
+			claim := cohortClaimAcceptOverride
 			if dryRun {
 				subject = fmt.Sprintf(" (dry-run preview; would accept %s)", rel)
+				claim = cohortClaimAcceptOverridePreview
 			}
-			fmt.Fprint(os.Stderr, formatCohortDiagnostic(cohort, cohortModeOverride, subject, cohortClaimAcceptOverride))
+			fmt.Fprint(os.Stderr, formatCohortDiagnostic(cohort, cohortModeOverride, subject, claim))
 		} else if dryRun {
-			fmt.Fprint(os.Stderr, formatCohortDiagnostic(cohort, cohortModeWouldRefuse, fmt.Sprintf(" to accept %s", rel), cohortClaimAcceptRefused))
+			fmt.Fprint(os.Stderr, formatCohortDiagnostic(cohort, cohortModeWouldRefuse, fmt.Sprintf(" to accept %s", rel), cohortClaimAcceptRefusedPreview))
 			fmt.Fprintf(os.Stderr, "  %s\n", cohortDryRunDisclaimer)
 			return acceptResult{rel: rel, reason: fmt.Sprintf(
 				"WOULD REFUSE (dry-run preview): cohort-link refusal: the prospective tree (current bytes with only %s substituted) still carries %d proven broken link(s) touching platform-managed files (full diagnostic above; docs: %s; override: --allow-broken-cohort)",
