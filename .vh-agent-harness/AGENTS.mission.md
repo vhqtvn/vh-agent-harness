@@ -43,6 +43,13 @@ develop the harness.
 - **Ownership is the safety contract.** A plain render may only overwrite
   `platform_managed` (and active `overlay_extension`); everything else is
   preserved / seeded-once / schema-reconciled. Always preview with `--dry-run`.
+- **eslink checks managed-output compatibility — managed-output compatibility
+  only.** The frozen-grammar ES-module link checker exists to keep the
+  manager's own rendered output compatible across managed/preserved
+  boundaries; never general JavaScript analysis, never semantic gate
+  verification (standing honesty rider: link integrity only; behavior of
+  preserved files is not verified). Charter ratified 2026-11-14
+  (`researches/decisions/2026-11-14-eslink-o4-posture-charter-boundary-process-rules.md`).
 - **Agent-operability is a feature.** `guide`, `--dry-run`, and the next-steps
   footers must stay accurate to the real command surface.
 - **`README.agent.md` must always be up-to-date.** It is the agent operating
