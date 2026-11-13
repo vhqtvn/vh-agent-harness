@@ -1539,8 +1539,15 @@ export default function transform({ context }) {
   the unknown findings, plus the handful of proven adopter-internal broken
   edges — all inside `node_modules/yaml`, where `dist/cli.mjs` requires
   symbols sibling builds do not export), on top of the known update-op
-  `++/--` debt + `compaction-primitives.js` unknowns — documented,
-  never suppressed, no expected count hardcoded. The
+  `++/--` debt + `compaction-primitives.js` unknowns. Under the 2026-11-13
+  vendor-noise reporting amendment (`researches/decisions/2026-11-13-eslink-
+  o4-vendor-unknown-reporting-amendment.md`, posture "a+b+c") those vendor
+  unknown findings are no longer itemized: they collapse to ONE aggregate
+  line (`+ N unknown finding(s) under vendor directories (node_modules/) not
+  itemized` — count stated, never pretended zero, carrying the literal rider)
+  while the non-vendor unknowns stay itemized and PROVEN broken edges stay
+  itemized regardless of location (facts, not noise) — reporting only, never
+  suppression, no expected count hardcoded. The
   `head-progress` check reads the commit-gate's
   durable closeout ledger (`.git/commit-gate/closeouts.log`) and WARNs when the
   last N (default 3, env `COMMIT_GATE_STALE_HEAD_THRESHOLD`) successful closeouts

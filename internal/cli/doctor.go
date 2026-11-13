@@ -564,11 +564,13 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	// ratified §C (intended enforcement). --allow-broken-cohort on
 	// update/install/accept-platform never suppresses this check.
 	//
-	// DOGFOOD NOISE (ratified no-suppression): this repo's own installed
-	// tree carries known unknowns (update-op debt + compaction-primitives,
-	// plus vendored third-party deps under .opencode/node_modules) — doctor
-	// here will WARN permanently. Documented, never suppressed, and no
-	// expected count is hardcoded.
+	// DOGFOOD NOISE (ratified no-suppression; 2026-11-13 vendor-noise
+	// amendment "a+b+c"): this repo's own installed tree carries known
+	// unknowns (update-op debt + compaction-primitives, plus vendored
+	// third-party deps under .opencode/node_modules) — doctor here will WARN
+	// permanently. Documented, never suppressed, and no expected count is
+	// hardcoded; vendor-dir unknowns collapse to ONE aggregate line (count +
+	// rider) while proven edges and non-vendor unknowns stay itemized.
 	fmt.Fprintln(out, "  cohort-links:")
 	clr := checkCohortLinks(abs)
 	fmt.Fprintln(out, "    "+clr.String())
@@ -1091,11 +1093,15 @@ func checkDeadGrants(target string) checkResult {
 // (cohortRider): link integrity only; behavior of preserved files is not
 // verified. No semantic or behavior claims are made anywhere.
 //
-// Dogfood note (ratified no-suppression): this repo's own installed tree
-// carries known unknowns (update-op debt + compaction-primitives, plus the
-// vendored third-party deps under .opencode/node_modules the frozen grammar
-// cannot parse), so doctor here WARNs permanently — documented, never
-// suppressed, no hardcoded expected counts.
+// Dogfood note (ratified no-suppression; 2026-11-13 vendor-noise amendment
+// "a+b+c"): this repo's own installed tree carries known unknowns (update-op
+// debt + compaction-primitives, plus the vendored third-party deps under
+// .opencode/node_modules the frozen grammar cannot parse), so doctor here
+// WARNs permanently — documented, never suppressed, no hardcoded expected
+// counts. Vendor-dir unknown findings (any node_modules/ path segment)
+// collapse to ONE aggregate line stating their count and carrying the rider
+// (never pretended zero); proven edges and non-vendor unknowns stay itemized
+// — REPORTING only, tiering and scan scope unchanged.
 func checkCohortLinks(target string) checkResult {
 	const name = "cohort-links"
 	opPath := filepath.Join(target, ".opencode")
@@ -1143,13 +1149,22 @@ func checkCohortLinks(target string) checkResult {
 				len(c.Refuse), c.Scanned, strings.Join(parts, "; "), cohortRider)}
 	}
 	if c.HasWarnSide() {
-		parts := make([]string, 0, len(c.Warn)+len(c.Unknown))
+		itemizedUnknown, vendorUnknown := splitCohortUnknowns(c.Unknown)
+		parts := make([]string, 0, len(c.Warn)+len(itemizedUnknown)+1)
 		for _, e := range c.Warn {
 			parts = append(parts, fmt.Sprintf("%s imports %q from %s (missing symbol %s: %s)",
 				e.Importer, e.Specifier, e.Provider, e.Symbol, oneLine(e.Reason)))
 		}
-		for _, u := range c.Unknown {
+		for _, u := range itemizedUnknown {
 			parts = append(parts, fmt.Sprintf("%s %q: %s", u.Path, u.Specifier, oneLine(u.Reason)))
+		}
+		if len(vendorUnknown) > 0 {
+			// 2026-11-13 vendor-noise amendment (posture (c)): vendor
+			// unknowns collapse to ONE aggregate clause (count + rider). The
+			// summary total above still counts them — stated, never pretended
+			// zero. Proven edges (listed before this clause) are NEVER
+			// aggregated, wherever they sit.
+			parts = append(parts, fmt.Sprintf(cohortVendorAggregateFmt, len(vendorUnknown), cohortRider))
 		}
 		return checkResult{name: name, tier: tierWarn,
 			detail: fmt.Sprintf("%d adopter-internal proven broken link(s), %d unknown finding(s) (unknown findings are never a failure basis — U6; %d module(s) scanned): %s. Scope: %s",

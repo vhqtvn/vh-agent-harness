@@ -2,7 +2,8 @@ package cli
 
 // doctor_cohort_links_test.go pins doctor check #28 `cohort-links` (O4
 // Slice 3, researches/decisions/2026-11-12-eslink-o4-s2-s4-wiring-scope.md
-// §C + Decision 2/O3):
+// §C + Decision 2/O3; vendor-noise reporting amendment
+// researches/decisions/2026-11-13-eslink-o4-vendor-unknown-reporting-amendment.md):
 //
 //   - clean installed tree → PASS;
 //   - proven broken edge touching the active platform set → FAIL naming
@@ -15,7 +16,11 @@ package cli
 //     adopter-internal broken (both endpoints non-platform) → WARN, and the
 //     preserved-platform-endpoint case (consumer-skewed state-lib.js) → FAIL
 //     side (divergence is the FAIL side — the state-lib skew family this
-//     check exists for).
+//     check exists for);
+//   - 2026-11-13 amendment: vendor-dir unknowns (node_modules/ path segment)
+//     collapse to ONE aggregate line (count + rider) and are NOT itemized,
+//     while a PROVEN edge under node_modules/ stays itemized (facts, never
+//     aggregated), and a no-vendor tree renders NO aggregate line.
 //
 // All fixtures are synthetic t.TempDir targets seeded by a real seam install;
 // the real repo corpus is never scanned and the eslink corpus pins stay
@@ -23,6 +28,7 @@ package cli
 // hardcoded anywhere.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,6 +168,12 @@ func TestCheckCohortLinks_WarnUnknown(t *testing.T) {
 	// "FAIL" substring on clean installs) must not be tripped by prose.
 	if strings.Contains(r.detail, "FAIL") {
 		t.Errorf("WARN detail must not contain the tier token FAIL; got:\n%s", r.detail)
+	}
+	// 2026-11-13 amendment regression guard: a NO-vendor tree (this fixture's
+	// only unknown sits under .opencode/scratch/) must render NO aggregate
+	// line — the amendment changes nothing where there is no vendor noise.
+	if strings.Contains(r.detail, "under vendor directories") {
+		t.Errorf("no-vendor tree must not render the vendor aggregate line; got:\n%s", r.detail)
 	}
 
 	out, err := cohortDoctorRun(t, root)
@@ -318,5 +330,148 @@ func TestCheckCohortLinks_O3_PreservedPlatformEndpointFails(t *testing.T) {
 	}
 	if !strings.Contains(out, "result: UNHEALTHY") {
 		t.Errorf("doctor must report UNHEALTHY; got:\n%s", out)
+	}
+}
+
+// --- 2026-11-13 vendor-noise reporting amendment (posture "a+b+c") ----------
+
+// TestIsVendorCohortPath_SegmentSemantics pins the deterministic vendor
+// definition: any path CONTAINING a node_modules/ path SEGMENT (segment
+// equality, never substring, never content sniffing).
+func TestIsVendorCohortPath_SegmentSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		rel  string
+		want bool
+	}{
+		{".opencode/node_modules/effect/index.js", true},
+		{".opencode/node_modules/@ai-sdk/util/dist/index.mjs", true},
+		{".opencode/plugins/foo/node_modules/dep/lib.js", true},  // nested anywhere
+		{".opencode/node_modules/a/node_modules/dep/b.js", true}, // repeated segments
+		{".opencode/scripts/node_modules.js", false},             // file NAMED like the token
+		{".opencode/scripts/node_modulesish/lib.js", false},      // prefix, not segment
+		{".opencode/scratch/dyn.js", false},
+		{".opencode/scripts/state-lib.js", false},
+	} {
+		if got := isVendorCohortPath(tc.rel); got != tc.want {
+			t.Errorf("isVendorCohortPath(%q) = %v, want %v", tc.rel, got, tc.want)
+		}
+	}
+}
+
+// TestCheckCohortLinks_WarnVendorUnknownsAggregated pins the amendment on the
+// live check surface with a dogfood-shaped fixture: a full seam install
+// (carrying the known non-vendor platform unknowns) PLUS vendored files under
+// .opencode/node_modules/ whose unknown findings must collapse to ONE
+// aggregate line — present with the exact vendor count and the literal rider,
+// while no vendor path is itemized and the non-vendor unknowns stay itemized.
+// Tier stays WARN (posture (a): the WARN baseline, nothing suppressed) and
+// doctor stays HEALTHY.
+func TestCheckCohortLinks_WarnVendorUnknownsAggregated(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	// Two vendored modules with unknown findings (dynamic imports — the same
+	// finding class the dogfood vendor tree yields under the frozen grammar).
+	for _, rel := range []string{
+		".opencode/node_modules/effect/index.js",
+		".opencode/node_modules/@ai-sdk/util/dist/helper.mjs",
+	} {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+		if err := os.WriteFile(p, []byte(
+			"const mod = await import(\"./lazy.js\");\nexport const ready = mod;\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	// One non-vendor unknown: must remain itemized.
+	if err := os.MkdirAll(filepath.Join(root, ".opencode/scratch"), 0o755); err != nil {
+		t.Fatalf("mkdir scratch: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".opencode/scratch/dyn.js"), []byte(
+		"const mod = await import(\"./optional-panel.js\");\nexport const ready = mod;\n"), 0o644); err != nil {
+		t.Fatalf("write dyn.js: %v", err)
+	}
+
+	r := checkCohortLinks(root)
+	if r.tier != tierWarn {
+		t.Fatalf("vendor unknown findings must keep the WARN baseline (posture a — no suppression, never FAIL), got %s: %s", r.tier, r.detail)
+	}
+	// The ONE aggregate line: exact vendor count (the fixture's two vendor
+	// files are the only vendor modules) + the literal rider.
+	agg := fmt.Sprintf("+ %d unknown finding(s) under vendor directories (node_modules/) not itemized", 2)
+	if !strings.Contains(r.detail, agg) {
+		t.Errorf("WARN detail must carry the aggregate line %q:\n%s", agg, r.detail)
+	}
+	if !strings.Contains(r.detail, "not itemized — "+cohortRider) {
+		t.Errorf("the aggregate clause must carry the literal rider itself; got:\n%s", r.detail)
+	}
+	// No vendor path is itemized (posture (b)) — the aggregate line mentions
+	// only the bare "(node_modules/)" token, never a .opencode/node_modules path.
+	if strings.Contains(r.detail, ".opencode/node_modules") {
+		t.Errorf("vendor unknown paths must NOT be itemized, only aggregated; got:\n%s", r.detail)
+	}
+	// Non-vendor unknowns stay itemized; totals still count everything
+	// (posture (a)/(c): stated, never pretended zero).
+	for _, want := range []string{
+		".opencode/scratch/dyn.js",
+		"unknown finding(s) (",
+		cohortRider,
+	} {
+		if !strings.Contains(r.detail, want) {
+			t.Errorf("WARN detail must contain %q, got:\n%s", want, r.detail)
+		}
+	}
+	if !strings.Contains(r.detail, "never a failure basis") {
+		t.Errorf("WARN detail must keep the U6 clause, got:\n%s", r.detail)
+	}
+
+	out, err := cohortDoctorRun(t, root)
+	if err != nil {
+		t.Fatalf("doctor must stay HEALTHY on a vendor-noise WARN; got err=%v, output:\n%s", err, out)
+	}
+	if !strings.Contains(out, "result: HEALTHY") {
+		t.Errorf("doctor must report HEALTHY; got:\n%s", out)
+	}
+}
+
+// TestCheckCohortLinks_VendorProvenEdgeStillItemized pins the first synthesis
+// rider: a PROVEN broken edge is a fact, not noise — even with BOTH endpoints
+// under node_modules/ (the exact node_modules/yaml dogfood shape) it stays
+// itemized in the WARN details, never aggregated.
+func TestCheckCohortLinks_VendorProvenEdgeStillItemized(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+
+	vendor := filepath.Join(root, ".opencode/node_modules/yaml/dist")
+	if err := os.MkdirAll(vendor, 0o755); err != nil {
+		t.Fatalf("mkdir yaml/dist: %v", err)
+	}
+	// dist/cli.mjs requires a symbol sibling build util.mjs does not export —
+	// the real dogfood proven-edge shape (both endpoints adopter-internal:
+	// node_modules never renders, so the edge is WARN-side).
+	if err := os.WriteFile(filepath.Join(vendor, "cli.mjs"), []byte(
+		"import { isDocument } from \"./util.mjs\";\nexport const cli = isDocument;\n"), 0o644); err != nil {
+		t.Fatalf("write cli.mjs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(vendor, "util.mjs"), []byte(
+		"export const isNodeStream = 1;\n"), 0o644); err != nil {
+		t.Fatalf("write util.mjs: %v", err)
+	}
+
+	r := checkCohortLinks(root)
+	if r.tier != tierWarn {
+		t.Fatalf("adopter-internal vendor proven edge must WARN (never FAIL), got %s: %s", r.tier, r.detail)
+	}
+	for _, want := range []string{
+		".opencode/node_modules/yaml/dist/cli.mjs",  // importer — ITEMIZED
+		".opencode/node_modules/yaml/dist/util.mjs", // provider — ITEMIZED
+		"isDocument", // the missing symbol
+		cohortRider,
+	} {
+		if !strings.Contains(r.detail, want) {
+			t.Errorf("vendor proven edge must stay itemized (never aggregated); missing %q in:\n%s", want, r.detail)
+		}
 	}
 }

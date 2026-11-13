@@ -25,7 +25,11 @@ package cli
 //     overlay guidance (89ea161: additive-only packs; same-path goes through
 //     project_owned in harness-ownership.yml; runbook docs pointer);
 //   - dry-run framings make MODE-ACCURATE preservation claims (S2-F3): a
-//     preview writes nothing and never borrows live-write wording.
+//     preview writes nothing and never borrows live-write wording;
+//   - 2026-11-13 vendor-noise amendment: the vendor aggregate line carries
+//     the literal rider itself, contains no banned phrase, and hides nothing
+//     (the unknown totals still count vendor findings; the vendor PROVEN
+//     edge stays itemized — facts, not noise).
 //
 // Corpus pins stay frozen (61/46/15 · 49 · 14/3/32 · 5 · 0); all fixtures are
 // synthetic t.TempDir targets seeded by a real seam install.
@@ -62,7 +66,9 @@ func TestCohortHonesty_RatifiedLiteralsPinned(t *testing.T) {
 // --- formatter surfaces (actual functions, never copies) ---------------------
 
 // honestyCohortCheck is a synthetic verdict covering EVERY evidence class the
-// diagnostic can carry (refuse edge, adopter-internal warn edge, unknown,
+// diagnostic can carry (refuse edge, adopter-internal warn edge — including
+// one under node_modules/ (2026-11-13 amendment: proven edges are never
+// aggregated), unknown — non-vendor AND vendor (the aggregate-line class),
 // hash row, preserved row) so one render exercises every message branch.
 func honestyCohortCheck() *cohortCheck {
 	return &cohortCheck{
@@ -73,18 +79,43 @@ func honestyCohortCheck() *cohortCheck {
 			Symbol:    "collectDecisionItems",
 			Reason:    "missing symbol collectDecisionItems",
 		}},
-		Warn: []eslink.BrokenEdge{{
-			Importer:  ".opencode/scratch/a.js",
-			Specifier: "./b.js",
-			Provider:  ".opencode/scratch/b.js",
-			Symbol:    "neverExported",
-			Reason:    "missing symbol neverExported",
-		}},
-		Unknown: []eslink.UnknownFinding{{
-			Path:      ".opencode/scratch/dyn.js",
-			Specifier: "./optional-panel.js",
-			Reason:    "dynamic import",
-		}},
+		Warn: []eslink.BrokenEdge{
+			{
+				Importer:  ".opencode/scratch/a.js",
+				Specifier: "./b.js",
+				Provider:  ".opencode/scratch/b.js",
+				Symbol:    "neverExported",
+				Reason:    "missing symbol neverExported",
+			},
+			{
+				// Vendor proven edge (the node_modules/yaml dogfood shape):
+				// stays itemized everywhere — a fact, never aggregated.
+				Importer:  ".opencode/node_modules/yaml/dist/cli.mjs",
+				Specifier: "./util.mjs",
+				Provider:  ".opencode/node_modules/yaml/dist/util.mjs",
+				Symbol:    "isDocument",
+				Reason:    "missing symbol isDocument",
+			},
+		},
+		Unknown: []eslink.UnknownFinding{
+			{
+				Path:      ".opencode/scratch/dyn.js",
+				Specifier: "./optional-panel.js",
+				Reason:    "dynamic import",
+			},
+			{
+				// Vendor unknowns (the aggregated class, 2026-11-13 posture
+				// b+c): these paths must NEVER appear itemized on a surface.
+				Path:      ".opencode/node_modules/effect/index.js",
+				Specifier: "./lazy.js",
+				Reason:    "dynamic import",
+			},
+			{
+				Path:      ".opencode/node_modules/@ai-sdk/util/dist/helper.mjs",
+				Specifier: "./lazy.js",
+				Reason:    "dynamic import",
+			},
+		},
 		Hashes: []cohortFileHash{{
 			Path: ".opencode/scripts/state-lib.js",
 			SHA:  "sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -190,6 +221,94 @@ func TestCohortHonesty_BannedPhrasesAbsentFromFormatters(t *testing.T) {
 				t.Errorf("surface %s contains banned phrase %q:\n%s", name, banned, s)
 			}
 		}
+	}
+}
+
+// TestCohortHonesty_VendorAggregateLine (2026-11-13 amendment): the ONE
+// aggregate line vendor unknown findings collapse to is itself honest — it
+// carries the literal rider, contains no banned phrase, states the vendor
+// count (never pretended zero), hides no TOTAL (the header count still
+// includes vendor findings), itemizes no vendor unknown path, and never
+// swallows the vendor PROVEN edge (facts stay itemized). Asserted against the
+// actual formatter surfaces (which honestyCohortCheck now seeds with the
+// vendor classes) and the live doctor WARN detail.
+func TestCohortHonesty_VendorAggregateLine(t *testing.T) {
+	aggCount := "+ 2 unknown finding(s) under vendor directories (node_modules/) not itemized"
+	vendorUnknownPaths := []string{
+		".opencode/node_modules/effect/index.js",
+		".opencode/node_modules/@ai-sdk/util/dist/helper.mjs",
+	}
+
+	for name, s := range honestyDiagnosticSurfaces(t) {
+		// The aggregate line exists, states its count, and carries the rider
+		// ON THE LINE ITSELF (multi-line surfaces) / on the emitted detail
+		// (single-line doctor surfaces).
+		if !strings.Contains(s, aggCount) {
+			t.Errorf("surface %s must carry the aggregate count line %q:\n%s", name, aggCount, s)
+		}
+		// Find the aggregate LINE and inspect exactly that line.
+		var aggLine string
+		for _, line := range strings.Split(s, "\n") {
+			if strings.Contains(line, "under vendor directories") {
+				aggLine = line
+				break
+			}
+		}
+		if aggLine == "" {
+			t.Fatalf("surface %s: aggregate line not found:\n%s", name, s)
+		}
+		if !strings.Contains(aggLine, cohortRider) {
+			t.Errorf("surface %s: aggregate line must carry the literal rider:\n%q", name, aggLine)
+		}
+		low := strings.ToLower(aggLine)
+		for _, banned := range cohortBannedPhrases {
+			if strings.Contains(low, banned) {
+				t.Errorf("surface %s: aggregate line contains banned phrase %q:\n%q", name, banned, aggLine)
+			}
+		}
+		// Honesty: vendor paths hidden from itemization but the TOTAL never
+		// pretends zero — the surface's unknown header counts all 3 findings.
+		for _, vp := range vendorUnknownPaths {
+			if strings.Contains(s, vp) {
+				t.Errorf("surface %s: vendor unknown path %s must not be itemized:\n%s", name, vp, s)
+			}
+		}
+		if !strings.Contains(s, "unknown finding(s) (3") {
+			t.Errorf("surface %s: unknown TOTAL must stay stated as 3 (1 itemized + 2 vendor):\n%s", name, s)
+		}
+		// The vendor PROVEN edge stays itemized — facts, not noise.
+		for _, want := range []string{".opencode/node_modules/yaml/dist/cli.mjs", "isDocument"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("surface %s: vendor proven edge must stay itemized; missing %s:\n%s", name, want, s)
+			}
+		}
+	}
+
+	// Live doctor WARN detail: a dogfood-shaped fixture (vendor unknowns via
+	// dynamic imports) aggregates with the rider and hides no vendor path
+	// from the COUNT while itemizing none of them.
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	vp := filepath.Join(root, ".opencode/node_modules/effect/index.js")
+	if err := os.MkdirAll(filepath.Dir(vp), 0o755); err != nil {
+		t.Fatalf("mkdir vendor dir: %v", err)
+	}
+	if err := os.WriteFile(vp, []byte(
+		"const mod = await import(\"./lazy.js\");\nexport const ready = mod;\n"), 0o644); err != nil {
+		t.Fatalf("write vendor module: %v", err)
+	}
+	r := checkCohortLinks(root)
+	if r.tier != tierWarn {
+		t.Fatalf("vendor unknown fixture must drive the WARN branch, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "+ 1 unknown finding(s) under vendor directories (node_modules/) not itemized") {
+		t.Errorf("doctor WARN detail must carry the vendor aggregate count:\n%s", r.detail)
+	}
+	if !strings.Contains(r.detail, cohortRider) {
+		t.Errorf("doctor WARN detail must carry the literal rider:\n%s", r.detail)
+	}
+	if strings.Contains(r.detail, ".opencode/node_modules/effect") {
+		t.Errorf("doctor WARN detail must not itemize the vendor unknown path:\n%s", r.detail)
 	}
 }
 

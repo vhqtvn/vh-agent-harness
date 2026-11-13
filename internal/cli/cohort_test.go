@@ -20,11 +20,13 @@ package cli
 // untouched (61/46/15 · 49 · 14/3/32 · 5 · 0).
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/vhqtvn/vh-agent-harness/internal/eslink"
 	"github.com/vhqtvn/vh-agent-harness/internal/originhash"
 	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 	"github.com/vhqtvn/vh-agent-harness/internal/substrate"
@@ -791,6 +793,106 @@ func TestActivePlatformPaths_KeepsPlatformClassesOnly(t *testing.T) {
 	} {
 		if active[notWant] {
 			t.Errorf("active set must NOT contain %s, got %v", notWant, active)
+		}
+	}
+}
+
+// TestCohortWarnSurfaces_VendorUnknownsAggregated pins the 2026-11-13
+// vendor-noise reporting amendment (posture "a+b+c") on BOTH preflight
+// reporting surfaces at the formatter level: the compact WARN block
+// (update/install/accept-platform preflight) and the full diagnostic's
+// section 1b. With a mixed synthetic verdict — 2 non-vendor unknowns, 2
+// vendor unknowns, and 1 PROVEN edge under node_modules/ — the surfaces must
+// (i) itemize exactly the non-vendor unknowns, (ii) collapse the vendor
+// unknowns to ONE aggregate line with the correct count and the literal
+// rider, (iii) keep the unknown TOTAL (4) stated in the header (never
+// pretended zero), and (iv) keep the vendor proven edge itemized (facts,
+// never aggregated). A no-vendor verdict renders NO aggregate line.
+func TestCohortWarnSurfaces_VendorUnknownsAggregated(t *testing.T) {
+	mixed := &cohortCheck{
+		Warn: []eslink.BrokenEdge{{
+			Importer:  ".opencode/node_modules/yaml/dist/cli.mjs",
+			Specifier: "./util.mjs",
+			Provider:  ".opencode/node_modules/yaml/dist/util.mjs",
+			Symbol:    "isDocument",
+			Reason:    "missing symbol isDocument",
+		}},
+		Unknown: []eslink.UnknownFinding{
+			{Path: ".opencode/scratch/dyn.js", Specifier: "./optional-panel.js", Reason: "dynamic import"},
+			{Path: ".opencode/scripts/compaction-primitives.js", Specifier: "./peer.js", Reason: "dynamic import"},
+			{Path: ".opencode/node_modules/effect/index.js", Specifier: "./lazy.js", Reason: "dynamic import"},
+			{Path: ".opencode/node_modules/@ai-sdk/util/dist/helper.mjs", Specifier: "./lazy.js", Reason: "dynamic import"},
+		},
+		Scanned: 4,
+	}
+	agg := fmt.Sprintf("+ %d unknown finding(s) under vendor directories (node_modules/) not itemized", 2)
+	aggLine := agg + " — " + cohortRider
+
+	for name, surface := range map[string]string{
+		"warn-block":       formatCohortWarnBlock(mixed),
+		"full-diagnostic":  formatCohortDiagnostic(mixed, cohortModeRefuse, "", cohortClaimSeamRefused),
+		"override":         formatCohortDiagnostic(mixed, cohortModeOverride, "", cohortClaimSeamOverride),
+		"would-refuse-dry": formatCohortDiagnostic(mixed, cohortModeWouldRefuse, " (dry-run preview)", cohortClaimSeamRefused),
+	} {
+		// (i) non-vendor unknowns itemized...
+		for _, want := range []string{
+			".opencode/scratch/dyn.js",
+			".opencode/scripts/compaction-primitives.js",
+		} {
+			if !strings.Contains(surface, want) {
+				t.Errorf("%s: non-vendor unknown %s must stay itemized:\n%s", name, want, surface)
+			}
+		}
+		// ...and ONLY the aggregate line carries the vendor marker: exactly
+		// ONE occurrence, so the vendor paths are never itemized.
+		if strings.Count(surface, "under vendor directories") != 1 {
+			t.Errorf("%s: exactly one aggregate line expected, got %d:\n%s", name, strings.Count(surface, "under vendor directories"), surface)
+		}
+		for _, vendorPath := range []string{
+			".opencode/node_modules/effect/index.js",
+			".opencode/node_modules/@ai-sdk/util/dist/helper.mjs",
+		} {
+			if strings.Contains(surface, vendorPath) {
+				t.Errorf("%s: vendor unknown path must not be itemized (posture b): %s\n%s", name, vendorPath, surface)
+			}
+		}
+		// (ii) one aggregate line, correct count, literal rider on the line.
+		if !strings.Contains(surface, aggLine) {
+			t.Errorf("%s: must carry the aggregate line with the correct count and rider:\n%s", name, surface)
+		}
+		// (iii) the TOTAL stays stated (itemized 2 + vendor 2 = 4).
+		if !strings.Contains(surface, "unknown finding(s) (4") {
+			t.Errorf("%s: unknown total must remain the stated total 4 (never pretended zero):\n%s", name, surface)
+		}
+		// (iv) the vendor PROVEN edge stays itemized — facts, never aggregated.
+		for _, want := range []string{
+			".opencode/node_modules/yaml/dist/cli.mjs",
+			".opencode/node_modules/yaml/dist/util.mjs",
+			"isDocument",
+		} {
+			if !strings.Contains(surface, want) {
+				t.Errorf("%s: vendor proven edge must stay itemized (facts, not noise); missing %s:\n%s", name, want, surface)
+			}
+		}
+	}
+
+	// No-vendor regression guard: a vendor-free verdict renders NO aggregate
+	// line on either surface.
+	noVendor := &cohortCheck{
+		Unknown: []eslink.UnknownFinding{
+			{Path: ".opencode/scratch/dyn.js", Specifier: "./optional-panel.js", Reason: "dynamic import"},
+		},
+		Scanned: 1,
+	}
+	for name, surface := range map[string]string{
+		"warn-block":      formatCohortWarnBlock(noVendor),
+		"full-diagnostic": formatCohortDiagnostic(noVendor, cohortModeRefuse, "", cohortClaimSeamRefused),
+	} {
+		if strings.Contains(surface, "under vendor directories") {
+			t.Errorf("%s: no-vendor verdict must not render an aggregate line:\n%s", name, surface)
+		}
+		if !strings.Contains(surface, ".opencode/scratch/dyn.js") {
+			t.Errorf("%s: the unknown must still be itemized:\n%s", name, surface)
 		}
 	}
 }

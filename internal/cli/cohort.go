@@ -28,6 +28,16 @@ package cli
 // mandatory literal rider below. A refusal writes ZERO files and exits
 // non-zero; --allow-broken-cohort converts the refusal into a full WARN
 // printout and proceeds (one-shot, never persisted, never doctor-suppressing).
+//
+// Vendor-noise reporting amendment (2026-11-13, operator posture "a+b+c";
+// researches/decisions/2026-11-13-eslink-o4-vendor-unknown-reporting-
+// amendment.md): at REPORT time only, unknown findings under a vendor
+// directory (any node_modules/ path segment) collapse to ONE aggregate line
+// (count + rider); non-vendor unknowns itemize as before. REPORTING ONLY —
+// tiering, scan scope, refusal behavior, and every count stay whole-tree; the
+// unknown totals still count vendor findings (the count is stated, never
+// pretended zero), and PROVEN broken edges are never aggregated regardless of
+// path (facts, not noise).
 
 import (
 	"fmt"
@@ -58,6 +68,12 @@ const cohortDryRunDisclaimer = "Notice: dry-run exit 0 indicates preview complet
 
 // cohortDocsPointer names the durable recovery documentation (element 4).
 const cohortDocsPointer = "vh-agent-harness docs preserved-managed-reconciliation"
+
+// cohortVendorAggregateFmt is the ONE aggregate line vendor unknown findings
+// collapse to (ratified posture (c), 2026-11-13): the count is stated (never
+// pretended zero — posture (a) honesty) and the line itself carries the
+// literal rider. Indentation is left to the caller.
+const cohortVendorAggregateFmt = "+ %d unknown finding(s) under vendor directories (node_modules/) not itemized — %s"
 
 // errCohortRefusal is the sentinel wrapped by the pre-write refusal error so
 // callers/tests can distinguish a cohort-link refusal (deliberate, zero-write,
@@ -108,6 +124,39 @@ func isCohortScannedPath(rel string) bool {
 		return false
 	}
 	return strings.HasSuffix(rel, ".js") || strings.HasSuffix(rel, ".mjs")
+}
+
+// isVendorCohortPath reports whether rel (slash-clean repo-relative) contains
+// a node_modules/ path SEGMENT — the deterministic vendor definition ratified
+// 2026-11-13 (path shape only; no content sniffing, no package-name lists, no
+// hard-coded exception enumeration). `.opencode/node_modules/x/y.js` matches;
+// `.opencode/scripts/node_modules.js` (a file whose basename merely starts
+// with the token) does not.
+func isVendorCohortPath(rel string) bool {
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == "node_modules" {
+			return true
+		}
+	}
+	return false
+}
+
+// splitCohortUnknowns partitions unknown findings for REPORTING ONLY (the
+// 2026-11-13 vendor-noise amendment): non-vendor unknowns itemize exactly as
+// before; unknowns under a vendor directory collapse to one aggregate line at
+// render time. The split changes NO semantics — c.Unknown keeps every finding
+// (totals, HasWarnSide, and the U6 WARN tier stay whole-tree), and PROVEN
+// broken edges (c.Refuse / c.Warn) are never passed through this split: a
+// proven edge is a fact, not noise, wherever it sits.
+func splitCohortUnknowns(unknowns []eslink.UnknownFinding) (itemized, vendor []eslink.UnknownFinding) {
+	for _, u := range unknowns {
+		if isVendorCohortPath(u.Path) {
+			vendor = append(vendor, u)
+		} else {
+			itemized = append(itemized, u)
+		}
+	}
+	return itemized, vendor
 }
 
 // sweepLiveCohortTree reads every .js/.mjs file under <target>/.opencode/ into
@@ -391,9 +440,16 @@ func formatCohortDiagnostic(c *cohortCheck, mode cohortDiagMode, subject, preser
 		fmt.Fprintf(&b, "     - %s imports %q from %s (required symbol: %s)\n       %s\n",
 			e.Importer, e.Specifier, e.Provider, e.Symbol, e.Reason)
 	}
+	itemizedUnknown, vendorUnknown := splitCohortUnknowns(c.Unknown)
 	fmt.Fprintf(&b, "  1b) unknown finding(s) (%d — never a refusal basis):\n", len(c.Unknown))
-	for _, u := range c.Unknown {
+	for _, u := range itemizedUnknown {
 		fmt.Fprintf(&b, "     - %s %q: %s\n", u.Path, u.Specifier, u.Reason)
+	}
+	if len(vendorUnknown) > 0 {
+		// 2026-11-13 amendment posture (c): vendor unknowns collapse to ONE
+		// aggregate line (count + rider); the header total above still counts
+		// them — the count is stated, never pretended zero.
+		fmt.Fprintf(&b, "     "+cohortVendorAggregateFmt+"\n", len(vendorUnknown), cohortRider)
 	}
 
 	fmt.Fprintf(&b, "  2) SHA-256 of assessed prospective bytes (%d module(s) scanned, %d hashed):\n", c.Scanned, len(c.Hashes))
@@ -463,7 +519,10 @@ const (
 // formatCohortWarnBlock renders the compact WARN-side report used when nothing
 // refuses but adopter-internal proven broken edges and/or unknown findings
 // exist. It is deliberately lighter than the full refusal contract (no hashes,
-// no preservation rows) but carries the same literal rider.
+// no preservation rows) but carries the same literal rider. Per the 2026-11-13
+// vendor-noise amendment, unknown findings under vendor directories
+// (node_modules/) collapse to one aggregate line; proven edges — the block's
+// first section — are NEVER aggregated regardless of path.
 func formatCohortWarnBlock(c *cohortCheck) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "vh-agent-harness: cohort-link preflight: warnings (never a refusal basis):\n")
@@ -472,9 +531,15 @@ func formatCohortWarnBlock(c *cohortCheck) string {
 		fmt.Fprintf(&b, "    - %s imports %q from %s (required symbol: %s)\n      %s\n",
 			e.Importer, e.Specifier, e.Provider, e.Symbol, e.Reason)
 	}
+	itemizedUnknown, vendorUnknown := splitCohortUnknowns(c.Unknown)
 	fmt.Fprintf(&b, "  unknown finding(s) (%d):\n", len(c.Unknown))
-	for _, u := range c.Unknown {
+	for _, u := range itemizedUnknown {
 		fmt.Fprintf(&b, "    - %s %q: %s\n", u.Path, u.Specifier, u.Reason)
+	}
+	if len(vendorUnknown) > 0 {
+		// Aggregate line states the vendor count (never zeroed) and carries
+		// the literal rider itself.
+		fmt.Fprintf(&b, "    "+cohortVendorAggregateFmt+"\n", len(vendorUnknown), cohortRider)
 	}
 	fmt.Fprintf(&b, "  scope: %s\n", cohortRider)
 	return b.String()
