@@ -512,7 +512,7 @@ The readiness artifact binds the model-driven gates (G1-coverage through
 G5-curated-note) to the release-prep commit; the wrapper independently
 re-checks the deterministic gates (G0/G0b/G0c) at tag time, so neither surface can
 both author AND authorize the same gate. G0c is `vh-agent-harness doctor`
-(all 21 checks, including #12 defer-liveness, #13 staged-errata-content, #14 behavioral-closure, #15 dev-stale-embed, #20 complexity-advisory, and #21 recurrence-state) — a
+(all 28 checks, including #12 defer-liveness, #13 staged-errata-content, #14 behavioral-closure, #15 dev-stale-embed, #20 complexity-advisory, #21 recurrence-state, and #28 cohort-links) — a
 non-HEALTHY doctor refuses the tag. This makes doctor a HARD machine gate, not a
 human-remembered pre-flight.
 

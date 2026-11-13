@@ -134,7 +134,7 @@
     ".opencode/skills/debugging-loop/references/red-signal-recipes.md": "sha256:5121d919422c6e178825b5e197f16815b705287e1b3fda683d9782c40802a939",
     ".opencode/skills/diagnostics-export/SKILL.md": "sha256:da192eba47a64c18aa1599e179014e0ccdb2287b7854e5ca3525a18e57422089",
     ".opencode/skills/gated-commit/SKILL.md": "sha256:dfed9fbc36a75948e23383ed36bd64c56a3a7b003ec7a88a1b851f3b2f120b07",
-    ".opencode/skills/harness-operator/SKILL.md": "sha256:a21801a6f714346c08434ca6191e7842a8bead55a93f1f1375b1024ca55a476e",
+    ".opencode/skills/harness-operator/SKILL.md": "sha256:508cdb1d160edfc9e412ac918e76de59e85bc2e71c8113b1b5a7688b8da5b0ae",
     ".opencode/skills/media-perception/SKILL.md": "sha256:2b332e4711ad3ce820cbce5fa1626ac5e92d78ae4124eddcd261f8f939e7cb0c",
     ".opencode/skills/repo-recon/SKILL.md": "sha256:a357f0f1271940862f47ff1f6677fb25494e925757e0b0364a181f629fdf6653",
     ".opencode/skills/skill-creator/LICENSE.txt": "sha256:4dd13869245e356246a5b770723247bbb80a8f07a181d1d3d873a1734297cdb9",

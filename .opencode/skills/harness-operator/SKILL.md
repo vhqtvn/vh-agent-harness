@@ -85,6 +85,30 @@ vh-agent-harness doctor                 # lint the result
 > target without both `corpus.go` and `templates/core/` (every consumer) is
 > completely unaffected — the guard never fires there.
 
+## Cohort-link refusals and `--allow-broken-cohort`
+
+`update`, `install`, and `accept-platform` preflight the installed
+`.opencode/` JavaScript tree before any write: a PROVEN broken import edge
+touching a platform-managed file REFUSES (zero writes) with a full diagnostic.
+The scope is stated on every refusal and warning: *link integrity only;
+behavior of preserved files is not verified*.
+
+- `--allow-broken-cohort` (same flag on all three verbs) proceeds past the
+  refusal with all diagnostics printed as WARN — one-shot, never persisted,
+  and it NEVER suppresses `doctor`, whose `cohort-links` check keeps reporting
+  the findings.
+- Dry-run previews of a refusal print `WOULD REFUSE` (exit 0) and make no
+  writes — every dry-run preview is write-free.
+- Recovery is sequential single-path repair: safeguard local edits first, then
+  `vh-agent-harness accept-platform <path>` (add the flag while other
+  platform-bound links remain broken), then `vh-agent-harness doctor` to
+  confirm. Full runbook: `vh-agent-harness docs
+  preserved-managed-reconciliation`.
+- `doctor`'s `cohort-links` check (part of the release G0c health gate) scans
+  the LIVE installed JS tree with the same boundary rule: platform-bound
+  proven breakage FAILs (blocks release), adopter-internal breakage and
+  unknown findings (dynamic imports, unsupported syntax) WARN only.
+
 ## Reading migration notes
 
 Every release ships a migration note so operators and agents know what changed
