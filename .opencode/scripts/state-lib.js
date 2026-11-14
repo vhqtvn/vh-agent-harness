@@ -5413,6 +5413,17 @@ function verifyLandingProof(taskID, repoOverride) {
 // AND that item's handle. A commit whose body contains only the card id
 // satisfies NOTHING (owner condition 1).
 //
+// Carrier-document fallback (2026-11-14 Class A fix): when a COMMIT carrier
+// (pinned or search mode) DETERMINISTICALLY misses the anchor and/or the
+// handle, a committed, branch-reachable retirement-carrier document (naming
+// convention per DECISION_CARRIER_DOC_* — durable home + "retirement-carrier"
+// basename token) carrying BOTH together in one blob ALSO satisfies the
+// slot. The fallback proves the durable preservation the gate exists for;
+// a stale pin pointing at label-less slice commits is a pointer problem,
+// not a preservation failure. Unresolvable/unreachable/unreadable pins and
+// artifact-carrier path misses keep their own honest diagnoses (no
+// fallback).
+//
 // INVENTORY BASELINE (owner condition 2): the stored record IS the baseline
 // item inventory. At closeout, every decision item currently on the card
 // must be declared (no missing slots, no surplus slots) and verbatim
@@ -5514,6 +5525,42 @@ const DECISION_RECORD_PROCESS_REVIEW_STATUSES = Object.freeze(["completed"]);
 // without weakening the declared-revision path (which checks exactly one
 // revision).
 const DECISION_RECORD_SEARCH_CAP = 200;
+// Carrier-DOCUMENT fallback (the 2026-11-14 Class A mismatch fix, 7
+// reproductions): decision-bearing closeouts declared commit carriers PINNED
+// to the slice commits, but those commits carry the card-id anchor (the
+// Task-Card trailer) and NEVER the decision-item labels/verbatim handles —
+// commit messages are authored by the committer protocol — so the carrier
+// verification predictably returned handle_not_in_carrier even though the
+// decision content was durably preserved in committed carrier documents (the
+// 476bfc8 checkpoint shape). When a COMMIT carrier (pinned or search mode)
+// deterministically misses the anchor and/or the handle, the verifier ALSO
+// searches committed, branch-reachable retirement-carrier DOCUMENTS for the
+// card-id anchor AND the item's handle together in one committed blob.
+//
+// The naming convention IS the trust boundary — "any committed doc" must
+// never become a carrier (accidental satisfaction from unrelated content, an
+// unbounded and unexplainable search). A carrier document is a file whose:
+//   - path sits under one of the durable homes below (the same homes
+//     artifact-carrier validation names), and
+//   - basename contains DECISION_CARRIER_DOC_NAME_TOKEN.
+// The fallback fires ONLY on deterministic misses of the DECLARED commit
+// carrier (anchor_missing / handle_not_in_carrier). A pin that does not
+// resolve, is not branch-reachable, or whose git read failed keeps its own
+// honest diagnosis — a broken declaration is a re-closeout matter, not a
+// preservation question. Artifact carriers (declared path) keep their own
+// path-scoped search: a wrong path declaration is not masked by the
+// fallback.
+const DECISION_CARRIER_DOC_NAME_TOKEN = "retirement-carrier";
+const DECISION_CARRIER_DOC_ROOTS = Object.freeze([
+    "docs/checkpoints/",
+    "researches/decisions/",
+    "researches/sources/",
+    "docs/planning/",
+]);
+// Distinct carrier-document paths the fallback will walk (each then bounded
+// by DECISION_RECORD_SEARCH_CAP revisions). Realistically one or two docs
+// exist per repo; the cap bounds pathological histories.
+const DECISION_CARRIER_DOC_PATH_CAP = 32;
 
 function decisionItemLabel(taskID, itemId, disposition) {
     return `${DECISION_ITEM_LABEL_PREFIX}${taskID}#${itemId} (${disposition})`;
@@ -6247,6 +6294,66 @@ function reachableCommitsTouchingPath(repo, targetPath) {
         .slice(0, DECISION_RECORD_SEARCH_CAP);
 }
 
+// --- carrier-document fallback helpers (2026-11-14 Class A fix) ---------------
+//
+// A retirement-carrier document is NAMED as one: path under a durable home,
+// basename carrying the convention token. The check is re-run JS-side on
+// every candidate (belt-and-braces on top of the git pathspec wildcard) so
+// a surprising git match can never slip a non-carrier path into the walk.
+function isCarrierDocPath(candidate) {
+    if (typeof candidate !== "string" || candidate.trim() === "") {
+        return false;
+    }
+    const normalized = candidate.trim().replace(/^(?:\.\/)+/, "");
+    if (normalized.includes("..") || normalized.startsWith("/")) {
+        return false;
+    }
+    const root = DECISION_CARRIER_DOC_ROOTS.find((home) =>
+        normalized.startsWith(home),
+    );
+    if (!root) {
+        return false;
+    }
+    const basename = normalized.slice(normalized.lastIndexOf("/") + 1);
+    return basename.includes(DECISION_CARRIER_DOC_NAME_TOKEN);
+}
+
+// Distinct committed carrier-document paths across reachable history,
+// newest-discovery first, capped. Returns null when the history read itself
+// failed (tri-state: an unavailable search is never "searched and empty").
+function discoverCarrierDocPaths(repo) {
+    const res = gitSpawn(repo, [
+        "log",
+        "--branches",
+        "--format=",
+        "--name-only",
+        "--",
+        ...DECISION_CARRIER_DOC_ROOTS.map(
+            (home) => `${home}*${DECISION_CARRIER_DOC_NAME_TOKEN}*`,
+        ),
+    ]);
+    if (res.status !== 0) {
+        return null;
+    }
+    const paths = [];
+    const seen = new Set();
+    for (const rawLine of res.stdout.split(/\r?\n/)) {
+        const candidate = rawLine.trim();
+        if (candidate === "" || seen.has(candidate)) {
+            continue;
+        }
+        if (!isCarrierDocPath(candidate)) {
+            continue;
+        }
+        seen.add(candidate);
+        paths.push(candidate);
+        if (paths.length >= DECISION_CARRIER_DOC_PATH_CAP) {
+            break;
+        }
+    }
+    return paths;
+}
+
 // Tri-state committed-blob read: { available, tracked, blob, stderr,
 // missReason }. Reads the COMMITTED blob — never the worktree.
 // `available:false` means the READ failed (spawn failure, corrupt/missing
@@ -6339,6 +6446,214 @@ function committedBlobAt(repo, sha, targetPath) {
         };
     }
     return { available: true, tracked: true, blob: blob.stdout, stderr: "" };
+}
+
+// Shared path-scoped search: walk reachable commits that touched
+// `targetPath`, newest first, for the card-id anchor AND the item's handle
+// together in ONE committed blob. Extracted from the artifact-carrier search
+// mode so the carrier-document fallback (below) verifies candidate carrier
+// documents with byte-identical semantics — unavailable reads keep b-F2
+// honesty (an incomplete negative search is never a confident miss),
+// directory paths keep b-F1 naming, and anchor-in-one-revision +
+// handle-in-another stays the TERMINAL scatter diagnosis (review F1,
+// 2026-10-27). Returns { status: "verified", locator, how } on success or
+// { status: "failed", problems: [...] } with fully-formed problems.
+function searchCommittedPathForAnchorAndHandle(
+    repo,
+    taskID,
+    handle,
+    targetPath,
+    id,
+    index,
+    handleKind,
+) {
+    const problems = [];
+    const revs = reachableCommitsTouchingPath(repo, targetPath);
+    if (revs === null) {
+        return {
+            status: "failed",
+            problems: [
+                {
+                    index,
+                    kind: "item",
+                    id,
+                    locator: targetPath,
+                    code: "verifier_unavailable",
+                    detail: `item "${id}": git could not read history for the path`,
+                },
+            ],
+        };
+    }
+    if (revs.length === 0) {
+        return {
+            status: "failed",
+            problems: [
+                {
+                    index,
+                    kind: "item",
+                    id,
+                    locator: targetPath,
+                    code: "path_never_committed",
+                    detail: `item "${id}": no reachable commit carries "${targetPath}" — the durable file was never committed (local-only files never count)`,
+                },
+            ],
+        };
+    }
+    let unavailableDetail = null;
+    let directoryDetail = null;
+    let anchorEver = false;
+    let handleEver = false;
+    // First (newest) revision bearing each half, so the scatter diagnosis
+    // can NAME where each side actually lives.
+    let anchorRev = null;
+    let handleRev = null;
+    for (const sha of revs) {
+        const read = committedBlobAt(repo, sha, targetPath);
+        if (!read.available) {
+            if (unavailableDetail === null) {
+                unavailableDetail = `item "${id}": git could not read "${targetPath}" at commit ${sha}: ${read.stderr}`;
+            }
+            continue;
+        }
+        if (read.blob === null) {
+            if (read.missReason && directoryDetail === null) {
+                directoryDetail = `item "${id}": ${read.missReason}`;
+            }
+            continue;
+        }
+        const anchorOk = read.blob.includes(taskID);
+        const handleOk = normalizedTextContains(read.blob, handle);
+        if (anchorOk && handleOk) {
+            return {
+                status: "verified",
+                locator: `${sha}:${targetPath}`,
+                how: `card-id anchor + ${handleKind} for "${id}" present in the committed blob at reachable revision ${sha}`,
+            };
+        }
+        if (anchorOk) {
+            anchorEver = true;
+            if (anchorRev === null) {
+                anchorRev = sha;
+            }
+        }
+        if (handleOk) {
+            handleEver = true;
+            if (handleRev === null) {
+                handleRev = sha;
+            }
+        }
+    }
+    if (unavailableDetail !== null) {
+        return {
+            status: "failed",
+            problems: [
+                {
+                    index,
+                    kind: "item",
+                    id,
+                    locator: targetPath,
+                    code: "verifier_unavailable",
+                    detail: `no reachable revision verified "${targetPath}" for item "${id}" and at least one committed-blob read was unavailable — content absence is NOT established: ${unavailableDetail}`,
+                },
+            ],
+        };
+    }
+    if (directoryDetail !== null) {
+        return {
+            status: "failed",
+            problems: [
+                {
+                    index,
+                    kind: "item",
+                    id,
+                    locator: targetPath,
+                    code: "path_is_directory_not_file_blob",
+                    detail: directoryDetail,
+                },
+            ],
+        };
+    }
+    // An unsuccessful walk is ALWAYS terminal. anchorEver and handleEver
+    // are per-revision accumulators, so "each half seen somewhere" is NOT
+    // "both seen together": anchor-alone in revision X + handle-alone in
+    // revision Y used to fall through with zero problems and read as
+    // ok:true (review F1 — the fail-open the deleted v2 scatter pin was
+    // guarding). Fail closed with a diagnosis naming both revisions.
+    if (!anchorEver) {
+        problems.push({
+            index,
+            kind: "item",
+            id,
+            locator: targetPath,
+            code: "anchor_missing",
+            detail: `item "${id}": no reachable revision of "${targetPath}" carries the card-id anchor "${taskID}" in its committed blob — every carrier must be discoverable from the card id after retirement (the documented back-reference convention)`,
+        });
+    }
+    if (!handleEver) {
+        problems.push({
+            index,
+            kind: "item",
+            id,
+            locator: targetPath,
+            code: "handle_not_in_carrier",
+            detail: `item "${id}": no reachable revision of "${targetPath}" carries the ${handleKind} ("${String(handle).slice(0, 60)}…") in its committed blob — the declared carrier does not contain THIS item's representation`,
+        });
+    }
+    if (anchorEver && handleEver) {
+        problems.push({
+            index,
+            kind: "item",
+            id,
+            locator: targetPath,
+            code: "anchor_handle_scattered",
+            detail: `item "${id}": no single reachable revision of "${targetPath}" carries the card-id anchor "${taskID}" AND the ${handleKind} together — the anchor was found at commit ${anchorRev} and the ${handleKind} at commit ${handleRev}, but never in the same committed blob. Split evidence across revisions is not a same-carrier representation: a fresh session recovering from the anchor-bearing revision finds no item representation there. Reunite both in one committed, branch-reachable carrier (or pin the revision that carries both).`,
+        });
+    }
+    return { status: "failed", problems };
+}
+
+// Carrier-document fallback (the 2026-11-14 Class A mismatch fix): search
+// every committed, branch-reachable retirement-carrier document (naming
+// convention per DECISION_CARRIER_DOC_* above) for the card-id anchor AND
+// the item's handle together in one committed blob, newest-discovery first.
+// Returns:
+//   { status: "verified", locator, how }
+//   { status: "failed" }          — searched, nothing verified
+//   { status: "unavailable" }     — the discovery read itself failed; the
+//                                   caller makes NO claim about carrier docs
+function carrierDocFallbackVerify(repo, taskID, handle, id, index, handleKind) {
+    const paths = discoverCarrierDocPaths(repo);
+    if (paths === null) {
+        return { status: "unavailable" };
+    }
+    for (const docPath of paths) {
+        const searched = searchCommittedPathForAnchorAndHandle(
+            repo,
+            taskID,
+            handle,
+            docPath,
+            id,
+            index,
+            handleKind,
+        );
+        if (searched.status === "verified") {
+            return searched;
+        }
+        // A non-verified candidate keeps the search going; its per-path
+        // problems are deliberately not surfaced (the DECLARED carrier's
+        // diagnosis stays the refusal of record — the fallback only adds
+        // evidence FOR preservation, never new refusal reasons).
+    }
+    return { status: "failed" };
+}
+
+// The appended note when the fallback ran and found nothing — names the
+// convention so a refusal teaches the sanctioned preservation route.
+function carrierDocFallbackMissNote(handleKind) {
+    return (
+        ` The retirement-carrier document fallback also found nothing: no committed, branch-reachable file matching *${DECISION_CARRIER_DOC_NAME_TOKEN}* ` +
+        `under ${DECISION_CARRIER_DOC_ROOTS.join(", ")} carries the card-id anchor and this ${handleKind} together in one blob — landing such a document (the checkpoint carrier shape) is the sanctioned preservation route for commit carriers whose messages cannot carry item labels.`
+    );
 }
 
 // Verify every declared slot of a v3 decision_record against committed,
@@ -6512,6 +6827,40 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                     });
                     return;
                 }
+                // Carrier-document fallback (2026-11-14 Class A fix): the
+                // declared commit carrier DETERMINISTICALLY misses the
+                // anchor and/or the handle — the pinned slice commit shape
+                // (trailer anchor, no labels) that produced seven
+                // force-deletions. Before refusing, search committed
+                // retirement-carrier documents for the anchor + handle
+                // together; the fallback proves preservation independently
+                // of the stale pin. When the fallback also finds nothing,
+                // the declared-carrier diagnosis stands with the fallback
+                // miss appended (naming the convention). A fallback whose
+                // own read failed appends NOTHING — an unavailable search
+                // never claims "searched and empty".
+                const fallback = carrierDocFallbackVerify(
+                    repo,
+                    taskID,
+                    handle,
+                    id,
+                    index,
+                    handleKind,
+                );
+                if (fallback.status === "verified") {
+                    verified.push({
+                        index,
+                        kind: "item",
+                        id,
+                        locator: fallback.locator,
+                        how: `${fallback.how} — verified via the retirement-carrier document fallback for the declared commit carrier ${sha}`,
+                    });
+                    return;
+                }
+                const fallbackNote =
+                    fallback.status === "failed"
+                        ? carrierDocFallbackMissNote(handleKind)
+                        : "";
                 if (!anchorOk) {
                     problems.push({
                         index,
@@ -6519,7 +6868,7 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                         id,
                         locator: declaredRev,
                         code: "anchor_missing",
-                        detail: `item "${id}": carrier commit ${sha} carries the card-id anchor "${taskID}" neither in its message nor in any blob at that committed revision — every carrier must be discoverable from the card id after retirement`,
+                        detail: `item "${id}": carrier commit ${sha} carries the card-id anchor "${taskID}" neither in its message nor in any blob at that committed revision — every carrier must be discoverable from the card id after retirement${fallbackNote}`,
                     });
                 }
                 if (!handleOk) {
@@ -6529,7 +6878,7 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                         id,
                         locator: declaredRev,
                         code: "handle_not_in_carrier",
-                        detail: `item "${id}": carrier commit ${sha} does not contain the ${handleKind} ("${String(handle).slice(0, 60)}…") in its message or any blob at that committed revision — the declared carrier does not contain THIS item's representation`,
+                        detail: `item "${id}": carrier commit ${sha} does not contain the ${handleKind} ("${String(handle).slice(0, 60)}…") in its message or any blob at that committed revision — the declared carrier does not contain THIS item's representation${fallbackNote}`,
                     });
                 }
                 return;
@@ -6587,6 +6936,35 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                 });
                 return;
             }
+            // Carrier-document fallback (2026-11-14 Class A fix) — same
+            // shape as the pinned branch: no reachable commit MESSAGE
+            // carries the anchor + handle together (search-mode commit
+            // carriers declared at closeout, before the landing commit
+            // exists, hit exactly this when decision-item labels cannot
+            // ride in committer-authored messages). Search committed
+            // retirement-carrier documents before refusing.
+            const fallback = carrierDocFallbackVerify(
+                repo,
+                taskID,
+                handle,
+                id,
+                index,
+                handleKind,
+            );
+            if (fallback.status === "verified") {
+                verified.push({
+                    index,
+                    kind: "item",
+                    id,
+                    locator: fallback.locator,
+                    how: `${fallback.how} — verified via the retirement-carrier document fallback for the declared search-mode commit carrier`,
+                });
+                return;
+            }
+            const fallbackNote =
+                fallback.status === "failed"
+                    ? carrierDocFallbackMissNote(handleKind)
+                    : "";
             if (!anchorSeen) {
                 problems.push({
                     index,
@@ -6594,7 +6972,7 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                     id,
                     locator: "<reachable history>",
                     code: "anchor_missing",
-                    detail: `item "${id}": no reachable commit message carries the card-id anchor "${taskID}" — every carrier must be discoverable from the card id after retirement (the landing trailer makes the landing commit body the natural carrier)`,
+                    detail: `item "${id}": no reachable commit message carries the card-id anchor "${taskID}" — every carrier must be discoverable from the card id after retirement (the landing trailer makes the landing commit body the natural carrier)${fallbackNote}`,
                 });
                 return;
             }
@@ -6604,7 +6982,7 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                 id,
                 locator: "<reachable history>",
                 code: "handle_not_in_carrier",
-                detail: `item "${id}": no card-id-anchored reachable commit message carries the ${handleKind} ("${String(handle).slice(0, 60)}…") — the declared carrier does not contain THIS item's representation`,
+                detail: `item "${id}": no card-id-anchored reachable commit message carries the ${handleKind} ("${String(handle).slice(0, 60)}…") — the declared carrier does not contain THIS item's representation${fallbackNote}`,
             });
             return;
         }
@@ -6733,134 +7111,25 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
             // diagnosis (review F1, 2026-10-27) — split evidence is never
             // a silent pass, because no single committed blob would carry
             // the item's representation next to its discoverability anchor.
-            const revs = reachableCommitsTouchingPath(repo, targetPath);
-            if (revs === null) {
-                problems.push({
+            const searched = searchCommittedPathForAnchorAndHandle(
+                repo,
+                taskID,
+                handle,
+                targetPath,
+                id,
+                index,
+                handleKind,
+            );
+            if (searched.status === "verified") {
+                verified.push({
                     index,
                     kind: "item",
                     id,
-                    locator: targetPath,
-                    code: "verifier_unavailable",
-                    detail: `item "${id}": git could not read history for the path`,
+                    locator: searched.locator,
+                    how: searched.how,
                 });
-                return;
-            }
-            if (revs.length === 0) {
-                problems.push({
-                    index,
-                    kind: "item",
-                    id,
-                    locator: targetPath,
-                    code: "path_never_committed",
-                    detail: `item "${id}": no reachable commit carries "${targetPath}" — the durable file was never committed (local-only files never count)`,
-                });
-                return;
-            }
-            let unavailableDetail = null;
-            let directoryDetail = null;
-            let anchorEver = false;
-            let handleEver = false;
-            // First (newest) revision bearing each half, so the scatter
-            // diagnosis can NAME where each side actually lives.
-            let anchorRev = null;
-            let handleRev = null;
-            for (const sha of revs) {
-                const read = committedBlobAt(repo, sha, targetPath);
-                if (!read.available) {
-                    if (unavailableDetail === null) {
-                        unavailableDetail = `item "${id}": git could not read "${targetPath}" at commit ${sha}: ${read.stderr}`;
-                    }
-                    continue;
-                }
-                if (read.blob === null) {
-                    if (read.missReason && directoryDetail === null) {
-                        directoryDetail = `item "${id}": ${read.missReason}`;
-                    }
-                    continue;
-                }
-                const anchorOk = read.blob.includes(taskID);
-                const handleOk = normalizedTextContains(read.blob, handle);
-                if (anchorOk && handleOk) {
-                    verified.push({
-                        index,
-                        kind: "item",
-                        id,
-                        locator: `${sha}:${targetPath}`,
-                        how: `card-id anchor + ${handleKind} for "${id}" present in the committed blob at reachable revision ${sha}`,
-                    });
-                    return;
-                }
-                if (anchorOk) {
-                    anchorEver = true;
-                    if (anchorRev === null) {
-                        anchorRev = sha;
-                    }
-                }
-                if (handleOk) {
-                    handleEver = true;
-                    if (handleRev === null) {
-                        handleRev = sha;
-                    }
-                }
-            }
-            if (unavailableDetail !== null) {
-                problems.push({
-                    index,
-                    kind: "item",
-                    id,
-                    locator: targetPath,
-                    code: "verifier_unavailable",
-                    detail: `no reachable revision verified "${targetPath}" for item "${id}" and at least one committed-blob read was unavailable — content absence is NOT established: ${unavailableDetail}`,
-                });
-                return;
-            }
-            if (directoryDetail !== null) {
-                problems.push({
-                    index,
-                    kind: "item",
-                    id,
-                    locator: targetPath,
-                    code: "path_is_directory_not_file_blob",
-                    detail: directoryDetail,
-                });
-                return;
-            }
-            // An unsuccessful walk is ALWAYS terminal. anchorEver and
-            // handleEver are per-revision accumulators, so "each half seen
-            // somewhere" is NOT "both seen together": anchor-alone in
-            // revision X + handle-alone in revision Y used to fall through
-            // with zero problems and read as ok:true (review F1 — the
-            // fail-open the deleted v2 scatter pin was guarding). Fail
-            // closed with a diagnosis naming both revisions.
-            if (!anchorEver) {
-                problems.push({
-                    index,
-                    kind: "item",
-                    id,
-                    locator: targetPath,
-                    code: "anchor_missing",
-                    detail: `item "${id}": no reachable revision of "${targetPath}" carries the card-id anchor "${taskID}" in its committed blob — every carrier must be discoverable from the card id after retirement (the documented back-reference convention)`,
-                });
-            }
-            if (!handleEver) {
-                problems.push({
-                    index,
-                    kind: "item",
-                    id,
-                    locator: targetPath,
-                    code: "handle_not_in_carrier",
-                    detail: `item "${id}": no reachable revision of "${targetPath}" carries the ${handleKind} ("${String(handle).slice(0, 60)}…") in its committed blob — the declared carrier does not contain THIS item's representation`,
-                });
-            }
-            if (anchorEver && handleEver) {
-                problems.push({
-                    index,
-                    kind: "item",
-                    id,
-                    locator: targetPath,
-                    code: "anchor_handle_scattered",
-                    detail: `item "${id}": no single reachable revision of "${targetPath}" carries the card-id anchor "${taskID}" AND the ${handleKind} together — the anchor was found at commit ${anchorRev} and the ${handleKind} at commit ${handleRev}, but never in the same committed blob. Split evidence across revisions is not a same-carrier representation: a fresh session recovering from the anchor-bearing revision finds no item representation there. Reunite both in one committed, branch-reachable carrier (or pin the revision that carries both).`,
-                });
+            } else {
+                problems.push(...searched.problems);
             }
             return;
         }
