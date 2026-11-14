@@ -1315,8 +1315,11 @@ export default function transform({ context }) {
   activation (`ready`->`working`), bgshell **launch + resume** (NEW spawn only;
   the stop/SIGTERM path is deliberately untouched), OpenCode TaskTool dispatch
   (  `@subagent` / new child task), and the dispatch commands `/implement`
-  `/implement-goal` `/research` `/solution-brief` (the "begin new delegated
-  work" class). **In-flight work is NEVER affected:** engaging sends no signal
+  `/implement-goal` `/research` `/solution-brief` `/deep-research` (the "begin
+  new delegated work" class; `/deep-research` ships via the
+  native-deep-research-pilot overlay pack — in repos without that pack the
+  blocklist entry is inert). **In-flight work is NEVER affected:** engaging
+  sends no signal
   and cancels no running process or OpenCode response; existing child work may
   complete and report; and `working`->`working` task resume/reclaim/takeover
   (continuation, not new dispatch) stays available — only the `ready`->`working`

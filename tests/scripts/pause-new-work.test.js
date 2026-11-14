@@ -127,12 +127,12 @@ test("contract: dispatch blocklist covers the new-work set, excludes write-task 
     freshStateDir();
     const { isBlockedDispatchCommand, PAUSE_BLOCKED_DISPATCH_COMMANDS } = await loadContract();
     // covered new-work dispatch commands (the "begin new delegated work" class)
-    for (const c of ["implement", "implement-goal", "research", "solution-brief"]) {
+    for (const c of ["implement", "implement-goal", "research", "solution-brief", "deep-research"]) {
         assert.equal(isBlockedDispatchCommand(c), true, `${c} should be blocked`);
         assert.equal(isBlockedDispatchCommand("/" + c), true, `/${c} should be blocked`);
     }
     assert.deepEqual([...PAUSE_BLOCKED_DISPATCH_COMMANDS].sort(),
-        ["implement", "implement-goal", "research", "solution-brief"]);
+        ["deep-research", "implement", "implement-goal", "research", "solution-brief"]);
     // write-task MUST stay available (creates candidate transport, not execution)
     assert.equal(isBlockedDispatchCommand("write-task"), false, "write-task must NOT be blocked");
     // resume-task is NOT command-level blocked: it is BOTH a new-dispatch AND a
@@ -144,6 +144,31 @@ test("contract: dispatch blocklist covers the new-work set, excludes write-task 
     assert.equal(isBlockedDispatchCommand("status"), false);
     assert.equal(isBlockedDispatchCommand("session-start"), false);
     assert.equal(isBlockedDispatchCommand("coordination"), false);
+});
+
+// Fiction guard (defer-017 open question, decided 2026-11-15: ADD): every
+// blocklist entry must exist as a command in the LIVE rendered dispatch
+// surface (.opencode/commands/ — templates/core commands union the selected
+// overlay packs, kept in sync by make update). This is deliberately NOT a
+// templates/core-only check: deep-research ships via the
+// native-deep-research-pilot overlay pack, and a core-only guard would
+// misclassify it as fiction. The guard fails when (a) a blocklist entry
+// references a command that no longer exists anywhere in the rendered
+// surface, or (b) the rendered tree is stale relative to the contract
+// (make update not run).
+test("fiction guard: every blocklist entry exists in the rendered command surface", async () => {
+    freshStateDir();
+    const { PAUSE_BLOCKED_DISPATCH_COMMANDS } = await loadContract();
+    assert.ok(PAUSE_BLOCKED_DISPATCH_COMMANDS.length > 0, "blocklist must not be empty");
+    for (const c of PAUSE_BLOCKED_DISPATCH_COMMANDS) {
+        const cmdPath = join(REPO, ".opencode", "commands", `${c}.md`);
+        assert.ok(
+            existsSync(cmdPath),
+            `blocklist entry "${c}" has no command file in the rendered dispatch surface ` +
+                `(.opencode/commands/${c}.md). Either the command was removed (update the ` +
+                `blocklist) or the rendered tree is stale (run make update).`,
+        );
+    }
 });
 
 // === bgshell gate (Python port) ============================================
@@ -290,7 +315,7 @@ test("plugin: dispatch commands blocked when engaged, write-task/status pass", a
     const { server } = await import(pluginUrl);
     const handlers = await server();
 
-    for (const cmd of ["implement", "implement-goal", "research", "solution-brief"]) {
+    for (const cmd of ["implement", "implement-goal", "research", "solution-brief", "deep-research"]) {
         await assert.rejects(
             () => handlers["command.execute.before"]({ command: cmd, sessionID: "s", arguments: "" }, { parts: [] }),
             (err) => {
