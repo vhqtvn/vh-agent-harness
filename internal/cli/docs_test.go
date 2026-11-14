@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	corpus "github.com/vhqtvn/vh-agent-harness"
 	"github.com/vhqtvn/vh-agent-harness/internal/runshape"
 )
 
@@ -213,5 +216,91 @@ func TestDocs_OverrideMissingFileErrors(t *testing.T) {
 	_, err := executeCapture(t, []string{"docs", "--target", target, "opencode-memory-model"})
 	if err == nil {
 		t.Fatal("override at missing file: want non-nil error, got nil")
+	}
+}
+
+// bodyFromFirstH2 slices a document from its first H2 heading (a "## " line
+// start) onward, returning ok=false when the document has none. The pre-H2
+// header is excluded on purpose: the runbook twins carry intentionally
+// different tier-specific headers (each names its own tier and points at the
+// other twin); only the shared body is parity-checked.
+func bodyFromFirstH2(doc []byte) ([]byte, bool) {
+	idx := bytes.Index(doc, []byte("\n## "))
+	if idx < 0 {
+		return nil, false
+	}
+	return doc[idx+1:], true
+}
+
+// twinBodyParityError carries the twin-parity verdict: nil when the two
+// runbook twins agree byte-for-byte from the first H2 heading onward, an
+// error naming both paths and the conscious-uncoupling escape otherwise.
+// Split out as a pure function so the red arm inside TestRunbookTwinParity
+// exercises the exact production failure path in-memory.
+func twinBodyParityError(devPath, embedPath string, dev, embed []byte) error {
+	devBody, ok := bodyFromFirstH2(dev)
+	if !ok {
+		return errors.New(devPath + ": no H2 heading found — cannot slice the shared body")
+	}
+	embedBody, ok := bodyFromFirstH2(embed)
+	if !ok {
+		return errors.New(embedPath + ": no H2 heading found — cannot slice the shared body")
+	}
+	if !bytes.Equal(devBody, embedBody) {
+		return errors.New("runbook twins diverged from the first H2 heading onward:\n" +
+			"  dev-repo twin: " + devPath + " (source of truth)\n" +
+			"  embedded twin: " + embedPath + " (binary-embed DocsDir copy served to adopters)\n" +
+			"Edit BOTH twins deliberately in the same change, or record a decision note\n" +
+			"to consciously uncouple them — never let them drift silently.")
+	}
+	return nil
+}
+
+// TestRunbookTwinParity guards the reconciliation-runbook twins (card
+// task-2026-11-13t13-03-35): the dev-repo durable-guidance copy
+// (docs/ai/preserved-managed-reconciliation.md — source of truth) and the
+// binary-embed DocsDir copy (templates/docs/preserved-managed-reconciliation.md
+// — served to adopters as `vh-agent-harness docs preserved-managed-reconciliation`)
+// must stay byte-identical FROM THE FIRST H2 HEADING ONWARD. The pre-H2 twin
+// notes intentionally differ (each header names its own tier); the guard
+// compares only the shared body, pinning the af97e05 relationship. If a
+// future legitimate divergence is intended, make it a conscious uncoupling
+// decision (edit both twins, or record a decision note) — not silent rot.
+func TestRunbookTwinParity(t *testing.T) {
+	const key = "preserved-managed-reconciliation"
+	devPath := filepath.Join("..", "..", "docs", "ai", key+".md")
+	embedPath := filepath.Join("..", "..", corpus.DocsDir, key+".md")
+
+	dev, err := os.ReadFile(devPath)
+	if err != nil {
+		t.Fatalf("read dev-repo twin %s: %v", devPath, err)
+	}
+	index, _, err := docsIndex()
+	if err != nil {
+		t.Fatalf("docsIndex: %v", err)
+	}
+	embed, ok := index[key]
+	if !ok {
+		t.Fatalf("embedded twin %s is missing from the docs index", embedPath)
+	}
+
+	// Green arm: the real twins must agree byte-for-byte from the first H2.
+	if err := twinBodyParityError(devPath, embedPath, dev, embed); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	// Red arm (in-memory fixture copies — no tree mutation): a one-line
+	// drift appended to one twin's shared body must FAIL the same parity
+	// path, and the failure must name both paths + the escape. This is the
+	// guard's teeth, exercised on every run.
+	mutated := append(append([]byte(nil), dev...), []byte("\n<!-- silent drift -->\n")...)
+	err = twinBodyParityError(devPath, embedPath, mutated, embed)
+	if err == nil {
+		t.Fatal("parity guard did not fail on a mutated twin body (in-memory red check)")
+	}
+	for _, want := range []string{devPath, embedPath, "uncoupl"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("parity failure message must mention %q, got:\n%v", want, err)
+		}
 	}
 }
