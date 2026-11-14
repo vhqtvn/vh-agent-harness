@@ -29,6 +29,26 @@ func fitModule(t *testing.T, name, src string) *Module {
 	return m
 }
 
+// strictExport asserts the FIT gate AND the exact exported surface in one
+// helper: the parse must succeed and NamedExports must be exactly [out].
+//
+// strictExport↔fitModule COUPLING VERDICT (card task-2026-11-12t18-40-43,
+// settled 2026-11-15): strictExport deliberately relies on fitModule for
+// FIT enforcement — sound, load-bearing, and KEPT (no decoupling
+// refactor). A degraded module can carry a PARTIAL exported surface that
+// is byte-for-byte the shape this helper accepts (pinned by
+// TestStrictExportFitModuleCoupling), so fitModule's fatal-on-UNKNOWN gate
+// is the ONLY thing standing between strictExport and a false-OK on
+// degraded modules; duplicating the gate inside strictExport would add no
+// safety, only drift.
+func strictExport(t *testing.T, name, src string) {
+	t.Helper()
+	m := fitModule(t, name, src)
+	if !m.NamedExports["out"] || len(m.NamedExports) != 1 {
+		t.Fatalf("%s: exported surface must be exactly [out], got %v", name, m.NamedExports)
+	}
+}
+
 func unknownModule(t *testing.T, name, src, reasonSubstr string) *Module {
 	t.Helper()
 	m := Parse(name, []byte(src))
@@ -261,20 +281,103 @@ func TestF1_FO_LineSeparatorIdentifierBoundary(t *testing.T) {
 	// surface must be exactly [out] with no separator absorption into
 	// identifier text (pre-fix: name recorded as out+U+2028, and
 	// export<LS>const degraded to UNKNOWN — cascade-3 B1/C2 probe
-	// receipts).
-	strictExport := func(name, src string) {
-		t.Helper()
-		m := fitModule(t, name, src)
-		if !m.NamedExports["out"] || len(m.NamedExports) != 1 {
-			t.Fatalf("%s: exported surface must be exactly [out], got %v", name, m.NamedExports)
-		}
-	}
-	strictExport(".opencode/plugins/lsident.js",
+	// receipts). strictExport is the file-level helper (see its coupling
+	// verdict above).
+	strictExport(t, ".opencode/plugins/lsident.js",
 		"const v = 1;\nconst w = v\u2028;\nexport const out = w;\n")
-	strictExport(".opencode/plugins/lsname.js", "export const out\u2028 = 1;\n")
-	strictExport(".opencode/plugins/psname.js", "export const out\u2029 = 1;\n")
-	strictExport(".opencode/plugins/lskw.js", "export\u2028const out = 1;\n")
-	strictExport(".opencode/plugins/pskw.js", "export\u2029const out = 1;\n")
+	strictExport(t, ".opencode/plugins/lsname.js", "export const out\u2028 = 1;\n")
+	strictExport(t, ".opencode/plugins/psname.js", "export const out\u2029 = 1;\n")
+	strictExport(t, ".opencode/plugins/lskw.js", "export\u2028const out = 1;\n")
+	strictExport(t, ".opencode/plugins/pskw.js", "export\u2029const out = 1;\n")
+}
+
+// TestStrictExportFitModuleCoupling pins WHY the strictExport→fitModule
+// coupling (verdict recorded on the strictExport helper) is load-bearing:
+// Parse never unwinds recorded exports on degrade, so a module can be
+// Unparseable while carrying a PARTIAL surface that is byte-for-byte the
+// exact shape strictExport accepts (exactly [out]). If fitModule ever
+// stopped treating Unparseable as fatal, this is the false-OK that would
+// slip through strictExport's surface check unchallenged — the invariant
+// test keeps the evidence for that verdict inspectable instead of
+// folklore.
+func TestStrictExportFitModuleCoupling(t *testing.T) {
+	m := Parse(".opencode/plugins/partial.js", []byte("export const out = 1;\nlet i = 0; i++;\n"))
+	if !m.Unparseable {
+		t.Fatalf("fixture must degrade (update-op): Unparseable=%v", m.Unparseable)
+	}
+	if !m.NamedExports["out"] || len(m.NamedExports) != 1 {
+		t.Fatalf("degraded module carries partial surface exactly [out]: got %v", m.NamedExports)
+	}
+}
+
+// TestF1_FO_LineSeparatorNumberAndRegexFlagsBoundary completes the LS/PS
+// adjacency coverage at the two remaining token boundaries (card
+// task-2026-11-12t18-40-43): NUMBER tokens and REGEX FLAG runs — the
+// identifier-adjacency class is pinned above. The ff2f577 boundary
+// (isIdentStart refuses isLineTerm positions) holds at both classes
+// through the same predicate: lexNumber's unsupported-literal tail-check
+// routes through isIdentPart, and lexRegexAt's flag scan is
+// isIdentPart-bounded, so U+2028/U+2029 terminate the token cleanly at
+// every adjacency and next()'s line-terminator handler consumes them.
+//
+// Pre-fix defect directions (both false, now pinned): a NUMBER-adjacent
+// separator tripped lexNumber's isIdentPart tail-check and degraded a
+// valid module with "unsupported number literal" (false-broken); a
+// separator after REGEX FLAGS was ABSORBED into the flag run (bytes
+// >= 0x80 were coarsely admitted as identifier characters), silently
+// corrupting the opaque literal text AND the line count — and in the
+// statement-initial shape fabricated a call expression out of statements
+// the separator actually split (false-ok).
+func TestF1_FO_LineSeparatorNumberAndRegexFlagsBoundary(t *testing.T) {
+	// Number-adjacency, both separators: the number token ends AT the
+	// separator (no byte absorbed, no unsupported-literal degrade) and
+	// the ';' after the separator still terminates the declarator.
+	strictExport(t, ".opencode/plugins/lsnum.js",
+		"const a = 1\u2028;\nexport const out = a;\n")
+	strictExport(t, ".opencode/plugins/psnum.js",
+		"const a = 1\u2029;\nexport const out = a;\n")
+	// The card's literal number shape (`1\u2028const x = 1;` — number
+	// immediately followed by the separator, no terminator before the
+	// next statement) keeps its FAMILY-8 verdict: the separator is a
+	// real line terminator at the number boundary, but the expression
+	// statement `1` is still ASI-dependent — the boundary fix must not
+	// become an ASI admission.
+	unknownModule(t, ".opencode/plugins/lsnumasi.js",
+		"1\u2028const x = 1;\n", ReasonAsiBoundary)
+	// False-ok guard: the boundary stop is isLineTerm-scoped — real
+	// identifier bytes after a number still degrade.
+	unknownModule(t, ".opencode/plugins/numbad.js",
+		"const v = 1abc;\n", "unsupported number literal")
+
+	// Regex-flags-adjacency: the flag run ends at the separator, the
+	// member continuation opens on the NEXT line, and the line count
+	// survives — pre-fix absorption ate the separator without counting
+	// the line, pinned here via the import decl's recorded line.
+	srcR := "const t = /re/g\u2028.test(\"x\");\n" +
+		"import { x } from \"./x.js\";\n" +
+		"export const out = t;\n"
+	m := fitModule(t, ".opencode/plugins/lsre.js", srcR)
+	if !m.NamedExports["out"] {
+		t.Fatalf("expected out exported, got %v", m.NamedExports)
+	}
+	if len(m.Imports) != 1 || m.Imports[0].Line != 3 {
+		t.Fatalf("import must sit on line 3 (separator counted as a line break), got %+v", m.Imports)
+	}
+	requireCleanScan(t, Scan(treeOf(map[string]string{
+		".opencode/plugins/lsre.js": srcR,
+		".opencode/plugins/x.js":    "export const x = 1;\n",
+	})))
+	// U+2029: same shape, surface pin.
+	strictExport(t, ".opencode/plugins/psre.js",
+		"const t = /re/g\u2029.test(\"x\");\nexport const out = t;\n")
+	// The absorption false-ok, pinned dead: statement-initial regex
+	// whose flags run pre-fix swallowed "\u2028use" and fabricated a
+	// CALL on the literal — the module parsed FIT with a call edge the
+	// source does not contain. Post-fix the separator terminates the
+	// statement-initial regex and the unterminated statement degrades
+	// ASI-coded (the honest frozen-grammar verdict for this shape).
+	unknownModule(t, ".opencode/plugins/lsreabsorb.js",
+		"const s = \"x\";\n/re/g\u2028use(s);\nexport const out = 1;\n", ReasonAsiBoundary)
 }
 
 // --- Family 2: control flow (map table: 11 PRESENT variants) --------------------
