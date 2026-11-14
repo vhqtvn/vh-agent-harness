@@ -255,7 +255,23 @@ func corpusDigest(tree map[string][]byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-const pinnedCorpusDigest = "70ceca3c646734bcb3b64b4000316e1ee29f4256b42d66f60997f183c020a4e9"
+// pinnedCorpusDigest was re-derived 2026-11-15 for the carrier-document
+// fallback slice (retirement-gate carrier-doc search in state-lib.js): the
+// edit is content-only — module/edge/L-join shape and the hub's 73-export
+// surface re-derived IDENTICAL (61/46/15, 49/0/5, 14/3/32), so only the
+// byte digest moved. Not a re-pin-to-absorb: the pin set was re-derived
+// before re-pinning.
+//
+// Re-derived again 2026-11-15 (same day, second content-only move) for the
+// pause-new-work blocklist re-audit (defer-017): the `deep-research`
+// blocklist entry + re-audit comment landed in
+// templates/core/.opencode/scripts/pause-new-work.js and was mirrored into
+// the rendered twin by the required `make update` — comment lines and one
+// array-literal string, no edges, no exports, no verdict changes; the full
+// counter pin set (61/46/15, 49/0/5, 14/3/32) re-derived IDENTICAL, so only
+// the byte digest moved. Same discipline: re-derived before re-pinning, not
+// a re-pin-to-absorb.
+const pinnedCorpusDigest = "be9f3d8711750f399555b01e966bab7765f136aed63c506e6c726b7ee8bc3256"
 
 // updateOpDebtFiles are the packet §B per-file table's post-normalization
 // remainder: 14 modules still carrying `++`/`--` update operators (the
