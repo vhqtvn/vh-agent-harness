@@ -9241,9 +9241,14 @@ function updateCoordinationTaskMetadata(
 // (a healthy card never reaches here), so the task_type/status carve-out does
 // not weaken healthy-card immutability — which the ordinary update allowlist
 // (TASK_METADATA_UPDATE_*_FIELD_NAMES, never including task_type/status)
-// enforces elsewhere. Repair routes through updateCoordinationTask (the
-// canonical writer), which re-runs collectCoordinationTaskCoreFieldErrors +
-// throws BEFORE atomicWriteJson, so a partial/invalid repair never lands.
+// enforces elsewhere. Repair saves through applyCoordinationTaskUpdateLocked
+// (the canonical writer core), which re-runs
+// collectCoordinationTaskCoreFieldErrors + throws BEFORE atomicWriteJson, so
+// a partial/invalid repair never lands.
+//
+// Runs ONLY under repairCoordinationTask's per-task lock (its sole caller);
+// the save is a required-load in-transaction update — never the public
+// absent-tolerant updateCoordinationTask.
 function repairDegradedCoordinationTaskCoreFields(actor, loaded, payload) {
     const offendingFields = loaded.diagnostics
         ? [...loaded.diagnostics.offendingFields]
@@ -9351,7 +9356,11 @@ function repairDegradedCoordinationTaskCoreFields(actor, loaded, payload) {
     // and return value to these, not the full offending set (which may also
     // carry status-conditional / list-field offenders this branch never wrote).
     const repairedFields = uniqueStrings(providedRepairFields);
-    const saved = updateCoordinationTask(loaded.payload.task_id, (current) => ({
+    // In-transaction save — the PRIVATE already-locked core (the public
+    // updateCoordinationTask would re-enter this transaction's non-reentrant
+    // per-task lock, and its absent-tolerant semantics are the resurrection
+    // vector this locked boundary exists to close).
+    const saved = applyCoordinationTaskUpdateLocked(loaded.payload.task_id, (current) => ({
         ...current,
         task_type:
             repairedTaskType !== null ? repairedTaskType : current.task_type,
@@ -9392,7 +9401,45 @@ function repairDegradedCoordinationTaskCoreFields(actor, loaded, payload) {
 
 function repairCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) {
     const actor = coordinationActorContext(sessionID, options);
-    const loaded = loadCoordinationTask(taskIDRaw);
+    const taskID = normalizeCoordinationTaskId(taskIDRaw);
+    // TOCTOU repair (defer-018): diagnosis and save now run inside ONE
+    // per-task locked boundary — the same boundary deleteCoordinationTask's
+    // removal transaction uses. Previously the unlocked
+    // load -> diagnose -> save window let a concurrent delete interleave:
+    // the save then re-loaded the card through updateCoordinationTask's
+    // absent-tolerant semantics (required:false -> defaultCoordinationTask
+    // Payload) and silently attempted to write a DEFAULT-bodied card for an
+    // id whose card had just been retired — resurrection from defaults (the
+    // written form was only held back by core-field validation, producing a
+    // misleading validation error instead of a refusal). A card missing at
+    // the REQUIRED load under the lock now refuses with a named refusal
+    // diagnostic; repair never recreates a card from defaults.
+    try {
+        return withLock(coordinationTaskLockPath(taskID), () =>
+            repairCoordinationTaskLocked(actor, taskID, input),
+        );
+    } catch (err) {
+        if (
+            err instanceof StateError &&
+            String(err.message).startsWith("Coordination task does not exist:")
+        ) {
+            throw new StateError(
+                `Task ${taskID} card no longer exists; repair refused (a concurrent delete may have retired it; repair never resurrects a card from defaults).`,
+            );
+        }
+        throw err;
+    }
+}
+
+// The body of repairCoordinationTask; runs ONLY under that function's
+// per-task lock (never call directly). Every load inside is REQUIRED — a
+// card that vanished under the lock refuses instead of resurrecting — and
+// both repair branches save through applyCoordinationTaskUpdateLocked (the
+// public updateCoordinationTask would deadlock on the non-reentrant lock
+// already held here, and its absent-tolerant semantics are exactly the
+// resurrection vector this boundary closes).
+function repairCoordinationTaskLocked(actor, taskID, input) {
+    const loaded = loadCoordinationTask(taskID);
     const payload = input && typeof input === "object" ? input : {};
 
     // DISPATCH: a DEGRADED card (diagnostics.degraded === true — authoritative,
@@ -9447,7 +9494,11 @@ function repairCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) 
         ...missingResearchFields,
         ...providedRepairFields,
     ]);
-    const saved = updateCoordinationTask(loaded.payload.task_id, (current) => ({
+    // In-transaction save — the PRIVATE already-locked core (the public
+    // updateCoordinationTask would re-enter this transaction's non-reentrant
+    // per-task lock, and its absent-tolerant semantics are the resurrection
+    // vector this locked boundary exists to close).
+    const saved = applyCoordinationTaskUpdateLocked(loaded.payload.task_id, (current) => ({
         ...current,
         research_question:
             payload.research_question !== undefined

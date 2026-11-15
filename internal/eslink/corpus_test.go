@@ -285,7 +285,24 @@ func corpusDigest(tree map[string][]byte) string {
 // (61/46/15, 49/0/5, 14/3/32) and the hub's 73-export surface re-derived
 // IDENTICAL, so only the byte digest moved. Same discipline: re-derived
 // before re-pinning, not a re-pin-to-absorb.
-const pinnedCorpusDigest = "25c1b3f128715442008bd92bd82cc1249991df1cb859fceab05e5fff0efd2c21"
+//
+// Re-derived again 2026-11-15 (same day, fourth content-only move) for the
+// repair no-resurrection fix (defer-018-repair-task-resurrection-window):
+// repairCoordinationTask in state-lib.js became a withLock wrapper over a
+// new repairCoordinationTaskLocked body whose loads are all REQUIRED, and
+// both repair-branch saves (degraded core fields + research contract) now
+// route through applyCoordinationTaskUpdateLocked instead of the public
+// absent-tolerant updateCoordinationTask — a card that vanished mid-repair
+// is refused (`card no longer exists; repair refused`); the pre-fix
+// defaults-based write was attempted but rejected by core-field validation
+// (misleading `5 validation problems` diagnostic; no resurrection
+// demonstrated). Pure control-flow/comment
+// change: no imports, no exports, no specifier changes; mirrored into the
+// rendered twin by the required `make update`. The full counter pin set
+// (61/46/15, 49/0/5, 14/3/32) and the hub's 73-export surface re-derived
+// IDENTICAL, so only the byte digest moved. Same discipline: re-derived
+// before re-pinning, not a re-pin-to-absorb.
+const pinnedCorpusDigest = "55fed821e9cfc7c9b1369dd4767ae6ed7674201cda8429bfcdd555595219b725"
 
 // updateOpDebtFiles are the packet §B per-file table's post-normalization
 // remainder: 14 modules still carrying `++`/`--` update operators (the

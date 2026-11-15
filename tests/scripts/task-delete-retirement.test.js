@@ -17,6 +17,10 @@
 //     (the in-flight guard runs before the retirement path);
 //   - cancelled / draft / ready remain freely disposable (no git check);
 //   - `force` is the emergency override for a completed card with no trailer.
+//   - repair NEVER resurrects a deleted card (defer-018): a card vanishing
+//     between repair diagnosis and save — or repaired after deletion — is
+//     refused with the `card no longer exists; repair refused` diagnostic,
+//     never recreated from defaultCoordinationTaskPayload.
 //
 // Test seam (NOT an env var): the verifier's repo root is redirected at the
 // scratch repo via the `landingProofRepo` OPTION on deleteCoordinationTask, which
@@ -56,6 +60,7 @@ const {
     bindSessionName,
     deleteCoordinationTask,
     listCoordinationTasks,
+    repairCoordinationTask,
 } = await import(pathToFileURL(STATE_LIB).href);
 
 // --- hermetic scratch git repo helpers ---------------------------------------
@@ -421,5 +426,103 @@ test("completed-card retirement: landing-gated path (m0141 Slice 2)", () => {
         if (scratch && scratch.dir) {
             fs.rmSync(scratch.dir, { recursive: true, force: true });
         }
+    }
+});
+
+test("repair never resurrects a deleted card (defer-018 TOCTOU + absent-id)", () => {
+    // Pre-fix behavior (RED baseline, receipts m0072/m0074): repair's save went
+    // through updateCoordinationTask (allowAbsent:true), so a card deleted
+    // between diagnosis and save triggered an attempted defaults-based write
+    // from defaultCoordinationTaskPayload — which core-field validation
+    // rejected (a misleading `5 validation problems` diagnostic), so no
+    // successful resurrection was demonstrated — and an absent-id repair
+    // surfaced the raw `Coordination task does not exist:` loader error
+    // instead of a refusal diagnostic. Post-fix both paths refuse with the
+    // message class `card no longer exists; repair refused` and no card file
+    // reappears.
+    //
+    // The mid-repair delete is simulated with a payload getter that removes the
+    // card file the moment diagnosis reads `payload.status` (deterministic
+    // stand-in for a concurrent deleteCoordinationTask landing in the
+    // load->save window; post-fix the whole repair runs under the per-task
+    // lock, so a lock-honoring deleter can no longer interleave at all).
+    const prevRoot = process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "repair-nores-"));
+    process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = root;
+    bindSessionName(SESSION_ID, "retirement-test");
+    try {
+        // ---- arm 1: card deleted MID-REPAIR (TOCTOU window) ------------------
+        const idToctou = "repair-toctou-001";
+        writeCard(root, idToctou, { status: "bogus", primary_lane: "docs" });
+        const boobyPayload = {
+            get status() {
+                // Fires inside repair's degraded-field diagnosis, BEFORE the
+                // save: the card vanishes mid-transaction.
+                fs.rmSync(cardPath(root, idToctou), { force: true });
+                return "draft";
+            },
+        };
+        assert.throws(
+            () => repairCoordinationTask(SESSION_ID, idToctou, boobyPayload),
+            (err) =>
+                err instanceof Error &&
+                /card no longer exists; repair refused/.test(err.message),
+            "arm 1: mid-repair deletion must be refused with the no-resurrection diagnostic",
+        );
+        assert.equal(
+            cardExists(root, idToctou),
+            false,
+            "arm 1: refusal must NOT recreate the card from defaults",
+        );
+
+        // ---- arm 2: card deleted BEFORE the repair call -----------------------
+        // A draft card is freely disposable (no git check), so the ordinary
+        // delete path retires it; the subsequent repair of the absent id must
+        // refuse with the same diagnostic class, not resurrect a draft.
+        const idAbsent = "repair-absent-001";
+        writeCard(root, idAbsent, { status: "draft", primary_lane: "docs" });
+        const deleted = deleteCoordinationTask(SESSION_ID, idAbsent, {
+            cwd: "/verification",
+        });
+        assert.equal(deleted.ok, true, "arm 2 setup: draft card must be freely disposable");
+        assert.equal(cardExists(root, idAbsent), false, "arm 2 setup: card must be gone");
+        assert.throws(
+            () => repairCoordinationTask(SESSION_ID, idAbsent, { status: "draft" }),
+            (err) =>
+                err instanceof Error &&
+                /card no longer exists; repair refused/.test(err.message),
+            "arm 2: repairing an absent card must be refused, never recreated",
+        );
+        assert.equal(
+            cardExists(root, idAbsent),
+            false,
+            "arm 2: refusal must NOT recreate the card from defaults",
+        );
+
+        // ---- control: repair still works for a card that EXISTS ----------------
+        // The refusal must be scoped to absent cards — a still-present degraded
+        // card must repair normally (no behavior regression from the lock fix).
+        const idAlive = "repair-alive-001";
+        writeCard(root, idAlive, {
+            status: "bogus",
+            primary_lane: "docs",
+            rough_scope: "control fixture scope",
+        });
+        const repaired = repairCoordinationTask(SESSION_ID, idAlive, {
+            status: "draft",
+        });
+        assert.ok(
+            Array.isArray(repaired.repaired_fields) &&
+                repaired.repaired_fields.includes("status"),
+            "control: an existing degraded card must still repair (status restored)",
+        );
+        assert.equal(cardExists(root, idAlive), true, "control: repaired card must still exist");
+    } finally {
+        if (prevRoot === undefined) {
+            delete process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+        } else {
+            process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = prevRoot;
+        }
+        fs.rmSync(root, { recursive: true, force: true });
     }
 });
