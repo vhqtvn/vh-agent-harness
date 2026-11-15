@@ -17,10 +17,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
+import { PassThrough } from "node:stream";
+import vm from "node:vm";
 
 const __dirname = dirname(new URL(import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:\/)/, ""));
 const REPO_ROOT = join(__dirname, "..", "..");
@@ -349,4 +351,161 @@ test("no S2 holds: G6 clear and the tag may be created", { skip: RUN ? false : "
         assert.equal(status, 0, "an empty backlog (no holds) must clear G6");
         assert.equal(tagExists(repo, "v0.1.0"), true);
     } finally { dispose(root); }
+});
+
+// --- json_str regression arms (defer-release-wrapper-refusal-emit-perf) ------
+//
+// Both arms route payloads through the REAL refusal emit path: version
+// validation (scripts/release-tag.sh) lands the operator-supplied version
+// string in the JSON `tag` field via json_str and exits 1 BEFORE any git or
+// repository access, so no scratch ceremony is needed.
+
+test("json_str perf: large payload escapes through one node invocation (no per-char forks)", { skip: BASH ? false : "bash unavailable" }, () => {
+    // The former json_str ran a catch-all loop with ONE subshell fork per
+    // character, unconditionally (the fork precedes the "does it need
+    // escaping" test). For a large error payload that is ~1 fork per byte —
+    // minutes of wall time. Escaping now routes through a single
+    // `node -e JSON.stringify` invocation.
+    //
+    // Fails-by-construction on the old per-char path: 130,000 subshell forks
+    // cannot complete inside the 15s spawn guard (even at an implausibly fast
+    // 0.1ms/fork that is 13s of pure fork overhead, and real bash subshell
+    // forks measure ~0.5-1ms) — the old implementation dies as status=null /
+    // SIGTERM under the guard and the status assertion below fails. No wall-
+    // time threshold is asserted for the NEW path (a ms threshold would be
+    // flaky); completion inside the guard plus full-fidelity round-trip is
+    // the deterministic signal.
+    const unit = "release-refusal-payload-A"; // 25 chars
+    const payload = unit.repeat(5200); // 130,000 chars — under the ~128KiB single-argv kernel limit
+    const r = spawnSync("bash", [RELEASE_TAG, payload], {
+        cwd: REPO_ROOT,
+        timeout: 15000,
+        env: { ...process.env },
+    });
+    assert.equal(
+        r.status, 1,
+        `refusal must complete inside the 15s guard (status=${r.status} signal=${r.signal}); a timeout kill here means the per-character fork path came back`,
+    );
+    const emitted = parseEmit((r.stdout && r.stdout.toString()) || "");
+    assert.ok(emitted, "refusal JSON line must be emitted");
+    assert.equal(emitted.ok, false);
+    assert.equal(emitted.tag, payload, "the full 130k payload must survive escaping and round-trip through JSON.parse — no truncation");
+});
+
+test("json_str contract: nasty payload round-trips with named-control shorthand and no double escapes", { skip: BASH ? false : "bash unavailable" }, () => {
+    // Guards the escaping CONTRACT across the node migration: valid JSON,
+    // round-trip identity, \b\t\n\f\r shorthand, \u00XX for other C0 bytes.
+    // The no-double-escape assertions are the trap this migration dodged:
+    // keeping the old parameter-expansion pre-pass in front of JSON.stringify
+    // would emit backslash+backslash+n for a real newline — which round-trips
+    // to a literal backslash+n, silently corrupting the payload while still
+    // parsing as valid JSON.
+    const c0 = [];
+    for (let code = 0x01; code <= 0x1f; code++) c0.push(String.fromCharCode(code)); // NUL cannot cross argv
+    const payload = [
+        c0.join(""),
+        "\x7f",
+        "héllo 🚡 日本語",
+        "'quoted' \"double\"",
+        "back\\slash",
+        "tab\tnewline\ncr\r",
+    ].join("|");
+    const r = spawnSync("bash", [RELEASE_TAG, payload], {
+        cwd: REPO_ROOT,
+        timeout: 15000,
+        env: { ...process.env },
+    });
+    assert.equal(r.status, 1, "version-validation refusal must fire");
+    const stdout = (r.stdout && r.stdout.toString()) || "";
+    const emitted = parseEmit(stdout);
+    assert.ok(emitted, "refusal JSON line must be emitted");
+    assert.equal(emitted.tag, payload, "full round-trip identity: all C0 controls, DEL, multi-byte UTF-8, quotes, backslashes");
+    // Named-control shorthand for real control bytes...
+    assert.ok(stdout.includes("\\n"), "a real newline must escape to the \\n shorthand");
+    // ...and the double-escape signature absent. The payload's literal
+    // backslash is never adjacent to an n or t ("back\\slash" is followed by
+    // '|'), so these detectors are unambiguous.
+    assert.ok(!stdout.includes("\\\\n"), "double-escaped \\\\n must not appear (the pre-pass + stringify trap)");
+    assert.ok(!stdout.includes("\\\\t"), "double-escaped \\\\t must not appear");
+    assert.ok(stdout.includes("\\u0001") && stdout.includes("\\u001f"), "C0 0x01/0x1f must escape to \\u00XX");
+});
+
+test("json_str argv-trap: payload beginning with a dash must not reach node's option parser", { skip: BASH ? false : "bash unavailable" }, () => {
+    // Regression pinned after TestReleaseTag_PushOnly_RefusesCombinedWithOverride
+    // (internal/cli) caught it live: the first node migration passed the payload
+    // as a node ARGUMENT — `node -e '...' "$v"` — so any payload beginning with
+    // a dash (an error message naming the flag it refuses: "--push-only cannot
+    // be combined with ...") was parsed by node as a bad option, which aborted
+    // the emit mid-JSON ("error":, — invalid). The payload now crosses via
+    // stdin and never touches node's command line; this arm pins that class by
+    // construction (an argv-form json_str emits node's "bad option" on stderr
+    // and a broken JSON line here).
+    const payload = "--push-only cannot be combined with --override-release-version / --override-manifest-sha (the DEFER gate is skipped in push-only mode)";
+    const r = spawnSync("bash", [RELEASE_TAG, payload], {
+        cwd: REPO_ROOT,
+        timeout: 15000,
+        env: { ...process.env },
+    });
+    assert.equal(r.status, 1, "version-validation refusal must fire");
+    const emitted = parseEmit((r.stdout && r.stdout.toString()) || "");
+    assert.ok(
+        emitted,
+        "refusal JSON line must be emitted and parse (an argv-form json_str dies as node 'bad option' and emits a broken line here)",
+    );
+    assert.equal(emitted.tag, payload, "leading-dash payload must round-trip intact");
+});
+
+test("json_str chunk-boundary: multibyte char split across two stdin data events round-trips intact", async () => {
+    // F1/F2 (commit-review blocker): the json_str node accumulator formerly
+    // concatenated STRING chunks (d+=c), which decodes each Buffer chunk
+    // independently — a multi-byte UTF-8 sequence split across a pipe chunk
+    // boundary corrupted to U+FFFD on both sides of the split. The snippet now
+    // accumulates Buffers and decodes exactly once
+    // (Buffer.concat(...).toString("utf8")).
+    //
+    // Determinism: this arm does NOT rely on OS pipe chunking (size-dependent
+    // luck). It extracts the LIVE snippet verbatim from scripts/release-tag.sh,
+    // hosts it in a vm sandbox whose process.stdin is a PassThrough, and drives
+    // TWO data events by construction — write(chunk1); write(chunk2); end() —
+    // with the split point placed INSIDE the 4-byte 🚡 sequence (chunk1 ends
+    // with the orphaned lead byte 0xF0; chunk2 opens with the continuation
+    // bytes 0x9F 0x9A 0xA1). A data-event counter asserts exactly two events
+    // fired, so the arm can never silently degrade to a single-chunk pass.
+    // Fails by construction on the string-accumulation pattern (each chunk
+    // decodes its orphaned partial sequence to U+FFFD, breaking the round-trip).
+    const sh = readFileSync(RELEASE_TAG, "utf8");
+    const m = sh.match(/json_str\(\)\s*\{[\s\S]*?node -e '([^']+)'/);
+    assert.ok(m, "json_str node program must be extractable from release-tag.sh");
+    const program = m[1];
+
+    const payload = "chunk-split 🚡 日本語 roundtrip";
+    const full = Buffer.from(payload, "utf8");
+    const lead = Buffer.from("🚡", "utf8");
+    const leadIdx = full.indexOf(lead);
+    assert.ok(leadIdx > 0, "payload must contain the multibyte char");
+    const splitAt = leadIdx + 1; // after the lead byte 0xF0 — inside the sequence
+    const chunk1 = full.subarray(0, splitAt);
+    const chunk2 = full.subarray(splitAt);
+    assert.equal(chunk1[chunk1.length - 1], lead[0], "chunk1 must end with the orphaned lead byte");
+
+    const pt = new PassThrough();
+    let dataEvents = 0;
+    pt.on("data", () => { dataEvents += 1; });
+    const chunks = [];
+    const sandbox = {
+        process: { stdin: pt, stdout: { write: (s) => { chunks.push(Buffer.from(s)); return true; } } },
+        Buffer,
+        JSON,
+    };
+    vm.runInNewContext(program, sandbox); // attaches pt data/end listeners (flowing mode)
+    const ended = new Promise((resolve) => pt.once("end", resolve));
+    pt.write(chunk1);
+    pt.write(chunk2);
+    pt.end();
+    await ended;
+
+    assert.equal(dataEvents, 2, "the split must cross exactly two data events");
+    const out = Buffer.concat(chunks).toString("utf8");
+    assert.ok(!out.includes("\uFFFD"), "no U+FFFD replacement character may appear in the JSON output");
+    assert.equal(JSON.parse(out), payload, "the split multibyte char must round-trip intact through JSON.parse");
 });

@@ -98,32 +98,37 @@ json_str() {
   # uses \u00XX. (U+0000 itself cannot occur in a bash variable.) This matters
   # because raw git stderr or an operator-supplied env value can flow into the
   # error field, and a literal control byte inside a JSON string is invalid.
+  #
+  # Escaping routes through ONE node invocation — JSON.stringify emits the
+  # identical contract (\" and \\ escapes, \b \t \n \f \r named-control
+  # shorthand, \u00XX for every other C0 byte, multi-byte UTF-8 passed through
+  # as-is). The former implementation ran one subshell per character for the
+  # C0 catch-all loop (~1M forks for a ~1MB error payload — minutes of wall
+  # time). The historical parameter-expansion pre-pass for named controls is
+  # deliberately GONE: under JSON.stringify it would double-escape (its own
+  # emitted backslash would be escaped again), so the contract is preserved
+  # by node alone.
+  #
+  # The payload crosses via STDIN (the file's established node idiom — the
+  # data/end accumulate pattern used by the readiness-verdict and gate
+  # parsers), never argv: a payload beginning with a dash — e.g. an error
+  # message naming the flag it refuses, "--push-only cannot be combined
+  # with ..." — would otherwise be parsed by node as a bad option and abort
+  # the emit mid-line. (A synchronous process.stdin.read() is NOT usable
+  # here: stdin starts paused on a pipe and read() returns null.)
+  #
+  # Chunks accumulate as BUFFERS and decode exactly ONCE, in the end
+  # handler: string accumulation (d+=c) decodes each Buffer chunk
+  # independently, so a multi-byte UTF-8 sequence split across a pipe
+  # chunk boundary would corrupt to U+FFFD on both sides of the split.
+  # Buffer.concat + a single toString("utf8") reassembles the split
+  # sequence — one decode point, byte-faithful at any chunking.
   local v="${1-}"
   if [ -z "$v" ]; then
     printf 'null'
     return
   fi
-  # 1) backslash, double-quote, and named control chars via parameter expansion
-  v="${v//\\/\\\\}"
-  v="${v//\"/\\\"}"
-  v="${v//$'\b'/\\b}"
-  v="${v//$'\t'/\\t}"
-  v="${v//$'\n'/\\n}"
-  v="${v//$'\f'/\\f}"
-  v="${v//$'\r'/\\r}"
-  # 2) catch-all: any remaining C0 control char (0x01-0x1F) -> \u00XX
-  local i=0 n=${#v} c code out=""
-  while [ "$i" -lt "$n" ]; do
-    c="${v:i:1}"
-    code=$(printf '%d' "'$c" 2>/dev/null || true)
-    if [ -n "$code" ] && [ "$code" -ge 0 ] 2>/dev/null && [ "$code" -lt 32 ]; then
-      out+=$(printf '\\u%04x' "$code")
-    else
-      out+="$c"
-    fi
-    i=$((i+1))
-  done
-  printf '"%s"' "$out"
+  printf '%s' "$v" | node -e 'let cs=[];process.stdin.on("data",c=>cs.push(c));process.stdin.on("end",()=>{process.stdout.write(JSON.stringify(Buffer.concat(cs).toString("utf8")));})'
 }
 
 emit() {
