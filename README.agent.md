@@ -1226,11 +1226,12 @@ export default function transform({ context }) {
   (blocked / owner-change / must-survive-session); only then does the promoter
   apply the Definition of Ready (and the predicate checker,
   `.opencode/scripts/check-defer-triggers.mjs`, promoter-use-only, never
-  blocking, confirms a trigger for trigger-gated candidates). A `completed`
-  card is **retired only on landing** — never on review approval alone — when a
-  commit carrying `Task-Card: <card-id>` is reachable from the integration
-  branch (`git log <branch> --fixed-strings --grep="Task-Card: <card-id>"` ≥ 1;
-  the `commit-message` agent authors the trailer, the committer is pass-through).
+  blocking, confirms a trigger for trigger-gated candidates). A `completed` card is **retired only on landing** — never on review approval
+  alone — when a commit carrying the exact `Task-Card: <card-id>` trailer line
+  is reachable from any local branch tip. The verifier searches with
+  `git log --branches` and post-filters for exact trailer-line equality
+  (see `docs/coordination/RECORD_LIFECYCLE.md`); the `commit-message` agent
+  authors the trailer, and the committer is pass-through.
   The landing commit (carrying the card id) is the durable record: no
   tombstones, no done-rows, checkpoints only for campaign closeouts / reopenable
   decisions. Run `/backlog-cleanup` (or `vh-agent-harness exec node
@@ -1246,42 +1247,41 @@ export default function transform({ context }) {
   against backlog rows, and lands backlog changes as a backlog-only commit; and
   (c) the **`backlog` skill** as the agent's procedure reference. Code commits
   never wait on a backlog blob.
-- **Retire unpromoted transport cards with `/task-delete <id>`** (validated
-  destructive single-card wrapper). A DEFER/fog candidate in
-  `.local/coordinator/tasks/` that should never reach execution is removed
-  (card + local report directory) via `/task-delete <id> [force]`. It is
-  irreversible hard removal, NOT a lifecycle status — it does not mark the task
-  cancelled, create a tombstone/archive, edit `backlog.md`, or bypass
-  `/task-review` / `/task-closeout`. A `draft`, `ready`, or `cancelled` card is
-  freely disposable (direct `rm` of the gitignored file remains an equivalent
-  operator path for those statuses); a `completed` card is **landing-gated** —
-  retirement is allowed only when a commit carrying `Task-Card: <card-id>` is
-  reachable from the integration branch, so direct `rm` of a `completed` card is
-  NOT equivalent (it bypasses the landing check — see
-  `docs/coordination/RECORD_LIFECYCLE.md`). Since the retention-preservation
-  gate (2026-10-25; coverage rule + review classification 2026-10-26),
-  ordinary `completed` retirement is additionally **decision-record-gated**:
-  after the landing proof, every `commit`/`artifact` entry of the card's
-  closeout-declared `decision_record` must resolve against committed,
-  branch-reachable git state, and every non-empty decision-class card field
-  (`owner_notes`, `measured_outcome`, non-empty `open_questions`, NON-APPROVE
-  review signals — a clean-approve review is a process record) must be
-  covered by an entry whose `carries` excerpt — a verbatim line from that
-  field's content — is present, with the card-id anchor, in the same
-  committed carrier (`decision_record_unresolved` / `decision_content_unpromoted`
-  refusals name each item/field); `force` bypasses it and the result names the
-  destroyed decision-class content (same doc). The Slice-2 retirement CODE
-  will
-  enforce the reachability check in the sanctioned op; until then a `working`,
-  `reported`, `blocked`, or `completed` card is refused without an explicit
-  `force` (a `completed` card is additionally landing-gated per the contract
-  above) because its report directory may carry evidence a coordinator gate
-  still needs. It
-  rejects wildcard/path-like/multiple-id/whitespace-separated input before any
-  filesystem mutation, confines removal to the transport roots, surfaces the
-  card (id, title, status, owner, report dir) to the operator *before* the
-  destructive call, and prints the post-removal `removed` summary after. No
-  `commit` follows — the transport is gitignored.
+- **Retire transport cards with `/task-delete <id> [force]`** (validated,
+  irreversible removal of the card and its local report directory, NOT a
+  lifecycle status). It does not mark cancelled, create a tombstone/archive,
+  edit `backlog.md`, or bypass promotion, review, or closeout gates. Accept
+  exactly one explicit id; reject wildcard, batch, whitespace-separated,
+  and path-like input. Surface the card and report directory before deletion
+  and print the returned `removed` summary afterward. No commit follows —
+  the transport is gitignored.
+
+  `draft`, `ready`, and `cancelled` cards are freely disposable; direct
+  `rm` of the gitignored card file remains an equivalent operator path for
+  those statuses. `working`, `reported`, and `blocked` cards are protected
+  without explicit `force`. Direct `rm` of a `completed` card is forbidden:
+  ordinary retirement requires both **landing proof** (the exact
+  `Task-Card: <card-id>` trailer reachable from any local branch tip) and
+  **retention preservation**. The v3 closeout `decision_record` declares one
+  slot per decision item, represented as `verbatim`, `curated`, or
+  `sanitized`; each declared slot must resolve to committed, branch-reachable
+  carrier content containing the card-id anchor and that item's handle
+  together. The landing trailer alone is insufficient.
+
+  When a `commit` carrier deterministically misses the anchor and/or handle,
+  the gate also accepts a committed, branch-reachable document under
+  `docs/checkpoints/`, `researches/decisions/`, `researches/sources/`, or
+  `docs/planning/` whose basename contains `retirement-carrier`, with both
+  anchor and handle together in one committed blob. This fallback does not
+  rescue unresolvable, unreachable, or unreadable pins, or artifact-carrier
+  path misses.
+
+  `force` is an explicit operator-supplied, emergency-only override of the
+  protection gates, including landing and preservation; never auto-retry
+  with it, and surface any returned destructive warning. Full preservation
+  and compatibility rules: `docs/coordination/RECORD_LIFECYCLE.md` and
+  `docs/coordination/CLOSEOUT_TEMPLATE.md`. Command procedure:
+  `.opencode/commands/task-delete.md`.
 - **Model-originated skill proposals use a parallel transport,
   `/skill-propose`.** A model that identifies a reusable workflow worth becoming
   a repo-local skill captures it as a structured `draft` card under
