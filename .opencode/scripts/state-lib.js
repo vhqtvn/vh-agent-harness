@@ -6618,14 +6618,29 @@ function searchCommittedPathForAnchorAndHandle(
 // the item's handle together in one committed blob, newest-discovery first.
 // Returns:
 //   { status: "verified", locator, how }
-//   { status: "failed" }          — searched, nothing verified
+//   { status: "failed" }          — every candidate was actually searched
+//                                   and none verified: a DETERMINISTIC miss
+//                                   (the miss note may assert absence)
 //   { status: "unavailable" }     — the discovery read itself failed; the
 //                                   caller makes NO claim about carrier docs
+//   { status: "unavailable", unexaminedCandidates: [path, ...] }
+//                                  — no candidate verified AND at least one
+//                                   candidate search could not complete
+//                                   (unreadable blob / history read error).
+//                                   Mirroring the discovery-level tri-state
+//                                   honesty convention, a walk with
+//                                   unexamined candidates is NEVER collapsed
+//                                   into a confident miss: the caller
+//                                   qualifies its note so universal absence
+//                                   is never asserted over documents that
+//                                   were never read (b-F1/c-F1/d-F2, commit
+//                                   review 2026-11-15 of 5db2741).
 function carrierDocFallbackVerify(repo, taskID, handle, id, index, handleKind) {
     const paths = discoverCarrierDocPaths(repo);
     if (paths === null) {
         return { status: "unavailable" };
     }
+    const unexaminedCandidates = [];
     for (const docPath of paths) {
         const searched = searchCommittedPathForAnchorAndHandle(
             repo,
@@ -6639,21 +6654,79 @@ function carrierDocFallbackVerify(repo, taskID, handle, id, index, handleKind) {
         if (searched.status === "verified") {
             return searched;
         }
+        // A candidate whose search could not COMPLETE (unreadable blob,
+        // history-read error) is unavailability, not a miss — record it
+        // and keep walking the remaining candidates (the same shape as
+        // the per-revision loop inside searchCommittedPathForAnchorAndHandle).
+        if (
+            Array.isArray(searched.problems) &&
+            searched.problems.some(
+                (p) => p && p.code === "verifier_unavailable",
+            )
+        ) {
+            unexaminedCandidates.push(docPath);
+        }
         // A non-verified candidate keeps the search going; its per-path
         // problems are deliberately not surfaced (the DECLARED carrier's
         // diagnosis stays the refusal of record — the fallback only adds
         // evidence FOR preservation, never new refusal reasons).
     }
+    if (unexaminedCandidates.length > 0) {
+        return { status: "unavailable", unexaminedCandidates };
+    }
     return { status: "failed" };
 }
 
 // The appended note when the fallback ran and found nothing — names the
-// convention so a refusal teaches the sanctioned preservation route.
+// convention so a refusal teaches the sanctioned preservation route. ONLY
+// ever appended for a DETERMINISTIC miss: carrierDocFallbackVerify returns
+// status "failed" only when every discovered candidate was actually
+// searched, so the universal-absence claim below is never made over
+// unexamined candidates.
 function carrierDocFallbackMissNote(handleKind) {
     return (
         ` The retirement-carrier document fallback also found nothing: no committed, branch-reachable file matching *${DECISION_CARRIER_DOC_NAME_TOKEN}* ` +
         `under ${DECISION_CARRIER_DOC_ROOTS.join(", ")} carries the card-id anchor and this ${handleKind} together in one blob — landing such a document (the checkpoint carrier shape) is the sanctioned preservation route for commit carriers whose messages cannot carry item labels.`
     );
+}
+
+// The appended note when the fallback's candidate walk could NOT complete
+// (≥1 candidate carrier-document search was unavailable and none
+// verified): still names the sanctioned preservation route, but claims
+// NEITHER presence NOR absence — content absence is NOT established over
+// documents that were never read (b-F1/c-F1/d-F2, commit review
+// 2026-11-15 of 5db2741).
+function carrierDocFallbackUnavailableNote(handleKind, unexaminedCandidates) {
+    const listed = (unexaminedCandidates || [])
+        .map((docPath) => `"${docPath}"`)
+        .join(", ");
+    return (
+        ` The retirement-carrier document fallback could not complete its search: candidate carrier document${(unexaminedCandidates || []).length === 1 ? "" : "s"} ${listed} could not be examined (a committed-blob or history read did not complete), so carrier-document absence is NOT established for this ${handleKind} — and neither is presence. ` +
+        `Landing an examinable file matching *${DECISION_CARRIER_DOC_NAME_TOKEN}* under ${DECISION_CARRIER_DOC_ROOTS.join(", ")} (the checkpoint carrier shape) remains the sanctioned preservation route for commit carriers whose messages cannot carry item labels.`
+    );
+}
+
+// Note selection for the commit-carrier call sites: a DETERMINISTIC miss
+// (every candidate searched, none verified) appends the miss note; a walk
+// with unexamined candidates appends the unavailable note (honest about
+// incompleteness, still teaching the route); a discovery-level unavailable
+// appends NOTHING (the pre-existing convention: an unavailable search
+// never claims "searched and empty").
+function carrierDocFallbackNote(fallback, handleKind) {
+    if (fallback.status === "failed") {
+        return carrierDocFallbackMissNote(handleKind);
+    }
+    if (
+        fallback.status === "unavailable" &&
+        Array.isArray(fallback.unexaminedCandidates) &&
+        fallback.unexaminedCandidates.length > 0
+    ) {
+        return carrierDocFallbackUnavailableNote(
+            handleKind,
+            fallback.unexaminedCandidates,
+        );
+    }
+    return "";
 }
 
 // Verify every declared slot of a v3 decision_record against committed,
@@ -6834,11 +6907,14 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                 // force-deletions. Before refusing, search committed
                 // retirement-carrier documents for the anchor + handle
                 // together; the fallback proves preservation independently
-                // of the stale pin. When the fallback also finds nothing,
-                // the declared-carrier diagnosis stands with the fallback
-                // miss appended (naming the convention). A fallback whose
-                // own read failed appends NOTHING — an unavailable search
-                // never claims "searched and empty".
+                // of the stale pin. When the fallback deterministically
+                // finds nothing, the declared-carrier diagnosis stands
+                // with the fallback miss appended (naming the convention).
+                // When the fallback's own search could not complete
+                // (discovery read failed, or ≥1 candidate carrier doc was
+                // unexamined), the appended note is qualified to claim
+                // neither presence nor absence — an unavailable search
+                // never asserts "searched and empty".
                 const fallback = carrierDocFallbackVerify(
                     repo,
                     taskID,
@@ -6857,10 +6933,10 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                     });
                     return;
                 }
-                const fallbackNote =
-                    fallback.status === "failed"
-                        ? carrierDocFallbackMissNote(handleKind)
-                        : "";
+                const fallbackNote = carrierDocFallbackNote(
+                    fallback,
+                    handleKind,
+                );
                 if (!anchorOk) {
                     problems.push({
                         index,
@@ -6942,7 +7018,9 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
             // carriers declared at closeout, before the landing commit
             // exists, hit exactly this when decision-item labels cannot
             // ride in committer-authored messages). Search committed
-            // retirement-carrier documents before refusing.
+            // retirement-carrier documents before refusing; a fallback
+            // whose search could not complete appends a note qualified to
+            // claim neither presence nor absence.
             const fallback = carrierDocFallbackVerify(
                 repo,
                 taskID,
@@ -6961,10 +7039,10 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                 });
                 return;
             }
-            const fallbackNote =
-                fallback.status === "failed"
-                    ? carrierDocFallbackMissNote(handleKind)
-                    : "";
+            const fallbackNote = carrierDocFallbackNote(
+                fallback,
+                handleKind,
+            );
             if (!anchorSeen) {
                 problems.push({
                     index,

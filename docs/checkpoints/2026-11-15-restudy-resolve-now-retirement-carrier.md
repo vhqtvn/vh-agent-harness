@@ -76,3 +76,11 @@ decision item from that card.
 - studied:2026-08-16
 - decision-item: defer-copieranswers-memorystore-deletion-audit#owner_notes[fnv1a:dab1ab58c111eb6d] (curated)
 - Deletion audit closed in commit 58abbb0 (Task-Card trailer present): internal/copieranswers deleted after zero-consumer grep receipts (sole repo-wide Go reference was the package itself); internal/memory audited ALIVE (12+ importers) and untouched; go build ./..., go vet ./..., go test ./... all green (33 ok); cascade review APPROVE.
+
+## defer-carrier-fallback-unavailable-threading
+
+- source:review-defer (cascade commit-review 2026-11-15, d-F2 converged with b-F1/c-F1)
+- trigger:path_touched(templates/core/.opencode/scripts/state-lib.js)
+- studied:2026-11-15
+- decision-item: defer-carrier-fallback-unavailable-threading#owner_notes[fnv1a:cbb98d136061d7e2] (curated)
+- Unavailability threading landed: carrierDocFallbackVerify now distinguishes per-candidate search unavailability from deterministic handle absence (fail-closed refusal unchanged); regression arms added; verified via node --test tests/scripts/ + go test ./... green at HEAD 3b92525 + this working tree.

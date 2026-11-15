@@ -271,7 +271,21 @@ func corpusDigest(tree map[string][]byte) string {
 // counter pin set (61/46/15, 49/0/5, 14/3/32) re-derived IDENTICAL, so only
 // the byte digest moved. Same discipline: re-derived before re-pinning, not
 // a re-pin-to-absorb.
-const pinnedCorpusDigest = "be9f3d8711750f399555b01e966bab7765f136aed63c506e6c726b7ee8bc3256"
+//
+// Re-derived again 2026-11-15 (same day, third content-only move) for the
+// carrier-doc fallback unavailability threading
+// (defer-carrier-fallback-unavailable-threading, b-F1/c-F1/d-F2 of the
+// cascade review of 5db2741): carrierDocFallbackVerify in state-lib.js now
+// threads per-candidate search unavailability into an
+// {status:"unavailable", unexaminedCandidates:[...]} outcome with a
+// qualified refusal note (fail-closed outcome unchanged) — new internal
+// helpers (carrierDocFallbackUnavailableNote / carrierDocFallbackNote), no
+// imports, no exports, no specifier changes; mirrored into the rendered
+// twin by the required `make update`. The full counter pin set
+// (61/46/15, 49/0/5, 14/3/32) and the hub's 73-export surface re-derived
+// IDENTICAL, so only the byte digest moved. Same discipline: re-derived
+// before re-pinning, not a re-pin-to-absorb.
+const pinnedCorpusDigest = "25c1b3f128715442008bd92bd82cc1249991df1cb859fceab05e5fff0efd2c21"
 
 // updateOpDebtFiles are the packet §B per-file table's post-normalization
 // remainder: 14 modules still carrying `++`/`--` update operators (the

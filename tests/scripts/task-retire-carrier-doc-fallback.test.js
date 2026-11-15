@@ -39,6 +39,12 @@
 //     fallback — a wrong path declaration is a re-closeout matter.
 //   - The refusal detail names the carrier-document search so operators
 //     learn the sanctioned preservation route.
+//   - Unavailability threading (b-F1/c-F1/d-F2, commit review 2026-11-15
+//     of 5db2741): a candidate carrier doc whose search could not
+//     COMPLETE (unreadable committed blob) is UNAVAILABILITY, never a
+//     confident miss — the refusal still fires (fail-closed unchanged)
+//     but its fallback note names the unexamined candidate and never
+//     asserts universal absence over it.
 //
 // Test seam (NOT an env var): the retirement verifier's repo is redirected
 // at a hermetic scratch git repo via the `landingProofRepo` OPTION (not
@@ -662,6 +668,182 @@ test("carrier-doc fallback: Class A reproduction retires after a convention-matc
             );
             assert.equal(cardExists(isoRoot, idH), true, "artifact scope: card survives");
         }
+    } finally {
+        if (prevCoordRoot === undefined) {
+            delete process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+        } else {
+            process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = prevCoordRoot;
+        }
+        fs.rmSync(isoRoot, { recursive: true, force: true });
+        fs.rmSync(scratch.dir, { recursive: true, force: true });
+    }
+});
+
+// Unavailability threading (b-F1/c-F1/d-F2, commit review 2026-11-15 of
+// 5db2741): the fallback's candidate walk used to collapse a candidate
+// carrier-doc search that could not COMPLETE (unreadable committed blob /
+// history read error) into a confident miss, so the appended note asserted
+// universal absence over a document that was never actually examined. The
+// gate outcome (fail-closed refusal) was and stays CORRECT — the defect is
+// diagnostic honesty only.
+//
+// Fixture (probe-verified 2026-11-15): removing the carrier doc's loose
+// BLOB object leaves every name-level read intact — discovery
+// (`git log --name-only -- <roots>/*retirement-carrier*`), the per-path
+// revision walk (`git log --format=%H -- <path>`), and the ls-tree
+// classification probe all exit 0 — while ONLY `git show <rev>:<path>`
+// fails (exit 128, "bad object"), i.e. exactly the per-candidate
+// verifier_unavailable shape inside searchCommittedPathForAnchorAndHandle.
+test("carrier-doc fallback: an unexamined candidate carrier doc is UNAVAILABILITY, never a confident miss", () => {
+    const isoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dr-docfb-unav-"));
+    const prevCoordRoot = process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+    process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = isoRoot;
+    bindSessionName(SESSION_ID, ALIAS);
+    const scratch = makeScratchRepo();
+
+    const retire = (id) =>
+        deleteCoordinationTask(SESSION_ID, id, {
+            cwd: "/verification",
+            landingProofRepo: scratch.dir,
+        });
+
+    try {
+        commitAll(scratch.git, scratch.dir, "initial: no trailer");
+
+        // Class A shape (pinned commit carrier): the slice commit carries
+        // the anchor but never the label, so the fallback is the only
+        // possible verification — and its ONLY candidate is a carrier doc
+        // whose committed blob is made UNREADABLE after the fact.
+        const ID = "dr-docfb-unreadable-candidate";
+        const NOTE =
+            "OWNER NOTE dr-docfb-unreadable-candidate: unreadable candidate docs are unavailability, never confident absence";
+        const ITEM_ID = noteId(NOTE);
+        const CURATED_LABEL = label(ID, ITEM_ID, "curated");
+        writeWorkingCard(isoRoot, ID, { owner_notes: [NOTE] });
+        fs.writeFileSync(path.join(scratch.dir, "slice-u.txt"), "work\n");
+        const sliceSha = commitAll(
+            scratch.git,
+            scratch.dir,
+            `fix u\n\nTask-Card: ${ID}\n`,
+        );
+        closeout(ID, [
+            {
+                id: ITEM_ID,
+                disposition: "curated",
+                carrier: { kind: "commit", revision: sliceSha },
+                handle: CURATED_LABEL,
+                provenance: "owner chat, 2026-11-15 — curated note",
+            },
+        ]);
+        // The candidate WOULD verify (anchor + label together in one
+        // committed blob); committing it exactly once keeps the candidate
+        // list at exactly this doc, so the walk's outcome hinges entirely
+        // on whether its search could complete.
+        const DOC_REL = `docs/checkpoints/2026-11-15-retirement-carrier-${ID}.md`;
+        const DOC_CONTENT = `Task-Card: ${ID}\n\n${CURATED_LABEL}\ncarrier content whose blob becomes unreadable\n`;
+        const docSha = commitFile(
+            scratch.git,
+            scratch.dir,
+            DOC_REL,
+            DOC_CONTENT,
+            `docs: carrier for ${ID}`,
+        );
+        // Corrupt: remove the committed blob's loose object. rev-parse
+        // resolves <rev>:<path> through the TREE (blob not read), so the
+        // oid is derivable while the blob is unreadable.
+        const blobOid = scratch.git([
+            "rev-parse",
+            `${docSha}:${DOC_REL}`,
+        ]).stdout.trim();
+        const objPath = path.join(
+            scratch.dir,
+            ".git",
+            "objects",
+            blobOid.slice(0, 2),
+            blobOid.slice(2),
+        );
+        assert.ok(
+            fs.existsSync(objPath),
+            "fixture: the carrier doc's loose blob object must exist before corruption",
+        );
+        fs.rmSync(objPath);
+
+        const refused = retire(ID);
+        // Fail-closed is UNCHANGED: no carrier verifiably preserves the
+        // item, so the refusal still fires and the card survives.
+        assert.equal(
+            refused.ok,
+            false,
+            "unavailable candidate: must still refuse (fail-closed unchanged)",
+        );
+        assert.equal(refused.refusal.code, "decision_record_unresolved");
+        const miss = (refused.refusal.problems || []).find(
+            (p) => p.code === "handle_not_in_carrier",
+        );
+        assert.ok(
+            miss,
+            "unavailable candidate: refusal must still name handle_not_in_carrier for the declared carrier",
+        );
+        // Honesty (the fix): the fallback note still teaches the route…
+        assert.ok(
+            (miss.detail || "").includes("retirement-carrier"),
+            `unavailable candidate: the note must still teach the carrier-doc route; got: ${miss.detail}`,
+        );
+        // …names the candidate it could not examine…
+        assert.ok(
+            (miss.detail || "").includes(DOC_REL),
+            `unavailable candidate: the note must name the unexamined candidate; got: ${miss.detail}`,
+        );
+        // …reflects UNAVAILABILITY and explicitly disclaims absence…
+        assert.ok(
+            (miss.detail || "").includes("could not") &&
+                (miss.detail || "").includes("absence is NOT established"),
+            `unavailable candidate: the note must reflect unavailability and disclaim absence; got: ${miss.detail}`,
+        );
+        // …and never collapses the incomplete walk into a confident miss
+        // (the pre-fix defect: universal-absence phrasing).
+        assert.ok(
+            !(miss.detail || "").includes("also found nothing"),
+            `unavailable candidate: the note must not assert a completed search that found nothing; got: ${miss.detail}`,
+        );
+        assert.ok(
+            !(miss.detail || "").includes("no committed, branch-reachable file"),
+            `unavailable candidate: the note must not assert universal absence over an unexamined candidate; got: ${miss.detail}`,
+        );
+        assert.equal(
+            cardExists(isoRoot, ID),
+            true,
+            "unavailable candidate: card survives the fail-closed refusal",
+        );
+
+        // Recovery: re-write the exact blob object (identical content →
+        // identical oid), the SAME candidate search now completes and
+        // verifies, and retirement succeeds — the fixture's only defect
+        // was readability, and the fallback's verify path is untouched.
+        const restoreFile = path.join(scratch.dir, "restore-carrier-blob.txt");
+        fs.writeFileSync(restoreFile, DOC_CONTENT);
+        const restoredOid = scratch.git([
+            "hash-object",
+            "-w",
+            restoreFile,
+        ]).stdout.trim();
+        fs.rmSync(restoreFile);
+        assert.equal(
+            restoredOid,
+            blobOid,
+            "fixture: the restored blob must hash to the same oid",
+        );
+        const done = retire(ID);
+        assert.equal(
+            done.ok,
+            true,
+            `unavailable candidate: retirement must succeed once the blob is readable again; got ${JSON.stringify(done.refusal || done)}`,
+        );
+        assert.equal(
+            cardExists(isoRoot, ID),
+            false,
+            "unavailable candidate: card retires after recovery",
+        );
     } finally {
         if (prevCoordRoot === undefined) {
             delete process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
