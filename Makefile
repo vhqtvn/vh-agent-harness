@@ -50,7 +50,7 @@ test-auto-gate-live: ## Run auto-gate live HTTP integration tests (requires Dock
 test-e2e-auto-gate: ## Run auto-gate-classifier plugin e2e (requires Docker Compose; fully isolated)
 	@command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || \
 		{ echo "[test-e2e-auto-gate] Docker Compose is not available; install Docker to run this suite."; exit 1; }
-	docker compose -f tests/e2e/auto-gate-classifier/docker-compose.yml run --rm e2e-runner
+	docker compose -f tests/e2e/auto-gate-classifier/docker-compose.yml run --rm --build e2e-runner
 
 test-e2e-auto-gate-opencode: ## Run auto-gate real-runtime e2e (requires Docker; single container, fully isolated)
 	@command -v docker >/dev/null 2>&1 || \
