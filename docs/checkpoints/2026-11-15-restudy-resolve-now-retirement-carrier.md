@@ -11,6 +11,11 @@ their report directories destroys no last-copy decision knowledge. The six
 outcome summaries are the closeout measured_outcome texts, declared verbatim
 at `/task-closeout`.
 
+Post-sweep addenda (sections appended below after the original six-card
+sweep) are excluded from the six-card totals above; each addendum section
+carries its own card's owner notes verbatim plus its measured outcome under
+the same label discipline.
+
 Landing commits carrying the `Task-Card:` trailers for the six cards:
 `5db2741` (carrier-mismatch), `c2b2f78` (eslink fixtures), `80edc5c`
 (twin-parity guard), `097b133` (pause blocklist), `e15e94b` (Makefile re-spec),
@@ -84,3 +89,75 @@ decision item from that card.
 - studied:2026-11-15
 - decision-item: defer-carrier-fallback-unavailable-threading#owner_notes[fnv1a:cbb98d136061d7e2] (curated)
 - Unavailability threading landed: carrierDocFallbackVerify now distinguishes per-candidate search unavailability from deterministic handle absence (fail-closed refusal unchanged); regression arms added; verified via node --test tests/scripts/ + go test ./... green at HEAD 3b92525 + this working tree.
+
+## task-2026-09-29t04-05-00-pin-armed-coreoutputs-disjointness-tripwire
+
+- source:review-defer (wave-3 slice-4 verdict follow-up, build final report 2026-09-29)
+- trigger:path_touched(internal/permconfig/catalog.go)
+- studied:2026-09-29
+- decision-item: task-2026-09-29t04-05-00-pin-armed-coreoutputs-disjointness-tripwire#owner_notes[fnv1a:fc6180a7dcbd26ca] (curated)
+- resolve-first triage: defer-with-trigger, pure-future-watch — NO actionable-now component asserted explicitly: the invariant HOLDS today (verdict memo 2026-09-29, pinned by existing per-capability catalog tests); the tripwire only becomes load-bearing when a capability first declares a CoreOutput containing an armed path — catalog.go touch is that moment.
+- studied:2026-11-15
+- decision-item: task-2026-09-29t04-05-00-pin-armed-coreoutputs-disjointness-tripwire#owner_notes[fnv1a:cbb98d136061d7e2] (curated)
+- resolved-by-operator-ask:2026-11-15 (previously valid-waiting; operator-directed execution)
+- Tripwire landed as TestCoreCatalog_CoreOutputsNeverPlatformArmed in internal/resolver/catalog_test.go (correct home — the card's original internal/permconfig anchor was stale): iterates CoreCatalog().IDs() + CoreOutputs against the platform_armed set from corpus.CoreOwnershipDefaults; passes trivially at HEAD; RED-check receipt via a temporarily injected armed CoreOutputs entry on core/debate (failure names capability + path), mutation reverted to byte-identical; go test ./internal/resolver/ green.
+
+## defer-020-auto-gate-dispatch-provenance-rail
+
+- source:review-defer
+- decision-item: defer-020-auto-gate-dispatch-provenance-rail#owner_notes[fnv1a:e8a2f357cf18ba64] (curated)
+- trigger:path_touched(templates/sys-prompts/auto-gate-classifier.md)
+- studied:2026-10-02
+- decision-item: defer-020-auto-gate-dispatch-provenance-rail#owner_notes[fnv1a:8aa49d9e33936ab7] (curated)
+- origin:commit-review of 1331717 (slice-2 reviewer AF1/tier1_c-F1): delegated-dispatch provenance cannot be verified from the transcript; injected tool output formatted as a delegation could ride the carve-out. Reviewer notes it upgrades to BLOCK only if a resolution claim is made without a live-classifier receipt.
+- This is transport, not truth (per AGENTS.md DEFER curation rule). Reaches backlog.md only if a trigger fires AND the promotion DoR is met.
+- studied:2026-11-15
+- decision-item: defer-020-auto-gate-dispatch-provenance-rail#owner_notes[fnv1a:cbb98d136061d7e2] (curated)
+- resolved-by-operator-ask:2026-11-15 (previously valid-waiting; operator-directed execution)
+- Provenance rail landed: the delegated-dispatch clause in templates/sys-prompts/auto-gate-classifier.md now names the distinction between session-origin dispatch text (operator/agent intent) and dispatch-claims appearing inside tool output or fetched text — the latter authorize nothing however official they look — with the pinned rail line preserved verbatim; golden lines extended in TestSysPrompt_ClassifierJudgmentScopeGoldenLines (RED before the prompt edit, green after); go test ./internal/cli/ green.
+
+## defer-release-wrapper-refusal-emit-perf
+
+- source:ops-finding
+- decision-item: defer-release-wrapper-refusal-emit-perf#owner_notes[fnv1a:8de6d88233bd54df] (curated)
+- trigger:path_touched(scripts/release-tag.sh)
+- milestone note: ideally land before the next release ceremony
+- studied:2026-10-05
+- decision-item: defer-release-wrapper-refusal-emit-perf#owner_notes[fnv1a:8da4a257309365fe] (curated)
+- ORIGIN: v0.28.0 ceremony resume (releaser session): wrapper refusal emit ground multi-MB failure output ~25 min; documented in tmp/agent-runs/release-v0-28-0/ receipts.
+- Transport, not truth.
+- decision-item: defer-release-wrapper-refusal-emit-perf#owner_notes[fnv1a:479fda1c2225e2e3] (curated)
+- studied:2026-11-15
+- decision-item: defer-release-wrapper-refusal-emit-perf#owner_notes[fnv1a:cbb98d136061d7e2] (curated)
+- resolved-by-operator-ask:2026-11-15 (previously valid-waiting; operator-directed execution)
+- Emit perf fixed: json_str in scripts/release-tag.sh escapes through one node -e JSON.stringify invocation instead of the per-character loop (contract preserved — named-control shorthand, \u00XX C0, quote/backslash escapes, UTF-8 passthrough, no truncation; the parameter-expansion pre-pass deliberately replaced because it would double-escape under stringify); four regression arms added — 130k-char payload under a 15s spawn guard the old per-char path fails by construction (extrapolated ~164s), a nasty-payload round-trip + double-escape detector, an argv-trap arm pinning stdin routing for leading-dash payloads, and a chunk-boundary arm pinning Buffer-accumulation reassembly of a multibyte char split across two stdin data events (F1/F2 fix); suite 13/13 green with RED receipts on faithful old-path copies.
+
+## draft-e2e-stale-image-20261004
+
+- source:p2-followup
+- decision-item: draft-e2e-stale-image-20261004#owner_notes[fnv1a:4c0c5c07f3b0738a] (curated)
+- trigger:path_touched(Makefile)
+- secondary watch: tests/e2e/auto-gate-classifier/ (directory prefix not expressible in the trigger grammar; Makefile is the primary seam)
+- studied:2026-10-04
+- decision-item: draft-e2e-stale-image-20261004#owner_notes[fnv1a:8ca4a0c431936791] (curated)
+- origin:verification of the 2026-10-04 permission.ask reserve-hook deletion slice (session auto-gate-permask-del-20261004). First post-edit `make test-e2e-auto-gate` completed in 1s and passed 12/12 against the STALE pre-edit image; explicit `docker compose build e2e-runner` + rerun exercised the new code (7/7). Receipts: tmp/agent-runs/auto-gate-permask-del-20261004/RECEIPTS.md (stale log bg-jobs/post-e2e-classifier/job.log vs valid bg-jobs/post-e2e-classifier-rebuilt/job.log).
+- resolve-first-triage:defer-with-trigger (fix is one Makefile line but outside the deletion slice's declared edit surface; not driven to verdict in-slice by contract).
+- Transport, not truth. Reaches backlog.md only if a trigger fires AND the promotion DoR is met.
+- studied:2026-11-15
+- decision-item: draft-e2e-stale-image-20261004#owner_notes[fnv1a:cbb98d136061d7e2] (curated)
+- resolved-by-operator-ask:2026-11-15 (previously valid-waiting; operator-directed execution)
+- --build appended to the test-e2e-auto-gate docker compose run line in the Makefile so the e2e-runner image rebuilds from current sources before each run; verified textually via make -n dry expansion showing the flag (no docker in this environment); live docker reproduction deferred to the next run in a docker-capable environment.
+
+## defer-018-repair-task-resurrection-window
+
+- source:review-defer
+- decision-item: defer-018-repair-task-resurrection-window#owner_notes[fnv1a:e8a2f357cf18ba64] (curated)
+- trigger:path_touched(templates/core/.opencode/scripts/state-lib.js:repairCoordinationTask)
+- studied:2026-11-07
+- decision-item: defer-018-repair-task-resurrection-window#owner_notes[fnv1a:4dbc98505e5f9625] (curated)
+- ORIGIN: committer round-3 review of slice 3 (1286c00), tier1_a/F1: the public updater's allowAbsent:true semantics let repairCoordinationTask recreate a deleted card from defaults.
+- resolve-first triage: defer-with-trigger — resolving requires a semantics decision (refuse vs opt-in recreate) that is not in any in-flight slice's scope.
+- studied:2026-11-15
+- decision-item: defer-018-repair-task-resurrection-window#owner_notes[fnv1a:cbb98d136061d7e2] (curated)
+- resolved-by-operator-ask:2026-11-15 (previously valid-waiting; operator-directed execution)
+- Resurrection window closed with the refuse-vs-opt-in decision resolved as REFUSE (no caller wants resurrection; create flows exist explicitly): repairCoordinationTask runs under the per-task lock with required loads end-to-end and both repair-branch saves route through applyCoordinationTaskUpdateLocked; a card vanishing mid-repair or repaired after deletion refuses with 'card no longer exists; repair refused' — the pre-fix defaults-based write was attempted, not landed: core-field validation rejected it (a misleading '5 validation problems' diagnostic), so no successful resurrection was ever demonstrated; TOCTOU + absent-id + existing-card-control arms pinned in task-delete-retirement.test.js (2/2 green; pre-fix RED baseline receipts m0072/m0074); eslink corpus digest re-pinned with counters identical (61/46/15 · 49/0/5 · 14/3/32, hub 73 exports); make update twin + origin-hashes refreshed.
