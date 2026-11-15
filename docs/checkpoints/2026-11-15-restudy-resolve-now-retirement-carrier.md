@@ -150,6 +150,7 @@ decision item from that card.
 - decision-item: draft-e2e-stale-image-20261004#owner_notes[fnv1a:cbb98d136061d7e2] (curated)
 - resolved-by-operator-ask:2026-11-15 (previously valid-waiting; operator-directed execution)
 - --build appended to the test-e2e-auto-gate docker compose run line in the Makefile so the e2e-runner image rebuilds from current sources before each run; verified textually via make -n dry expansion showing the flag (no docker in this environment); live docker reproduction deferred to the next run in a docker-capable environment.
+- decision-item: draft-e2e-stale-image-20261004#measured_outcome[fnv1a:cf27b06107e049b6] (curated)
 - Should the target prepend `docker compose -f tests/e2e/auto-gate-classifier/docker-compose.yml build e2e-runner` (matches the opencode target's explicit `docker build`), or switch to `docker compose run --build e2e-runner`? --build is the smaller diff; explicit build is the more legible one.
 
 ## defer-018-repair-task-resurrection-window
