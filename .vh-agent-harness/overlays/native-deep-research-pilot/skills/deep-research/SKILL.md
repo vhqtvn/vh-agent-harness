@@ -218,9 +218,17 @@ exceeding a limit is fine ONLY when the caller explicitly raised the budget.
    have been made elsewhere; a pinned source may have moved; a prior
    capability failure may have healed). Record revalidation outcomes.
 3. **Continue unfinished gaps** using their recorded exact next actions.
-4. **Never repeat** completed queries or already-read sources — the packet's
-   query and read logs are the dedup index. A failed read MAY be retried once
-   after a revalidated surface change; record the retry as new.
+4. **Reuse before repeating — a default, not a ban.** Treat the packet's
+   query and read logs as the dedup index: prefer recorded evidence while its
+   freshness and depth still serve the frame. Re-issuing a query or
+   re-reading a source is legitimate — record it as a new attempt with its
+   reason — whenever: the source version changed; the question is new or
+   materially broader; the recorded depth is insufficient for the current
+   classification; the claim now requires verification; or the packet entry
+   is missing. A failed read MAY also be retried once after a revalidated
+   surface change. Shared semantics: the evidence-coverage and
+   read-accounting convention (`docs/coordination/REPORT_ENVELOPES.md` →
+   "Evidence Coverage and Read Accounting").
 
 Resume is logical resume: the goal is no wasted repetition, not a guarantee
 that exactly-once semantics held across the interruption.

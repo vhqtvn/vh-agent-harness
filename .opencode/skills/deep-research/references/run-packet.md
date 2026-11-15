@@ -28,7 +28,7 @@ per item, and never drop a section — an empty section stays with a one-line
 - webfetch_fallback: <usable|not>
 - surface_incidents: <tool failures, labeled capability_failure>
 
-## Completed queries      (the dedup index — never repeat these)
+## Completed queries      (the dedup index — reuse by default; repeats need a recorded reason)
 | # | query | tool | results | date | notes |
 |---|---|---|---|---|---|
 
@@ -103,8 +103,12 @@ path forces the `capability_blocked` stop reason — it is never reported as
 ### Completed queries
 
 One row per discovery query actually issued, through any surface. This table
-is the dedup index for resume: a completed query is never re-issued on
-resume without a recorded reason (e.g. the surface changed).
+is the dedup index for resume: a completed query is not re-issued on resume
+without a recorded reason — legitimate reasons follow the reuse exceptions
+(source version changed, new or materially broader question, insufficient
+recorded depth, required verification, missing entry) in
+`docs/coordination/REPORT_ENVELOPES.md` → "Evidence Coverage and Read
+Accounting".
 
 ### Attempted reads
 
@@ -218,6 +222,32 @@ violation (a 3-backtick or language-tagged line never closes the report;
 an unterminated report fails rather than passing as closed); the
 `finalization_check:` line records the PASS and date. The check is
 structural only: it never changes stop-reason semantics.
+
+### Convention mapping (shared meanings, additive)
+
+This packet's existing records already carry the shared meanings of the
+evidence-coverage and read-accounting convention
+(`docs/coordination/REPORT_ENVELOPES.md` → "Evidence Coverage and Read
+Accounting"). Nothing is renamed; the mapping is:
+
+- **Read ledger** — the Attempted reads table IS the convention's read
+  ledger: one row per attempt, `outcome` records the result, `duplicate_of`
+  and notes carry retry/dedup reasons, and Evidence records'
+  `source_version` is the ledger's source version. Payload size is usually
+  not observable through the search surface — when size matters, note it
+  with a measurement basis (`measured`/`estimated`/`unknown`), and never
+  treat `unknown` as zero or sum across units.
+- **Coverage receipts** — the frame's `material_questions` are the slots: a
+  question is `examined` when its evidence rows exist at the depth the
+  classification requires, `partial` when only some aspects are covered,
+  `unexamined` otherwise; the Gaps checklist carries the per-slot gaps.
+  Answer sufficiency stays in Claim classifications — coverage is never
+  sufficiency.
+- **Reuse bindings** — resume revalidation (SKILL.md → "Resume semantics"
+  step 2) is the convention's freshness check. The binding is
+  (objective = the frame's `decision_supported`, source version, locator
+  anchor, `read_depth`); a failed premise re-derivation expires the binding
+  and earns no reuse credit — revalidate, re-read, or record the gap.
 
 ## Promotion (explicit-only)
 
