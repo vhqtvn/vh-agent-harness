@@ -2,6 +2,9 @@ package resolver
 
 import (
 	"testing"
+
+	corpus "github.com/vhqtvn/vh-agent-harness"
+	"github.com/vhqtvn/vh-agent-harness/internal/ownership"
 )
 
 func TestCoreCatalog_ValidatesClean(t *testing.T) {
@@ -141,6 +144,50 @@ func TestCoreCatalog_OtherCapabilitiesHaveNoCoreOutputs(t *testing.T) {
 		}
 		if len(m.CoreOutputs) != 0 {
 			t.Errorf("%s should have empty CoreOutputs (retains unconditional behavior), got %v", id, m.CoreOutputs)
+		}
+	}
+}
+
+// TestCoreCatalog_CoreOutputsNeverPlatformArmed is the general armed ∩
+// CoreOutputs = ∅ disjointness tripwire
+// (task-2026-09-29t04-05-00-pin-armed-coreoutputs-disjointness-tripwire; guard
+// from the armed-schema INTENDED verdict, researches/decisions/
+// 2026-09-29-armed-schema-all-known-defaults-verdict.md). CoreOutputs gate
+// rendering by capability SELECTION: when a capability is unselected its
+// CoreOutputs are skipped, and a prior on-disk file is left as inactive
+// residue. A platform_armed path inside CoreOutputs would therefore be SKIPPED
+// on deselection while the armed-schema surface still expects the platform to
+// reconcile it — a permanently false "will be re-seeded" WARN and an armed
+// file silently stranded as residue. The per-capability tests above pin
+// today's declarations; this GENERAL invariant iterates every catalog entry so
+// a future capability declaring an armed CoreOutput trips here even though no
+// per-capability test exists for it yet. Today it holds trivially (the armed
+// set is the two profile/policy files; CoreOutputs exist only on
+// core/media-perception and core/worker-read-only).
+func TestCoreCatalog_CoreOutputsNeverPlatformArmed(t *testing.T) {
+	defs, err := corpus.CoreOwnershipDefaults()
+	if err != nil {
+		t.Fatalf("CoreOwnershipDefaults: %v", err)
+	}
+	armed := map[string]bool{}
+	for p, rule := range defs {
+		if rule.Class == ownership.ClassPlatformArmed {
+			armed[p] = true
+		}
+	}
+	if len(armed) == 0 {
+		t.Fatalf("armed set unexpectedly empty — CoreOwnershipDefaults found no platform_armed paths; the tripwire cannot assert disjointness against an empty set (re-derive the walk)")
+	}
+	c := CoreCatalog()
+	for _, id := range c.IDs() {
+		m, ok := c.Get(id)
+		if !ok {
+			t.Fatalf("Get(%q): expected ok (id came from IDs())", id)
+		}
+		for _, p := range m.CoreOutputs {
+			if armed[p] {
+				t.Errorf("capability %q declares platform_armed path %q in CoreOutputs — deselection would skip an armed file (permanently false re-seed WARN, armed residue stranded); armed ∩ CoreOutputs must stay empty", id, p)
+			}
 		}
 	}
 }
