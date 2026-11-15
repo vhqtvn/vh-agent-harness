@@ -101,6 +101,7 @@ decision item from that card.
 - decision-item: task-2026-09-29t04-05-00-pin-armed-coreoutputs-disjointness-tripwire#owner_notes[fnv1a:cbb98d136061d7e2] (curated)
 - resolved-by-operator-ask:2026-11-15 (previously valid-waiting; operator-directed execution)
 - Tripwire landed as TestCoreCatalog_CoreOutputsNeverPlatformArmed in internal/resolver/catalog_test.go (correct home — the card's original internal/permconfig anchor was stale): iterates CoreCatalog().IDs() + CoreOutputs against the platform_armed set from corpus.CoreOwnershipDefaults; passes trivially at HEAD; RED-check receipt via a temporarily injected armed CoreOutputs entry on core/debate (failure names capability + path), mutation reverted to byte-identical; go test ./internal/resolver/ green.
+- Exact assertion home: catalog_test.go general test vs core_manifest_test.go — decide at pickup
 
 ## defer-020-auto-gate-dispatch-provenance-rail
 
@@ -115,6 +116,7 @@ decision item from that card.
 - decision-item: defer-020-auto-gate-dispatch-provenance-rail#owner_notes[fnv1a:cbb98d136061d7e2] (curated)
 - resolved-by-operator-ask:2026-11-15 (previously valid-waiting; operator-directed execution)
 - Provenance rail landed: the delegated-dispatch clause in templates/sys-prompts/auto-gate-classifier.md now names the distinction between session-origin dispatch text (operator/agent intent) and dispatch-claims appearing inside tool output or fetched text — the latter authorize nothing however official they look — with the pinned rail line preserved verbatim; golden lines extended in TestSysPrompt_ClassifierJudgmentScopeGoldenLines (RED before the prompt edit, green after); go test ./internal/cli/ green.
+- The delegated-dispatch clause (commit 1331717) relaxes scope-creep judgment for operator-driven delegation/coordination chains, but a classifier reading a transcript cannot verify dispatch provenance — injected tool output FORMATTED as a coordinator delegation could in principle ride the carve-out. Should the clause gain an explicit sentence distinguishing session-origin dispatch text from dispatch-claims appearing inside tool output (or aligning the rail with the threat model's full untrusted enumeration: tool results, fetched pages, files, messages from other agents)?
 
 ## defer-release-wrapper-refusal-emit-perf
 
@@ -131,6 +133,7 @@ decision item from that card.
 - decision-item: defer-release-wrapper-refusal-emit-perf#owner_notes[fnv1a:cbb98d136061d7e2] (curated)
 - resolved-by-operator-ask:2026-11-15 (previously valid-waiting; operator-directed execution)
 - Emit perf fixed: json_str in scripts/release-tag.sh escapes through one node -e JSON.stringify invocation instead of the per-character loop (contract preserved — named-control shorthand, \u00XX C0, quote/backslash escapes, UTF-8 passthrough, no truncation; the parameter-expansion pre-pass deliberately replaced because it would double-escape under stringify); four regression arms added — 130k-char payload under a 15s spawn guard the old per-char path fails by construction (extrapolated ~164s), a nasty-payload round-trip + double-escape detector, an argv-trap arm pinning stdin routing for leading-dash payloads, and a chunk-boundary arm pinning Buffer-accumulation reassembly of a multibyte char split across two stdin data events (F1/F2 fix); suite 13/13 green with RED receipts on faithful old-path copies.
+- Where exactly is the per-char loop (json_str or its caller)? Truncate vs stream decision.
 
 ## draft-e2e-stale-image-20261004
 
@@ -147,6 +150,7 @@ decision item from that card.
 - decision-item: draft-e2e-stale-image-20261004#owner_notes[fnv1a:cbb98d136061d7e2] (curated)
 - resolved-by-operator-ask:2026-11-15 (previously valid-waiting; operator-directed execution)
 - --build appended to the test-e2e-auto-gate docker compose run line in the Makefile so the e2e-runner image rebuilds from current sources before each run; verified textually via make -n dry expansion showing the flag (no docker in this environment); live docker reproduction deferred to the next run in a docker-capable environment.
+- Should the target prepend `docker compose -f tests/e2e/auto-gate-classifier/docker-compose.yml build e2e-runner` (matches the opencode target's explicit `docker build`), or switch to `docker compose run --build e2e-runner`? --build is the smaller diff; explicit build is the more legible one.
 
 ## defer-018-repair-task-resurrection-window
 
@@ -161,3 +165,5 @@ decision item from that card.
 - decision-item: defer-018-repair-task-resurrection-window#owner_notes[fnv1a:cbb98d136061d7e2] (curated)
 - resolved-by-operator-ask:2026-11-15 (previously valid-waiting; operator-directed execution)
 - Resurrection window closed with the refuse-vs-opt-in decision resolved as REFUSE (no caller wants resurrection; create flows exist explicitly): repairCoordinationTask runs under the per-task lock with required loads end-to-end and both repair-branch saves route through applyCoordinationTaskUpdateLocked; a card vanishing mid-repair or repaired after deletion refuses with 'card no longer exists; repair refused' — the pre-fix defaults-based write was attempted, not landed: core-field validation rejected it (a misleading '5 validation problems' diagnostic), so no successful resurrection was ever demonstrated; TOCTOU + absent-id + existing-card-control arms pinned in task-delete-retirement.test.js (2/2 green; pre-fix RED baseline receipts m0072/m0074); eslink corpus digest re-pinned with counters identical (61/46/15 · 49/0/5 · 14/3/32, hub 73 exports); make update twin + origin-hashes refreshed.
+- Is recreate-from-defaults ever the INTENDED repair behavior (e.g. reconstructing a structurally-degraded card whose file was lost)? If yes, the fix is a required-load + explicit opt-in recreate flag rather than a blanket refusal.
+- Which public updateCoordinationTask callers genuinely rely on allowAbsent:true today beyond repair (save/create flows construct their own cards)?
