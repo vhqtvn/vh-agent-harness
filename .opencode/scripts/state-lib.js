@@ -6276,6 +6276,11 @@ function treeAtRevisionContains(repo, sha, marker) {
 }
 
 // Reachable commits whose tree touched the path, newest first (capped).
+// Returns { revs, truncated } — truncated is true when the reachable
+// history exceeded DECISION_RECORD_SEARCH_CAP and the walk stopped early
+// (a capped walk can never ground a universal-absence claim; the caller
+// qualifies its deterministic-miss diagnosis accordingly) — or null when
+// the history read itself failed (tri-state, unchanged).
 function reachableCommitsTouchingPath(repo, targetPath) {
     const res = gitSpawn(repo, [
         "log",
@@ -6287,11 +6292,14 @@ function reachableCommitsTouchingPath(repo, targetPath) {
     if (res.status !== 0) {
         return null;
     }
-    return res.stdout
+    const all = res.stdout
         .split(/\r?\n/)
         .map((line) => line.trim())
-        .filter((line) => line !== "")
-        .slice(0, DECISION_RECORD_SEARCH_CAP);
+        .filter((line) => line !== "");
+    return {
+        revs: all.slice(0, DECISION_RECORD_SEARCH_CAP),
+        truncated: all.length > DECISION_RECORD_SEARCH_CAP,
+    };
 }
 
 // --- carrier-document fallback helpers (2026-11-14 Class A fix) ---------------
@@ -6319,8 +6327,12 @@ function isCarrierDocPath(candidate) {
 }
 
 // Distinct committed carrier-document paths across reachable history,
-// newest-discovery first, capped. Returns null when the history read itself
-// failed (tri-state: an unavailable search is never "searched and empty").
+// newest-discovery first, capped at DECISION_CARRIER_DOC_PATH_CAP distinct
+// paths. Returns { paths, truncated } — truncated is true when discovery
+// stopped at the cap while further distinct carrier-doc paths remained in
+// history (a capped candidate list can never ground a universal-absence
+// claim) — or null when the history read itself failed (tri-state: an
+// unavailable search is never "searched and empty").
 function discoverCarrierDocPaths(repo) {
     const res = gitSpawn(repo, [
         "log",
@@ -6337,6 +6349,7 @@ function discoverCarrierDocPaths(repo) {
     }
     const paths = [];
     const seen = new Set();
+    let truncated = false;
     for (const rawLine of res.stdout.split(/\r?\n/)) {
         const candidate = rawLine.trim();
         if (candidate === "" || seen.has(candidate)) {
@@ -6346,12 +6359,16 @@ function discoverCarrierDocPaths(repo) {
             continue;
         }
         seen.add(candidate);
-        paths.push(candidate);
         if (paths.length >= DECISION_CARRIER_DOC_PATH_CAP) {
-            break;
+            // A distinct carrier-doc path beyond the cap: never enumerated
+            // as a candidate, so its examination never happens — flag the
+            // incompleteness instead of silently dropping it.
+            truncated = true;
+            continue;
         }
+        paths.push(candidate);
     }
-    return paths;
+    return { paths, truncated };
 }
 
 // Tri-state committed-blob read: { available, tracked, blob, stderr,
@@ -6457,7 +6474,10 @@ function committedBlobAt(repo, sha, targetPath) {
 // directory paths keep b-F1 naming, and anchor-in-one-revision +
 // handle-in-another stays the TERMINAL scatter diagnosis (review F1,
 // 2026-10-27). Returns { status: "verified", locator, how } on success or
-// { status: "failed", problems: [...] } with fully-formed problems.
+// { status: "failed", problems: [...] } with fully-formed problems; a
+// failed walk that stopped at DECISION_RECORD_SEARCH_CAP revisions also
+// carries truncated: true (its miss details are qualified — absence
+// beyond the cap is NOT established).
 function searchCommittedPathForAnchorAndHandle(
     repo,
     taskID,
@@ -6468,8 +6488,8 @@ function searchCommittedPathForAnchorAndHandle(
     handleKind,
 ) {
     const problems = [];
-    const revs = reachableCommitsTouchingPath(repo, targetPath);
-    if (revs === null) {
+    const walk = reachableCommitsTouchingPath(repo, targetPath);
+    if (walk === null) {
         return {
             status: "failed",
             problems: [
@@ -6484,6 +6504,8 @@ function searchCommittedPathForAnchorAndHandle(
             ],
         };
     }
+    const revs = walk.revs;
+    const walkTruncated = walk.truncated === true;
     if (revs.length === 0) {
         return {
             status: "failed",
@@ -6579,6 +6601,16 @@ function searchCommittedPathForAnchorAndHandle(
     // revision Y used to fall through with zero problems and read as
     // ok:true (review F1 — the fail-open the deleted v2 scatter pin was
     // guarding). Fail closed with a diagnosis naming both revisions.
+    //
+    // A walk that stopped at DECISION_RECORD_SEARCH_CAP revisions can
+    // never ground a universal-absence claim either: revisions beyond the
+    // cap were never read, so the deterministic-miss details below carry
+    // the SAME diagnostic-certainty qualification as verifier_unavailable
+    // (absence beyond the cap is NOT established) while the fail-closed
+    // refusal itself is unchanged.
+    const truncationSuffix = walkTruncated
+        ? ` — the revision walk was capped at ${DECISION_RECORD_SEARCH_CAP} reachable commits touching this path, so absence beyond the cap is NOT established`
+        : "";
     if (!anchorEver) {
         problems.push({
             index,
@@ -6586,7 +6618,7 @@ function searchCommittedPathForAnchorAndHandle(
             id,
             locator: targetPath,
             code: "anchor_missing",
-            detail: `item "${id}": no reachable revision of "${targetPath}" carries the card-id anchor "${taskID}" in its committed blob — every carrier must be discoverable from the card id after retirement (the documented back-reference convention)`,
+            detail: `item "${id}": no reachable revision of "${targetPath}" carries the card-id anchor "${taskID}" in its committed blob — every carrier must be discoverable from the card id after retirement (the documented back-reference convention)${truncationSuffix}`,
         });
     }
     if (!handleEver) {
@@ -6596,7 +6628,7 @@ function searchCommittedPathForAnchorAndHandle(
             id,
             locator: targetPath,
             code: "handle_not_in_carrier",
-            detail: `item "${id}": no reachable revision of "${targetPath}" carries the ${handleKind} ("${String(handle).slice(0, 60)}…") in its committed blob — the declared carrier does not contain THIS item's representation`,
+            detail: `item "${id}": no reachable revision of "${targetPath}" carries the ${handleKind} ("${String(handle).slice(0, 60)}…") in its committed blob — the declared carrier does not contain THIS item's representation${truncationSuffix}`,
         });
     }
     if (anchorEver && handleEver) {
@@ -6606,8 +6638,11 @@ function searchCommittedPathForAnchorAndHandle(
             id,
             locator: targetPath,
             code: "anchor_handle_scattered",
-            detail: `item "${id}": no single reachable revision of "${targetPath}" carries the card-id anchor "${taskID}" AND the ${handleKind} together — the anchor was found at commit ${anchorRev} and the ${handleKind} at commit ${handleRev}, but never in the same committed blob. Split evidence across revisions is not a same-carrier representation: a fresh session recovering from the anchor-bearing revision finds no item representation there. Reunite both in one committed, branch-reachable carrier (or pin the revision that carries both).`,
+            detail: `item "${id}": no single reachable revision of "${targetPath}" carries the card-id anchor "${taskID}" AND the ${handleKind} together — the anchor was found at commit ${anchorRev} and the ${handleKind} at commit ${handleRev}, but never in the same committed blob. Split evidence across revisions is not a same-carrier representation: a fresh session recovering from the anchor-bearing revision finds no item representation there. Reunite both in one committed, branch-reachable carrier (or pin the revision that carries both).${truncationSuffix}`,
         });
+    }
+    if (walkTruncated) {
+        return { status: "failed", problems, truncated: true };
     }
     return { status: "failed", problems };
 }
@@ -6625,23 +6660,31 @@ function searchCommittedPathForAnchorAndHandle(
 //                                   caller makes NO claim about carrier docs
 //   { status: "unavailable", unexaminedCandidates: [path, ...] }
 //                                  — no candidate verified AND at least one
-//                                   candidate search could not complete
-//                                   (unreadable blob / history read error).
-//                                   Mirroring the discovery-level tri-state
-//                                   honesty convention, a walk with
-//                                   unexamined candidates is NEVER collapsed
-//                                   into a confident miss: the caller
-//                                   qualifies its note so universal absence
-//                                   is never asserted over documents that
-//                                   were never read (b-F1/c-F1/d-F2, commit
-//                                   review 2026-11-15 of 5db2741).
+//                                  candidate search could not complete
+//                                  (unreadable blob / history read error /
+//                                  walk capped before every revision was
+//                                  examined). Mirroring the discovery-level
+//                                  tri-state honesty convention, a walk with
+//                                  unexamined candidates is NEVER collapsed
+//                                  into a confident miss: the caller
+//                                  qualifies its note so universal absence
+//                                  is never asserted over documents that
+//                                  were never read (b-F1/c-F1/d-F2, commit
+//                                  review 2026-11-15 of 5db2741).
+//   { status: "unavailable", truncatedDiscovery: true }
+//                                  — no candidate verified AND candidate
+//                                  discovery itself stopped at
+//                                  DECISION_CARRIER_DOC_PATH_CAP distinct
+//                                  paths: carrier documents beyond the cap
+//                                  were never even enumerated, the same
+//                                  incompleteness class one level up.
 function carrierDocFallbackVerify(repo, taskID, handle, id, index, handleKind) {
-    const paths = discoverCarrierDocPaths(repo);
-    if (paths === null) {
+    const discovery = discoverCarrierDocPaths(repo);
+    if (discovery === null) {
         return { status: "unavailable" };
     }
     const unexaminedCandidates = [];
-    for (const docPath of paths) {
+    for (const docPath of discovery.paths) {
         const searched = searchCommittedPathForAnchorAndHandle(
             repo,
             taskID,
@@ -6666,6 +6709,12 @@ function carrierDocFallbackVerify(repo, taskID, handle, id, index, handleKind) {
         ) {
             unexaminedCandidates.push(docPath);
         }
+        // A candidate whose walk was CAPPED before every revision was
+        // examined is the same incompleteness class: the candidate was
+        // not fully examined, so it can never ground a confident miss.
+        else if (searched.truncated === true) {
+            unexaminedCandidates.push(docPath);
+        }
         // A non-verified candidate keeps the search going; its per-path
         // problems are deliberately not surfaced (the DECLARED carrier's
         // diagnosis stays the refusal of record — the fallback only adds
@@ -6674,6 +6723,12 @@ function carrierDocFallbackVerify(repo, taskID, handle, id, index, handleKind) {
     if (unexaminedCandidates.length > 0) {
         return { status: "unavailable", unexaminedCandidates };
     }
+    // Discovery itself capped: distinct carrier-document paths beyond
+    // DECISION_CARRIER_DOC_PATH_CAP were never enumerated as candidates
+    // at all — universal absence over them is unassertable.
+    if (discovery.truncated) {
+        return { status: "unavailable", truncatedDiscovery: true };
+    }
     return { status: "failed" };
 }
 
@@ -6681,8 +6736,9 @@ function carrierDocFallbackVerify(repo, taskID, handle, id, index, handleKind) {
 // convention so a refusal teaches the sanctioned preservation route. ONLY
 // ever appended for a DETERMINISTIC miss: carrierDocFallbackVerify returns
 // status "failed" only when every discovered candidate was actually
-// searched, so the universal-absence claim below is never made over
-// unexamined candidates.
+// searched AND neither discovery nor any candidate walk was capped, so
+// the universal-absence claim below is never made over unexamined
+// candidates or beyond-cap revisions/documents.
 function carrierDocFallbackMissNote(handleKind) {
     return (
         ` The retirement-carrier document fallback also found nothing: no committed, branch-reachable file matching *${DECISION_CARRIER_DOC_NAME_TOKEN}* ` +
@@ -6691,27 +6747,43 @@ function carrierDocFallbackMissNote(handleKind) {
 }
 
 // The appended note when the fallback's candidate walk could NOT complete
-// (≥1 candidate carrier-document search was unavailable and none
-// verified): still names the sanctioned preservation route, but claims
-// NEITHER presence NOR absence — content absence is NOT established over
-// documents that were never read (b-F1/c-F1/d-F2, commit review
-// 2026-11-15 of 5db2741).
+// (≥1 candidate carrier-document search was unavailable — unreadable
+// blob, history-read error, or a walk capped before every revision was
+// examined — and none verified): still names the sanctioned preservation
+// route, but claims NEITHER presence NOR absence — content absence is NOT
+// established over documents that were never read (b-F1/c-F1/d-F2, commit
+// review 2026-11-15 of 5db2741).
 function carrierDocFallbackUnavailableNote(handleKind, unexaminedCandidates) {
     const listed = (unexaminedCandidates || [])
         .map((docPath) => `"${docPath}"`)
         .join(", ");
     return (
-        ` The retirement-carrier document fallback could not complete its search: candidate carrier document${(unexaminedCandidates || []).length === 1 ? "" : "s"} ${listed} could not be examined (a committed-blob or history read did not complete), so carrier-document absence is NOT established for this ${handleKind} — and neither is presence. ` +
+        ` The retirement-carrier document fallback could not complete its search: candidate carrier document${(unexaminedCandidates || []).length === 1 ? "" : "s"} ${listed} could not be fully examined (a committed-blob or history read did not complete, or the revision walk was capped before every revision was examined), so carrier-document absence is NOT established for this ${handleKind} — and neither is presence. ` +
         `Landing an examinable file matching *${DECISION_CARRIER_DOC_NAME_TOKEN}* under ${DECISION_CARRIER_DOC_ROOTS.join(", ")} (the checkpoint carrier shape) remains the sanctioned preservation route for commit carriers whose messages cannot carry item labels.`
     );
 }
 
-// Note selection for the commit-carrier call sites: a DETERMINISTIC miss
-// (every candidate searched, none verified) appends the miss note; a walk
+// The appended note when candidate DISCOVERY itself was capped: distinct
+// carrier-document paths beyond DECISION_CARRIER_DOC_PATH_CAP were never
+// enumerated, so neither presence nor absence over them is assertable —
+// the same qualified diagnostic-certainty class as an unexamined
+// candidate, one level up.
+function carrierDocFallbackTruncationNote(handleKind) {
+    return (
+        ` The retirement-carrier document fallback stopped at ${DECISION_CARRIER_DOC_PATH_CAP} distinct candidate carrier documents, so any documents beyond that cap were never examined and carrier-document absence is NOT established for this ${handleKind} — and neither is presence. ` +
+        `Landing an examinable file matching *${DECISION_CARRIER_DOC_NAME_TOKEN}* under ${DECISION_CARRIER_DOC_ROOTS.join(", ")} (the checkpoint carrier shape) remains the sanctioned preservation route for commit carriers whose messages cannot carry item labels.`
+    );
+}
+
+// Note selection for the commit-carrier call sites — three distinct
+// outcomes: a DETERMINISTIC miss (every candidate discovered, every
+// candidate fully searched, none verified) appends the miss note; a walk
 // with unexamined candidates appends the unavailable note (honest about
-// incompleteness, still teaching the route); a discovery-level unavailable
-// appends NOTHING (the pre-existing convention: an unavailable search
-// never claims "searched and empty").
+// incompleteness, still teaching the route); a capped DISCOVERY appends
+// the truncation note (same class — candidates beyond the cap were never
+// enumerated); a discovery-level unavailable appends NOTHING (the
+// pre-existing convention: an unavailable search never claims "searched
+// and empty").
 function carrierDocFallbackNote(fallback, handleKind) {
     if (fallback.status === "failed") {
         return carrierDocFallbackMissNote(handleKind);
@@ -6725,6 +6797,12 @@ function carrierDocFallbackNote(fallback, handleKind) {
             handleKind,
             fallback.unexaminedCandidates,
         );
+    }
+    if (
+        fallback.status === "unavailable" &&
+        fallback.truncatedDiscovery === true
+    ) {
+        return carrierDocFallbackTruncationNote(handleKind);
     }
     return "";
 }
@@ -6907,14 +6985,14 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
                 // force-deletions. Before refusing, search committed
                 // retirement-carrier documents for the anchor + handle
                 // together; the fallback proves preservation independently
-                // of the stale pin. When the fallback deterministically
-                // finds nothing, the declared-carrier diagnosis stands
-                // with the fallback miss appended (naming the convention).
-                // When the fallback's own search could not complete
-                // (discovery read failed, or ≥1 candidate carrier doc was
-                // unexamined), the appended note is qualified to claim
-                // neither presence nor absence — an unavailable search
-                // never asserts "searched and empty".
+                // of the stale pin. Note selection is THREE-way: a
+                // deterministic miss (all candidates discovered and fully
+                // searched, none verified) appends the miss note (naming
+                // the convention); ≥1 unexamined candidate (unreadable
+                // blob / capped walk) appends the QUALIFIED note claiming
+                // neither presence nor absence; a discovery-level
+                // unavailable search appends NOTHING (an unavailable
+                // search never asserts "searched and empty").
                 const fallback = carrierDocFallbackVerify(
                     repo,
                     taskID,
@@ -7018,9 +7096,12 @@ function verifyDecisionRecordForRetirement(taskID, record, repoOverride) {
             // carriers declared at closeout, before the landing commit
             // exists, hit exactly this when decision-item labels cannot
             // ride in committer-authored messages). Search committed
-            // retirement-carrier documents before refusing; a fallback
-            // whose search could not complete appends a note qualified to
-            // claim neither presence nor absence.
+            // retirement-carrier documents before refusing. Note selection
+            // mirrors the pinned branch's three-way split: a deterministic
+            // miss appends the miss note; ≥1 unexamined candidate (or a
+            // capped discovery) appends the QUALIFIED note claiming
+            // neither presence nor absence; a discovery-level unavailable
+            // search appends NOTHING.
             const fallback = carrierDocFallbackVerify(
                 repo,
                 taskID,

@@ -106,7 +106,7 @@
     ".opencode/scripts/rewrite-parity-validate.py": "sha256:db93b45e382c607b47793a385a862332cf3339340d785b67259521534d7e613a",
     ".opencode/scripts/session-bind.js": "sha256:2b7be5981ac3e6aa06b7f0decf90ed98a5f39c7afa115fd63a7e5145f0d7b3cf",
     ".opencode/scripts/session-current.js": "sha256:172e9401808f6b5f86f308d2add03b0803654fe7bed7b7cf147afcc374092372",
-    ".opencode/scripts/state-lib.js": "sha256:e7c924b17dd119a7fda48ef96bec4eee8ca311b14c50a6494a8c2759bbf8bf97",
+    ".opencode/scripts/state-lib.js": "sha256:b974af1a7a7ec337e6c1e4425c6c47fce5f89def0ab8171872d1091d00583056",
     ".opencode/scripts/validate-opencode-config.py": "sha256:c38845d9908e71c51de1f0f93c6616d9da0ccaca6d5a5f38fc92891a236c7828",
     ".opencode/scripts/verify-chunk-timeout-backstop.js": "sha256:c74a46c27cea8f33c0d173a49b3d185b95f316f5732863f36858d9fab9358768",
     ".opencode/scripts/verify-coordination-hints.js": "sha256:57ecb2786b7336dcedb931a61029822565816b1d0947ee39a75b08de08627f3d",

@@ -302,7 +302,25 @@ func corpusDigest(tree map[string][]byte) string {
 // (61/46/15, 49/0/5, 14/3/32) and the hub's 73-export surface re-derived
 // IDENTICAL, so only the byte digest moved. Same discipline: re-derived
 // before re-pinning, not a re-pin-to-absorb.
-const pinnedCorpusDigest = "55fed821e9cfc7c9b1369dd4767ae6ed7674201cda8429bfcdd555595219b725"
+//
+// Re-derived again 2026-11-16 (fifth content-only move) for the
+// carrier-fallback hardening batch
+// (defer-carrier-fallback-hardening-batch, review F1/F3/F5 + cap-truncation
+// item): state-lib.js threads cap-truncation honesty through the
+// carrier-doc fallback — reachableCommitsTouchingPath and
+// discoverCarrierDocPaths now return {…, truncated} shapes, the shared
+// walker qualifies its deterministic-miss details when the
+// DECISION_RECORD_SEARCH_CAP walk stops early, and the fallback appends a
+// qualified truncation/unavailable note (never the universal-absence miss
+// note) when DECISION_CARRIER_DOC_PATH_CAP caps discovery — new internal
+// helper (carrierDocFallbackTruncationNote), comment splits at both
+// commit-carrier call sites, fail-closed refusals unchanged. No imports,
+// no exports, no specifier changes; mirrored into the rendered twin by
+// the required `make update`. The full counter pin set
+// (61/46/15, 49/0/5, 14/3/32) and the hub's 73-export surface re-derived
+// IDENTICAL, so only the byte digest moved. Same discipline: re-derived
+// before re-pinning, not a re-pin-to-absorb.
+const pinnedCorpusDigest = "f1930dbe8e0705bdb9e30bd016037b5deeb2beaab2a69c20613dc76970a2843c"
 
 // updateOpDebtFiles are the packet §B per-file table's post-normalization
 // remainder: 14 modules still carrying `++`/`--` update operators (the

@@ -45,6 +45,24 @@
 //     confident miss — the refusal still fires (fail-closed unchanged)
 //     but its fallback note names the unexamined candidate and never
 //     asserts universal absence over it.
+//   - Search-mode end-to-end (review F5, 2026-11-16): an unreadable
+//     candidate driven through the SEARCH-MODE commit-carrier call site
+//     (revision omitted) gets the same qualified-unavailability refusal
+//     and recovers after the blob is restored.
+//   - Continue-walking (review F5, 2026-11-16): an unreadable NEWEST
+//     candidate does not short-circuit the walk — an older readable
+//     candidate carrying both halves still verifies and retirement
+//     SUCCEEDS.
+//   - Cap-truncation honesty (batch item 4, 2026-11-16): discovery capped
+//     at DECISION_CARRIER_DOC_PATH_CAP distinct candidates and per-candidate
+//     walks capped at DECISION_RECORD_SEARCH_CAP revisions both yield a
+//     QUALIFIED note (absence NOT established) — never the
+//     universal-absence miss note — while the fail-closed refusal is
+//     unchanged.
+//   - gc-invariance (review F1, 2026-11-16): the corruption fixture
+//     asserts the loose blob is actually GONE after removal and the
+//     scratch repo pins gc.auto=0, so a packed copy can never silently
+//     re-satisfy reads and false-green the unreadable arms.
 //
 // Test seam (NOT an env var): the retirement verifier's repo is redirected
 // at a hermetic scratch git repo via the `landingProofRepo` OPTION (not
@@ -92,6 +110,12 @@ function makeScratchRepo() {
     run(["config", "user.email", "dr-docfb@test"]);
     run(["config", "user.name", "dr-docfb-test"]);
     run(["config", "commit.gpgsign", "false"]);
+    // gc-invariance (review F1, 2026-11-16): a background auto-gc could
+    // repack the loose blob the unreadable-candidate fixture removes, so
+    // the "unreadable" object would silently become readable again from a
+    // pack and false-green the arm. Auto-gc OFF keeps every corruption
+    // fixture in this suite loose-object-true for the repo's lifetime.
+    run(["config", "gc.auto", "0"]);
     const git = (args) => {
         const res = run(args);
         if (res.status !== 0) {
@@ -119,6 +143,32 @@ function commitFile(git, dir, relPath, content, message) {
     git(["add", relPath]);
     git(["commit", "-q", "-m", message]);
     return git(["rev-parse", "HEAD"]).stdout.trim();
+}
+
+// Corrupt a committed file's loose BLOB object (review F1/F5, 2026-11-16):
+// rev-parse resolves <rev>:<path> through the TREE (blob not read), so the
+// oid is derivable while the blob is unreadable. Asserts the object is
+// GONE after removal (gc-invariance: a surviving path means a pack holds a
+// copy and the corruption premise is false).
+function corruptLooseBlob(scratch, rev, relPath) {
+    const blobOid = scratch.git(["rev-parse", `${rev}:${relPath}`]).stdout.trim();
+    const objPath = path.join(
+        scratch.dir,
+        ".git",
+        "objects",
+        blobOid.slice(0, 2),
+        blobOid.slice(2),
+    );
+    assert.ok(
+        fs.existsSync(objPath),
+        `fixture: the loose blob object for ${relPath} must exist before corruption`,
+    );
+    fs.rmSync(objPath);
+    assert.ok(
+        !fs.existsSync(objPath),
+        "fixture: the loose blob must be GONE after removal — a surviving path means a packed copy could false-green the arm",
+    );
+    return blobOid;
 }
 
 // --- isolated transport helpers (mirrors the sibling suites) -----------------
@@ -767,6 +817,14 @@ test("carrier-doc fallback: an unexamined candidate carrier doc is UNAVAILABILIT
             "fixture: the carrier doc's loose blob object must exist before corruption",
         );
         fs.rmSync(objPath);
+        // gc-invariance (review F1, 2026-11-16): the corruption premise is
+        // only true while the blob is GONE — if this object path still
+        // exists (e.g. a pack quietly holds a copy), every subsequent
+        // read succeeds and the arm would pass for the wrong reason.
+        assert.ok(
+            !fs.existsSync(objPath),
+            "fixture: the loose blob must be GONE after removal — a surviving path means a packed copy could false-green the arm",
+        );
 
         const refused = retire(ID);
         // Fail-closed is UNCHANGED: no carrier verifiably preserves the
@@ -843,6 +901,422 @@ test("carrier-doc fallback: an unexamined candidate carrier doc is UNAVAILABILIT
             cardExists(isoRoot, ID),
             false,
             "unavailable candidate: card retires after recovery",
+        );
+    } finally {
+        if (prevCoordRoot === undefined) {
+            delete process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+        } else {
+            process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = prevCoordRoot;
+        }
+        fs.rmSync(isoRoot, { recursive: true, force: true });
+        fs.rmSync(scratch.dir, { recursive: true, force: true });
+    }
+});
+
+// Search-mode end-to-end (review F5, 2026-11-16): the pinned-carrier
+// unavailability arm above pins the per-candidate honesty at the PINNED
+// call site; this arm drives the SAME unreadable-candidate shape through
+// the SEARCH-MODE commit-carrier call site (revision omitted — the
+// landing-commit body pattern), where the declared-carrier diagnosis is
+// produced by the message walk instead of the pinned-revision probe. The
+// qualified-unavailability refusal and the post-restore recovery must
+// behave identically.
+test("carrier-doc fallback: search-mode commit carrier with an unreadable candidate refuses qualified and recovers after restore", () => {
+    const isoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dr-docfb-smu-"));
+    const prevCoordRoot = process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+    process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = isoRoot;
+    bindSessionName(SESSION_ID, ALIAS);
+    const scratch = makeScratchRepo();
+
+    const retire = (id) =>
+        deleteCoordinationTask(SESSION_ID, id, {
+            cwd: "/verification",
+            landingProofRepo: scratch.dir,
+        });
+
+    try {
+        commitAll(scratch.git, scratch.dir, "initial: no trailer");
+
+        const ID = "dr-docfb-searchmode-unreadable";
+        const NOTE =
+            "OWNER NOTE dr-docfb-searchmode-unreadable: search-mode refusals qualify unavailability the same way";
+        const ITEM_ID = noteId(NOTE);
+        const CURATED_LABEL = label(ID, ITEM_ID, "curated");
+        writeWorkingCard(isoRoot, ID, { owner_notes: [NOTE] });
+        // Slice commit carries the anchor (trailer) — the search-mode
+        // message walk sees the anchor but never the label, so the
+        // fallback is the only possible verification.
+        commitAll(
+            scratch.git,
+            scratch.dir,
+            `fix smu\n\nTask-Card: ${ID}\n`,
+        );
+        closeout(ID, [
+            {
+                id: ITEM_ID,
+                disposition: "curated",
+                carrier: { kind: "commit" },
+                handle: CURATED_LABEL,
+                provenance: "owner chat, 2026-11-16 — curated note",
+            },
+        ]);
+        const DOC_REL = `docs/checkpoints/2026-11-16-retirement-carrier-${ID}.md`;
+        const DOC_CONTENT = `Task-Card: ${ID}\n\n${CURATED_LABEL}\ncarrier content whose blob becomes unreadable\n`;
+        const docSha = commitFile(
+            scratch.git,
+            scratch.dir,
+            DOC_REL,
+            DOC_CONTENT,
+            `docs: carrier for ${ID}`,
+        );
+        const blobOid = corruptLooseBlob(scratch, docSha, DOC_REL);
+
+        const refused = retire(ID);
+        assert.equal(
+            refused.ok,
+            false,
+            "search-mode unreadable: must refuse (fail-closed unchanged)",
+        );
+        assert.equal(refused.refusal.code, "decision_record_unresolved");
+        const miss = (refused.refusal.problems || []).find(
+            (p) => p.code === "handle_not_in_carrier",
+        );
+        assert.ok(
+            miss,
+            "search-mode unreadable: refusal must name handle_not_in_carrier for the declared carrier",
+        );
+        assert.ok(
+            (miss.detail || "").includes(DOC_REL),
+            `search-mode unreadable: the note must name the unexamined candidate; got: ${miss.detail}`,
+        );
+        assert.ok(
+            (miss.detail || "").includes("could not") &&
+                (miss.detail || "").includes("absence is NOT established"),
+            `search-mode unreadable: the note must reflect unavailability and disclaim absence; got: ${miss.detail}`,
+        );
+        assert.ok(
+            !(miss.detail || "").includes("also found nothing"),
+            `search-mode unreadable: the note must not assert a completed search that found nothing; got: ${miss.detail}`,
+        );
+        assert.equal(
+            cardExists(isoRoot, ID),
+            true,
+            "search-mode unreadable: card survives the fail-closed refusal",
+        );
+
+        // Recovery: restore the exact blob (identical content → identical
+        // oid) — the same candidate search now completes and verifies.
+        const restoreFile = path.join(scratch.dir, "restore-carrier-blob.txt");
+        fs.writeFileSync(restoreFile, DOC_CONTENT);
+        const restoredOid = scratch.git([
+            "hash-object",
+            "-w",
+            restoreFile,
+        ]).stdout.trim();
+        fs.rmSync(restoreFile);
+        assert.equal(restoredOid, blobOid, "fixture: restored blob oid must match");
+        const done = retire(ID);
+        assert.equal(
+            done.ok,
+            true,
+            `search-mode unreadable: retirement must succeed after restore; got ${JSON.stringify(done.refusal || done)}`,
+        );
+        assert.equal(
+            cardExists(isoRoot, ID),
+            false,
+            "search-mode unreadable: card retires after recovery",
+        );
+    } finally {
+        if (prevCoordRoot === undefined) {
+            delete process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+        } else {
+            process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = prevCoordRoot;
+        }
+        fs.rmSync(isoRoot, { recursive: true, force: true });
+        fs.rmSync(scratch.dir, { recursive: true, force: true });
+    }
+});
+
+// Continue-walking pin (review F5, 2026-11-16): an unavailable NEWEST
+// candidate must not short-circuit the candidate walk — an older READABLE
+// candidate carrying both halves still verifies, so retirement SUCCEEDS
+// despite the unreadable doc. (A short-circuit-on-unavailable
+// implementation fails this arm.)
+test("carrier-doc fallback: an unreadable newest candidate does not stop the walk — an older readable candidate still verifies", () => {
+    const isoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dr-docfb-mix-"));
+    const prevCoordRoot = process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+    process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = isoRoot;
+    bindSessionName(SESSION_ID, ALIAS);
+    const scratch = makeScratchRepo();
+
+    const retire = (id) =>
+        deleteCoordinationTask(SESSION_ID, id, {
+            cwd: "/verification",
+            landingProofRepo: scratch.dir,
+        });
+
+    try {
+        commitAll(scratch.git, scratch.dir, "initial: no trailer");
+
+        const ID = "dr-docfb-mixed-walk";
+        const NOTE =
+            "OWNER NOTE dr-docfb-mixed-walk: the walk continues past an unreadable candidate";
+        const ITEM_ID = noteId(NOTE);
+        const CURATED_LABEL = label(ID, ITEM_ID, "curated");
+        writeWorkingCard(isoRoot, ID, { owner_notes: [NOTE] });
+        const sliceSha = commitAll(
+            scratch.git,
+            scratch.dir,
+            `fix mix\n\nTask-Card: ${ID}\n`,
+        );
+        closeout(ID, [
+            {
+                id: ITEM_ID,
+                disposition: "curated",
+                carrier: { kind: "commit", revision: sliceSha },
+                handle: CURATED_LABEL,
+                provenance: "owner chat, 2026-11-16 — curated note",
+            },
+        ]);
+        // OLDER (committed first): the readable candidate that WOULD
+        // verify — anchor + label together in one committed blob.
+        const GOOD_REL = `docs/checkpoints/2026-11-16-retirement-carrier-${ID}-good.md`;
+        commitFile(
+            scratch.git,
+            scratch.dir,
+            GOOD_REL,
+            `Task-Card: ${ID}\n\n${CURATED_LABEL}\nthe readable candidate, committed first\n`,
+            `docs: readable carrier for ${ID}`,
+        );
+        // NEWER (committed last): a distinct candidate whose blob is made
+        // unreadable — discovery walks it FIRST, its search cannot
+        // complete, and the walk must CONTINUE to the older good doc.
+        const BAD_REL = `docs/checkpoints/2026-11-16-retirement-carrier-${ID}-bad.md`;
+        const badSha = commitFile(
+            scratch.git,
+            scratch.dir,
+            BAD_REL,
+            `Task-Card: ${ID}\n\n${CURATED_LABEL}\nthe candidate whose blob becomes unreadable\n`,
+            `docs: unreadable carrier for ${ID}`,
+        );
+        corruptLooseBlob(scratch, badSha, BAD_REL);
+
+        const done = retire(ID);
+        assert.equal(
+            done.ok,
+            true,
+            `mixed walk: the readable older candidate must verify past the unreadable newest one; got ${JSON.stringify(done.refusal || done)}`,
+        );
+        assert.equal(
+            cardExists(isoRoot, ID),
+            false,
+            "mixed walk: card retires through the readable candidate",
+        );
+    } finally {
+        if (prevCoordRoot === undefined) {
+            delete process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+        } else {
+            process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = prevCoordRoot;
+        }
+        fs.rmSync(isoRoot, { recursive: true, force: true });
+        fs.rmSync(scratch.dir, { recursive: true, force: true });
+    }
+});
+
+// Discovery-cap truncation (batch item 4, 2026-11-16): DECISION_CARRIER_
+// DOC_PATH_CAP=32 distinct candidate paths. The 33rd distinct carrier doc
+// — the OLDEST, and the only one carrying the content — is never
+// enumerated as a candidate, so the fallback CANNOT claim it searched
+// everything: the appended note is the qualified truncation note
+// (absence NOT established), never the universal-absence miss note, and
+// the fail-closed refusal is unchanged.
+test("carrier-doc fallback: a discovery walk capped at 32 distinct candidates refuses with a QUALIFIED truncation note", () => {
+    const isoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dr-docfb-dcap-"));
+    const prevCoordRoot = process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+    process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = isoRoot;
+    bindSessionName(SESSION_ID, ALIAS);
+    const scratch = makeScratchRepo();
+
+    const retire = (id) =>
+        deleteCoordinationTask(SESSION_ID, id, {
+            cwd: "/verification",
+            landingProofRepo: scratch.dir,
+        });
+
+    try {
+        commitAll(scratch.git, scratch.dir, "initial: no trailer");
+
+        const ID = "dr-docfb-dcap";
+        const NOTE =
+            "OWNER NOTE dr-docfb-dcap: capped discovery never claims searched-and-empty";
+        const ITEM_ID = noteId(NOTE);
+        const CURATED_LABEL = label(ID, ITEM_ID, "curated");
+        writeWorkingCard(isoRoot, ID, { owner_notes: [NOTE] });
+        const sliceSha = commitAll(
+            scratch.git,
+            scratch.dir,
+            `fix dcap\n\nTask-Card: ${ID}\n`,
+        );
+        closeout(ID, [
+            {
+                id: ITEM_ID,
+                disposition: "curated",
+                carrier: { kind: "commit", revision: sliceSha },
+                handle: CURATED_LABEL,
+                provenance: "owner chat, 2026-11-16 — curated note",
+            },
+        ]);
+        // The GOOD carrier doc lands FIRST (oldest distinct path)…
+        commitFile(
+            scratch.git,
+            scratch.dir,
+            `docs/checkpoints/2026-11-16-retirement-carrier-${ID}-good.md`,
+            `Task-Card: ${ID}\n\n${CURATED_LABEL}\nbeyond the discovery cap, never enumerated\n`,
+            `docs: good carrier for ${ID}`,
+        );
+        // …then 32 DISTINCT filler carrier docs land after it (newest —
+        // the ones discovery actually examines), none carrying the
+        // content.
+        for (let i = 0; i < 32; i++) {
+            commitFile(
+                scratch.git,
+                scratch.dir,
+                `docs/checkpoints/2026-11-16-retirement-carrier-${ID}-fill-${i}.md`,
+                `filler candidate ${i} — no anchor, no label\n`,
+                `docs: filler carrier ${i} for ${ID}`,
+            );
+        }
+
+        const refused = retire(ID);
+        assert.equal(
+            refused.ok,
+            false,
+            "dcap: must still refuse — the good doc is beyond the cap (fail-closed unchanged)",
+        );
+        const miss = (refused.refusal.problems || []).find(
+            (p) => p.code === "handle_not_in_carrier",
+        );
+        assert.ok(
+            miss,
+            "dcap: refusal must still name handle_not_in_carrier for the declared carrier",
+        );
+        assert.ok(
+            (miss.detail || "").includes("stopped at 32") &&
+                (miss.detail || "").includes("never examined") &&
+                (miss.detail || "").includes("absence is NOT established"),
+            `dcap: the note must be the qualified truncation note; got: ${miss.detail}`,
+        );
+        assert.ok(
+            !(miss.detail || "").includes("also found nothing"),
+            `dcap: the note must not assert universal absence beyond the cap; got: ${miss.detail}`,
+        );
+        assert.equal(
+            cardExists(isoRoot, ID),
+            true,
+            "dcap: card survives the fail-closed refusal",
+        );
+    } finally {
+        if (prevCoordRoot === undefined) {
+            delete process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+        } else {
+            process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = prevCoordRoot;
+        }
+        fs.rmSync(isoRoot, { recursive: true, force: true });
+        fs.rmSync(scratch.dir, { recursive: true, force: true });
+    }
+});
+
+// Revision-walk-cap truncation (batch item 4, 2026-11-16):
+// DECISION_RECORD_SEARCH_CAP=200 revisions per candidate path. The only
+// content-bearing revision of the candidate doc is the OLDEST (201st) —
+// beyond the capped walk — so the per-candidate search neither verifies
+// nor honestly misses: it is UNEXAMINED, and the appended note is the
+// qualified unavailable note naming the candidate (with the capped-walk
+// parenthetical), never the universal-absence miss note.
+test("carrier-doc fallback: a candidate walk capped at 200 revisions treats the capped miss as unavailability", () => {
+    const isoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dr-docfb-scap-"));
+    const prevCoordRoot = process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+    process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = isoRoot;
+    bindSessionName(SESSION_ID, ALIAS);
+    const scratch = makeScratchRepo();
+
+    const retire = (id) =>
+        deleteCoordinationTask(SESSION_ID, id, {
+            cwd: "/verification",
+            landingProofRepo: scratch.dir,
+        });
+
+    try {
+        commitAll(scratch.git, scratch.dir, "initial: no trailer");
+
+        const ID = "dr-docfb-scap";
+        const NOTE =
+            "OWNER NOTE dr-docfb-scap: a capped revision walk never claims a complete miss";
+        const ITEM_ID = noteId(NOTE);
+        const CURATED_LABEL = label(ID, ITEM_ID, "curated");
+        writeWorkingCard(isoRoot, ID, { owner_notes: [NOTE] });
+        const sliceSha = commitAll(
+            scratch.git,
+            scratch.dir,
+            `fix scap\n\nTask-Card: ${ID}\n`,
+        );
+        closeout(ID, [
+            {
+                id: ITEM_ID,
+                disposition: "curated",
+                carrier: { kind: "commit", revision: sliceSha },
+                handle: CURATED_LABEL,
+                provenance: "owner chat, 2026-11-16 — curated note",
+            },
+        ]);
+        // One candidate doc, 201 revisions: the OLDEST carries both
+        // halves; the 200 newest (the ones the capped walk reads) carry
+        // neither. Lean loop — 3 spawns per commit, no rev-parse.
+        const DOC_REL = `docs/checkpoints/2026-11-16-retirement-carrier-${ID}.md`;
+        const docAbs = path.join(scratch.dir, DOC_REL);
+        fs.mkdirSync(path.dirname(docAbs), { recursive: true });
+        fs.writeFileSync(
+            docAbs,
+            `Task-Card: ${ID}\n\n${CURATED_LABEL}\nthe only content-bearing revision, landed oldest\n`,
+        );
+        scratch.git(["add", DOC_REL]);
+        scratch.git(["commit", "-q", "-m", `docs: oldest good revision for ${ID}`]);
+        for (let i = 0; i < 200; i++) {
+            fs.writeFileSync(docAbs, `filler revision ${i} — no anchor, no label\n`);
+            scratch.git(["add", DOC_REL]);
+            scratch.git(["commit", "-q", "-m", `docs: filler revision ${i} for ${ID}`]);
+        }
+
+        const refused = retire(ID);
+        assert.equal(
+            refused.ok,
+            false,
+            "scap: must still refuse — the good revision is beyond the walk cap (fail-closed unchanged)",
+        );
+        const miss = (refused.refusal.problems || []).find(
+            (p) => p.code === "handle_not_in_carrier",
+        );
+        assert.ok(
+            miss,
+            "scap: refusal must still name handle_not_in_carrier for the declared carrier",
+        );
+        assert.ok(
+            (miss.detail || "").includes(DOC_REL),
+            `scap: the note must name the capped candidate; got: ${miss.detail}`,
+        );
+        assert.ok(
+            (miss.detail || "").includes("capped") &&
+                (miss.detail || "").includes("absence is NOT established"),
+            `scap: the note must name the capped walk and disclaim absence; got: ${miss.detail}`,
+        );
+        assert.ok(
+            !(miss.detail || "").includes("also found nothing"),
+            `scap: the note must not assert universal absence beyond the cap; got: ${miss.detail}`,
+        );
+        assert.equal(
+            cardExists(isoRoot, ID),
+            true,
+            "scap: card survives the fail-closed refusal",
         );
     } finally {
         if (prevCoordRoot === undefined) {
