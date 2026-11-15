@@ -247,6 +247,14 @@ blocking):
   the capability-conditional model so you can re-adopt the new wording
   deliberately.
 
+**Operator escape hatch (`SKIP_COMMIT_GATE`) — explicit staging required.**
+If the gated-commit mechanism locks up, the operator-only bypass documented
+in AGENTS.md ("Escape hatch") applies: clear the gate lock and index, then
+`git add` the deliberate path list, then `SKIP_COMMIT_GATE=1 git commit`.
+The gate never stages implicitly — an empty index is refused with guidance
+(stage explicit paths, then retry). Agents must never take this path; the
+sanctioned agent route is always the `committer`.
+
 #### Media-perception model seed
 
 Like every agent, `media-perception` resolves its model via
