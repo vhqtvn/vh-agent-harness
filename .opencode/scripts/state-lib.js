@@ -134,6 +134,16 @@ const COORDINATION_TASK_STATUSES = Object.freeze([
     "blocked",
     "completed",
     "cancelled",
+    // Errata-transport HOLDING status (defer-taskcard-repair-op-deadlock):
+    // a "staged" card waits for the release ceremony's inject-errata step,
+    // which consumes only errata-class staged cards, injects the staged
+    // corrective body into the next release note, and flips the card to
+    // completed. It is a holding state, not open work: excluded from the
+    // OPEN/REVIEWABLE/CLOSEOUT/RESUMABLE sets; metadata updates on it take
+    // the narrow follow-up allowlist; entry is the dedicated restage op
+    // (and the repair op's transition-validated staged restoration) only —
+    // never a review/closeout verdict.
+    "staged",
 ]);
 const OPEN_COORDINATION_TASK_STATUSES = new Set([
     "draft",
@@ -151,6 +161,21 @@ const COORDINATION_REVIEWABLE_STATUSES = new Set([
     "reported",
     "blocked",
     "completed",
+]);
+// The review op's accepted RESULT statuses: an EXPLICIT frozen allowlist,
+// never derived from the (widenable) lifecycle enum — the five documented
+// coordinator-review resolutions. `staged` is deliberately absent: it is a
+// release-mechanic holding state whose only entries are the dedicated
+// restage op and the repair op's transition-validated staged restoration
+// (both carrying the staged_path contract); deriving review's result set
+// from the lifecycle enum would let a review verdict resolve a card into
+// staged and bypass that contract (the status-widening leak this closes).
+const COORDINATION_REVIEW_RESULT_STATUSES = Object.freeze([
+    "ready",
+    "reported",
+    "blocked",
+    "completed",
+    "cancelled",
 ]);
 const COORDINATION_RESUMABLE_STATUSES = new Set([
     "ready",
@@ -2232,6 +2257,16 @@ const DEGRADED_CORE_REPAIRABLE_FIELD_NAMES = [
     "primary_lane",
 ];
 
+// Round-5 narrowing (2026-11-16, operator c-prime): the degraded-FILL
+// supplement that once let a degraded-card repair ALSO carry
+// files_in_scope/success_criteria/validation_plan was REMOVED — four
+// review rounds sourced their findings in that widening, and it is
+// deferred as its own card. A repair payload carrying those fields now
+// refuses with the standard "Unsupported fields…" diagnostic, so no
+// sanctioned op replaces execution-contract fields at all and the
+// task-update freeze (no files_in_scope/success_criteria/
+// validation_plan changes after execution starts) holds trivially.
+
 const TASK_METADATA_UPDATE_PRE_EXECUTION_FIELD_NAMES = [
     "title",
     "coordination_mode",
@@ -2326,6 +2361,12 @@ function allowedTaskMetadataUpdateFieldNamesForStatus(status) {
         case "reported":
         case "blocked":
             return TASK_METADATA_UPDATE_FOLLOW_UP_FIELD_NAMES;
+        // Staged errata transport: holding state — narrow follow-up-class
+        // updates only (owner_notes/next_action/measured_outcome). The
+        // staged_path itself moves through the dedicated restage op, never
+        // the generic metadata update.
+        case "staged":
+            return TASK_METADATA_UPDATE_FOLLOW_UP_FIELD_NAMES;
         default:
             return [];
     }
@@ -2344,6 +2385,8 @@ function defaultCoordinationTaskNextAction(taskIDRaw, status) {
             return `Review the latest closeout and run /task-review ${taskID}.`;
         case "blocked":
             return `Review the blocker report and run /task-review ${taskID}.`;
+        case "staged":
+            return "Awaiting release inject-errata: the release ceremony reads staged_path, injects the corrective body into the next release note, and flips this card to completed.";
         case "completed":
         case "cancelled":
             return "Open the task card if follow-up is needed; create a new task for additional work.";
@@ -3882,6 +3925,34 @@ function cleanupArtifacts(sessionID, options = {}) {
     return summary;
 }
 
+// The RAW on-disk status of a stored card, canonicalized ONLY by
+// trim+lowercase (the same casing fold normalizeCoordinationEnumCollected
+// applies) and accepted only when it is a VALID task-status enum —
+// deliberately WITHOUT the fault-tolerant rewrites
+// normalizeCoordinationTaskRecord performs on the projection (a stored
+// `working` card whose ownership/claim metadata cannot be recovered is
+// rewritten to `ready`; an invalid stored enum coerces to the draft
+// default). Lifecycle guards that must refuse based on what the card
+// ACTUALLY says on disk — the degraded-repair execution-source refusal,
+// staging-source allowlist, and F3 crossing detection — authorize on this
+// value so a valid stored execution status cannot be laundered into a
+// pre-execution projection by the fault-tolerant read (round-3 b-F1/b-F2:
+// the rewrite is a READ resilience behavior and must never become a WRITE
+// authority). Returns "" when the stored bytes carry no valid enum status
+// (absent, non-string, or invalid); callers fall back to the normalized
+// projection for that case, where the fault-tolerant read has already
+// flagged `status` as an offending field and restore-only semantics
+// demand an explicit status payload anyway.
+function coordinationTaskStoredStatus(storedPayload) {
+    if (!storedPayload || typeof storedPayload !== "object") {
+        return "";
+    }
+    const raw = String(storedPayload.status || "")
+        .trim()
+        .toLowerCase();
+    return COORDINATION_TASK_STATUSES.includes(raw) ? raw : "";
+}
+
 function loadCoordinationTask(taskIDRaw, options = {}) {
     ensureLocalCoordinatorNamespace();
     const taskID = normalizeCoordinationTaskId(taskIDRaw);
@@ -3893,6 +3964,7 @@ function loadCoordinationTask(taskIDRaw, options = {}) {
                 path: targetPath,
                 payload: defaultCoordinationTaskPayload(taskID),
                 exists: false,
+                stored_status: "",
                 diagnostics: {
                     problems: [],
                     offendingFields: [],
@@ -3915,16 +3987,21 @@ function loadCoordinationTask(taskIDRaw, options = {}) {
     // ensureCoordinationTaskCoreFields call, so only the read path tolerates
     // already-stored data. This closes the read/write asymmetry: writes
     // reject bad INPUT, reads tolerate bad STORED data — and now REPORT it.
+    const storedPayload = readJson(
+        targetPath,
+        defaultCoordinationTaskPayload(taskID),
+    );
     const { task: payload, diagnostics } =
-        normalizeCoordinationTaskRecordWithDiagnostics(
-            readJson(targetPath, defaultCoordinationTaskPayload(taskID)),
-            taskID,
-        );
+        normalizeCoordinationTaskRecordWithDiagnostics(storedPayload, taskID);
     return {
         task_id: taskID,
         path: targetPath,
         payload,
         exists: true,
+        // Stored-status preservation (round-3 b-F1/b-F2): the RAW on-disk
+        // status, captured BEFORE normalization so the diagnostic boundary
+        // cannot launder it. See coordinationTaskStoredStatus.
+        stored_status: coordinationTaskStoredStatus(storedPayload),
         diagnostics,
     };
 }
@@ -9111,6 +9188,186 @@ function readyCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) {
     };
 }
 
+// Shared staged_path guard (round-4 C-F2): BOTH entry paths into `staged`
+// — the dedicated restage op below and a staged-target degraded repair —
+// validate the fragment path through this one predicate. Pre-fix it was
+// POSIX-only ('/'-prefix + '..' traversal), so Windows drive-absolute
+// ("C:/x.md", "C:\x.md") and UNC ("\\server\share\x.md") forms passed.
+// The release injector honors an ABSOLUTE staged_path at inject time (only
+// a non-absolute path is joined to the repo root), so a card carrying such
+// a path would read its erratum body from OUTSIDE the repository during
+// the release ceremony — the JS write side is this gate, because the
+// ceremony consumes the stored path as-is.
+function isNonRepoRelativeStagedPath(stagedPath) {
+    return (
+        stagedPath.startsWith("/") ||
+        // Windows drive-absolute (C:/x.md, C:\x.md)
+        /^[A-Za-z]:[\\/]/.test(stagedPath) ||
+        // UNC (\\server\share\x.md)
+        stagedPath.startsWith("\\\\") ||
+        // parent traversal on either separator
+        stagedPath.split(/[\\/]+/).includes("..")
+    );
+}
+
+// Restage a coordination task for release inject-errata
+// (defer-taskcard-repair-op-deadlock): move a healthy `ready` card to the
+// canonical `staged` holding status, or refresh the staged_path of a card
+// that is already `staged` (idempotent re-stage). This is the sanctioned
+// ready -> staged transition: /task-update never allows `status` in any
+// allowlist (by design — lifecycle transitions are op-owned), and the
+// review/closeout result-status allowlists never include staged. Dedicated
+// op, NOT a whitelist extension: staging is a release-mechanic handoff,
+// not a coordinator verdict, so it must not widen the review/closeout
+// verdict surfaces. Errata-class only (task_id begins "errata-"): the
+// release injector consumes only errata-class staged cards, so staging a
+// non-errata card would strand it in a holding state no ceremony ever
+// drains — such cards are refused with a pointer at the ordinary
+// lifecycle ops. Mirrors the readyCoordinationTask shape: degraded
+// boundary guard (action boundary closes on degraded cards regardless of
+// coerced status), errata-class guard, pre-lock source-status guard, then
+// a locked save through the PUBLIC updateCoordinationTask with an in-lock
+// source re-check (TOCTOU: a concurrent caller may have transitioned the
+// card between the pre-lock read and lock acquisition). Round-4 B-F1/B-F2:
+// BOTH source-status guards authorize on the STORED status first (the
+// same authority the round-3 repair guard uses), never the normalized
+// projection alone — see the guard sites below. staged_path is
+// repo-relative by contract (cross-platform: POSIX, Windows drive-letter,
+// and UNC absolute forms all refused by isNonRepoRelativeStagedPath) and
+// is NOT filesystem-validated here — the
+// release ceremony reads it at inject time, and staging may legitimately
+// precede the file's appearance on disk (transport ordering freedom).
+function restageCoordinationTask(sessionID, taskIDRaw, input = {}, options = {}) {
+    const actor = coordinationActorContext(sessionID, options);
+    const loaded = loadCoordinationTask(taskIDRaw);
+    if (loaded.diagnostics && loaded.diagnostics.degraded) {
+        const fields = loaded.diagnostics.offendingFields.length
+            ? loaded.diagnostics.offendingFields.join(", ")
+            : "(unspecified)";
+        throw new StateError(
+            `Task ${loaded.payload.task_id} is degraded ` +
+                `(offending fields: ${fields}) and cannot be staged for ` +
+                `release inject-errata. Inspect or repair the stored card ` +
+                `first; a degraded card is refused at the action boundary ` +
+                `regardless of its normalized status.`,
+        );
+    }
+    if (!loaded.payload.task_id.startsWith("errata-")) {
+        throw new StateError(
+            `Task ${loaded.payload.task_id} is not an errata-class card (task_id must begin "errata-"); restage is the release inject-errata transport for errata cards only. Use the ordinary lifecycle ops (/task-ready, /resume-task, /task-closeout, /task-review) for this card.`,
+        );
+    }
+    // Round-4 B-F1/B-F2 (restage laundering; mirrors the round-3 repair
+    // guard): the SOURCE authority is the STORED status, not the
+    // normalized projection. normalizeCoordinationTaskRecord rewrites a
+    // stored `working` card whose ownership/claim metadata cannot be
+    // recovered to a PROJECTED `ready` — a fault-tolerant READ behavior
+    // that must not become a staging WRITE authority. Pre-fix this
+    // allowlist read loaded.payload.status, so such a NON-degraded card
+    // (a valid `working` enum is not a diagnostic; only the claim
+    // metadata is missing) restaged into `staged`, laundering the
+    // execution status through the read path. The projection remains the
+    // fallback only when the stored bytes carry no valid enum status — a
+    // card the degraded boundary above has already refused.
+    const storedStatus =
+        typeof loaded.stored_status === "string" ? loaded.stored_status : "";
+    const sourceStatus = storedStatus || loaded.payload.status;
+    if (!["ready", "staged"].includes(sourceStatus)) {
+        throw new StateError(
+            `Task ${loaded.payload.task_id} is ${sourceStatus} and cannot be staged for release inject-errata; only ready tasks (or already-staged tasks refreshing staged_path) can be staged.`,
+        );
+    }
+    const payload = input && typeof input === "object" ? input : {};
+    const stagedPath = String(payload.staged_path || "").trim();
+    if (!stagedPath) {
+        throw new StateError(
+            `Restaging task ${loaded.payload.task_id} requires a staged_path (repo-relative path of the staged release-note fragment the release ceremony will inject).`,
+        );
+    }
+    if (isNonRepoRelativeStagedPath(stagedPath)) {
+        throw new StateError(
+            `staged_path must be a repo-relative path without parent traversal (POSIX, Windows drive-letter, and UNC absolute forms are all out-of-repo reads at inject time); got ${stagedPath}.`,
+        );
+    }
+    const note = String(payload.note || "").trim();
+    const explicitNextAction =
+        payload.next_action !== undefined
+            ? String(payload.next_action || "").trim()
+            : null;
+
+    const saved = updateCoordinationTask(loaded.payload.task_id, (current) => {
+        // Locked source re-checks (same TOCTOU defense as
+        // readyCoordinationTask): the pre-lock guards above read
+        // loaded.payload; re-check under the lock before writing.
+        if (!current.task_id.startsWith("errata-")) {
+            throw new StateError(
+                `Task ${current.task_id} is not an errata-class card (task_id must begin "errata-"); restage is the release inject-errata transport for errata cards only.`,
+            );
+        }
+        // Round-4 B-F1/B-F2 in-lock: `current` here is the NORMALIZED
+        // projection (applyCoordinationTaskUpdateLocked passes only
+        // loadCoordinationTask(...).payload), so a locked re-load is
+        // required to re-derive the STORED status under the lock — the
+        // same stored-status authority the pre-lock guard uses. The
+        // projection stays the fallback only for bytes carrying no valid
+        // enum status (the card the pre-lock degraded boundary refused).
+        // A card that vanished inside the load->save window surfaces the
+        // canonical does-not-exist refusal here (absence beats
+        // invalidity, the defer-018 ordering pin).
+        const lockedStored = loadCoordinationTask(current.task_id);
+        const lockedStoredStatus =
+            typeof lockedStored.stored_status === "string"
+                ? lockedStored.stored_status
+                : "";
+        const lockedSourceStatus = lockedStoredStatus || current.status;
+        if (!["ready", "staged"].includes(lockedSourceStatus)) {
+            throw new StateError(
+                `Task ${current.task_id} is ${lockedSourceStatus} and cannot be staged for release inject-errata; only ready tasks (or already-staged tasks refreshing staged_path) can be staged.`,
+            );
+        }
+        const wasStaged = current.status === "staged";
+        return {
+            ...current,
+            status: "staged",
+            staged_path: stagedPath,
+            next_action:
+                explicitNextAction !== null
+                    ? explicitNextAction
+                    : wasStaged
+                      ? current.next_action ||
+                        defaultCoordinationTaskNextAction(
+                            current.task_id,
+                            "staged",
+                        )
+                      : defaultCoordinationTaskNextAction(
+                            current.task_id,
+                            "staged",
+                        ),
+            history: [
+                ...(current.history || []),
+                {
+                    at: isoZ(),
+                    event: "task_restaged",
+                    session_name: actor.session_name,
+                    status: "staged",
+                    note: note
+                        ? note
+                        : wasStaged
+                          ? "Refreshed the staged release-inject path."
+                          : "Staged the task for release inject-errata.",
+                },
+            ],
+        };
+    });
+    return {
+        ...actor,
+        path: relativeToRepo(coordinationTaskPath(saved.task_id)),
+        task: saved,
+        summary: summarizeCoordinationTask(saved),
+        ...recommendedCoordinationTaskFields(saved, actor.session_name || null),
+    };
+}
+
 function updateCoordinationTaskMetadata(
     sessionID,
     taskIDRaw,
@@ -9317,59 +9574,183 @@ function updateCoordinationTaskMetadata(
 
 // Degraded-core repair branch of repairCoordinationTask. Restores the CURRENT
 // core-offender subset (offendingFields ∩ DEGRADED_CORE_REPAIRABLE_FIELD_NAMES)
-// on a degraded card in one atomic request — restore-only, never an edit of
-// non-offending fields. Dispatched STRICTLY on diagnostics.degraded === true
-// (a healthy card never reaches here), so the task_type/status carve-out does
-// not weaken healthy-card immutability — which the ordinary update allowlist
+// on a degraded card in one atomic request — restore-only for the core fields,
+// never an edit of non-offending fields. The degraded-FILL supplement that
+// once ALSO accepted files_in_scope/success_criteria/validation_plan here
+// was removed by the round-5 narrowing (2026-11-16): four review rounds
+// sourced their findings in that widening, it is deferred as its own card,
+// and with no execution-contract field replacement existing at all the
+// task-update freeze (no files_in_scope/success_criteria/validation_plan
+// changes after execution starts) holds trivially. The deliberate
+// pre-execution status widening (draft|ready|staged) is TRANSITION-VALIDATED
+// in-branch: the ready-target
+// runs the same F3 design-readiness gate as readyCoordinationTask, the
+// staged-target carries the restage op's staged_path contract, and a
+// verdict/execution current status is never widened back. Dispatched
+// STRICTLY on diagnostics.degraded === true (a healthy card never reaches
+// here), so the task_type/status carve-out does not weaken healthy-card
+// immutability — which the ordinary update allowlist
 // (TASK_METADATA_UPDATE_*_FIELD_NAMES, never including task_type/status)
-// enforces elsewhere. Repair saves through applyCoordinationTaskUpdateLocked
-// (the canonical writer core), which re-runs
-// collectCoordinationTaskCoreFieldErrors + throws BEFORE atomicWriteJson, so
-// a partial/invalid repair never lands.
+// enforces elsewhere. The merged result is pre-validated
+// against collectCoordinationTaskCoreFieldErrors BEFORE the in-transaction
+// save, so a partial/invalid repair never lands.
 //
 // Runs ONLY under repairCoordinationTask's per-task lock (its sole caller);
 // the save is a required-load in-transaction update — never the public
 // absent-tolerant updateCoordinationTask.
+//
+// Round-2 guard-completeness classes (all refusal-before-write):
+//  - prohibited target status: EVERY explicitly-supplied repair target
+//    status outside {draft, ready, staged} is refused outright, INDEPENDENT
+//    of offender classification. A card whose STORED status is invalid
+//    (coerces to draft on read) has `status` among its offending fields,
+//    so without this guard a payload status of completed/cancelled/
+//    reported/... would pass the offender carve-out, normalize to a VALID
+//    enum value, and clear the verdict-source check (coerced current status
+//    is draft) — landing a terminal/verdict status through the repair save,
+//    which (like updateCoordinationTask) never re-runs the lifecycle
+//    transition-legality guard. The guard closes exactly that bypass.
+//  - staged -> ready is a BUILD-READY crossing: F3 design-readiness
+//    validation fires for EVERY repair entering ready from ANY non-ready
+//    current status (draft -> ready AND staged -> ready); the
+//    envelope-free exemption survives only for genuine ready -> ready
+//    refreshes.
+//  - staged-target restage guards: a repair targeting staged enforces the
+//    SAME lifecycle guards as the dedicated restage op — errata-class
+//    card-id requirement and a ready|staged source-status allowlist
+//    (draft cannot jump to staged; verdict/execution sources are already
+//    refused below).
+//  - blocked source: `blocked` joins the never-repair-restore verdict/
+//    execution source set (a review verdict parked the card; repair has no
+//    authority to silently unblock it).
+//  - stored-status authority (round-3 b-F1/b-F2): EVERY lifecycle check
+//    below — the execution-source refusal, the staged-target source
+//    allowlist, and the F3 BUILD-READY crossing detection — authorizes on
+//    the STORED status threaded through loadCoordinationTask
+//    (loaded.stored_status), never on the normalized projection. The
+//    fault-tolerant read rewrites a stored `working` card with
+//    unrecoverable ownership/claim metadata to a projected `ready`;
+//    authorizing guards on that projection laundered execution state
+//    through the diagnostic boundary (a stored-`working` card repaired
+//    into staged/draft/ready, or persisted as the laundered `ready` by a
+//    no-explicit-status repair).
 function repairDegradedCoordinationTaskCoreFields(actor, loaded, payload) {
     const offendingFields = loaded.diagnostics
         ? [...loaded.diagnostics.offendingFields]
         : [];
     const errors = [];
     const enumInvalidFields = new Set();
-    // RESTORE-ONLY: a degraded-card repair may touch ONLY fields that are
-    // currently offending. The allowed payload set is the intersection of the
-    // core-offender field set and THIS card's offendingFields — NOT the full
-    // repairable set. This closes a transition-guard bypass: if status were
-    // accepted on a card degraded by a NON-status corruption (e.g. title), the
-    // repair could move a healthy status to a terminal value (completed) via
+    // RESTORE-ONLY (core fields): a degraded-card repair may touch ONLY
+    // core fields that are currently offending. The allowed payload set is
+    // the intersection of the core-offender field set and THIS card's
+    // offendingFields — NOT the full repairable set (the partial-repair
+    // check below still demands every repairable offender be covered).
+    // This closes a
+    // transition-guard bypass: if status were accepted on a card degraded
+    // by a NON-status corruption (e.g. title), the repair could move a
+    // healthy status to a terminal value (completed) via
     // updateCoordinationTask, which re-runs only enum-validity
-    // (collectCoordinationTaskCoreFieldErrors), never the lifecycle transition
-    // legality guard (coordinationTaskStatusTransitionErrors, enforced only on
-    // the save path). Restricting to offenders keeps the carve-out a pure
-    // "restore corrupted fields" exit; legitimate status recovery (where status
-    // itself is the corrupted offender) remains allowed.
+    // (collectCoordinationTaskCoreFieldErrors), never the lifecycle
+    // transition legality guard (coordinationTaskStatusTransitionErrors,
+    // enforced only on the save path). Restricting to offenders keeps the
+    // carve-out a pure "restore corrupted fields" exit; legitimate status
+    // recovery (where status itself is the corrupted offender) remains
+    // allowed. The ONE deliberate widening: a `status` payload whose value
+    // is draft | ready | staged (pre-execution/holding class only) is
+    // accepted even when status is not an offender — see the
+    // payloadStatusIsPreExecution note below for why that cannot bypass
+    // the transition guard.
     const repairableOffenders = offendingFields.filter((field) =>
         DEGRADED_CORE_REPAIRABLE_FIELD_NAMES.includes(field),
     );
+    // Status acceptance is wider than restore-only, deliberately: a repair
+    // may carry `status` whenever the supplied value is one of draft |
+    // ready | staged — the pre-execution/holding class. A degraded transport
+    // card can hold a VALID "staged" status (not an offender) while its
+    // enums are the corrupted fields, and the operator contract for this
+    // repair is exactly "enums + status among staged/ready/draft". Those
+    // three values carry no lifecycle verdict (no
+    // working/reported/blocked/completed/cancelled), so admitting them
+    // cannot bypass the transition guard in a dangerous direction. The
+    // widening is TRANSITION-VALIDATED below: a ready-target runs the
+    // same F3 design-readiness gate readyCoordinationTask enforces
+    // (envelope in the payload or already on the card, validated by the
+    // same validator), a staged-target must carry a repo-relative
+    // staged_path (the restage contract), and a card whose CURRENT
+    // status is a verdict/execution status is never widened back to a
+    // pre-execution status. Every other core field stays strictly
+    // restore-only.
+    const payloadStatusNormalized =
+        typeof payload.status === "string"
+            ? payload.status.trim().toLowerCase()
+            : "";
+    const payloadStatusIsPreExecution = [
+        "draft",
+        "ready",
+        "staged",
+    ].includes(payloadStatusNormalized);
+    // Prohibited-target refusal (guard completeness, round-2): EVERY
+    // explicitly-supplied target status outside {draft, ready, staged} is
+    // refused here — BEFORE the accepted-field set is even computed, so
+    // the refusal is INDEPENDENT of offender classification. Pre-fix, a
+    // card whose stored status was invalid (so status WAS an offender and
+    // the payload field was accepted) could be "repaired" to
+    // completed/cancelled/reported: the payload value normalized to a
+    // VALID enum, and the verdict-source check below could not fire (the
+    // card's coerced current status is draft). The locked repair save
+    // never re-runs coordinationTaskStatusTransitionErrors, so nothing
+    // else stood between that payload and a landed terminal status.
+    if (payload.status !== undefined && !payloadStatusIsPreExecution) {
+        throw new StateError(
+            `Task ${loaded.payload.task_id} repair never accepts a target status outside the pre-execution/holding class (draft | ready | staged); got ${JSON.stringify(
+                payload.status === undefined ? null : payload.status,
+            )}. ` +
+                `Verdict, execution, terminal, and invalid status values can never be installed by a repair — use the lifecycle ops (closeout, review) for terminal dispositions and the operator hand-edit path for genuinely corrupted verdict state.`,
+        );
+    }
+    // Stored-first authority applies to the INTENDED TARGET too (round-5
+    // A-F1 ride-along): intendedTargetStatus derives from currentStatus —
+    // the stored-first value, moved up from the execution-source check
+    // below — not the raw normalized projection. The transition-contract
+    // supplement slots below are keyed on this value, so a stored
+    // execution status that merely PROJECTS as a pre-execution shape (the
+    // round-3 laundering vector) cannot widen its own accepted-payload
+    // set; the execution-source refusal still fires, and the supplements
+    // stay keyed on the status the card actually carries on disk.
+    const storedStatus =
+        typeof loaded.stored_status === "string" ? loaded.stored_status : "";
+    const currentStatus = storedStatus || loaded.payload.status;
+    const intendedTargetStatus = payloadStatusNormalized || currentStatus;
+    const acceptedPayloadFields = [
+        ...repairableOffenders,
+        ...(payloadStatusIsPreExecution ? ["status"] : []),
+        // Transition-contract supplements, accepted only when the
+        // intended target status demands them (fail-closed otherwise):
+        ...(intendedTargetStatus === "staged" ? ["staged_path"] : []),
+        ...(intendedTargetStatus === "ready" ? ["f3_design_readiness"] : []),
+    ];
     errors.push(
         ...unexpectedCoordinationTaskPayloadFieldsErrors(
             payload,
-            repairableOffenders,
+            acceptedPayloadFields,
             "degraded task repair",
         ),
     );
     const providedRepairFields = Object.keys(payload).filter((key) =>
-        repairableOffenders.includes(key),
+        acceptedPayloadFields.includes(key),
     );
     // Residual risk #1: the repair must cover EVERY offending field this
     // branch can repair (the core enum/identity offenders). Status-conditional
     // offenders (rough_scope/open_questions/ready_criteria when status coerces
     // to "draft"; active_session_alias/claimed_at for "working") VANISH once
-    // status is corrected; list-field offenders (files_in_scope etc.) are
-    // outside this branch (caught by the canonical save-path throw as
-    // backstop). So the partial-repair check considers only repairable
-    // offenders uncovered by the payload — keeping the save-path throw a
-    // backstop, not the primary diagnostic.
+    // status is corrected; DoR list-field demands re-attach to the merged
+    // preview below, where they are answered by the card's STORED values
+    // only — the round-5 narrowing removed the fill supplement, so a
+    // corrupted card whose stored DoR fields cannot satisfy the restored
+    // status's demands is refused there (the fill widening is deferred as
+    // its own card). So the partial-repair check considers only repairable
+    // offenders uncovered by the payload — keeping the merged-preview
+    // validation the primary diagnostic for everything else.
     const uncoveredFields = repairableOffenders.filter(
         (field) => !providedRepairFields.includes(field),
     );
@@ -9430,12 +9811,215 @@ function repairDegradedCoordinationTaskCoreFields(actor, loaded, payload) {
             : null;
     throwCollectedErrors(errors);
 
-    // Fields actually written by this repair. With restore-only,
-    // providedRepairFields == repairableOffenders (the partial-repair check
-    // above guarantees every repairable offender is covered, and the
-    // unexpected-field check forbids any non-offender). Scope the history note
-    // and return value to these, not the full offending set (which may also
-    // carry status-conditional / list-field offenders this branch never wrote).
+    // Transition validation (B-F1b): a degraded card whose CURRENT status
+    // is a verdict/execution status
+    // (working/blocked/reported/completed/cancelled) is NEVER widened back
+    // to a pre-execution/holding status. Such a card carries lifecycle
+    // state the repair op has no authority to rewind — an execution claim,
+    // a review verdict (including `blocked`: the verdict PARKED the card,
+    // and unblocking is a coordinator decision, not a side effect of
+    // field repair), or a terminal disposition. The sanctioned paths from
+    // those statuses are the lifecycle ops (closeout, review) or, for
+    // genuinely corrupted verdict state, the operator hand-edit. Without
+    // this guard the status-widening above could move a degraded
+    // `reported` card to `staged`/`ready`/`draft` in one payload.
+    //
+    // Round-3 b-F1/b-F2 (normalization-laundered execution status): the
+    // SOURCE authority here is the STORED status, not the normalized
+    // projection. normalizeCoordinationTaskRecord rewrites a stored
+    // `working` card whose ownership/claim metadata (active_session_alias
+    // / claimed_at, including the single-alias and updated_at fallbacks)
+    // cannot be recovered to a PROJECTED `ready` — a fault-tolerant READ
+    // behavior that must never become a fault-tolerant WRITE authority.
+    // Pre-fix, authorizing on the projection let a stored-`working` card
+    // with an independently degraded core field (e.g. an empty title)
+    // repair into staged/draft/ready — laundering the execution state
+    // through the diagnostic boundary. The stored value governs the
+    // no-explicit-status case too: such a repair persists the NORMALIZED
+    // projection (the locked save re-derives it), which for a
+    // stored-`working` card is the laundered `ready` — itself a
+    // pre-execution restoration from a stored execution status. The
+    // projection remains the fallback ONLY when the stored bytes carry no
+    // valid enum status (absent/invalid — `status` is then an offending
+    // field and the partial-repair check demands an explicit status
+    // payload, so no laundering path exists through that fallback).
+    // (currentStatus — stored-first — is computed above, before the
+    // accepted-field set; see the round-5 A-F1 note there.)
+    // What this repair would PERSIST: an explicit payload status, else the
+    // normalized projection the locked save re-derives. Comparing the
+    // stored source against THIS value is what closes the title-only
+    // laundering vector (no explicit status, projection = laundered
+    // ready).
+    const targetStatus =
+        repairedStatus !== null ? repairedStatus : loaded.payload.status;
+    if (
+        ["working", "blocked", "reported", "completed", "cancelled"].includes(
+            currentStatus,
+        ) &&
+        ["draft", "ready", "staged"].includes(targetStatus)
+    ) {
+        throw new StateError(
+            `Task ${loaded.payload.task_id} is currently ${currentStatus} (a verdict/execution status); degraded-card repair never restores a pre-execution status (${targetStatus}) from it. ` +
+                `Close the card out through its lifecycle ops, or use the operator hand-edit path for genuinely corrupted verdict state.`,
+        );
+    }
+
+    // Transition validation (staged-target restage guards, guard
+    // completeness round-2): a repair targeting `staged` enforces the SAME
+    // lifecycle guards as the dedicated restageCoordinationTask op — the
+    // errata-class card-id requirement and the ready|staged source-status
+    // allowlist. Pre-fix the staged-target branch checked only the
+    // staged_path contract, so a repair could stage a NON-errata card (or
+    // jump a degraded draft card straight to staged), bypassing the class
+    // and source guards every other path into staged honors. These run
+    // BEFORE the merged-preview validation so the lifecycle refusal is
+    // never masked by field diagnostics. (Round-3: the allowlist below
+    // reads currentStatus — the STORED status first — so a stored
+    // execution status cannot pass as its projected pre-execution shape.)
+    if (targetStatus === "staged") {
+        if (!loaded.payload.task_id.startsWith("errata-")) {
+            throw new StateError(
+                `Task ${loaded.payload.task_id} is not an errata-class card (task_id must begin "errata-"); a staged-target repair is the release inject-errata transport for errata cards only (the same class contract the dedicated restage op enforces). Use the ordinary lifecycle ops (/task-ready, /resume-task, /task-closeout, /task-review) for this card.`,
+            );
+        }
+        if (!["ready", "staged"].includes(currentStatus)) {
+            throw new StateError(
+                `Task ${loaded.payload.task_id} is ${currentStatus} and cannot be repaired to staged; only ready tasks (or already-staged tasks refreshing staged_path) can be staged — the same source-status contract the dedicated restage op enforces. Restore the card to ready first (a ready-target repair runs the F3 gate), then restage.`,
+            );
+        }
+    }
+
+    // Absence beats invalidity (defer-018 ordering pin): a card that
+    // vanished mid-diagnosis (a concurrent delete landing inside the
+    // load->save window; the TOCTOU regression arms reproduce exactly this)
+    // must surface the canonical no-resurrection refusal, NOT a
+    // merged-preview diagnostic for a card that no longer exists. Required
+    // re-load: throws the canonical does-not-exist error that the public
+    // repairCoordinationTask catch translates. The locked save below
+    // re-checks absence authoritatively; this keeps the diagnostic ORDER
+    // stable now that merged-preview validation runs before the save.
+    loadCoordinationTask(loaded.payload.task_id);
+
+    // Pre-validate the MERGED card against the canonical validator BEFORE
+    // the in-transaction save: with the enums restored, status-conditional
+    // demands (files_in_scope/success_criteria/validation_plan for every
+    // non-draft status) re-attach to the card and are answered by the
+    // card's STORED values only — the round-5 narrowing removed the fill
+    // supplement, so the original op-split deadlock deliberately remains
+    // for a card whose stored DoR fields cannot satisfy the restored
+    // status's demands (the fill widening is deferred as its own card;
+    // until it lands, such a card completes through the operator
+    // hand-edit path). Refuse (with the validator's own diagnostics)
+    // rather than write a card the next load would flag degraded again.
+    const mergedPreview = {
+        ...loaded.payload,
+        task_type:
+            repairedTaskType !== null ? repairedTaskType : loaded.payload.task_type,
+        status: repairedStatus !== null ? repairedStatus : loaded.payload.status,
+        coordination_mode:
+            repairedCoordinationMode !== null
+                ? repairedCoordinationMode
+                : loaded.payload.coordination_mode,
+        report_envelope:
+            repairedReportEnvelope !== null
+                ? repairedReportEnvelope
+                : loaded.payload.report_envelope,
+        title: repairedTitle !== null ? repairedTitle : loaded.payload.title,
+        primary_lane:
+            repairedPrimaryLane !== null
+                ? repairedPrimaryLane
+                : loaded.payload.primary_lane,
+    };
+    const mergedErrors = collectCoordinationTaskCoreFieldErrors(mergedPreview, {
+        enumInvalidFields,
+    });
+    if (mergedErrors.length) {
+        throwCollectedErrors(
+            mergedErrors.map(
+                (line) =>
+                    `Degraded task repair would leave task ${loaded.payload.task_id} invalid: ${line}`,
+            ),
+        );
+    }
+
+    // Transition validation (B-F1c): a staged-target repair must carry a
+    // repo-relative staged_path — the SAME contract the dedicated restage
+    // op enforces, through the SAME shared validator (round-4 C-F2: the
+    // predicate is cross-platform — POSIX '/', Windows drive-letter, and
+    // UNC absolute forms are all refused, because the release injector
+    // honors an absolute staged_path at inject time and would read the
+    // erratum body from outside the repository). Without it the repair
+    // would land a staged card with no injectable fragment path for the
+    // release ceremony to consume.
+    const stagedPath =
+        payload.staged_path !== undefined
+            ? String(payload.staged_path || "").trim()
+            : "";
+    if (targetStatus === "staged") {
+        if (!stagedPath) {
+            throw new StateError(
+                `Repairing task ${loaded.payload.task_id} to staged requires a staged_path (repo-relative path of the staged release-note fragment the release ceremony will inject) — the same contract the dedicated restage op enforces.`,
+            );
+        }
+        if (isNonRepoRelativeStagedPath(stagedPath)) {
+            throw new StateError(
+                `staged_path must be a repo-relative path without parent traversal (POSIX, Windows drive-letter, and UNC absolute forms are all out-of-repo reads at inject time); got ${stagedPath}.`,
+            );
+        }
+    }
+
+    // Transition validation (B-F1a): a ready-target repair runs the SAME
+    // F3 design-readiness gate readyCoordinationTask enforces at the
+    // BUILD-READY crossing. The envelope comes from the repair payload or
+    // is already persisted on the card, and is validated by the same
+    // validator against the design digest of the MERGED (post-repair)
+    // card — so a repair can never promote a degraded card to ready
+    // without a complete, current-digest-bound envelope any more than
+    // /task-ready could. Guard completeness (round-2): EVERY repair
+    // entering ready from ANY non-ready current status is a BUILD-READY
+    // crossing (draft -> ready AND staged -> ready — staged is a holding
+    // status, not a review verdict, and a staged card re-entering ready
+    // must re-earn BUILD-READY). The envelope-free exemption survives
+    // ONLY for a genuine ready -> ready refresh (validate-when-supplied,
+    // the split readyCoordinationTask uses for envelope refreshes).
+    // (Round-3: `currentStatus` here is the STORED status first — the
+    // exemption for a "genuine ready -> ready refresh" cannot be earned
+    // by a stored execution status merely PROJECTING as ready.)
+    if (targetStatus === "ready") {
+        const isBuildReadyCrossing = currentStatus !== "ready";
+        const envelopeSupplied = payload.f3_design_readiness !== undefined;
+        if (isBuildReadyCrossing || envelopeSupplied) {
+            const f3Envelope = envelopeSupplied
+                ? payload.f3_design_readiness
+                : loaded.payload.f3_design_readiness !== undefined
+                  ? loaded.payload.f3_design_readiness
+                  : null;
+            const f3Result = validateF3DesignReadiness({
+                envelope: f3Envelope,
+                currentDesignDigest: computeTaskDesignDigest(mergedPreview, {}),
+                transitionKind: isBuildReadyCrossing
+                    ? "task_ready"
+                    : "task_ready_refresh",
+            });
+            if (!f3Result.passed) {
+                throw new StateError(
+                    `F3 design-readiness gate refused the degraded repair to ready for task ${loaded.payload.task_id} ` +
+                        `(reason: ${f3Result.reasonCode}). ${f3Result.detail} ` +
+                        `The repair is refused; supply a complete f3_design_readiness ` +
+                        `envelope bound to the current design digest in the repair ` +
+                        `payload (or persist one on the card), or declare ` +
+                        `ownership_hazards: [] if no hazard was named.`,
+                );
+            }
+        }
+    }
+
+    // Fields actually written by this repair. With restore-only for the
+    // core fields, every repairable offender is covered (the partial-repair
+    // check above), and the unexpected-field check admits no core
+    // non-offender beyond the transition-contract supplements (staged_path,
+    // f3_design_readiness). Scope the history note and return value to
+    // these, not the full offending set.
     const repairedFields = uniqueStrings(providedRepairFields);
     // In-transaction save — the PRIVATE already-locked core (the public
     // updateCoordinationTask would re-enter this transaction's non-reentrant
@@ -9459,6 +10043,18 @@ function repairDegradedCoordinationTaskCoreFields(actor, loaded, payload) {
             repairedPrimaryLane !== null
                 ? repairedPrimaryLane
                 : current.primary_lane,
+        // Transition-contract supplements (validated above): the staged
+        // fragment path on a staged-target repair, and the F3 envelope on
+        // a ready-target repair (persisted when supplied, mirroring
+        // readyCoordinationTask's envelope refresh).
+        staged_path:
+            targetStatus === "staged" && stagedPath
+                ? stagedPath
+                : current.staged_path,
+        f3_design_readiness:
+            payload.f3_design_readiness !== undefined
+                ? payload.f3_design_readiness
+                : current.f3_design_readiness,
         history: [
             ...(current.history || []),
             {
@@ -9966,9 +10562,18 @@ function reviewCoordinationTaskLocked(actor, taskID, sessionID, options) {
             "task_status",
             errors,
         ) || loaded.payload.status;
-    if (["draft", "working"].includes(taskStatus)) {
+    // Result-status allowlist (explicit + frozen — see
+    // COORDINATION_REVIEW_RESULT_STATUSES): review resolves a closeout into
+    // one of the five documented /task-review resolutions and NOTHING else.
+    // This is deliberately NOT derived from COORDINATION_TASK_STATUSES: the
+    // lifecycle enum carries holding/mechanic states (staged) that must
+    // never be reachable as a review verdict — a review resolving a card
+    // into staged would bypass the dedicated restage op's staged_path
+    // contract (status-widening leak, closed here).
+    if (!COORDINATION_REVIEW_RESULT_STATUSES.includes(taskStatus)) {
         errors.push(
-            "task_review should resolve to ready, reported, blocked, completed, or cancelled.",
+            "task_review should resolve to ready, reported, blocked, completed, or cancelled. " +
+                "(Explicit verdict allowlist — staged is a release-mechanic holding state owned by the dedicated restage op, never a review result.)",
         );
     }
     throwCollectedErrors(errors);
@@ -10777,6 +11382,7 @@ export {
     readyCoordinationTask,
     updateCoordinationTaskMetadata,
     repairCoordinationTask,
+    restageCoordinationTask,
     saveCoordinationTaskCloseout,
     reviewCoordinationTask,
     deleteCoordinationTask,
@@ -10868,6 +11474,7 @@ export default {
     readyCoordinationTask,
     updateCoordinationTaskMetadata,
     repairCoordinationTask,
+    restageCoordinationTask,
     saveCoordinationTaskCloseout,
     reviewCoordinationTask,
     deleteCoordinationTask,

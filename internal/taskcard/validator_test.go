@@ -14,7 +14,10 @@ package taskcard
 // additionalProperties violations (top-level, recurrence block, evidence item)
 // and nested evidence/aliases shape violations (missing ref/kind, empty kind,
 // empty alias id). The generic draft-07 subset validator handles all of them;
-// these rows prove the gate catches them.
+// these rows prove the gate catches them. Later schema pins: the staged
+// errata-transport status + staged_path property (staged_task ok-pin,
+// invalid_status_bogus reject-pin) joined the schema enum/properties in the
+// same change as these rows.
 
 import (
 	"encoding/json"
@@ -176,7 +179,8 @@ type fixture struct {
 	verdict string
 }
 
-// portedFixtures are the 20 assertions from verify-task-card-schema.py main().
+// portedFixtures are the 20 assertions from verify-task-card-schema.py main()
+// plus later same-engine schema pins (staged errata transport + staged_path).
 func portedFixtures() []fixture {
 	// Shared builders mirroring the Python base + status variants.
 	ready := func(t *testing.T) map[string]interface{} { return mustCard(t, baseReadyJSON) }
@@ -229,6 +233,16 @@ func portedFixtures() []fixture {
 		return c
 	}
 
+	// staged: errata-transport holding status (pinned with its staged_path
+	// property — both joined the schema in the same change).
+	staged := func(t *testing.T) map[string]interface{} {
+		c := ready(t)
+		c["status"] = "staged"
+		c["staged_path"] = "docs/migration-errata/vX.Y.Z-example-erratum.md"
+		hist0(t, c)["status"] = "staged"
+		return c
+	}
+
 	return []fixture{
 		// validate_ok (schema passes + ack-pair holds) ----------------------
 		{"ready_task", ready, verdictOK},
@@ -237,8 +251,14 @@ func portedFixtures() []fixture {
 		{"reviewed_task", reviewed, verdictOK},
 		{"recurrence_valid", withBlock, verdictOK},
 		{"legacy_no_recurrence", ready, verdictOK}, // backward-compat: no block
+		{"staged_task", staged, verdictOK},         // staged enum + staged_path property
 
 		// validate_fail (schema rejects) -------------------------------------
+		{"invalid_status_bogus", func(t *testing.T) map[string]interface{} {
+			c := ready(t)
+			c["status"] = "bogus-status"
+			return c
+		}, verdictFailJSON},
 		{"invalid_draft", func(t *testing.T) map[string]interface{} {
 			c := draft(t) // draft with rough_scope set
 			c["rough_scope"] = []interface{}{}

@@ -320,7 +320,127 @@ func corpusDigest(tree map[string][]byte) string {
 // (61/46/15, 49/0/5, 14/3/32) and the hub's 73-export surface re-derived
 // IDENTICAL, so only the byte digest moved. Same discipline: re-derived
 // before re-pinning, not a re-pin-to-absorb.
-const pinnedCorpusDigest = "f1930dbe8e0705bdb9e30bd016037b5deeb2beaab2a69c20613dc76970a2843c"
+// Re-derived again 2026-11-16 (sixth move; NOT content-only) for the
+// repair-op deadlock fix (defer-taskcard-repair-op-deadlock): state-lib.js
+// converges `staged` into COORDINATION_TASK_STATUSES (Go-side canonical
+// closed set; JS read path no longer degrades the staged errata cards),
+// repairDegradedCoordinationTaskCoreFields accepts the degraded-FILL
+// supplement (files_in_scope/success_criteria/validation_plan) plus a
+// pre-execution-class `status` payload, and a new exported
+// restageCoordinationTask op owns the ready -> staged transition (the
+// dedicated-op design: review/closeout whitelists stay closed). The hub's
+// named-export surface moves 73 -> 74 (restageCoordinationTask) and the
+// plan-state.js -> state-lib.js import edge gains the symbol (SpecLine 47
+// -> 48, mirrored in ledger_golden_test.go). Module/edge/L-join counters
+// re-derived IDENTICAL (61/46/15, 49/0/5, 14/3/32) — the new export is a
+// hub-internal surface widening, not a new module or edge. A same-slice
+// rider re-derived the byte digest once more: merged-preview validation in
+// repairDegradedCoordinationTaskCoreFields is now preceded by a required
+// re-load so a card that vanished mid-diagnosis surfaces the canonical
+// no-resurrection refusal (absence beats invalidity — the defer-018 TOCTOU
+// ordering pin) instead of a merged-preview diagnostic for a card that no
+// longer exists; no imports, no exports, no specifier changes — counters
+// and the hub's 74-export surface re-derived IDENTICAL. Mirrored into
+// the rendered twins by the required `make update`. Same discipline:
+// re-derived before re-pinning, not a re-pin-to-absorb.
+// Re-derived again 2026-11-16 (seventh move; NOT content-only) for the
+// review-block repairs on the restage/repair slice: the degraded-repair
+// status widening is now transition-validated (ready-target runs the F3
+// design-readiness gate with an f3_design_readiness payload supplement,
+// staged-target requires a repo-relative staged_path supplement, and a
+// verdict/execution current status is never widened back to
+// draft/ready/staged), restageCoordinationTask is errata-class only
+// (task_id prefix guard pre-lock + in-lock), the review op's result
+// statuses are an explicit frozen ready/reported/blocked/completed/
+// cancelled allowlist (staged refused; the "task_status must be one of"
+// enum pre-check is preserved), the task-card schema twins gain staged +
+// staged_path, and verify-task-registry.js case 10g carries an F3
+// envelope for its ready-target repair. No new modules, imports,
+// exports, or specifiers — counters and the hub's 74-export surface
+// re-derived IDENTICAL. Mirrored into the rendered twins by the required
+// `make update`. Same discipline: re-derived before re-pinning, not a
+// re-pin-to-absorb.
+// Re-derived again 2026-11-16 (eighth move; NOT content-only) for the
+// round-2 guard-completeness fixes on the restage/repair slice: the
+// degraded-repair branch refuses every explicitly-supplied target status
+// outside {draft, ready, staged} independent of offender classification
+// (the invalid-status-offender terminal bypass), staged -> ready now runs
+// the F3 design-readiness gate (every non-ready -> ready is a BUILD-READY
+// crossing; envelope-free only for genuine ready -> ready refreshes), a
+// staged-target repair enforces the restage op's errata-class card-id
+// requirement and ready|staged source allowlist, `blocked` joins the
+// never-repair-restore verdict/execution source set, files_in_scope fills
+// are file-scope-normalized before the merged preview so the validated
+// F3 digest equals the persisted digest, and verify-task-registry.js case
+// 10i expects the new prohibited-target refusal text. No new modules,
+// imports, exports, or specifiers — counters and the hub's 74-export
+// surface re-derived IDENTICAL. Mirrored into the rendered twins by the
+// required `make update`. Same discipline: re-derived before re-pinning,
+// not a re-pin-to-absorb.
+//
+// Re-derived again 2026-11-16 (ninth move; content-only) for the round-3
+// normalization-laundering guard (b-F1/b-F2 on the restage/repair slice):
+// state-lib.js threads the RAW stored status through the fault-tolerant
+// read — a new internal helper (coordinationTaskStoredStatus: trim+lower
+// fold, valid only against the closed status enum) and
+// loadCoordinationTask now returns stored_status alongside the normalized
+// payload — and every lifecycle check in
+// repairDegradedCoordinationTaskCoreFields (execution-source refusal,
+// staged-target source allowlist, F3 BUILD-READY crossing detection)
+// authorizes on the STORED value with the normalized projection as the
+// only fallback (stored bytes with no valid enum status, where `status`
+// is itself an offending field demanding an explicit payload). Closes the
+// laundering vector: normalizeCoordinationTaskRecord rewrites a stored
+// `working` card with unrecoverable ownership/claim metadata to a
+// projected `ready`, and pre-fix the guards authorized on that projection
+// so such a card (with an independently degraded core field) could be
+// repaired into staged/draft/ready or persisted as the laundered ready by
+// a no-explicit-status repair. No new modules, imports, exports, or
+// specifiers — counters and the hub's 74-export surface re-derived
+// IDENTICAL. Mirrored into the rendered twins by the required `make
+// update`. Same discipline: re-derived before re-pinning, not a
+// re-pin-to-absorb.
+//
+// Re-derived again 2026-11-16 (tenth move; content-only) for the round-4
+// restage-laundering + cross-platform staged_path guards (B-F1/B-F2 and
+// C-F2 on the restage/repair slice): restageCoordinationTask now
+// authorizes its ready|staged source allowlist on the STORED status
+// (loaded.stored_status via coordinationTaskStoredStatus, projection as
+// fallback) at BOTH guard sites — the pre-lock check and an in-lock
+// re-load under the mutator — so a non-degraded stored-`working` card
+// whose normalization projects `ready` is refused by name instead of
+// laundered into staged; and the shared staged_path validator used by
+// BOTH entry paths (restage + staged-target repair) now rejects
+// Windows drive-letter and UNC absolute forms alongside the POSIX
+// '/'-prefix and '..' traversal checks, because release_inject.go
+// honors absolute staged_path at inject time (out-of-repo read; the
+// JS side is the gate). New internal helper isNonRepoRelativeStagedPath;
+// no new modules, imports, exports, or specifiers — counters and the
+// hub's 74-export surface re-derived IDENTICAL. Mirrored into the
+// rendered twins by the required `make update`. Same discipline:
+// re-derived before re-pinning, not a re-pin-to-absorb.
+//
+// Re-derived again 2026-11-16 (eleventh move; content-only) for the
+// round-5 operator narrowing (c-prime) of the restage/repair slice:
+// the degraded-FILL supplement is REMOVED — the DEGRADED_FILL_FIELD_NAMES
+// constant and the fill normalizers die, merged-preview/save no longer
+// overlay files_in_scope/success_criteria/validation_plan, a DoR-field
+// repair payload refuses with the standard unsupported-fields diagnostic
+// (dissolving review blocker B-F1 by removal: no execution-contract
+// field replacement exists, so the task-update freeze holds trivially),
+// intendedTargetStatus now derives from the stored-first currentStatus
+// (round-4 A-F1: the supplement slots key on the status the card
+// actually carries, never the laundered projection), and the
+// repo-file literal in the round-added staged_path comments is
+// genericized to "the release injector" (C-F3; templates/core stays
+// domain-free — the D-F2 characterization extension also surfaced and
+// genericized two PRE-EXISTING repo-local comment paths in
+// verify-task-registry.js). No new modules, imports, exports, or
+// specifiers — counters and the hub's 74-export surface re-derived
+// IDENTICAL. Mirrored into the rendered twins by the required `make
+// update`. Same discipline: re-derived before re-pinning, not a
+// re-pin-to-absorb.
+const pinnedCorpusDigest = "6c64199b698a980b0456f75b46f51f1bcece62f758ac23c420f1060370f0e223"
 
 // updateOpDebtFiles are the packet §B per-file table's post-normalization
 // remainder: 14 modules still carrying `++`/`--` update operators (the
@@ -361,14 +481,14 @@ func TestGate4_CorpusGoldenPins(t *testing.T) {
 
 	// Per-module verdicts: the 14 update-op debt files degrade with the
 	// update-op reason; the hub (state-lib.js) is post-normalization FIT —
-	// closed, 73 named exports; compaction-primitives.js degrades (known
+	// closed, 74 named exports; compaction-primitives.js degrades (known
 	// corpus defect: invalid JS, carded separately); every other module is
 	// FIT.
 	const hub = ".opencode/scripts/state-lib.js"
 	if m := Parse(hub, tree[hub]); m.Unparseable {
 		t.Fatalf("%s: post-normalization hub must be FIT, got UNKNOWN(%s)", hub, m.UnparseableWhy)
-	} else if len(m.NamedExports) != 73 {
-		t.Fatalf("%s: post-normalization hub surface = %d export names, want 73", hub, len(m.NamedExports))
+	} else if len(m.NamedExports) != 74 {
+		t.Fatalf("%s: post-normalization hub surface = %d export names, want 74", hub, len(m.NamedExports))
 	}
 	debt := map[string]bool{}
 	for _, p := range updateOpDebtFiles {

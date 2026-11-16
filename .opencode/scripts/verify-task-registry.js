@@ -4198,10 +4198,36 @@ async function main() {
                 ),
             "still missing",
         );
+        // The ready-target restoration runs the SAME F3 design-readiness
+        // gate /task-ready enforces: without an envelope the repair is
+        // refused (missing_envelope), with a current explicit-empty
+        // envelope bound to the post-repair design digest it passes and
+        // the envelope persists on the repaired card.
+        expectStateError(
+            () =>
+                repairCoordinationTask(
+                    coordinatorSessionID,
+                    statusDegraded.task.task_id,
+                    { task_type: "implementation", status: "ready" },
+                    { cwd: "/verification" },
+                ),
+            "F3 design-readiness gate refused",
+        );
+        const statusRepairPayload = {
+            task_type: "implementation",
+            status: "ready",
+        };
+        statusRepairPayload.f3_design_readiness = {
+            ownership_hazards: [],
+            design_digest: computeTaskDesignDigest(
+                statusDegradedRead.task,
+                statusRepairPayload,
+            ),
+        };
         repairCoordinationTask(
             coordinatorSessionID,
             statusDegraded.task.task_id,
-            { task_type: "implementation", status: "ready" },
+            statusRepairPayload,
             { cwd: "/verification" },
         );
         const statusRepairedRead = readCoordinationTask(
@@ -4211,6 +4237,13 @@ async function main() {
         );
         if (statusRepairedRead.degraded) {
             throw new StateError("Case 10g: complete repair must clear degraded despite status-conditional offenders.");
+        }
+        if (
+            !statusRepairedRead.task.f3_design_readiness ||
+            statusRepairedRead.task.f3_design_readiness.design_digest !==
+                statusRepairPayload.f3_design_readiness.design_digest
+        ) {
+            throw new StateError("Case 10g: ready-target repair must persist the validated F3 envelope.");
         }
 
         // 10h. Ordinary update unchanged: task_type still rejected by ordinary
@@ -4261,7 +4294,11 @@ async function main() {
             throw new StateError("Case 10i: status must NOT be an offender (title-only degradation).");
         }
         // Attempt to smuggle a terminal status through repair alongside the
-        // title restore -> rejected (status is not an offending field).
+        // title restore -> rejected. Round-2 guard completeness: the
+        // refusal is now the explicit prohibited-target-status guard
+        // (EVERY explicitly-supplied target outside draft|ready|staged is
+        // refused outright, independent of offender classification), not
+        // the older unexpected-field listing.
         expectStateError(
             () =>
                 repairCoordinationTask(
@@ -4270,7 +4307,7 @@ async function main() {
                     { title: "Restored title", status: "completed" },
                     { cwd: "/verification" },
                 ),
-            "Unsupported fields",
+            "repair never accepts a target status outside the pre-execution/holding class",
         );
         // Restore-only repair (title only) succeeds and leaves status untouched.
         repairCoordinationTask(
@@ -4515,10 +4552,9 @@ async function main() {
         // retirement path (4c in deleteCoordinationTask — completed + a
         // reachable `Task-Card:` trailer → deleted; otherwise a structured
         // landing_not_confirmed refusal). That path needs a git fixture, so it
-        // is covered by the dedicated hermetic suite
-        // tests/scripts/task-delete-retirement.test.js (an internal/dev-only
-        // harness test — NOT shipped in the rendered consumer set) rather than
-        // here.
+        // is covered by the dedicated hermetic suite (an internal/dev-only
+        // harness test — NOT shipped in the rendered consumer set) rather
+        // than here.
         //
         // Every fixture id is pushed to createdTaskIDs so the finally-block
         // cleanupArtifacts runs over ids whose card + report dir were already
@@ -5191,10 +5227,8 @@ async function main() {
         //      this set — it enters the landing-gated retirement path (4c:
         //      verifyLandingProof — completed + reachable Task-Card trailer →
         //      deleted; otherwise landing_not_confirmed), covered by the
-        //      dedicated hermetic suite
-        //      tests/scripts/task-delete-retirement.test.js (an internal/dev-
-        //      only harness test, NOT shipped in the rendered consumer set).
-        //      Each refusal here
+        //      dedicated hermetic suite (an internal/dev-only harness test,
+        //      NOT shipped in the rendered consumer set). Each refusal here
         //      must leave the card + report dir + sentinel byte-identical and
         //      intact.
         const lifecycleStatusFixtures = [

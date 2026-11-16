@@ -1,10 +1,10 @@
 ---
-description: Repair one incomplete local research task card without changing its lifecycle status
+description: Repair one incomplete research task card or one degraded task card through the sanctioned repair paths
 agent: build
 subtask: false
 ---
 
-Repair one incomplete local research task card.
+Repair one local task card.
 
 Task id:
 $ARGUMENTS
@@ -15,24 +15,20 @@ Workflow:
 - call `plan_state` with:
   - `operation: read_coordination_task`
   - `task_id: $ARGUMENTS`
-- stop if the task is not `task_type: research`
-- identify the missing research-contract fields that must be repaired:
-  - `research_question`
-  - `source_policy`
-  - optional `source_allowlist`
-  - `desired_artifact_type`
-  - `target_artifact_path`
-- stop if the task already has a complete research contract; tell the user to use `/task-update <id>` for broader metadata changes instead
-- preserve the current lifecycle status; this command repairs metadata and does not promote or resume the task
+- route on what the read shows:
+  - a healthy research card with a missing-but-tolerated contract takes the research-contract path: stop if the task is not `task_type: research` or the contract is already complete (use `/task-update <id>` for broader metadata changes); repair only the missing contract fields (`research_question`, `source_policy`, optional `source_allowlist`, `desired_artifact_type`, `target_artifact_path`); the lifecycle status is preserved
+  - a degraded card (`diagnostics.degraded: true`) takes the enum-core-field path: accepted payload fields are the offending core fields (`title`, `task_type`, `coordination_mode`, `primary_lane`, `report_envelope`) plus `status` when its value is draft/ready/staged — restore-only; `files_in_scope`/`success_criteria`/`validation_plan` are never repairable (refused as unsupported fields)
+- degraded-card lifecycle-transition guards: a verdict/execution status (working/blocked/reported/completed/cancelled) is never restored to a pre-execution status; a ready-target crossing requires an `f3_design_readiness` envelope bound to the current design digest; a staged-target is errata-class only (`task_id` begins `errata-`) and requires a repo-relative `staged_path`
+- for a healthy errata-class card, `restage_coordination_task` (plan-state) is the sanctioned ready→staged route — staging is a release-mechanic handoff, not a review verdict
 - call `plan_state` with:
   - `operation: repair_coordination_task`
   - `task_id: $ARGUMENTS`
-  - `task_payload`: a JSON object containing only the missing research-contract fields to repair
-- stop if the resulting task still lacks any required research-contract field
+  - `task_payload`: a JSON object containing only the accepted repair fields for the routed path
+- stop if the resulting task still fails its research contract or still loads degraded; report the remaining offenders instead of widening the payload
 
 Return:
-- task id and preserved status
-- repaired research fields
+- task id and resulting status
+- repaired fields
 - current next action
 - next recommended command
 
