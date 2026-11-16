@@ -9864,6 +9864,34 @@ function repairDegradedCoordinationTaskCoreFields(actor, loaded, payload) {
         );
     }
 
+    // Transition validation (staged-source directional refusal, round-6 /
+    // defer-repair-staged-source-refusal): `staged` is deliberately NOT
+    // in the execution-source refusal set above — it is a release-HOLDING
+    // status, not a verdict/execution status, and the sanctioned moves out
+    // of staged stay open (the staged -> staged refresh with a
+    // staged_path below, and the F3-gated staged -> ready restore). The
+    // one refused direction is the DEMOTION to draft: a staged card
+    // carries release-ceremony state (staged_path, the inject-errata
+    // transport), and a degraded-card field repair has no authority to
+    // strand it back in pre-execution holding. Authority form (round-5
+    // A-F1): the source is the stored-first currentStatus; the target is
+    // the EFFECTIVE PERSISTED target — an explicit payload status, else
+    // the normalized projection the locked save re-derives — so an
+    // omitted status cannot bypass this guard where the effective
+    // persisted target is draft. (For a staged-source card that shape is
+    // not constructible with an omitted status: the read path rewrites
+    // only an unrecoverable `working` to ready and coerces an invalid
+    // status to draft, so a valid stored `staged` projects as `staged`
+    // itself — a draft target here implies an explicit draft payload.)
+    if (currentStatus === "staged" && targetStatus === "draft") {
+        throw new StateError(
+            `Task ${loaded.payload.task_id} is staged for release; ` +
+                `degraded-card repair cannot demote it to draft. ` +
+                `Refresh staged with staged_path, or restore ready through ` +
+                `the F3 design-readiness gate.`,
+        );
+    }
+
     // Transition validation (staged-target restage guards, guard
     // completeness round-2): a repair targeting `staged` enforces the SAME
     // lifecycle guards as the dedicated restageCoordinationTask op — the

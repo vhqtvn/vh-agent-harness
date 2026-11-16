@@ -95,6 +95,19 @@
 //     validation (arm 1) — the original op-split deadlock deliberately
 //     remains for that shape until the deferred card lands.
 //
+// Round-6 directional-guard arms (2026-11-16,
+// defer-repair-staged-source-refusal — debate verdict P3 directional):
+//   - staged -> draft demotion is refused (a staged card is
+//     release-HOLDING; the demotion would strand release-ceremony state
+//     back in pre-execution holding) while the sanctioned moves out of
+//     staged stay open (staged -> staged refresh, F3-gated staged -> ready
+//     — pinned by the existing arms above). `staged` deliberately does NOT
+//     join the execution-source refusal set.
+//   - neither staged_path nor an F3 envelope authorizes the demotion (a
+//     draft target admits no supplement; the ride-alongs refuse as
+//     unsupported fields), and every refusal leaves the stored bytes
+//     deepEqual-unchanged.
+//
 // Run:  vh-agent-harness exec node --test tests/scripts/task-repair-deadlock-restage.test.js
 //       (or: node --test tests/scripts/task-repair-deadlock-restage.test.js)
 
@@ -1630,6 +1643,127 @@ test(
             workingBefore,
             "pin (ii): refused DoR-field payload must leave the card bytes unchanged",
         );
+    }),
+);
+
+// --- round-6 directional guard: staged -> draft demotion refused -----------
+//
+// defer-repair-staged-source-refusal (2026-11-16 study+debate+go chain;
+// 84c1097 cascade leaf A-F1; debate verdict P3 directional): `staged` is
+// deliberately ABSENT from the repair op's execution-source refusal set —
+// staged is a release-HOLDING status, and the sanctioned moves out of it
+// (staged -> staged refresh with staged_path; the F3-gated staged -> ready
+// restore, both pinned above by arms 2/2d) must keep working. The ONE
+// refused direction is the demotion to draft, which would strand a card
+// carrying release-ceremony state (staged_path, the inject-errata
+// transport) back in pre-execution holding. The guard authorizes on the
+// stored-first currentStatus against the EFFECTIVE PERSISTED target
+// (explicit payload status, else the normalized projection the locked
+// save re-derives), so an omitted status cannot bypass it.
+test(
+    "round-6: staged -> draft demotion refused (directional guard); staged_path and F3 envelopes do not authorize it",
+    withIsolatedTransport((root) => {
+        // Fixture: a stored-staged card degraded by missing enums with a
+        // valid stored body otherwise (rough_scope answers the merged-draft
+        // demand; the DoR lists answer the staged demands). Pre-fix this is
+        // exactly the card a status:"draft" repair DEMOTED (the RED
+        // receipt: the repair landed and the stored card became draft).
+        const idDemote = "dlk-f-staged-demote";
+        writeCard(root, idDemote, {
+            status: "staged",
+            rough_scope: ["staged source must not demote to draft via repair"],
+            files_in_scope: FILL_FIX.files_in_scope,
+            success_criteria: FILL_FIX.success_criteria,
+            validation_plan: FILL_FIX.validation_plan,
+        });
+        const demoteRead = readCoordinationTask(SESSION_ID, idDemote);
+        assert.equal(
+            demoteRead.diagnostics && demoteRead.diagnostics.degraded,
+            true,
+            "round-6 premise: the fixture must load degraded (missing enums)",
+        );
+        const demoteBefore = readRawCard(root, idDemote);
+
+        // Arm 1 — explicit status:"draft" on a stored-staged card: the
+        // directional refusal, exact message.
+        assert.throws(
+            () =>
+                repairCoordinationTask(SESSION_ID, idDemote, {
+                    ...ENUM_FIX,
+                    status: "draft",
+                }),
+            (err) =>
+                err instanceof Error &&
+                err.message ===
+                    "Task dlk-f-staged-demote is staged for release; degraded-card repair cannot demote it to draft. Refresh staged with staged_path, or restore ready through the F3 design-readiness gate.",
+            "round-6 arm 1: staged->draft demotion must refuse with the exact directional message",
+        );
+        assert.deepEqual(
+            readRawCard(root, idDemote),
+            demoteBefore,
+            "round-6 arm 1: refused staged->draft demotion must leave the stored bytes unchanged",
+        );
+
+        // Arm 2 — neither release artifact authorizes the demotion: adding
+        // the staged-refresh artifact (staged_path) or a ready-crossing F3
+        // envelope to the draft-target payload is still refused. A draft
+        // target admits no supplement (the accepted-field slots key on the
+        // INTENDED target status, fail-closed), so these refuse at the
+        // unsupported-fields boundary before any transition check runs —
+        // pinned here so the smuggling shape cannot silently become
+        // accepted later.
+        assert.throws(
+            () =>
+                repairCoordinationTask(SESSION_ID, idDemote, {
+                    ...ENUM_FIX,
+                    status: "draft",
+                    staged_path: FIXTURE_STAGED_PATH,
+                }),
+            (err) =>
+                err instanceof Error &&
+                /Unsupported fields for degraded task repair: staged_path/.test(
+                    err.message,
+                ),
+            "round-6 arm 2a: staged_path must not authorize a staged->draft demotion",
+        );
+        assert.throws(
+            () =>
+                repairCoordinationTask(SESSION_ID, idDemote, {
+                    ...ENUM_FIX,
+                    status: "draft",
+                    f3_design_readiness: {
+                        ownership_hazards: [],
+                        design_digest: "0".repeat(64),
+                    },
+                }),
+            (err) =>
+                err instanceof Error &&
+                /Unsupported fields for degraded task repair: f3_design_readiness/.test(
+                    err.message,
+                ),
+            "round-6 arm 2b: an F3 envelope must not authorize a staged->draft demotion",
+        );
+        assert.deepEqual(
+            readRawCard(root, idDemote),
+            demoteBefore,
+            "round-6 arm 2: refused ride-along attempts must leave the stored bytes unchanged",
+        );
+
+        // Arm 3 — omitted-status case (ASSESSMENT, deliberately no runtime
+        // arm): could a staged-source card with NO explicit status payload
+        // carry an effective persisted target of draft? targetStatus falls
+        // back to the normalized projection (loaded.payload.status) — the
+        // value the locked save re-derives — and the read path rewrites
+        // ONLY an unrecoverable `working` to ready
+        // (normalizeCoordinationTaskRecord); a draft projection arises only
+        // from an invalid/absent stored status. But an invalid stored
+        // status makes coordinationTaskStoredStatus return "" (currentStatus
+        // then falls to that same draft projection and the source is not
+        // staged either), and a valid stored `staged` projects as `staged`
+        // itself. So `currentStatus === "staged" && targetStatus ===
+        // "draft"` is NOT constructible with an omitted status — the guard
+        // fires only on an explicit draft payload (arm 1). Per the
+        // adjudicated design, no fake arm is built for this shape.
     }),
 );
 

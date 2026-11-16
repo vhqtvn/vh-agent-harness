@@ -440,7 +440,20 @@ func corpusDigest(tree map[string][]byte) string {
 // IDENTICAL. Mirrored into the rendered twins by the required `make
 // update`. Same discipline: re-derived before re-pinning, not a
 // re-pin-to-absorb.
-const pinnedCorpusDigest = "6c64199b698a980b0456f75b46f51f1bcece62f758ac23c420f1060370f0e223"
+// Re-derived again 2026-11-16 (twelfth move; content-only) for the
+// staged->draft demotion guard (defer-repair-staged-source-refusal, the
+// 84c1097 cascade leaf A-F1 debate-rescoped to directional): a staged
+// card is release-HOLDING, so `staged` deliberately does NOT join the
+// execution-source refusal set — instead a new directional guard
+// immediately after that refusal block refuses ONLY staged -> draft
+// (stored-first currentStatus against the effective persisted
+// targetStatus, round-5 A-F1 form; staged->staged refresh and the
+// F3-gated staged->ready restore stay sanctioned). Pure guard +
+// comments: no new modules, imports, exports, or specifiers — counters
+// and the hub's 74-export surface re-derived IDENTICAL. Mirrored into
+// the rendered twin by the required `make update`. Same discipline:
+// re-derived before re-pinning, not a re-pin-to-absorb.
+const pinnedCorpusDigest = "79c96414ecad72c301423f9b82ff731f6e787ce9072cb8111db053f3a64e5cc9"
 
 // updateOpDebtFiles are the packet §B per-file table's post-normalization
 // remainder: 14 modules still carrying `++`/`--` update operators (the
