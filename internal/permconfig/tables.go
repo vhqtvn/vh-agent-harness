@@ -387,13 +387,18 @@ var CoreLocationRules = map[string]LocationRule{
 	// (defer-triggers is NOT exec-sandbox — it cannot run arbitrary code).
 	"worker-read-only": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny,
 		ReadOnlyExtraAllows: []string{DeferTriggersCommand}},
-	// Cluster leaves (commit-reviewer-a..d) — the corpus ships these as full
+	// Cluster leaves (commit-reviewer-a..e) — the corpus ships these as full
 	// agent blocks. They carry the leafBaseRule (deny wildcard, allow
 	// readonly/git_readonly, deny gate, allow devSh) and a deny-all task rule.
+	// The 5-leaf set is the bounded-B registered pool: seats a..d are the
+	// default active roster; seat e is registered but held out of the default
+	// roster (premium tier disabled in review-tiers.json) until an operator
+	// activates it via the .opencode/repo-configs/review-tiers.json override.
 	"commit-reviewer-a": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	"commit-reviewer-b": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	"commit-reviewer-c": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 	"commit-reviewer-d": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
+	"commit-reviewer-e": {Wildcard: Deny, Readonly: Allow, GitReadonly: Allow, Gate: Deny, HasGate: true, HarnessPolicy: HarnessPolicyReadOnly, Edit: Deny},
 }
 
 // GateExemptBase is the set of agents that must NOT carry a gate key in their
@@ -413,8 +418,9 @@ var GateExemptBase = map[string]bool{
 // coordination, project-coordinator) list every agent they may delegate to;
 // leaf agents deny everything except "*".
 //
-// The commit-reviewer cluster edges (commit-reviewer → a/b/c/d) are included
-// directly here since the cluster is static at 4 leaves.
+// The commit-reviewer cluster edges (commit-reviewer → a/b/c/d/e) are included
+// directly here since the registered pool is static at 5 leaves; which subset
+// is ACTIVE is a review-tiers.json roster decision.
 var CoreTaskRules = map[string][]TaskEntry{
 	"plan": {
 		{"*", Deny},
@@ -477,11 +483,14 @@ var CoreTaskRules = map[string][]TaskEntry{
 	},
 	"commit-reviewer": {
 		{"*", Deny},
-		// Cluster leaf edges: commit-reviewer may delegate to its tier-cascade leaves.
+		// Cluster leaf edges: commit-reviewer may delegate to its tier-cascade
+		// leaves (the full bounded-B registered pool a..e; which seats are
+		// ACTIVE is a review-tiers.json roster decision, not a permission one).
 		{"commit-reviewer-a", Allow},
 		{"commit-reviewer-b", Allow},
 		{"commit-reviewer-c", Allow},
 		{"commit-reviewer-d", Allow},
+		{"commit-reviewer-e", Allow},
 	},
 	"ship-review": {
 		{"*", Deny},
@@ -556,6 +565,7 @@ var CoreTaskRules = map[string][]TaskEntry{
 	"commit-reviewer-b": {{"*", Deny}},
 	"commit-reviewer-c": {{"*", Deny}},
 	"commit-reviewer-d": {{"*", Deny}},
+	"commit-reviewer-e": {{"*", Deny}},
 }
 
 // BacklogCommand is the feature-gated bash entry added to the top-level

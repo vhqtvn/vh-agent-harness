@@ -157,7 +157,7 @@ opt-in only:
 
 | Capability ID | Provides | In preset? | What it does |
 | --- | --- | --- | --- |
-| `core/gated-commit` | `commit-message`, `commit-reviewer`, `commit-reviewer-a..d`, `committer` | `supervised` | The gated-commit protocol (commit-message drafting, tiered cascade review, committer-exclusive git mutations). |
+| `core/gated-commit` | `commit-message`, `commit-reviewer`, `commit-reviewer-a..e`, `committer` | `supervised` | The gated-commit protocol (commit-message drafting, tiered cascade review, committer-exclusive git mutations). The cluster registers 5 leaf seats (bounded-B pool); the default active roster is 3+1 on a..d. |
 | `core/debate` | `debate`, `debate-proposer`, `debate-critic`, `debate-synth`, `solution-brief` | `supervised` | The multi-model debate pipeline plus the solution-brief wrapper. |
 | `core/media-perception` | `media-perception` (agent + caller-facing skill) | none (opt-in) | A single read-only perception specialist that inspects media (image, diagram, chart, video, document/PDF, audio). For local media, callers pass BOTH `@file <path>` (bytes) and `path:` (locator); for remote media, `url:`. Parent-session attachments do NOT auto-propagate to a task child. |
 | `core/worker-read-only` | `worker-read-only` (dynamic worker leaf) | none (opt-in) | A prompt-scoped read-only worker leaf for bounded repository inspection, path tracing, evidence extraction, and state observation when the dispatch itself completely defines the scope and no durable specialist process is required. `delegateFrom` is `build`, `coordination`, `project-coordinator` (researcher deliberately excluded — it is not a perception specialist, and a researcher already holds the read-only inspection surface itself). Read-only boundary: deny `edit`/`task`/`webfetch`/`skill`, deny-all task (no outbound delegation), candidate-only return; carries NO `exec-sandbox` grant, so it is deliberately narrower than `researcher`/`repo-explorer`/`media-perception` (cannot run arbitrary code). It DOES carry `defer-triggers` — the no-arg contained wrapper that runs ONLY the canonical DEFER-trigger predicate checker (no caller-controlled exe/script/mode), which fits its trigger-currency inspection charter without promoting it to Level B. |
@@ -254,6 +254,36 @@ in AGENTS.md ("Escape hatch") applies: clear the gate lock and index, then
 The gate never stages implicitly — an empty index is refused with guidance
 (stage explicit paths, then retry). Agents must never take this path; the
 sanctioned agent route is always the `committer`.
+
+#### Commit-reviewer panel: bounded-B roster (5 registered seats)
+
+The tier-cascade review cluster registers FIVE leaf seats
+(`commit-reviewer-a` .. `commit-reviewer-e`). Registered ≠ active: the
+shipped default roster stays **3+1** on seats a..d (a = contract/data
+specialist under Lever E; b/c/d = redundant generalists); seat e is
+registered but held out via the disabled premium tier.
+
+- **Roster override seam.** The active roster is changed ONLY via the
+  operator-owned override at `.opencode/repo-configs/review-tiers.json`
+  (additive merge over the managed base `.opencode/config/review-tiers.json`
+  — objects merge key-by-key, arrays like `tiers` replace wholesale). The
+  harness never writes the override; it is entirely the operator's.
+- **Roster validators (before any dispatch).** Leaf IDs unique and within
+  the registered pool; ≥2 active generalist seats; ≤5 active seats; every
+  present `panel.leaf_roles` entry complete (role+lens, both defined). A
+  roster with ≥2 specialist seats additionally surfaces the P2-REVIEWER-001
+  per-class-quorum fixture prerequisite as a documented gate.
+- **Model preflight (hard refusal).** Every ACTIVE leaf needs a non-empty
+  `.local/config/agent-model/<leaf>` file (operator-local, gitignored). The
+  orchestrator hard-refuses dispatch when one is missing or zero bytes —
+  seed the model file before activating a seat. The refusal is also
+  enforced MECHANICALLY by the reference implementation
+  (`run_cascade` in `.opencode/sys-scripts/tier_cascade.py`), which
+  preflight-raises before any leaf — lightweight or tier — is consulted,
+  so it does not depend on orchestrator prompt conformance.
+- **Lightweight reviews** select the first ACTIVE GENERALIST (`b` under the
+  default roster), not the specialist that happens to be the first
+  configured leaf.
 
 #### Media-perception model seed
 
@@ -790,17 +820,18 @@ block:
 | `allow` | `"vh-agent-harness *": "allow"` (broad) | `build`, `coordination`, `project-coordinator` |
 | `ask` | `"vh-agent-harness *": "ask"` (broad) | _(none in CoreLocationRules — `plan` migrated to `read_only`)_ |
 | `deny` | `"vh-agent-harness *": "deny"` (broad) | `committer` (keeps its gated command surface; uses `commit-gate.sh` directly, needs no harness exec surface) |
-| `read_only` | `"vh-agent-harness *": "deny"` **FIRST**, then a canonical set of safe read-only verbs as `"allow"` **AFTER** | see below (18 core agents + 1 overlay-managed) |
+| `read_only` | `"vh-agent-harness *": "deny"` **FIRST**, then a canonical set of safe read-only verbs as `"allow"` **AFTER** | see below (20 core agents + 1 overlay-managed) |
 
-The `read_only` roster is **18 core agents** (in `CoreLocationRules`) plus
+The `read_only` roster is **20 core agents** (in `CoreLocationRules`) plus
 **1 overlay-managed**:
 
 - **9 original RO specialists:** `researcher`, `planner`, `media-perception`, `repo-explorer`, `debate`, `debate-proposer`, `debate-critic`, `debate-synth`, `solution-brief`.
-- **8 read-only service roles (F7-residue migration):** `commit-message`, `commit-reviewer`, `commit-reviewer-a`, `commit-reviewer-b`, `commit-reviewer-c`, `commit-reviewer-d`, `ship-review`, `docs-steward`.
+- **9 read-only service roles (F7-residue migration; seat e joined with the bounded-B 5-seat registration):** `commit-message`, `commit-reviewer`, `commit-reviewer-a`, `commit-reviewer-b`, `commit-reviewer-c`, `commit-reviewer-d`, `commit-reviewer-e`, `ship-review`, `docs-steward`.
 - **1 read-only primary-mode planner:** `plan` (migrated from `ask`).
+- **1 dynamic-worker read-only leaf (opt-in `core/worker-read-only`):** `worker-read-only` — the prompt-scoped read-only worker; pure read-only (no `exec-sandbox` grant; carries `defer-triggers` only).
 - **1 overlay-managed service role (not in `CoreLocationRules`):** `harness-release-readiness`.
 
-All 18 core roles are asserted in `CoreLocationRules`
+All 20 core roles are asserted in `CoreLocationRules`
 (`internal/permconfig/tables.go`); `harness-release-readiness` is
 overlay-managed (the `.vh-agent-harness` release pack renders its block and
 emits the same read_only surface). These roles draft text, review diffs,

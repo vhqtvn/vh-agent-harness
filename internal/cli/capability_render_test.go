@@ -8,10 +8,10 @@ package cli
 //
 // Coverage (Phase 5 preset semantics — the backward-compat bridge is gone):
 //   - Supervised preset: a profile declaring `profile: supervised` must render
-//     ALL 21 agents (9 ungated incl. the dormant plan subagent + 7 gated-commit +
-//     5 debate) — the supervised preset selects {core/gated-commit, core/debate}
-//     so every gated block renders. This is what this repo (and vh-solara-style
-//     repos) ship.
+//     ALL 22 agents (9 ungated incl. the dormant plan subagent + 8 gated-commit
+//     incl. the bounded-B seat e + 5 debate) — the supervised preset selects
+//     {core/gated-commit, core/debate} so every gated block renders. This is
+//     what this repo (and vh-solara-style repos) ship.
 //   - Minimal preset: a profile declaring `profile: minimal` with no explicit
 //     capabilities must render ONLY the 9 ungated agents (8 CoreCatalog
 //     baseline + dormant plan) — minimal's preset is empty, so no cluster
@@ -67,7 +67,7 @@ var ungatedAgents = append(append([]string{}, baselineAgents...), "plan")
 // case), so it is asserted separately from the orchestrators.
 var orchestrators = []string{"build", "coordination", "project-coordinator"}
 
-// gatedCommitAgents is the 7 agents owned by the core/gated-commit capability.
+// gatedCommitAgents is the 8 agents owned by the core/gated-commit capability.
 var gatedCommitAgents = []string{
 	"commit-message",
 	"commit-reviewer",
@@ -75,6 +75,7 @@ var gatedCommitAgents = []string{
 	"commit-reviewer-b",
 	"commit-reviewer-c",
 	"commit-reviewer-d",
+	"commit-reviewer-e",
 	"committer",
 }
 
@@ -176,7 +177,7 @@ func capRenderSortedKeys(m map[string]bool) []string {
 
 // TestSeamRender_SupervisedProfileRendersAllCapabilities is the Phase 5
 // supervised-preset proof: a profile declaring `profile: supervised` must render
-// all 21 agents — the supervised preset selects both core clusters so every
+// all 22 agents — the supervised preset selects both core clusters so every
 // gated block renders. This is the roster this repo (and vh-solara-style repos)
 // ship. If this regresses, the supervised profile silently loses agents on the
 // next update. (Phase 3 ran this assertion against the now-removed
@@ -192,7 +193,7 @@ func TestSeamRender_SupervisedProfileRendersAllCapabilities(t *testing.T) {
 	}
 	rendered := parseRenderedAgents(t, root)
 
-	// All 21 agents must render (9 ungated + 7 gated-commit + 5 debate).
+	// All 22 agents must render (9 ungated + 8 gated-commit + 5 debate).
 	assertAgentsPresent(t, rendered, ungatedAgents)
 	assertAgentsPresent(t, rendered, gatedCommitAgents)
 	assertAgentsPresent(t, rendered, debateAgents)
@@ -491,7 +492,7 @@ func TestSeamRender_MediaPerceptionOptInCapabilityRenders(t *testing.T) {
 
 // TestSeamRender_MediaPerceptionUnselectedDropsEdges proves the graceful-
 // degradation contract for the opt-in capability: the supervised preset (which
-// does NOT include core/media-perception) must render the standard 21 agents
+// does NOT include core/media-perception) must render the standard 22 agents
 // WITHOUT the media-perception block, and no baseline caller may carry a
 // dangling media-perception: allow edge. This mirrors the headline
 // graceful-degradation test for the existing clusters.
@@ -751,7 +752,7 @@ func TestSeamRender_WorkerReadOnly_Selected(t *testing.T) {
 
 // TestSeamRender_WorkerReadOnly_Unselected proves the graceful-degradation
 // contract for the opt-in capability (CF2): the supervised preset (which does
-// NOT include core/worker-read-only) must render the standard 21 agents
+// NOT include core/worker-read-only) must render the standard 22 agents
 // WITHOUT the worker-read-only block, and no caller may carry a dangling
 // worker-read-only: allow edge. This mirrors the headline graceful-degradation
 // test for the existing clusters and the media-perception precedent.
@@ -836,6 +837,7 @@ var stepsUncappedAgents = []string{
 	"commit-reviewer-b",
 	"commit-reviewer-c",
 	"commit-reviewer-d",
+	"commit-reviewer-e",
 	"committer",
 	"ship-review",
 	"releaser",

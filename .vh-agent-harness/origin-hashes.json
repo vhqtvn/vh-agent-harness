@@ -8,7 +8,8 @@
     ".opencode/agents/commit-reviewer-b.md": "sha256:e7c6e09bfd476fd7bad1973988db6451aae6c3e704f57192a47443c79c006a71",
     ".opencode/agents/commit-reviewer-c.md": "sha256:393eaeb506618fbbb950a2462f1ee59a62ceeb3750d09d0479b0083270d24915",
     ".opencode/agents/commit-reviewer-d.md": "sha256:fd0f3f510ea24cf8f768ee9ad27b230ce16620fa473b65047ad1bb2d3e2d0dd3",
-    ".opencode/agents/commit-reviewer.md": "sha256:e2ac884526578b3039543da0061a43124c17666a2175fd665bbe9d40b88690b1",
+    ".opencode/agents/commit-reviewer-e.md": "sha256:2460ff8eaeb031094f5ec6ea9f8951458d10792f1eb69ef3b4cc7f4bb9499bab",
+    ".opencode/agents/commit-reviewer.md": "sha256:3dab801eaad1d0b6cab5a217f0bfc2a3d3386b04e603c3b56824b52e40a7159c",
     ".opencode/agents/committer.md": "sha256:44244e89450bb3c74d39c1c8f322c616c80a622b445eff2de006b5355ac58a39",
     ".opencode/agents/coordination.md": "sha256:0f6987765ed35e4d75126109c3de67614403b2ebceabc9e679f82d3c3c5334ee",
     ".opencode/agents/debate-critic.md": "sha256:c02bfc3a2db1ec5280d75c88cc0a39848d6d7eb7f810ffe6a5a7676e0a239f6f",
@@ -65,9 +66,9 @@
     ".opencode/commands/workstream-start.md": "sha256:6a71f6173af502bac315b0643931376a1bd936efa4badde4beae9480b5f47b4b",
     ".opencode/commands/workstream-update.md": "sha256:43ad20b52c6f59b3d0ed0ed48c8b7b155d7bee54e93c7dbcbce5b7558f94c1aa",
     ".opencode/commands/write-task.md": "sha256:c9ab7ae25028547401edc45f72c9f8e65a1e3a159003d830dbb53927a1a06fdc",
-    ".opencode/config/review-tiers.json": "sha256:0d9539591a0fbe230d115ab0038d6909f59d8ef2e1680f5ad4375207bc25da13",
+    ".opencode/config/review-tiers.json": "sha256:d71d1ff698bdf5847faf6287b27058dc27c84d4bafea59842004ec7ed45f4ef6",
     ".opencode/docs/agents/README.md": "sha256:5f879421c694ad5cff1ef42937cc5ef066746ec5037bc982bd92fc09750d9f5a",
-    ".opencode/docs/agents/callable-graph.md": "sha256:e4c5eacd5b44eec1b609181d7ab9e968e52a88267535a5e33e8dcc3035482bf6",
+    ".opencode/docs/agents/callable-graph.md": "sha256:ddab88ad4d758d06b2b47de02ee65a5170d08ee61f87266f0fdee1c7dd52dfd7",
     ".opencode/docs/agents/commit-reviewer-modes.md": "sha256:a85eb2edd5c7c889225a22ac7085cf4ce352cfa5eb2e8761c384f8c4c0228ac6",
     ".opencode/docs/agents/permission-templates.md": "sha256:9d9c2cbd2d2f350126ca62c8e6c0d26c27f47ddfdb3b4e2bf98a5bec42eae89b",
     ".opencode/docs/agents/read-only-execution-policy.md": "sha256:efd0c5899fdcc8ea424d0107f13e352bac9409fac7ae195053674f3c8e8a439f",
@@ -150,8 +151,8 @@
     ".opencode/skills/tdd-loop/SKILL.md": "sha256:be8222d34364cd033d54f909e584e05544fa4a935d039403803f69a7c811f8fe",
     ".opencode/skills/tdd-loop/references/seam-localization.md": "sha256:5174f63a8ab771ecc372e28b006f4f44986a72b0b48ff93e1e968d3fceebff3a",
     ".opencode/skills/think-mode/SKILL.md": "sha256:b74870ac10bec2efa98e4bdbf316a76298c927cdd51c612429b7c6b2e322f878",
-    ".opencode/sys-scripts/tier_cascade.py": "sha256:7498bb22f4bbb0ca6e36253d27417a33f1fef6ff2a7264b1510ba804fc898e09",
-    ".opencode/sys-scripts/tier_cascade_test.py": "sha256:bb15689a09d5ce46c3700430e85045656eaa8153a5ac581bced708a47097e39e",
+    ".opencode/sys-scripts/tier_cascade.py": "sha256:46645670d120af28cc895b3b58d348b4f5f56cc292a5d1c61760353ae8a981be",
+    ".opencode/sys-scripts/tier_cascade_test.py": "sha256:b9d0c82afe25c9aac338ca0fde458d61a03eec38286cf315223dfa9d2ab5513c",
     ".opencode/sys-scripts/update-opencode-config.js": "sha256:2b4f09134b5b296f851015644dbb8ae1e7d94ee702b1203ddec22e5eba0e02cb",
     ".opencode/tools/plan-state.js": "sha256:18febcef591b0cfe11ea0ac69eea1ebbd8406aaf433b4e07012e742a15bade79",
     ".vh-agent-harness/AGENTS.core.md": "sha256:e6708cf686d5b33faa2a7e2fb1ab85c717f9779e59b97a289b4ff897e8dc5425",
@@ -179,6 +180,6 @@
     "docs/coordination/schemas/standard-report.schema.json": "sha256:0ab50a39df9d390ffa7dbddd3963809d7102774658348a00118691c89a432974",
     "docs/coordination/schemas/synthesis-report.schema.json": "sha256:34478e9f0164e1d651a78deacf9dc254ff299f15e28158469661469b826a89a6",
     "docs/coordination/schemas/task-card.schema.json": "sha256:73cff6e7dea706dd672395107a1c16cabb258500001a21bce7abd9dcd96b8433",
-    "opencode.jsonc": "sha256:497ea0469208726806a43b3e85220303304c40469ac1911a99e4fc2b5c1aa83c"
+    "opencode.jsonc": "sha256:ec8dabbafc8dbfcdd9ac06b289b8f08113e958d19a202fd152d512c8e107ad75"
   }
 }

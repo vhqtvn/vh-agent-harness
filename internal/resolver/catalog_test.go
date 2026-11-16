@@ -45,7 +45,7 @@ func TestCoreCatalog_GatedCommitProvides(t *testing.T) {
 	// Every agent the audit assigns to gated-commit is owned by it.
 	for _, agent := range []string{
 		"commit-message", "commit-reviewer",
-		"commit-reviewer-a", "commit-reviewer-b", "commit-reviewer-c", "commit-reviewer-d",
+		"commit-reviewer-a", "commit-reviewer-b", "commit-reviewer-c", "commit-reviewer-d", "commit-reviewer-e",
 		"committer",
 	} {
 		owner, owned := c.CapabilityForAgent(agent)

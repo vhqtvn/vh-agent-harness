@@ -264,6 +264,7 @@ func CoreCatalog() *Catalog {
 				"commit-reviewer-b",
 				"commit-reviewer-c",
 				"commit-reviewer-d",
+				"commit-reviewer-e",
 				"committer",
 			},
 			// No capability-level hard_deps: gated-commit is self-contained.

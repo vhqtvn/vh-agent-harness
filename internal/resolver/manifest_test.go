@@ -29,6 +29,7 @@ provides:
   - commit-reviewer-b
   - commit-reviewer-c
   - commit-reviewer-d
+  - commit-reviewer-e
   - committer
 hard_deps: []
 optional_deps: []
