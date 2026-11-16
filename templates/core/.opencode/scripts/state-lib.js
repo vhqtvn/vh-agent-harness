@@ -6554,7 +6554,9 @@ function committedBlobAt(repo, sha, targetPath) {
 // { status: "failed", problems: [...] } with fully-formed problems; a
 // failed walk that stopped at DECISION_RECORD_SEARCH_CAP revisions also
 // carries truncated: true (its miss details are qualified — absence
-// beyond the cap is NOT established).
+// beyond the cap is NOT established). The directory-diagnosis return
+// honors the same contract: qualified detail + truncated: walkTruncated
+// (2026-11-16 dir-truncation fix).
 function searchCommittedPathForAnchorAndHandle(
     repo,
     taskID,
@@ -6657,7 +6659,26 @@ function searchCommittedPathForAnchorAndHandle(
             ],
         };
     }
+    // A walk that stopped at DECISION_RECORD_SEARCH_CAP revisions can
+    // never ground a universal-absence claim, in ANY outcome class:
+    // revisions beyond the cap were never read, so the miss details below
+    // (deterministic miss AND directory diagnosis) carry the SAME
+    // diagnostic-certainty qualification as verifier_unavailable (absence
+    // beyond the cap is NOT established) while the fail-closed refusal
+    // itself is unchanged.
+    const truncationSuffix = walkTruncated
+        ? ` — the revision walk was capped at ${DECISION_RECORD_SEARCH_CAP} reachable commits touching this path, so absence beyond the cap is NOT established`
+        : "";
     if (directoryDetail !== null) {
+        // A directory diagnosis is per-revision DETERMINATE, but when the
+        // walk was capped only the capped slice was examined — the same
+        // incompleteness class as the truncation-aware returns below, so
+        // the detail carries the truncation suffix and the return keeps
+        // truncated: walkTruncated (carrierDocFallbackVerify then routes
+        // the candidate into unexaminedCandidates with zero caller
+        // changes; the 2026-11-16 dir-truncation fix — the early return
+        // used to drop walkTruncated, letting the universal-absence miss
+        // note fire over a capped walk).
         return {
             status: "failed",
             problems: [
@@ -6667,9 +6688,10 @@ function searchCommittedPathForAnchorAndHandle(
                     id,
                     locator: targetPath,
                     code: "path_is_directory_not_file_blob",
-                    detail: directoryDetail,
+                    detail: `${directoryDetail}${truncationSuffix}`,
                 },
             ],
+            truncated: walkTruncated,
         };
     }
     // An unsuccessful walk is ALWAYS terminal. anchorEver and handleEver
@@ -6679,15 +6701,9 @@ function searchCommittedPathForAnchorAndHandle(
     // ok:true (review F1 — the fail-open the deleted v2 scatter pin was
     // guarding). Fail closed with a diagnosis naming both revisions.
     //
-    // A walk that stopped at DECISION_RECORD_SEARCH_CAP revisions can
-    // never ground a universal-absence claim either: revisions beyond the
-    // cap were never read, so the deterministic-miss details below carry
-    // the SAME diagnostic-certainty qualification as verifier_unavailable
-    // (absence beyond the cap is NOT established) while the fail-closed
-    // refusal itself is unchanged.
-    const truncationSuffix = walkTruncated
-        ? ` — the revision walk was capped at ${DECISION_RECORD_SEARCH_CAP} reachable commits touching this path, so absence beyond the cap is NOT established`
-        : "";
+    // The deterministic-miss details below carry truncationSuffix (hoisted
+    // above with the directory diagnosis for the same cap-qualification
+    // contract); the walk-truncated return shape closes the function.
     if (!anchorEver) {
         problems.push({
             index,

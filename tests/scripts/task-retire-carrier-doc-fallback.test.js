@@ -59,6 +59,18 @@
 //     QUALIFIED note (absence NOT established) — never the
 //     universal-absence miss note — while the fail-closed refusal is
 //     unchanged.
+//   - Directory-truncation honesty (2026-11-16 dir-truncation fix): a
+//     DIRECTORY-shaped candidate (a committed path later superseded by a
+//     directory) under a capped walk is the same incompleteness class —
+//     the directory diagnosis must not discard walkTruncated, so the note
+//     is the qualified unavailable note naming the candidate, never the
+//     universal-absence miss note.
+//   - Named local pin (2026-11-16): search-mode ARTIFACT carriers verify
+//     and diagnose through searchCommittedPathForAnchorAndHandle — the
+//     helper's own locator/how and deterministic path_never_committed
+//     wording flow through the artifact arm unchanged (the sibling
+//     decision-record suite covers this only indirectly, through the full
+//     retire flow).
 //   - gc-invariance (review F1, 2026-11-16): the corruption fixture
 //     asserts the loose blob is actually GONE after removal and the
 //     scratch repo pins gc.auto=0, so a packed copy can never silently
@@ -89,6 +101,7 @@ const {
     saveCoordinationTaskCloseout,
     deleteCoordinationTask,
     decisionItemId,
+    verifyDecisionRecordForRetirement,
 } = await import(pathToFileURL(STATE_LIB).href);
 
 const noteId = (text) => decisionItemId("owner_notes", text);
@@ -1325,6 +1338,232 @@ test("carrier-doc fallback: a candidate walk capped at 200 revisions treats the 
             process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = prevCoordRoot;
         }
         fs.rmSync(isoRoot, { recursive: true, force: true });
+        fs.rmSync(scratch.dir, { recursive: true, force: true });
+    }
+});
+
+// Directory-diagnosis truncation honesty (2026-11-16 dir-truncation fix):
+// a DIRECTORY-shaped candidate — a committed carrier-doc path later
+// superseded by a directory at the same path — under a walk capped at
+// DECISION_RECORD_SEARCH_CAP=200 revisions. The only content-bearing
+// revision of the candidate is the OLDEST file revision (beyond the cap),
+// and every walked revision is directory-shaped, so the per-candidate
+// search ends in the DIRECTORY diagnosis while the walk was truncated.
+// Pre-fix, the directory-diagnosis early return fired BEFORE the
+// truncation-aware return and DROPPED walkTruncated — the candidate read
+// as fully examined and the universal-absence miss note fired over a
+// capped walk. Post-fix the directory branch carries the truncation
+// suffix and truncated: walkTruncated, so carrierDocFallbackVerify routes
+// the candidate into unexaminedCandidates with ZERO caller changes and
+// the appended note is the qualified unavailable note naming the
+// candidate — never the universal-absence miss note — while the
+// fail-closed refusal is unchanged.
+test("carrier-doc fallback: a directory-shaped candidate under a capped walk is unavailability, never a confident miss", () => {
+    const isoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dr-docfb-dirtr-"));
+    const prevCoordRoot = process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+    process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = isoRoot;
+    bindSessionName(SESSION_ID, ALIAS);
+    const scratch = makeScratchRepo();
+
+    const retire = (id) =>
+        deleteCoordinationTask(SESSION_ID, id, {
+            cwd: "/verification",
+            landingProofRepo: scratch.dir,
+        });
+
+    try {
+        commitAll(scratch.git, scratch.dir, "initial: no trailer");
+
+        const ID = "dr-docfb-dirtr";
+        const NOTE =
+            "OWNER NOTE dr-docfb-dirtr: a directory-shaped candidate under a capped walk never claims a confident miss";
+        const ITEM_ID = noteId(NOTE);
+        const CURATED_LABEL = label(ID, ITEM_ID, "curated");
+        writeWorkingCard(isoRoot, ID, { owner_notes: [NOTE] });
+        const sliceSha = commitAll(
+            scratch.git,
+            scratch.dir,
+            `fix dirtr\n\nTask-Card: ${ID}\n`,
+        );
+        closeout(ID, [
+            {
+                id: ITEM_ID,
+                disposition: "curated",
+                carrier: { kind: "commit", revision: sliceSha },
+                handle: CURATED_LABEL,
+                provenance: "owner chat, 2026-11-16 — curated note",
+            },
+        ]);
+        // One candidate path, 201 revisions touching it: the OLDEST is the
+        // only content-bearing FILE revision (anchor + label together —
+        // it would verify, but sits beyond the capped walk); the 200
+        // newest supersede the file with a DIRECTORY at the same path, so
+        // every walked revision is directory-shaped. Lean loop — the
+        // first iteration is the file->directory transition itself.
+        const DOC_REL = `docs/checkpoints/2026-11-16-retirement-carrier-${ID}.md`;
+        const docAbs = path.join(scratch.dir, DOC_REL);
+        fs.mkdirSync(path.dirname(docAbs), { recursive: true });
+        fs.writeFileSync(
+            docAbs,
+            `Task-Card: ${ID}\n\n${CURATED_LABEL}\nthe only content-bearing revision, landed oldest as a FILE\n`,
+        );
+        scratch.git(["add", DOC_REL]);
+        scratch.git(["commit", "-q", "-m", `docs: oldest good file revision for ${ID}`]);
+        fs.rmSync(docAbs);
+        fs.mkdirSync(docAbs, { recursive: true });
+        for (let i = 0; i < 200; i++) {
+            fs.writeFileSync(
+                path.join(docAbs, `fill-${i}.txt`),
+                `directory filler ${i} — a listing is not content\n`,
+            );
+            scratch.git(["add", "-A"]);
+            scratch.git(["commit", "-q", "-m", `docs: directory revision ${i} for ${ID}`]);
+        }
+
+        const refused = retire(ID);
+        assert.equal(
+            refused.ok,
+            false,
+            "dirtr: must still refuse — the good file revision is beyond the walk cap (fail-closed unchanged)",
+        );
+        assert.equal(refused.refusal.code, "decision_record_unresolved");
+        const miss = (refused.refusal.problems || []).find(
+            (p) => p.code === "handle_not_in_carrier",
+        );
+        assert.ok(
+            miss,
+            "dirtr: refusal must still name handle_not_in_carrier for the declared carrier",
+        );
+        // The qualified note names the directory-shaped candidate…
+        assert.ok(
+            (miss.detail || "").includes(DOC_REL),
+            `dirtr: the note must name the directory-shaped unexamined candidate; got: ${miss.detail}`,
+        );
+        // …reflects UNAVAILABILITY and explicitly disclaims absence…
+        assert.ok(
+            (miss.detail || "").includes("could not") &&
+                (miss.detail || "").includes("absence is NOT established"),
+            `dirtr: the note must reflect unavailability and disclaim absence; got: ${miss.detail}`,
+        );
+        // …and never collapses the capped directory walk into a confident
+        // miss (the pre-fix defect: the directory-diagnosis early return
+        // dropped walkTruncated, so the universal-absence miss note fired).
+        assert.ok(
+            !(miss.detail || "").includes("also found nothing"),
+            `dirtr: the note must not assert a completed search that found nothing; got: ${miss.detail}`,
+        );
+        assert.ok(
+            !(miss.detail || "").includes("no committed, branch-reachable file"),
+            `dirtr: the note must not assert universal absence over an unexamined candidate; got: ${miss.detail}`,
+        );
+        assert.equal(
+            cardExists(isoRoot, ID),
+            true,
+            "dirtr: card survives the fail-closed refusal",
+        );
+    } finally {
+        if (prevCoordRoot === undefined) {
+            delete process.env.OPENCODE_LOCAL_COORDINATOR_ROOT;
+        } else {
+            process.env.OPENCODE_LOCAL_COORDINATOR_ROOT = prevCoordRoot;
+        }
+        fs.rmSync(isoRoot, { recursive: true, force: true });
+        fs.rmSync(scratch.dir, { recursive: true, force: true });
+    }
+});
+
+// Named local pin (2026-11-16, the artifact-path fixture card): the
+// ARTIFACT-carrier arm's SEARCH mode (revision omitted) routes through the
+// shared walker searchCommittedPathForAnchorAndHandle — the extraction
+// 5db2741 made the artifact and carrier-doc paths byte-equivalent. The
+// sibling task-retire-decision-record suite covers this only INDIRECTLY
+// (artifact search-mode arms through the full retire flow); this pin is
+// NAMED for the helper and local to the fallback suite, asserting BOTH
+// outcome shapes the helper returns flow through the artifact arm
+// unchanged: the verified locator/how (the helper's own return values,
+// passed through verbatim) and the deterministic path_never_committed
+// diagnosis (helper-unique wording). Driven through the exported
+// verifyDecisionRecordForRetirement test seam — no hub export widening.
+test("carrier-doc fallback: named pin — search-mode ARTIFACT carriers verify and diagnose through searchCommittedPathForAnchorAndHandle", () => {
+    const scratch = makeScratchRepo();
+    try {
+        commitAll(scratch.git, scratch.dir, "initial: no trailer");
+        const ID = "dr-docfb-artifact-named-pin";
+        const NOTE =
+            "OWNER NOTE dr-docfb-artifact-named-pin: artifact search-mode outcomes flow through the shared walker";
+        const ITEM_ID = noteId(NOTE);
+        const CURATED_LABEL = label(ID, ITEM_ID, "curated");
+        const REL = `docs/checkpoints/${ID}-artifact.md`;
+        const sha = commitFile(
+            scratch.git,
+            scratch.dir,
+            REL,
+            `Task-Card: ${ID}\n\n${CURATED_LABEL}\nthe committed artifact carrier blob\n`,
+            `docs: artifact carrier for ${ID}`,
+        );
+        const record = (path) => ({
+            version: 3,
+            items: [
+                {
+                    id: ITEM_ID,
+                    disposition: "curated",
+                    carrier: { kind: "artifact", path },
+                    handle: CURATED_LABEL,
+                    provenance: "owner chat, 2026-11-16 — curated note",
+                },
+            ],
+        });
+
+        // Verified outcome: the locator/how pushed by the artifact arm ARE
+        // the helper's return values (`<sha>:<path>` + "committed blob at
+        // reachable revision"), passed through unchanged.
+        const verified = verifyDecisionRecordForRetirement(
+            ID,
+            record(REL),
+            scratch.dir,
+        );
+        assert.equal(
+            verified.ok,
+            true,
+            `named pin: search-mode artifact carrier must verify; got ${JSON.stringify(verified.problems || verified)}`,
+        );
+        assert.equal(verified.verified.length, 1, "named pin: exactly one verified item");
+        assert.equal(
+            verified.verified[0].locator,
+            `${sha}:${REL}`,
+            `named pin: locator must be the helper's own "<sha>:<path>" shape; got: ${verified.verified[0].locator}`,
+        );
+        assert.ok(
+            (verified.verified[0].how || "").includes(
+                "present in the committed blob at reachable revision",
+            ),
+            `named pin: how must be the helper's own wording; got: ${verified.verified[0].how}`,
+        );
+
+        // Diagnosis outcome: a never-committed artifact path refuses with
+        // the helper's deterministic path_never_committed diagnosis
+        // (helper-unique wording — not the pinned-probe wording).
+        const refused = verifyDecisionRecordForRetirement(
+            ID,
+            record(`docs/checkpoints/${ID}-never-committed.md`),
+            scratch.dir,
+        );
+        assert.equal(
+            refused.ok,
+            false,
+            "named pin: a never-committed artifact path must refuse",
+        );
+        assert.equal(refused.problems.length, 1, "named pin: exactly one problem");
+        assert.equal(
+            refused.problems[0].code,
+            "path_never_committed",
+            `named pin: refusal must carry the helper's path_never_committed code; got: ${JSON.stringify(refused.problems[0])}`,
+        );
+        assert.ok(
+            (refused.problems[0].detail || "").includes("no reachable commit carries"),
+            `named pin: detail must be the helper's own wording; got: ${refused.problems[0].detail}`,
+        );
+    } finally {
         fs.rmSync(scratch.dir, { recursive: true, force: true });
     }
 });

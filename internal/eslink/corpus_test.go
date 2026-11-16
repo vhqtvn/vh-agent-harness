@@ -451,9 +451,27 @@ func corpusDigest(tree map[string][]byte) string {
 // F3-gated staged->ready restore stay sanctioned). Pure guard +
 // comments: no new modules, imports, exports, or specifiers — counters
 // and the hub's 74-export surface re-derived IDENTICAL. Mirrored into
-// the rendered twin by the required `make update`. Same discipline:
+// the rendered twin by the required make update. Same discipline:
 // re-derived before re-pinning, not a re-pin-to-absorb.
-const pinnedCorpusDigest = "79c96414ecad72c301423f9b82ff731f6e787ce9072cb8111db053f3a64e5cc9"
+//
+// Re-derived again 2026-11-16 (thirteenth move; content-only) for the
+// carrier-doc directory-truncation fix
+// (defer-carrier-fallback-dir-truncation-note, the Region-B pair of the
+// 2026-11-16 study+go chain): the directory-diagnosis early return in
+// searchCommittedPathForAnchorAndHandle no longer discards walkTruncated
+// — the truncationSuffix const is hoisted above the directory branch,
+// the directory detail carries it, and the return keeps
+// truncated: walkTruncated, so carrierDocFallbackVerify routes a
+// directory-shaped candidate under a capped
+// (DECISION_RECORD_SEARCH_CAP) walk into unexaminedCandidates with zero
+// caller changes (qualified unavailable note naming the candidate,
+// never the universal-absence miss note; fail-closed refusal
+// unchanged). No new modules, imports, exports, or specifiers —
+// counters and the hub's 74-export surface re-derived IDENTICAL
+// (verified green against the new bytes before this comment landed).
+// Mirrored into the rendered twin by the required make update. Same
+// discipline: re-derived before re-pinning, not a re-pin-to-absorb.
+const pinnedCorpusDigest = "7561f9ee6cc9cffe8a3c0f848e3f9fdb934390af1609d108e01da3a336e23981"
 
 // updateOpDebtFiles are the packet §B per-file table's post-normalization
 // remainder: 14 modules still carrying `++`/`--` update operators (the
