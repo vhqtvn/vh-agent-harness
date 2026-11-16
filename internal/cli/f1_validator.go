@@ -529,8 +529,14 @@ func validatePAProbeRequirements(pe string, pa *F1PAProbeSummary) []string {
 // coverage: found / not_found_in_checked_scope / unavailable (a probe was
 // attempted and produced a bounded result). not_run does NOT (memo L206).
 // unavailable satisfies coverage structurally but cannot support proven
-// (memo L309) — the high-risk-release-seam policy that would ALSO block on
-// unavailable is operator-owned (open-question #5) and is NOT enforced here.
+// (memo L309) — whether high-risk release seams ALSO block on `unavailable`
+// is decided NO-for-now (2026-11-16, operator; memo open-question #5;
+// decision record researches/decisions/2026-11-16-f1-pa-unavailable-high-
+// risk-seam-policy.md): no refusal is enforced and the proven-rule linkage
+// stays comment-only (accepted, unrepaired assurance gap). Reconsider on
+// release-material reliance on unavailable-only coverage, an observed
+// misleading proven claim resting solely on `unavailable`, or BEFORE any
+// emit/R3 production wiring lands (memo open-question #6).
 //
 // This is an EXPLICIT ALLOWLIST (not `!= not_run`) so that an UNKNOWN result
 // string is treated as non-coverage-satisfying rather than silently accepted

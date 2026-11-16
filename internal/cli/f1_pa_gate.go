@@ -17,13 +17,19 @@ package cli
 //     envelope validator's digest re-derivation). This gate is envelope-
 //     agnostic by design: it takes the summaries, not the whole envelope.
 //
-// OPERATOR-OWNED BOUNDARY (memo open-question #5, L307-311): the baseline
-// coverage rule IS decided — not_run fails coverage; unavailable satisfies
-// coverage structurally (with a limitation) but cannot support proven. The
-// NOT-decided extension — whether high-risk release seams ALSO block on
-// `unavailable` — is operator-owned and is NOT enforced here. Callers that
-// need the high-risk-seam policy must layer it on top (and that decision
-// belongs to a policy owner, not this structural gate).
+// OPERATOR-DECIDED BOUNDARY (2026-11-16, operator; memo open-question #5;
+// decision record researches/decisions/2026-11-16-f1-pa-unavailable-high-
+// risk-seam-policy.md): the baseline rule stands — not_run fails coverage;
+// unavailable satisfies coverage structurally (limitation required, closed
+// enum, exact-enum rendering) but cannot support proven. The extension —
+// whether high-risk release seams ALSO block on `unavailable` — is decided
+// NO-for-now: no categorical refusal is enforced at any seam, and the
+// proven-rule linkage stays comment-only (accepted, unrepaired assurance
+// gap). A future yes would be a policy-layer check on top, never a
+// tightening of this structural gate. Reconsider on release-material
+// reliance on unavailable-only coverage, an observed misleading proven
+// claim resting solely on `unavailable`, or BEFORE any emit/R3 production
+// wiring lands (memo open-question #6).
 //
 // Structural, not truth: this gate proves coverage COMPLETENESS and per-probe
 // HONESTY, NOT that the evidence is actually true (memo L276:

@@ -16,11 +16,19 @@ package cli
 // that passes validatePASummary — the producer↔validator property guarantee
 // (mirrors TestJoinR1_ProducerOutputPassesValidator).
 //
-// OPERATOR-OWNED BOUNDARY (memo open-question #5, L307-311): the baseline
-// rules ARE decided here — found needs refs, not_found_in_checked_scope needs
-// method+scope, unavailable needs a limitation, not_run cannot satisfy
-// coverage. The NOT-decided part is whether high-risk release seams ALSO block
-// on `unavailable`; that extension is deferred and is NOT implemented here.
+// OPERATOR-DECIDED BOUNDARY (2026-11-16, operator; memo open-question #5;
+// decision record researches/decisions/2026-11-16-f1-pa-unavailable-high-
+// risk-seam-policy.md): the baseline rules stand — found needs refs,
+// not_found_in_checked_scope needs method+scope, unavailable needs a
+// limitation, not_run cannot satisfy coverage; F1PAResult stays a closed
+// enum with exact-enum rendering. Whether high-risk release seams ALSO
+// block on `unavailable` is decided NO-for-now: no categorical release
+// refusal for unavailable-only P-a coverage, and "unavailable cannot
+// support proven" stays comment-only — accepted, unrepaired assurance gap
+// (no mechanical P-a→proven-claim linkage). Reconsider on release-material
+// reliance on unavailable-only coverage, an observed misleading proven
+// claim resting solely on `unavailable`, or BEFORE any emit/R3 production
+// wiring lands (memo open-question #6).
 
 import (
 	"fmt"
