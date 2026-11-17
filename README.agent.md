@@ -1160,6 +1160,16 @@ export default function transform({ context }) {
   - Sibling repos / home-sensitive paths: denied (not in ruleset → EACCES on
     open; metadata may still be visible via `stat`)
 
+  **Compile-class workloads do not fit the sandbox** (any kernel-enforced
+  mode, strict included): a compile writes to the Go module cache
+  (`~/go/pkg/mod`), the build cache (`$GOCACHE`, default `~/.cache/go-build`),
+  and its output path (`-o bin/…`) — all outside `./tmp/`, so `make build` /
+  `make doctor` / `go build` fail there with permission-denied. That is the
+  accepted tradeoff of the write-`./tmp/`-only contract (mode-floor memo
+  addendum, 2026-11-18): route compile-then-run verification through
+  `vh-agent-harness exec make doctor` instead, and keep `exec-sandbox` for
+  arbitrary read-code.
+
   **Modes (`--sandbox`):**
   - `off` — no sandbox; run directly.
   - `best-effort` (default) — use OS sandbox if available; otherwise print a

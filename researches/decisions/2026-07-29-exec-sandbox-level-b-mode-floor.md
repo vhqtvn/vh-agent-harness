@@ -263,3 +263,61 @@ The brief also specified prompt reinforcement (one bullet each in
 `researcher.md.tmpl`, `repo-explorer.md`, `media-perception.md` pointing at
 the read-only-execution-policy doc); that is implementation detail, not
 design rationale, and is not repeated here.
+
+## Addendum (2026-11-18): compile-class workloads are outside the strict floor's charter — accepted limitation + verb-routing, not a carve-out
+
+Provenance: friction card `defer-execsandbox-make-doctor-gocache-friction`
+(source: session receipt 2026-08-16, researcher leg of solution-brief run
+ses_ff60578c6ffe — "make doctor was attempted but could not build because
+the strict sandbox lacked Go-cache access") plus the fresh reproduction
+receipt below. The card's open question: should the strict floor carve out
+GOCACHE/GOPATH access, or should doctor-class verification route to a
+different exec verb?
+
+**The friction, reproduced (2026-11-18, host kernel, Landlock active).**
+`make doctor` routes doctor through `build` (`Makefile: doctor: build` —
+compile-then-run). Under the strict floor:
+
+```text
+$ vh-agent-harness exec-sandbox --sandbox=strict -- make doctor
+go build -ldflags "..." -o bin/vh-agent-harness ./cmd/vh-agent-harness
+go: verifying golang.org/toolchain@v0.0.1-go1.25.0.linux-amd64:
+  open ~/go/pkg/mod/cache/download/golang.org/toolchain/@v/v0.0.1-go1.25.0.linux-amd64.ziphash:
+  permission denied        (home path abbreviated)
+make: *** [Makefile:20: build] Error 1
+```
+
+The failure is NOT one environment variable deep. A compile needs writes to
+the MODULE cache (`~/go/pkg/mod` — the toolchain-verification `.ziphash`
+above), the BUILD cache (`$GOCACHE`, default `~/.cache/go-build`), and the
+link OUTPUT (`-o bin/…`) — all outside the profile's `./tmp/`-only write
+surface. Any compile-then-run flow fails the same way; `make doctor` is
+just the first one an agent reaches for.
+
+**Settled disposition: accepted limitation + verb-routing** (the card's
+third option). A GOCACHE/GOPATH carve-out is REFUSED:
+
+- The floor's load-bearing property (decision 2, the P5 rationale) is that
+  the kernel write surface is EXACTLY `./tmp/`. A carve-out widens it to
+  operator-state directories the repo does not own, for a workload the
+  Level-B charter never covered: the memo's payoff case (decisions 1/3) is
+  arbitrary READ-CODE (analysis scripts reading inputs, writing neutral
+  dumps to `./tmp/`), not compilation.
+- Redirecting cache/output under `./tmp/` in the Makefile is churn, not a
+  fix: the cache would die with routine `tmp/` hygiene (a cold rebuild on
+  every run), the normal host flow pays the indirection, and it patches
+  only this repo's Makefile — the workload class stays broken everywhere
+  else.
+
+**Recovery (verb-routing):** doctor-class verification — anything that must
+compile or run the project binary — belongs to `vh-agent-harness exec`
+(the mutation/runtime verb): `vh-agent-harness exec make doctor` compiles
+against the host toolchain caches and writes `bin/` normally. Keep
+`exec-sandbox --sandbox=strict` for arbitrary read-code. The boundary is
+also stated agent-facing in `README.agent.md` (exec-sandbox section:
+compile-class workloads note).
+
+Scope note: the Slice-4 verification line above ("`doctor` = HEALTHY") was
+an UNSANDBOXED acceptance receipt (`make doctor` on the normal host path);
+this addendum records the boundary that line did not test. The floor, the
+per-agent grant, and the ladder framing (X1/X3/X4) are unchanged.
