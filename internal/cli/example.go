@@ -36,8 +36,10 @@ then edit:
    vh-agent-harness example .opencode/repo-configs/forbidden-patterns.project.js
 
 Covered: the project-owned seeds (mission, project.config, forbidden-patterns,
-compaction-primitives, cleared-assumptions, LANES, ROLES) AND the schema'd
-authorities (vh-harness-profile.yml, run-shape.yml, harness-ownership.yml).`,
+compaction-primitives, cleared-assumptions, LANES, ROLES), the schema'd
+authorities (vh-harness-profile.yml, run-shape.yml, harness-ownership.yml),
+AND the operator config docs (the commit-reviewer review-tiers roster-override
+recipes).`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runExample,
 }

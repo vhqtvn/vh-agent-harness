@@ -1,0 +1,39 @@
+{
+  "//": "vh-agent-harness :: .opencode/repo-configs/review-tiers.json — operator-owned roster override for the commit-reviewer panel (OPTIONAL file).",
+  "//_purpose": "The managed base at .opencode/config/review-tiers.json already ships a working default roster; create this file ONLY to change the active composition. Get this template with: vh-agent-harness example .opencode/repo-configs/review-tiers.json — then trim it to the keys you actually override and edit. Merge semantics: nested objects merge key-by-key with this file winning; arrays (tiers) and scalars are replaced WHOLESALE — any roster change must re-state the entire tiers array. Delete this file to return to the shipped default. The harness never writes or reconciles this file; it is entirely the operator's.",
+  "//_recipe_model_only": "RECIPE 1 — swap/add/remove a MODEL (no copy of this file needed). Model identity and roster composition are independent axes: each seat resolves its model from .local/config/agent-model/commit-reviewer-<seat> (operator-local, gitignored). To change which model a seat uses, edit ONLY that file's contents. Rules: the model file must exist and be non-empty for every ACTIVE seat (missing or zero bytes = the whole dispatch is hard-refused before any leaf runs); registered-but-inactive seats are exempt; doctor WARNs on any empty model file. A model swap never touches roster files.",
+  "//_recipe_default_3plus1": "RECIPE 2 — first-time composition (no copy of this file needed). With no override, the shipped default is 3+1 on seats a..d: commit-reviewer-a = contract/data specialist, b/c/d = redundant generalists; seat e is registered but held out (premium tier disabled). Setup = seed the model files for the ACTIVE seats only: .local/config/agent-model/commit-reviewer-{a,b,c,d}. Lightweight (docs-only) reviews pick the first active generalist (b).",
+  "//_recipe_4plus1": "RECIPE 3a — 4+1 single specialist, the bounded-B showcase (the LIVE BODY below). Premium tier enabled (seat e active) with the specialist re-seated from a to e: 4 generalists (a..d) + 1 specialist (e). Two levers are exercised: (1) the tiers array is re-stated WHOLESALE — the premium tier object re-appears WITHOUT \"disabled\": true, so it activates; (2) panel.leaf_roles merges KEY-BY-KEY, so BOTH moves must be named — a back to the generalist default and e onto the specialist role (naming only e would leave TWO specialists, which surfaces the specialist-floor warning for M>=2 specialists). Lightweight reviews now pick a (first active generalist). Before activating: seed .local/config/agent-model/commit-reviewer-e or model preflight hard-refuses. Role vocabulary: r1_redundant, r1_backup_secondary, r2_contract_data, r3_security, r4_blind_spot (RESERVED). Lens vocabulary: block_finder, contract_data, security, blind_spot (RESERVED).",
+  "//_recipe_minimal_2plus1": {
+    "tiers": [
+      {
+        "name": "free",
+        "description": "Reduced-budget roster — 2 generalists + 1 specialist",
+        "leaves": ["commit-reviewer-a", "commit-reviewer-b", "commit-reviewer-c"],
+        "within_tier_aggregation": "strict_consensus"
+      }
+    ]
+  },
+  "//_recipe_2plus1_note": "RECIPE 3b — minimal 2+1, reduced model budget: copy the //_recipe_minimal_2plus1 object above as this file's ENTIRE body. One active tier with three seats: a stays the contract/data specialist via the BASE leaf_roles (no panel section is needed at all); b and c are the required minimum of 2 generalists. Seats d and e go inactive — inactive seats are exempt from model preflight, so only the a/b/c model files must exist. Lightweight reviews pick b. The base leaf_roles entries for inactive seats merge through harmlessly.",
+
+  "tiers": [
+    {
+      "name": "free",
+      "description": "Generalist tier — 4 redundant generalists",
+      "leaves": ["commit-reviewer-a", "commit-reviewer-b", "commit-reviewer-c", "commit-reviewer-d"],
+      "within_tier_aggregation": "strict_consensus"
+    },
+    {
+      "name": "premium",
+      "description": "Premium tier — the specialist seat (activated: no disabled flag)",
+      "leaves": ["commit-reviewer-e"],
+      "within_tier_aggregation": "strict_consensus"
+    }
+  ],
+  "panel": {
+    "leaf_roles": {
+      "commit-reviewer-a": { "role": "r1_redundant", "lens": "block_finder" },
+      "commit-reviewer-e": { "role": "r2_contract_data", "lens": "contract_data" }
+    }
+  }
+}

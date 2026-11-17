@@ -113,6 +113,7 @@ real target locations.
 | `.vh-agent-harness/product-prefixes.json` | (optional; not seeded) Declare the product-code surface (directory prefixes) for the coordination cross-boundary-slice hint. Absent or malformed → monorepo default `apps/` + `packages/`; create only for a non-monorepo layout (e.g. `src/`). Read at runtime by `coordination-hints-lib.js` (not the render seam). |
 | `.vh-agent-harness/overlays/<pack>/` | Project overlay: `agents/`, `commands/`, `skills/`, `opencode-append.jsonc`, `permission-pack.jsonc`, `callable-graph-snippet.md`. |
 | `.opencode/repo-configs/forbidden-patterns.project.js` | (seeded blank) Project deny-rules (import builders from `forbidden-patterns.core.js`; each rule needs a `why`). |
+| `.opencode/repo-configs/review-tiers.json` | (optional; not seeded) Commit-reviewer panel roster override — shipped recipe file (copy/edit to configure panel composition; see "Commit-reviewer panel" below). |
 | `.vh-agent-harness/config-transform.mjs` | (seeded blank) Project permission transform (F-intent). Returns typed `permissionPatches` merged into every render. NO raw config mutation. See "Permission transform (F-intent)" below. |
 | `.vh-agent-harness/config-transform.core.mjs` | (regenerated) Harness-owned types + Decision constants + builder helpers for the transform. Import, do not edit. |
 | `.opencode/plugins/compaction-primitives.project.md` | Project compaction-recovery block (operational primitives an agent needs after context loss). |
@@ -284,6 +285,17 @@ registered but held out via the disabled premium tier.
 - **Lightweight reviews** select the first ACTIVE GENERALIST (`b` under the
   default roster), not the specialist that happens to be the first
   configured leaf.
+
+**Roster recipes (shipped examples).** The example file doubles as a recipe
+book — print it with
+`vh-agent-harness example .opencode/repo-configs/review-tiers.json`:
+a model-only swap (NO override file — edit
+`.local/config/agent-model/commit-reviewer-<seat>` instead), the shipped
+default 3+1 (no override needed), the 4+1 single-specialist showcase (the
+example's live body), and the minimal 2+1 (the copyable
+`//_recipe_minimal_2plus1` doc key). Model changes take effect only after an
+opencode RESTART — the `{file:...}` binding is resolved at config load, not
+per-dispatch.
 
 #### Media-perception model seed
 
