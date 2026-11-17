@@ -1767,6 +1767,78 @@ test(
     }),
 );
 
+// --- watch pin (defer-staged-draft-omitted-status-watch, 2026-11-16): ----
+// a valid stored `staged` NEVER projects to `draft` on the load path.
+//
+// The round-6 arm-3 infeasibility assessment (above) rests on one premise
+// about the read path: normalizeCoordinationTaskRecord coerces ONLY an
+// unrecoverable `working` to `ready` (and an invalid/absent status to
+// `draft`); a VALID stored `staged` projects as `staged` itself. If the
+// normalizer's coercion set ever widens — e.g. a `staged` card degraded by
+// an unrelated field starts projecting `draft` — the omitted-status
+// staged->draft bypass becomes constructible and the watch card demands
+// re-assessment. This arm pins the premise against the REAL load path
+// (readCoordinationTask -> loadCoordinationTask ->
+// normalizeCoordinationTaskRecordWithDiagnostics): two stored-staged
+// fixtures — (i) healthy, (ii) degraded by an UNRELATED field (missing
+// enums, the round-6 demote fixture shape) — must both project `staged`,
+// never `draft`. Green-from-birth by design (the watch card is
+// assessment-only; this pin exists to catch coercion-set drift, not to
+// red-flag the current slice).
+test(
+    "watch pin: a valid stored staged card never projects to draft on the load path",
+    withIsolatedTransport((root) => {
+        // (i) healthy stored-staged card: valid enums + report envelope +
+        // DoR lists on the stored body, non-degenerate title from the
+        // writeCard base.
+        const idHealthy = "dlk-w-staged-healthy";
+        writeCard(root, idHealthy, {
+            status: "staged",
+            ...ENUM_FIX,
+            report_envelope: "minimal",
+            rough_scope: ["healthy staged projection pin"],
+            staged_path: FIXTURE_STAGED_PATH,
+            files_in_scope: FILL_FIX.files_in_scope,
+            success_criteria: FILL_FIX.success_criteria,
+            validation_plan: FILL_FIX.validation_plan,
+        });
+        const healthy = readCoordinationTask(SESSION_ID, idHealthy);
+        assert.equal(
+            healthy.diagnostics.degraded,
+            false,
+            "watch pin (i) premise: the healthy staged fixture must not load degraded",
+        );
+        assert.equal(
+            healthy.task.status,
+            "staged",
+            "watch pin (i): a healthy stored staged card must project staged",
+        );
+
+        // (ii) stored-staged card degraded by an UNRELATED field (missing
+        // enums — the round-6 demote fixture shape): degradation must NOT
+        // flip the status projection.
+        const idDegraded = "dlk-w-staged-degraded";
+        writeCard(root, idDegraded, {
+            status: "staged",
+            rough_scope: ["degraded staged projection pin"],
+            files_in_scope: FILL_FIX.files_in_scope,
+            success_criteria: FILL_FIX.success_criteria,
+            validation_plan: FILL_FIX.validation_plan,
+        });
+        const degraded = readCoordinationTask(SESSION_ID, idDegraded);
+        assert.equal(
+            degraded.diagnostics.degraded,
+            true,
+            "watch pin (ii) premise: the fixture must load degraded (missing enums)",
+        );
+        assert.equal(
+            degraded.task.status,
+            "staged",
+            "watch pin (ii): an unrelated degraded field must not flip a valid stored staged into a draft projection",
+        );
+    }),
+);
+
 // --- round-2 C-F7: domain-free characterization ------------------------------
 //
 // templates/core/ is the DOMAIN-FREE embedded corpus (tokens only, no

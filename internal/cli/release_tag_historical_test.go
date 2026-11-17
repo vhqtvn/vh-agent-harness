@@ -2127,6 +2127,199 @@ func TestReleaseTag_Historical_G0cRealBinary_DeferLivenessAnchorEscape_DisposedC
 	}
 }
 
+// Round-4/7 companion (defer-release-tag-mdl-greenfield-skip-pin): the
+// greenfield fail-safe of the historical-M defer-liveness anchor supplement.
+//
+// greenfieldManifestSpecForHistorical is the root-base (first-release) twin
+// of manifestSpecForReadiness: kind=root attests a greenfield release whose
+// whole history is the release arc — no prior tag exists to derive (the
+// same first-release shape as TestCheckDefer_Manifest_RootBaseEvaluates
+// WholeHistory / ..._RootBaseIgnoresHeadFallback).
+func greenfieldManifestSpecForHistorical() manifestSpec {
+	return manifestSpec{
+		ReleaseBaseKind:     "root",
+		ReconciliationScope: "whole repository history through evaluated_commit",
+		Records:             []manifestRecordSpec{seededNoDiscloseInvalid("defer-seed")},
+	}
+}
+
+// deferLivenessGreenfieldCardID is the live OPEN firing card for the
+// greenfield arm — distinct from deferLivenessEscapeCardID so the two
+// fixtures' cards stay distinguishable in any surfaced diagnostic.
+const deferLivenessGreenfieldCardID = "defer-hist-greenfield-skip"
+
+// setupDeferLivenessGreenfieldFixture builds the greenfield (no-prior-tag)
+// twin of the round-4 anchor-escape shape: the SAME full seam render,
+// coordinator adoption marker, below-ceremony touched path, live OPEN
+// firing card (trigger:path_touched on that path), and post-M restore chore
+// — on a root-base manifest with NO tag in the repo at all. The wrapper's
+// PRIOR_TAG derivation (`git describe --tags --abbrev=0 <M>`) is therefore
+// EMPTY, and the anchor supplement must take its GREENFIELD SKIP branch
+// (release-tag.sh: `if [ "$HISTORICAL" = "1" ] && [ -n "$PRIOR_TAG" ]`)
+// rather than refusing fail-closed on the unresolvable prior tag — the
+// supplement mirrors doctor's own fail-safe-dormant recurrence predicate on
+// the same boundary (evaluateDeferRecurrence with an empty diff-since
+// self-derivation failure yields no blockers).
+func setupDeferLivenessGreenfieldFixture(t *testing.T) *historicalFixture {
+	t.Helper()
+	spec := greenfieldManifestSpecForHistorical()
+	scratch, wrapper, _, _, _ := setupReleaseTagManifestRepo(t, spec)
+	// setupReleaseTagManifestRepo tags v0.1.0 mid-build; greenfield means
+	// ZERO tags, so delete it (the recorded first-release simulation move).
+	if out, err := exec.Command("git", "-C", scratch, "tag", "-d", "v0.1.0").CombinedOutput(); err != nil {
+		t.Fatalf("git tag -d v0.1.0: %v\n%s", err, out)
+	}
+	fx := &historicalFixture{scratch: scratch, wrapper: wrapper, spec: spec}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", scratch}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	// tmp/ hosts the verification worktree and .local/ hosts live coordinator
+	// transport; both must be ignored BEFORE anything lands under them.
+	commitScratchFile(t, scratch, ".gitignore", "bin/\ntmp/\n.local/\n", "gitignore tmp/local scratch")
+	// Full seam render + the escape shape's below-ceremony plant (adoption
+	// marker + the note the card's trigger points at), committed below the
+	// ceremony so M's tree carries both.
+	seamInstallInto(t, scratch)
+	writeAdoptionMarker(t, scratch)
+	if err := os.MkdirAll(filepath.Join(scratch, filepath.FromSlash(filepath.Dir(deferLivenessEscapeNoteRel))), 0o755); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scratch, filepath.FromSlash(deferLivenessEscapeNoteRel)),
+		[]byte("scratch content touched before the greenfield ceremony\n"), 0o644); err != nil {
+		t.Fatalf("write scratch note: %v", err)
+	}
+	git("add", "-A")
+	git("commit", "-q", "-m", "seam render + greenfield anchor-skip plant")
+
+	// Ceremony: note (N) -> readiness artifact (R) -> manifest (M), with the
+	// greenfield root-base manifest spec.
+	commitScratchFile(t, scratch, "templates/migrations/v0.2.0.md", "# v0.2.0\n\nTest migration note for the historical fixture.\n", "migration note (N)")
+	fx.nsha = gitRevParseVerify(t, scratch, "HEAD")
+	artifactBytes := buildReadinessArtifactBytes(t, readinessArtifactSpec{CommitSHA: fx.nsha})
+	commitScratchFile(t, scratch, ".vh-agent-harness/release-readiness-pass.json", string(artifactBytes), "readiness artifact (R)")
+	fx.rsha = gitRevParseVerify(t, scratch, "HEAD")
+	restampManifest(t, scratch, spec)
+	fx.msha = gitRevParseVerify(t, scratch, "HEAD")
+
+	if err := os.MkdirAll(filepath.Join(scratch, "tmp"), 0o755); err != nil {
+		t.Fatalf("mkdir scratch tmp: %v", err)
+	}
+	branchOut, err := exec.Command("git", "-C", scratch, "symbolic-ref", "--short", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("symbolic-ref: %v", err)
+	}
+	fx.branch = strings.TrimSpace(string(branchOut))
+
+	// Eligible post-M chore: the escape shape's restore (delete the note
+	// again). In greenfield there is no prior-tag baseline to restore to,
+	// but keeping the chore makes this fixture byte-parallel to the
+	// anchor-escape one minus the tag — the differential IS the pin.
+	removeScratchFile(t, scratch, deferLivenessEscapeNoteRel,
+		"chore: remove the scratch note above M (greenfield twin of the restore chore)")
+	fx.hsha = gitRevParseVerify(t, scratch, "HEAD")
+
+	// Live at H only (gitignored): the adopted transport dir plus the OPEN
+	// firing card — the exact card shape the supplement REFUSES when a prior
+	// tag exists (round-4 C-F1 arm).
+	tasksDir := filepath.Join(scratch, ".local", "coordinator", "tasks")
+	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
+		t.Fatalf("mkdir live tasks dir: %v", err)
+	}
+	card := map[string]interface{}{
+		"task_id": deferLivenessGreenfieldCardID,
+		"status":  "draft",
+		"title":   "historical-M greenfield anchor-skip regression card",
+		"owner_notes": []string{
+			"source:review-defer",
+			"trigger:path_touched(" + deferLivenessEscapeNoteRel + ")",
+			"studied:2026-11-18",
+		},
+	}
+	cardBytes, err := json.Marshal(card)
+	if err != nil {
+		t.Fatalf("marshal card: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tasksDir, deferLivenessGreenfieldCardID+".json"), cardBytes, 0o644); err != nil {
+		t.Fatalf("write live card: %v", err)
+	}
+	copyHarnessBinaryToCeremony(t, scratch)
+
+	// PREMISE PINS — the load-bearing facts the skip rests on:
+	// (1) ZERO tags exist, so the wrapper's PRIOR_TAG derivation at the
+	//     derived M is empty (the greenfield boundary);
+	// (2) the card's trigger path WAS committed in history (greenfield's
+	//     release arc is the whole history, so the card is firing-shaped —
+	//     had the supplement's PRIOR_TAG guard been absent, it would have
+	//     refused fail-closed on the unresolvable prior tag).
+	tagList, err := exec.Command("git", "-C", scratch, "tag").Output()
+	if err != nil {
+		t.Fatalf("git tag: %v", err)
+	}
+	if got := strings.TrimSpace(string(tagList)); got != "" {
+		t.Fatalf("premise: greenfield fixture must carry ZERO tags (PRIOR_TAG derives empty); got %q", got)
+	}
+	touchLog, err := exec.Command("git", "-C", scratch, "log", "--format=%H", "--", deferLivenessEscapeNoteRel).Output()
+	if err != nil {
+		t.Fatalf("git log -- %s: %v", deferLivenessEscapeNoteRel, err)
+	}
+	if len(strings.Fields(string(touchLog))) == 0 {
+		t.Fatalf("premise: the card's trigger path %s must have been committed in history", deferLivenessEscapeNoteRel)
+	}
+	return fx
+}
+
+// TestReleaseTag_Historical_G0cRealBinary_DeferLivenessAnchorGreenfield_NoPriorTag_SkipsAndAccepts —
+// pin the supplement's intentional SKIP-when-PRIOR_TAG-empty branch
+// (defer-release-tag-mdl-greenfield-skip-pin, round-4 A-F3): a greenfield
+// historical-M run — real git history, real ceremony binary, real live
+// registry, ZERO tags — carries the SAME OPEN firing card and touched path
+// that the round-4 arm refuses when a prior tag exists, yet must ACCEPT:
+// the supplement skips identically to doctor's fail-safe-dormant recurrence
+// predicate (nothing to diff against) instead of inventing a stricter
+// window or erroring on the empty PRIOR_TAG. The ACCEPT is the pin: had the
+// `[ -n "$PRIOR_TAG" ]` guard been removed, the supplement's MDL_SINCE
+// resolution would fail-closed ("could not resolve prior tag") and this
+// exact fixture would refuse — no anchor-supplement refusal category may
+// fire on a first release.
+func TestReleaseTag_Historical_G0cRealBinary_DeferLivenessAnchorGreenfield_NoPriorTag_SkipsAndAccepts(t *testing.T) {
+	fx := setupDeferLivenessGreenfieldFixture(t)
+	msgFile := histMsgFile(t, "v0.2.0")
+	exitCode, result, _, stderr := runReleaseTagHistorical(t, fx.wrapper, fx.scratch, msgFile, "v0.2.0", nil, nil, 300*time.Second)
+	if exitCode != 0 {
+		t.Fatalf("greenfield (no prior tag) historical-M must SKIP the anchor supplement and ACCEPT; got exit %d\nstderr:\n%s", exitCode, stderr)
+	}
+	if !result.OK {
+		t.Fatalf("expected ok=true (the skip is not an error); error=%v", result.Error)
+	}
+	if result.Error != nil {
+		t.Errorf("expected no error envelope on the accepted greenfield run; got %s", *result.Error)
+	}
+	if result.Commit == nil || *result.Commit != fx.msha {
+		t.Errorf("commit must be the derived M %s; got %v", fx.msha, result.Commit)
+	}
+	if result.Historical == nil || !*result.Historical {
+		t.Errorf("historical must be true; got %v", result.Historical)
+	}
+	// The first-ever tag: v0.2.0 peels to exactly M.
+	if !tagExists(t, fx.scratch, "v0.2.0") {
+		t.Fatalf("tag v0.2.0 must exist after the accepted greenfield run")
+	}
+	if peeled := gitRevParseVerify(t, fx.scratch, "refs/tags/v0.2.0^{commit}"); peeled != fx.msha {
+		t.Errorf("tag must peel to M %s; got %s", fx.msha, peeled)
+	}
+	requireCleanHistoricalRepo(t, fx)
+	if got := worktreeEntryCount(t, fx.scratch); got != 1 {
+		t.Errorf("worktree list must be back to exactly 1 entry; got %d", got)
+	}
+	if leftovers := releaseVerifyLeftovers(t, fx); len(leftovers) != 0 {
+		t.Errorf("verification worktree leaked: %v", leftovers)
+	}
+}
+
 // realHistoryClone clones the module root (shared objects, no tags) and
 // detaches HEAD at shortSHA. Skips when the recorded history is absent.
 func realHistoryClone(t *testing.T, shortSHA, label string) (cloneDir, wrapperCopy string) {
