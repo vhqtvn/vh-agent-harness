@@ -816,24 +816,48 @@ git.
 > wrapper/tag mechanism is absent or exits non-zero — there is no fallback to
 > raw git.
 
-> **Tag-ready → tag HEAD-drift guard (pin-to-M, never silent).** The wrapper
+> **Tag-ready → tag pin + HEAD-drift handling (never silent).** The wrapper
 > captures the validated commit (the manifest commit M, = HEAD before any gate
-> ran) and creates the annotated tag with that EXPLICIT commit argument
-> (`git tag -a ... "$VERSION" "$HEAD_SHA"`) — never bare HEAD — so a concurrent
-> landing between the tag-ready assertion and the tag mutation cannot silently
-> re-target the manifest pin. This closes the v0.15.0 incident's defect class
-> (tag target `40e5f74` while a concurrent commit `c3dcf29` landed on main,
-> requiring operator history surgery to preserve the intended pin-to-M): the
-> wrapper now performs that pin internally, with no surgery and no fallback to
-> raw git. Right before the mutation the wrapper also re-reads HEAD and, if it
-> advanced past the validated commit, prints a LOUD stderr warning and reports
-> `"head_drift": true` in `wrapper_result`. The tag is STILL cut at the
-> validated commit M (the concurrent commit is NOT part of this release; it
-> lands in the next). On `head_drift: true`, surface it prominently in the
-> closeout (a concurrent commit landed during the ceremony and was excluded);
-> the release itself is correct and MUST NOT be rolled back for drift alone.
-> The wrapper additionally verifies, after creation, that the tag's target
-> equals the validated commit and refuses before any push if it does not.
+> ran in the classic flow) and creates the annotated tag with that EXPLICIT
+> commit argument (`git tag -a ... "$VERSION" "$TAG_TARGET"`) — never bare
+> HEAD — so a concurrent landing between the tag-ready assertion and the tag
+> mutation cannot silently re-target the manifest pin. This closes the v0.15.0
+> incident's defect class (tag target `40e5f74` while a concurrent commit
+> `c3dcf29` landed on main, requiring operator history surgery to preserve
+> the intended pin-to-M). Attribute that incident precisely: it was a
+> TAG-PINNING (tag-authorship) defect — the tag was created against a moving
+> HEAD instead of the validated M — NOT a readiness-attribution defect;
+> readiness authorship separation is its own, later disclosure (see the
+> v0.18.0 migration note on defer-release-readiness-attestation-separation).
+> The wrapper now performs the pin internally, with no surgery and no
+> fallback to raw git. Right before the mutation the wrapper also re-reads
+> HEAD. In the CLASSIC flow (M is still HEAD), an advanced HEAD prints a LOUD
+> stderr warning and reports `"head_drift": true` in `wrapper_result`; the
+> tag is STILL cut at the validated commit M (the concurrent commit is NOT
+> part of this release; it lands in the next), and on `head_drift: true` you
+> surface it prominently in the closeout — the release itself is correct and
+> MUST NOT be rolled back for drift alone. The wrapper additionally verifies,
+> after creation, that the tag's target equals the validated commit and
+> refuses before any push if it does not.
+
+> **Historical M — concurrent commit above a completed ceremony.** When the
+> wrapper is invoked while HEAD has advanced past a completed ceremony's M
+> (an operator chore or post-ceremony commit landed after M), the wrapper
+> DERIVES the eligible M from the current committed anchors, verifies it in a
+> wrapper-owned detached worktree AT M (G0 tests/vet/build/gofmt there;
+> release-context doctor: target declarations from M, control/live checks
+> from the original checkout), re-checks the ORIGINAL checkout clean at
+> pre-isolation and the mutation boundary, cleans the worktree BEFORE
+> tagging, and tags M — `"historical": true` in `wrapper_result`, tag peels
+> to exactly M. This is agent-only: NO operator history surgery, NO
+> detached-HEAD state left in your checkout, NO re-ceremony. Eligibility
+> (uninterrupted current ceremony: no protected-path change in M..H — edit or
+> revert — no suffix merge, byte-identical manifest/readiness/migration-note,
+> no newer re-ceremonied M) is derived by the wrapper, never asserted by you.
+> If the wrapper refuses with an eligibility violation, STOP-AND-ASK per the
+> failure-mode-B runbook in `README.agent.md`; do not author a recovery.
+> Pass `--at <full-SHA>` ONLY as an assertion of the expected derived M; a
+> mismatch (e.g. the ceremony was re-run and the old M superseded) refuses.
 
 ---
 
@@ -910,9 +934,13 @@ single-path child of the note commit N); M = manifest-only child commit
    `release_base.kind=root`) through R.
 2. **Recompute the manifest's handshake SHAs** with R as `evaluated_commit` AND
    `manifest_parent_commit` (both = full SHA of R), and `evaluated_tree` =
-   `tree(R)`. At tag time HEAD = M, so the wrapper resolves HEAD^ = R and
-   checks these three fields against R; the manifest binds to R (the artifact
-   commit), NOT to the note commit N at HEAD^^ (the readiness artifact binds
+   `tree(R)`. At tag time the wrapper anchors the ceremony chain at the
+   eligible commit (HEAD in the classic flow, so HEAD^ = R and HEAD^^ = N;
+   the derived M when HEAD has advanced past a completed ceremony — the
+   evaluator re-runs at M via its release-only `--commit M` input and the
+   readiness anchors resolve as M^ = R, M^^ = N) and checks these three
+   fields against R; the manifest binds to R (the artifact
+   commit), NOT to the note commit N (the readiness artifact binds
    to N). The releaser does NOT change `release_base`, `records[]`
    dispositions, or any operator-attested field — it recomputes ONLY the three
    handshake SHAs.

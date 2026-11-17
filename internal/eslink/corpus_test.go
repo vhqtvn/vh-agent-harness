@@ -471,7 +471,43 @@ func corpusDigest(tree map[string][]byte) string {
 // (verified green against the new bytes before this comment landed).
 // Mirrored into the rendered twin by the required make update. Same
 // discipline: re-derived before re-pinning, not a re-pin-to-absorb.
-const pinnedCorpusDigest = "7561f9ee6cc9cffe8a3c0f848e3f9fdb934390af1609d108e01da3a336e23981"
+// Re-derived again 2026-11-16 (fourteenth move; content-only) for the
+// release-tag historical-M slice (task-2026-11-02t07-50-18): (a) the
+// release evaluator templates/core/.opencode/scripts/check-defer-triggers.mjs
+// gained a release-only `--commit <full-SHA>` input (options.commit; the
+// gitShowHeadBlob/gitHeadBlobSha/gitHeadParent/gitHeadParentTree/
+// gitDiffHeadRange/gitLatestTag helpers parameterized with an at anchor
+// defaulting to HEAD; mainRelease validates isFullSha and re-anchors
+// manifest read/sha/freshness-handshake/range-diff/release-base derivation
+// at that commit; envelope carries evaluated_ref; HEAD invocations stay
+// byte-identical) and (b) templates/core/.opencode/repo-configs/
+// allowed-commands.js regenerated from the Go tables after "worktree" joined
+// permconfig.GitMutationVerbs. No new modules, imports, exports, or
+// specifiers — counters and the hub's 74-export surface re-derived
+// IDENTICAL (all non-pin gates green against the new bytes before this
+// comment landed). Mirrored into the rendered twins by the required make
+// update. Same discipline: re-derived before re-pinning, not a
+// re-pin-to-absorb.
+// Re-derived again 2026-11-16 (fifteenth move; content-only, still the
+// release-tag historical-M slice): the evaluator's --commit help paragraph
+// was rewrapped so the pinned phrase "Release mode NEVER reads --since"
+// stays on one line (tests/scripts/check-defer-triggers.test.js pins it
+// verbatim; the first cut had folded it across lines). Help-text bytes
+// only — no code, counters and the hub's 74-export surface re-derived
+// IDENTICAL. Mirrored into the rendered twin by the required make update.
+// Same discipline: re-derived before re-pinning, not a re-pin-to-absorb.
+// Re-derived again 2026-11-17 (sixteenth move; content-only) for the G0c
+// exit-contract fix round on the release-tag historical-M slice
+// (commit-review round 1): the release evaluator's two `evaluated_ref`
+// envelope sites in check-defer-triggers.mjs gained comments narrowing the
+// retired "classic path byte-identical" claim to "identical classic
+// anchor/error behavior with an additive evaluated_ref field" (F9) —
+// comment bytes only, no code, no edges, no exports, no specifier changes.
+// Mirrored into the rendered twin with the template twin kept token-true;
+// counters and the hub's 74-export surface re-derived IDENTICAL (verified
+// against the new bytes before this pin landed). Same discipline:
+// re-derived before re-pinning, not a re-pin-to-absorb.
+const pinnedCorpusDigest = "9e9e925cc35b26f58d4aaa9e30ad0d104b2d375b978bf24e52df864051fa2fad"
 
 // updateOpDebtFiles are the packet §B per-file table's post-normalization
 // remainder: 14 modules still carrying `++`/`--` update operators (the

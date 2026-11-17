@@ -87,6 +87,21 @@ func TestExec_F1WrappedGitMutationDenied(t *testing.T) {
 		{name: "git -c x commit (config-flag consume-and-continue)", args: []string{"git", "-c", "x=y", "commit"}, wantDeny: true, verbSub: "commit"},
 		{name: "git --work-tree=/x reset", args: []string{"git", "--work-tree=/x", "reset"}, wantDeny: true, verbSub: "reset"},
 
+		// --- DENY: raw worktree/tag authority is wrapper-only (the
+		// historical-M release-tag wrapper owns temporary verification
+		// worktree administration and tag/push; agents retain NO raw
+		// authority). "worktree" joined GitMutationVerbs for exactly this. ---
+		{name: "git worktree add --detach (raw worktree authority)", args: []string{"git", "worktree", "add", "--detach", "tmp/release-verify-v0.2.0-x", "0d1a9c2f"}, wantDeny: true, verbSub: "worktree"},
+		{name: "git -C /x worktree remove --force (raw worktree authority)", args: []string{"git", "-C", "/x", "worktree", "remove", "--force", "tmp/x"}, wantDeny: true, verbSub: "worktree"},
+		{name: "git --no-pager worktree list (collateral read-only deny)", args: []string{"git", "--no-pager", "worktree", "list"}, wantDeny: true, verbSub: "worktree"},
+		{name: "git tag -a (raw tag authority)", args: []string{"git", "tag", "-a", "v0.2.0", "-F", "tmp/msg.txt"}, wantDeny: true, verbSub: "tag"},
+		{name: "git --no-pager tag (raw tag authority)", args: []string{"git", "--no-pager", "tag", "v0.2.0"}, wantDeny: true, verbSub: "tag"},
+
+		// --- ALLOW: the sanctioned release-tag wrapper invocation (bash
+		// scripts/release-tag.sh) is a non-git command surface; its own
+		// internal git calls run as script subprocesses, ungated. ---
+		{name: "bash scripts/release-tag.sh (sanctioned wrapper)", args: []string{"bash", "scripts/release-tag.sh", "v0.2.0"}, wantDeny: false},
+
 		// --- ALLOW: read-only git + global flags (A1 must NOT over-deny). ---
 		{name: "git --no-pager status (readonly + global flag)", args: []string{"git", "--no-pager", "status"}, wantDeny: false},
 		{name: "git -C /repo status (readonly + path-bearing flag)", args: []string{"git", "-C", "/repo", "status"}, wantDeny: false},

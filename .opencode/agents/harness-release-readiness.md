@@ -584,7 +584,11 @@ anti-pattern this gate exists to close.
 **Manifest ceremony (sacred — do not weaken).** The manifest embeds its own
 parent commit and tree to prevent weakening after evaluation. The release
 sequence is a three-commit arc — **N -> R -> M** (note -> readiness artifact ->
-manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`:
+manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`
+(classic flow; when HEAD has advanced past a COMPLETED ceremony, the wrapper
+derives the eligible M from the committed anchors and re-anchors the chain
+there — evaluator via its release-only `--commit M` input, readiness anchors
+as M^ = R and M^^ = N — with the artifact read from `M:` instead of `HEAD:`):
 
 1. Reconcile the release arc at commit **N** (the evaluated note /
    release-preparation commit). N binds the readiness artifact (its
@@ -631,7 +635,9 @@ manifest) — so that at tag time `HEAD = M`, `HEAD^ = R`, and `HEAD^^ = N`:
 
 None. This agent does NOT run the release evaluator: no final G7 verdict
 exists at the readiness phase (the agent runs at HEAD=N, pre-R, while release
-mode's freshness handshake is satisfiable only at HEAD=M — see the phase
+mode's freshness handshake is satisfiable only at the eligible ceremony commit
+M (HEAD=M in the classic flow, or the wrapper-derived historical M via the
+evaluator's `--commit M` input — never at HEAD=N) — see the phase
 matrix below). Do not fabricate, estimate, or hand-derive a substitute
 classification; do not forward evaluator flags — the
 `--override-confirmed-version` operator ceremony belongs to the wrapper ONLY
@@ -653,7 +659,7 @@ matrix):**
 |---|---|
 | Readiness phase (this agent, at HEAD=N pre-R) | **No final G7 verdict exists at this phase** — final defer-gate verification occurs post-M at the release wrapper (authoritative), releaser Step 3.3 item 4, and CI. The report emits NO G7 blocker or warning from this agent. |
 | Release-prep (pre-N/at-N; parent orchestrator, optional) | PRELIMINARY enumeration only (`--mode=release-prep`, reads the WORKTREE manifest) — advisory input to the N-commit reconciliation; never a readiness-agent prerequisite, never a gate. |
-| Post-M, pre-tag (release wrapper `scripts/release-tag.sh`) | FINAL and AUTHORITATIVE — release-mode evaluator with the freshness handshake at HEAD=M; `blocker`/`evaluator-error` refuses the tag; the Go defer-liveness gate (doctor #12 / G0c) is an independent second surface. |
+| Post-M, pre-tag (release wrapper `scripts/release-tag.sh`) | FINAL and AUTHORITATIVE — release-mode evaluator with the freshness handshake at the eligible ceremony commit (HEAD=M classic; the wrapper-derived historical M — evaluator re-anchored via `--commit M` — when HEAD has advanced past a completed ceremony); `blocker`/`evaluator-error` refuses the tag; the Go defer-liveness gate (doctor #12 / G0c) is an independent second surface. |
 | Post-M, pre-tag (releaser Step 3.3 item 4) | FINAL — wrapped read-only handshake re-verification at HEAD=M. |
 | Post-tag (CI `.github/workflows/release.yml`) | FINAL bypass-detection — re-runs the committed-manifest evaluator against the tagged commit; refuses publication on any refusal. |
 
@@ -934,7 +940,9 @@ After producing the G0–G7 verdict and BEFORE emitting the final report, write
 the release-readiness-pass artifact at
 `.vh-agent-harness/release-readiness-pass.json`. This is the ONLY file you write
 (the sole scoped exception to INVARIANT #1). The sanctioned release-tag wrapper
-(`scripts/release-tag.sh`) reads this artifact from `HEAD:` at tag time and
+(`scripts/release-tag.sh`) reads this artifact from the eligible ceremony
+anchor — `HEAD:` in the classic flow, the derived historical `M:` when HEAD
+has advanced past a completed ceremony — at tag time and
 refuses to tag unless it is present, schema-valid, commit-bound, and carries
 `ready` for every model-driven gate.
 

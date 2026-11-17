@@ -1702,6 +1702,19 @@ export default function transform({ context }) {
   ownership. This is the staged advisory hybrid: complexity is advisory
   evidence, never transition authority.
   `vh-agent-harness diff` shows drift vs. the corpus.
+- **Machine-readable doctor:** `vh-agent-harness doctor --json` replaces the
+  human report with a pure JSON envelope on stdout (schema: `schema_version`,
+  `checks[]` with `name`/`tier`/`class`/`detail`, `unclassified[]`,
+  `coverage_complete`, `problems`, `warnings`, `healthy`). Every check entry
+  carries its release-context `class` (`target`/`control`/`both` — the
+  historical-M routing classes; a check doctor can emit but the routing map
+  does not list sets `coverage_complete:false` and lands a synthetic FAIL
+  entry so it can never silently escape routing). The EXIT CONTRACT is
+  unchanged from the human report: entries with a FAIL tier still produce a
+  NON-ZERO exit with the complete envelope on stdout — consumers must parse
+  the envelope, not branch on the exit code, when they intend to apply their
+  own verdict policy (the release-tag wrapper's G0c target run is exactly
+  such a consumer).
 - **Inspect / validate skills:** `vh-agent-harness skill list` prints every skill
   (core, overlay-pack, and rendered) with its source, whether it is rendered to
   `.opencode/skills/`, and whether its SKILL.md frontmatter is valid.
@@ -2611,26 +2624,74 @@ after the seed manifest lands is the canonical case — the seed manifest's SHAs
 are placeholders that the releaser recomputes against the actual post-artifact
 commit R on its first run.
 
-### Recovery: ceremony refusals (operator-only git recovery)
+### Recovery: ceremony refusals (historical-M agent path + operator-only git recovery)
 
 The release-tag wrapper refuses the tag BEFORE any `git tag` mutation, emitting
-a structured JSON refusal and a non-zero exit. Two refusal classes need
-operator git recovery that the agent CANNOT perform itself — shell-guard's
-`git-mutation-bypass` rule denies `git reset`, `git branch`, and
-`git cherry-pick` to every agent (the gated-commit `committer` only stages and
-commits an authorized slice; it does not reset or cherry-pick). On either class
-the agent's correct role is **STOP-AND-ASK** the operator with the verified
-chain below — never author a recovery that leaves untracked files in the
-worktree or relies on the reflog in place of a branch ref.
+a structured JSON refusal and a non-zero exit. Refusals split into an
+**agent-resolvable class** (eligible historical M) and two **operator-only**
+failure modes.
+
+**Eligible historical M — agent-only, no git recovery.** When a concurrent
+commit (an operator chore, a post-ceremony fixup) lands on first-parent AFTER
+a completed ceremony's manifest commit M, the wrapper DERIVES M from the
+current committed anchors and tags M directly — no reset, no cherry-pick, no
+re-ceremony, no operator git step. Eligibility ("uninterrupted current
+ceremony") is checked by the wrapper itself, never asserted by the caller:
+
+- HEAD's committed manifest must exist and its handshake must agree on R (the
+  evaluator re-runs at M via its release-only `--commit M` input);
+- M must be R's direct single-parent child on H's first-parent chain;
+- manifest, readiness artifact, and the version's migration note must be
+  byte-identical between M and HEAD (blob equality);
+- EVERY intervening commit M..H must touch no protected path (manifest,
+  readiness artifact, the wrapper itself, the evaluator, the S2 gate,
+  migration notes, the lineage record (.vh-agent-harness/lineage.yml) — an
+  edit AND its revert both count, and a rename out of a protected path
+  counts as an edit: the scan diffs with rename detection disabled so the
+  source path cannot be hidden);
+- no suffix merge commits in M..H (v1 refuses them).
+- managed-path changes between M and H also refuse: `managed-drift` is a
+  BOTH-class check (tracked declarations + live render state), so it must
+  pass at M — a managed file drifted at M and repaired only at H still
+  refuses the tag.
+
+For an eligible M the wrapper runs G0 (tests/vet/build/gofmt) in a
+wrapper-owned detached verification worktree AT M (the original checkout is
+never checked out or reset), routes `doctor` into release-context classes
+(target declarations tracked at M via `--target`, control/live checks at the
+original checkout, an unclassified check fails release-context coverage),
+requires the ORIGINAL checkout clean at pre-isolation and again at the
+mutation boundary, cleans the worktree up BEFORE tagging (cleanup failure
+refuses), then tags M. The JSON result carries `"historical":true` and the
+tag peels to exactly M. The OLD runbook's answer to a concurrent commit above
+M — STOP-AND-ASK for history surgery — is now, for the eligible case, simply:
+re-run the wrapper and proceed on its verdict. If the wrapper refuses with a
+named eligibility violation, that refusal is load-bearing: see failure mode B.
 
 - **Failure mode A — mis-authored M.** M's handshake SHAs are wrong, or the
   `records[]` block is malformed/unsorted, so the evaluator returns
   `evaluator-error` (exit 2). The override ceremony CANNOT cure this class;
-  M must be re-authored.
-- **Failure mode B — a concurrent commit landed above M.** A commit outside
-  the N→R→M chain now sits at HEAD above M, breaking the wrapper's readiness
-  binding (at tag time M must be HEAD, R = HEAD^, N = HEAD^^). The handshake
-  no longer holds and the wrapper refuses.
+  M must be re-authored (a fresh N→R→M ceremony on top of HEAD is the
+  sanctioned cure; the operator git-recovery sequence below is the
+  history-surgery alternative).
+- **Failure mode B — ineligible drift above M.** A concurrent commit landed
+  above M AND the wrapper's eligibility scan refuses: a protected path
+  changed in some M..H commit (edit or revert), a suffix merge sits in M..H,
+  a ceremony artifact differs between M and HEAD, the ceremony was SUPERSEDED
+  by a re-ceremony (a newer M exists on H's first-parent chain — the old M is
+  no longer the current ceremony), or HEAD moved during the tag window
+  itself. The tag cannot be cut at the stale M; either run a fresh ceremony
+  on top of HEAD, or use the operator-only sequence below when history
+  surgery is explicitly wanted.
+
+Both failure modes need operator git recovery that the agent CANNOT perform
+itself — shell-guard's `git-mutation-bypass` rule denies `git reset`,
+`git branch`, `git cherry-pick`, and raw `git tag`/`git worktree` to every
+agent (the gated-commit `committer` only stages and commits an authorized
+slice; it does not reset or cherry-pick). On either failure mode the agent's
+correct role is **STOP-AND-ASK** the operator with the verified
+chain below — never author a recovery that leaves untracked files in the
+worktree or relies on the reflog in place of a branch ref.
 
 **The G0b untracked-file trap (applies to both).** G0b runs
 `git status --short` (the G0b clean-worktree check) and refuses on ANY non-empty output.
@@ -2648,7 +2709,8 @@ before acting:**
   `git status --short` is not, the entire G0b refusal is untracked-file noise,
   not an uncommitted edit.
 
-**Operator-verified recovery sequence (v0.21.0 reference; operator-only):**
+**Operator-verified recovery sequence (v0.21.0 reference; operator-only;
+failure modes A/B when history surgery is chosen over a fresh ceremony):**
 
 1. **Pin any concurrent commit with a real branch ref BEFORE reset** —
    `git branch keep-<id> <sha>`. A branch ref is GC-proof; the reflog is NOT
@@ -2692,14 +2754,20 @@ before acting:**
    (`git stash pop`). The release tag sits immutable on M, with the concurrent
    work reapplied above it.
 
-**Agent role.** Every git step above (reset, branch, cherry-pick) is
-operator-only. On a ceremony refusal in either failure mode the agent
+**Agent role.** For an ELIGIBLE historical M the agent path is sanctioned and
+wrapper-owned: re-run the wrapper (optionally passing `--at <full-SHA>` as an
+assertion that the derived M is the expected one) and proceed on its verdict —
+there is no operator step, no detached-HEAD state left behind, and no
+re-ceremony. For failure mode A or B (mis-authored or ineligible) every git
+step above (reset, branch, cherry-pick) is operator-only: the agent
 STOP-AND-ASKs the operator with this verified chain — it does not run the
 recovery, does not author a variant that leaves untracked files in the
 worktree, and does not rely on the reflog in place of a branch ref. The G0b
-global-clean requirement at release transitions is correct and load-bearing
-(see the AGENTS.md B2 release-cleanliness rule); the gap this runbook closes is
-the UNDOCUMENTED recovery path, not the gate.
+global-clean requirement at release transitions remains correct and
+load-bearing (see the AGENTS.md B2 release-cleanliness rule); the
+historical-M flow satisfies it by confining all verification dirt to the
+wrapper-owned worktree under repo `tmp/` and requiring the original checkout
+clean at pre-isolation and at the mutation boundary.
 
 ### Published-tag immutability (never move a published version)
 
@@ -2780,6 +2848,16 @@ vh-agent-harness exec bash -c 'RELEASE_TAG_MESSAGE_FILE=tmp/release-tag-msg-<ver
   with `--override-*` flags (the DEFER gate is skipped, so there is nothing
   to override). Use this for a push-only slice after a tag was cut by an
   earlier create-only run.
+- **`--at <full-40-char-SHA>`** (optional, create flow) — an ASSERTION, never
+  a target selector. The wrapper derives the eligible ceremony commit from
+  the current committed anchors (HEAD itself in the classic flow; the derived
+  M when HEAD has advanced past a completed ceremony). `--at` must equal that
+  derived commit or the wrapper refuses ("--at assertion failed ... the
+  eligible ceremony commit is <derived>; --at is an assertion, not a target
+  selector — re-ceremonied manifests are superseded"). This guards against
+  tagging a superseded M after a re-ceremony: once the ceremony is re-run,
+  the OLD M is no longer the current ceremony and `--at <old-M>` refuses
+  naming the new M. Cannot be combined with `--push-only`.
 - **`--override-release-version <vX.Y.Z>` + `--override-manifest-sha <blob-sha>`**
   (both required together) — explicit noninteractive override confirmation.
   The operator is the ONLY transition authority for an override; the releaser
@@ -2793,9 +2871,13 @@ vh-agent-harness exec bash -c 'RELEASE_TAG_MESSAGE_FILE=tmp/release-tag-msg-<ver
 
 On any refusal (blocker, evaluator-error, override-ceremony mismatch,
 handshake mismatch, `--push-only` against a missing tag, `--push-only` against
-a lightweight (non-annotated) tag, or `--push-only` combined with
-`--override-*`) the wrapper emits a structured JSON refusal and exits NON-zero
-BEFORE any `git tag` or `git push` invocation. There is no fallback to raw git.
+a lightweight (non-annotated) tag, `--push-only` combined with
+`--override-*` or `--at`, `--at` assertion failure (malformed SHA, wrong
+SHA, or superseded ceremony), or a historical-M eligibility violation
+(suffix merge, protected-path change, artifact drift between M and HEAD,
+final drift, cleanup failure)) the wrapper emits a structured JSON refusal
+and exits NON-zero BEFORE any `git tag` or `git push` invocation. There is no
+fallback to raw git.
 
 When a command prints a "Next steps" footer, follow it. When unsure, re-run
 `vh-agent-harness guide`.

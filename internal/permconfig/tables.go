@@ -173,6 +173,14 @@ var GitMutationVerbs = []string{
 	"add", "commit", "push", "reset", "commit-tree", "update-ref",
 	"checkout", "merge", "rebase", "stash", "branch", "restore",
 	"cherry-pick", "revert", "clean", "rm", "mv", "tag", "am", "apply", "switch",
+	// `git worktree <sub>` mutates repo state (.git/worktrees registrations +
+	// on-disk checkouts). Denied to agents as raw authority so the ONLY
+	// sanctioned worktree administration surface is the release-tag wrapper's
+	// wrapper-owned historical-M verification isolation (scripts/release-tag.sh),
+	// exactly as `tag`/`push` are wrapper-only. Read-only `git worktree list`
+	// is collaterally denied at verb granularity — acceptable strictness; the
+	// wrapper's own internal invocations run as script subprocesses, ungated.
+	"worktree",
 	// Hyphenated mutating plumbing (see the comment block above this slice):
 	"checkout-index",   // checkout prefix: copies index→working-tree; -f overwrites uncommitted files
 	"checkout--worker", // checkout prefix: parallel-checkout worker; writes files to the working tree

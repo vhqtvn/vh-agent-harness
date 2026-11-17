@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -93,9 +94,205 @@ unchanged and converges in a later slice.`,
 // doctorTargetFlag lets tests/CI point doctor at a target other than cwd.
 var doctorTargetFlag string
 
+// doctorJSONFlag (--json) switches doctor to a machine-readable per-check JSON
+// report. It exists for the release-tag wrapper's release-context routing
+// (historical-M verification): the wrapper runs doctor twice — once against the
+// ORIGINAL checkout (control run) and once against the detached verification
+// worktree at M via --target (target run) — and merges the two per-check
+// verdicts using the release-context class each check carries here. Human
+// output is preserved byte-identically when the flag is absent.
+var doctorJSONFlag bool
+
 func init() {
 	doctorCmd.Flags().StringVarP(&doctorTargetFlag, "target", "o", "",
 		"target directory (default: current directory)")
+	doctorCmd.Flags().BoolVar(&doctorJSONFlag, "json", false,
+		"emit a machine-readable per-check JSON report (for wrapper release-context routing) instead of the human report")
+}
+
+// ---- Release-context routing (target/control classes per check) -----------
+//
+// When the release-tag wrapper verifies a HISTORICAL manifest commit M (HEAD
+// has advanced past M), doctor fidelity requires that every registered check
+// be evaluated against the right input surface:
+//
+//   - target: the check reads TRACKED declarations (committed files). Its
+//     verdict is taken from the target run (the verification worktree at M) —
+//     a defect that existed at M and was repaired at H must still refuse the
+//     tag ("defect-at-M repaired-at-H still refuses").
+//   - control: the check reads LIVE resources (.local transport, the .git
+//     commit-gate ledger, user-global config, the host environment). Its
+//     verdict is taken from the control run at the ORIGINAL checkout H (or
+//     the real external env). The verification worktree structurally lacks
+//     these (the wrapper never copies or symlinks .local into it), so a
+//     target-side verdict would be a structural false-FAIL (e.g. defer-liveness
+//     row 4 "adopted transport dir was lost") or a silent SKIP — never an
+//     honest evaluation.
+//   - both: the check reads a MIX of tracked and live surfaces. It must pass
+//     in BOTH runs; a FAIL in either refuses the tag.
+//
+// Advisory semantics are PRESERVED: classes route verdicts, they never
+// escalate a WARN/INFO/SKIP into a refusal — only FAIL-tier verdicts refuse,
+// exactly like the plain doctor exit contract. An UNCLASSIFIED check (a name
+// emitted by doctor but missing from this map) FAILS release-context coverage:
+// doctor --json reports coverage_complete:false and a synthetic FAIL entry, so
+// a newly added check cannot silently escape release-context routing.
+// doctor_json_test.go pins map-vs-emitted completeness.
+var doctorReleaseRouting = map[string]string{
+	// target — tracked declarations, verdict from the M worktree.
+	"lineage":              "target",
+	"armed-schema":         "target",
+	"agents-composition":   "target",
+	"overlay-perm":         "target",
+	"capability-coherence": "target",
+	"gitignore":            "target",
+	"auto-classifier":      "target",
+	"skills":               "target",
+	"shipped-pilots":       "target",
+	"dead-grants":          "target",
+	"cohort-links":         "target",
+	"f1-envelope":          "target",
+	"f1-f2-consistency":    "target",
+	"f2-pairs":             "target",
+	// both — mixed tracked + live surfaces; must pass in both runs.
+	"managed-drift":      "both",
+	"auto-gate-ignore":   "both",
+	"behavioral-closure": "both",
+	"rewrite-parity":     "both",
+	"exec-sandbox-floor": "both",
+	// control — live resources (env, .local, .git ledger, user config);
+	// verdict from the original checkout / real external env.
+	"node":           "control",
+	"eval.js":        "control",
+	"subagent-depth": "control",
+	"defer-liveness": "control",
+	// config-refs reads the TRACKED opencode.jsonc but its FAIL-tier verdict
+	// is dominated by LIVE ref targets: every agent-model {file:} ref points
+	// under .local/config/agent-model/ (gitignored, operator-managed, seeded
+	// on the live checkout by the seam). A checkout of M structurally lacks
+	// .local/, so a target-side verdict is a structural false-FAIL — the same
+	// shape as defer-liveness row 4 — and the honest verdict is the control
+	// run's. Residual (accepted): a TRACKED ref target (e.g.
+	// .opencode/agents/*.md) missing at M and repaired at H is no longer
+	// caught by the target run; the corpus's tracked refs are render outputs
+	// that move with the same commit as the config, so that shape requires a
+	// chore to delete a rendered agent and repair it after M.
+	"config-refs":           "control",
+	"staged-errata-content": "control",
+	"dev-stale-embed":       "control",
+	"head-progress":         "control",
+	"complexity-advisory":   "control",
+	"recurrence-state":      "control",
+	"closeout-reach":        "control",
+	"redlines":              "control",
+}
+
+const (
+	releaseClassTarget  = "target"
+	releaseClassControl = "control"
+	releaseClassBoth    = "both"
+)
+
+// doctorJSONCheck is one entry of the --json report.
+type doctorJSONCheck struct {
+	Name   string `json:"name"`
+	Tier   string `json:"tier"`
+	Class  string `json:"class"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// doctorJSONReport is the whole --json envelope.
+type doctorJSONReport struct {
+	SchemaVersion    int               `json:"schema_version"`
+	Checks           []doctorJSONCheck `json:"checks"`
+	Unclassified     []string          `json:"unclassified"`
+	CoverageComplete bool              `json:"coverage_complete"`
+	Problems         int               `json:"problems"`
+	Warnings         int               `json:"warnings"`
+	Healthy          bool              `json:"healthy"`
+}
+
+// doctorTierTokens is the closed tier vocabulary used to distinguish a real
+// result line from an indented continuation of a multi-line detail.
+var doctorTierTokens = map[string]bool{
+	tierPass: true, tierFail: true, tierWarn: true, tierSkip: true, tierInfo: true,
+}
+
+// doctorLineCapture intercepts doctor's printed result lines to build the
+// per-check report without restructuring the linear print flow. Result lines
+// are exactly the "    " + checkResult.String() prints ("%-13s %-4s %s"); a
+// line only counts as a result when its second whitespace field is a closed
+// tier token, so multi-line details that happen to be indented cannot inject
+// fake checks. When suppress is set (--json), nothing is forwarded to the
+// underlying writer — the human report is replaced, not appended to.
+type doctorLineCapture struct {
+	inner    io.Writer
+	suppress bool
+	results  []checkResult
+}
+
+func (w *doctorLineCapture) Write(p []byte) (int, error) {
+	for _, line := range strings.Split(string(p), "\n") {
+		if !strings.HasPrefix(line, "    ") {
+			continue
+		}
+		f := strings.Fields(line)
+		// Accept any plausible result line (name token + closed tier token).
+		// Classification/coverage is decided later from the routing map, so an
+		// unknown name is RECORDED (and then FAILS coverage) rather than
+		// dropped here.
+		if len(f) >= 2 && doctorTierTokens[f[1]] {
+			w.results = append(w.results, checkResult{
+				name:   f[0],
+				tier:   f[1],
+				detail: strings.Join(f[2:], " "),
+			})
+		}
+	}
+	if w.suppress {
+		return len(p), nil
+	}
+	return w.inner.Write(p)
+}
+
+// buildDoctorJSONReport assembles the --json envelope from the captured
+// per-check results. Unclassified names (emitted but absent from
+// doctorReleaseRouting) produce coverage_complete:false plus a synthetic FAIL
+// entry and increment Problems — an unknown check cannot silently escape
+// release-context routing.
+func buildDoctorJSONReport(results []checkResult, problems, warns int) doctorJSONReport {
+	rep := doctorJSONReport{
+		SchemaVersion:    1,
+		Checks:           make([]doctorJSONCheck, 0, len(results)),
+		CoverageComplete: true,
+		Problems:         problems,
+		Warnings:         warns,
+		Healthy:          problems == 0,
+	}
+	for _, r := range results {
+		class := doctorReleaseRouting[r.name]
+		if class == "" {
+			rep.Unclassified = append(rep.Unclassified, r.name)
+			rep.CoverageComplete = false
+		}
+		rep.Checks = append(rep.Checks, doctorJSONCheck{
+			Name:   r.name,
+			Tier:   r.tier,
+			Class:  class,
+			Detail: r.detail,
+		})
+	}
+	if !rep.CoverageComplete {
+		rep.Checks = append(rep.Checks, doctorJSONCheck{
+			Name:   "release-context-coverage",
+			Tier:   tierFail,
+			Class:  releaseClassControl,
+			Detail: "unclassified doctor check(s): " + strings.Join(rep.Unclassified, ", "),
+		})
+		rep.Problems++
+		rep.Healthy = false
+	}
+	return rep
 }
 
 func runDoctor(cmd *cobra.Command, _ []string) (err error) {
@@ -107,6 +304,12 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	defer func() { reportRunErrToStderr(cmd, err) }()
 
 	out := cmd.OutOrStdout()
+
+	// --json: intercept result lines (suppressed forwarding) so the per-check
+	// report can be emitted as JSON at the end. Without the flag the capture
+	// writer is a pass-through — human output stays byte-identical.
+	capw := &doctorLineCapture{inner: out, suppress: doctorJSONFlag}
+	out = capw
 
 	target := doctorTargetFlag
 	if target == "" {
@@ -575,6 +778,23 @@ func runDoctor(cmd *cobra.Command, _ []string) (err error) {
 	clr := checkCohortLinks(abs)
 	fmt.Fprintln(out, "    "+clr.String())
 	applyTier(clr.tier, &problems, &warns)
+
+	// --json emission: replace the human summary with the machine report. The
+	// report carries each check's release-context class; unclassified names
+	// fail coverage (synthetic FAIL + problem) so an unknown check cannot
+	// silently escape wrapper-side release routing. Exit semantics match the
+	// human path: problems>0 → errSilent (non-zero).
+	if doctorJSONFlag {
+		rep := buildDoctorJSONReport(capw.results, problems, warns)
+		enc := json.NewEncoder(cmd.OutOrStdout())
+		if err := enc.Encode(rep); err != nil {
+			return fmt.Errorf("doctor --json encode: %w", err)
+		}
+		if rep.Problems > 0 {
+			return errSilent{}
+		}
+		return nil
+	}
 
 	// Summary.
 	fmt.Fprintf(out, "summary: %d problem(s), %d warning(s)\n", problems, warns)

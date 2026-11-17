@@ -855,6 +855,44 @@ func TestShellGuardHook_LiveBridge(t *testing.T) {
 			cmd:  `vh-agent-harness git commit -m x`,
 			want: Deny,
 		},
+
+		// Release-tag wrapper isolation authority (historical-M support):
+		// raw worktree/tag administration is denied to agents — the ONLY
+		// sanctioned surface is the wrapper's own internal invocations
+		// (script subprocesses, ungated). "worktree" joined
+		// GIT_MUTATION_VERBS in the canonical Go tables (tables.go) which
+		// allowed-commands.js exports and this engine consumes.
+		{
+			name: "git worktree add --detach denied (raw worktree authority is wrapper-only)",
+			cmd:  `git worktree add --detach tmp/release-verify-v0.2.0-x 0d1a9c2f`,
+			want: Deny,
+		},
+		{
+			name: "git tag -a denied (raw tag authority is wrapper-only)",
+			cmd:  `git tag -a v0.2.0 -F tmp/msg.txt`,
+			want: Deny,
+		},
+		{
+			name: "git -C /x worktree remove denied (external -C + raw worktree authority)",
+			cmd:  `git -C /x worktree remove --force tmp/x`,
+			want: Deny,
+		},
+		{
+			// The load-bearing evasion shape: the wrapper-owned isolation
+			// authority must not be reachable by nesting the raw verb
+			// inside an exec'd shell.
+			name: "vh-agent-harness exec bash -c git worktree remove denied (nested evasion)",
+			cmd:  `vh-agent-harness exec bash -c 'git worktree remove --force tmp/x'`,
+			want: Deny,
+		},
+		{
+			// The SANCTIONED wrapper invocation: no raw git verb is exposed
+			// to the agent surface (the wrapper's internal git calls run as
+			// script subprocesses). This shape must stay allowed.
+			name: "vh-agent-harness exec bash -c release-tag.sh allowed (sanctioned wrapper)",
+			cmd:  `vh-agent-harness exec bash -c 'RELEASE_TAG_MESSAGE_FILE=tmp/release-tag-msg.txt scripts/release-tag.sh v0.2.0'`,
+			want: Allow,
+		},
 	}
 	for _, c := range gitCases {
 		c := c
