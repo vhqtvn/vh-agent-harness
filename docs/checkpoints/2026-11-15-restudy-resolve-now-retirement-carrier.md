@@ -283,3 +283,43 @@ Release-tag historical-M support landed (eligible-concurrent tagging is agent-on
 - decision-item: defer-task-repair-doc-guard-list-sync#owner_notes[fnv1a:ccb98ea65f61d64f] (curated)
 - resolved-by-operator-ask:2026-11-16 (restudy item 2+3 go)
 task-repair.md guard-list sync landed (docs-only): the round-6 staged-to-draft directional refusal is now part of the degraded-card lifecycle-transition guards bullet (a staged card is release-HOLDING so demotion to draft is never a repair) with the sanctioned targets kept explicit in the same bullet (staged-to-staged field refresh and the F3-gated staged-to-ready restore), the rendered twin .opencode/commands/task-repair.md is byte-identical to the templates/core source after make update (diff -q clean), no RED receipt exists because the change is docs-only, the eslink corpus digest did NOT move for this slice (md command files sit outside the 61-module ES corpus — TestGate4_CorpusGoldenPins passes against the unchanged pin 7561f9ee6cc9cffe8a3c0f848e3f9fdb934390af1609d108e01da3a336e23981), and go test ./... 33 packages green, node tests/scripts/ 256/256 pass, gofmt+vet clean.
+
+## opencode-v2-compat-study
+
+- studied:2026-11-18
+- decision-item: opencode-v2-compat-study#owner_notes[fnv1a:d6b99e646561dfc1] (curated)
+- resolved-by-operator-ask:2026-11-18 (follow-up batch go)
+- Reopened 2026-11-18 by operator follow-up batch go: completed study card reopened to carry the durable-promotion landing receipts and retire through the full gate.
+Findings durably promoted: researches/sources/2026-11-17-opencode-v2-compat-field-study.md landed in commit 1b96881 (Task-Card trailer present) as a labeled second-generation distillation of this card's closeout/review reports — compatible-with-changes verdict, the 8-surface table (plugins and custom tools hard-break; state-dir degraded/informational), honesty limits, contradictions counted-not-itemized; tmp/ primary probe artifacts cleaned after distillation; the v2-migration implementation task remains an operator decision.
+
+## defer-execsandbox-make-doctor-gocache-friction
+
+- source:session-receipt (researcher leg of solution-brief run ses_ff60578c6ffe, 2026-08-16: 'make doctor was attempted but could not build because the strict sandbox lacked Go-cache access; this finding is therefore source/ledger/reachability-derived, not a fresh doctor receipt')
+- studied:2026-08-16
+- decision-item: defer-execsandbox-make-doctor-gocache-friction#owner_notes[fnv1a:dab1ab58c111eb6d] (curated)
+- studied:2026-11-18
+- decision-item: defer-execsandbox-make-doctor-gocache-friction#owner_notes[fnv1a:d6b99e646561dfc1] (curated)
+- resolved-by-operator-ask:2026-11-18 (follow-up batch go)
+Friction recorded and disposition settled: a dated addendum to researches/decisions/2026-07-29-exec-sandbox-level-b-mode-floor.md (record body untouched) plus a README.agent.md exec-sandbox note landed in commit 0a507fd (Task-Card trailer present) — strict-sandbox builds fail three write-surfaces deep (module-cache verify, build cache, link output; reproduced receipt included), no GOCACHE tweak fixes the class without widening the write surface, settled disposition = accepted limitation + verb routing (exec owns compile-then-run, exec-sandbox stays read-code-only), and the memo's Slice-4 HEALTHY line is noted as an unsandboxed receipt.
+
+## defer-release-tag-mdl-greenfield-skip-pin
+
+- source:review-defer (round-4 A-F3 of the release-tag historical-M slice — the supplement landed with escape-arm pins but no greenfield-SKIP pin)
+- re-derivation: operator-driven — add the regression arm the next time scripts/release-tag.sh is touched (no mechanical trigger; a bare path predicate would self-fire on unrelated wrapper edits)
+- studied:2026-11-17
+- decision-item: defer-release-tag-mdl-greenfield-skip-pin#owner_notes[fnv1a:cdb990395e61d4bc] (curated)
+- studied:2026-11-18
+- decision-item: defer-release-tag-mdl-greenfield-skip-pin#owner_notes[fnv1a:d6b99e646561dfc1] (curated)
+- resolved-by-operator-ask:2026-11-18 (follow-up batch go)
+Greenfield skip pin landed: the greenfield twin of the anchor-escape fixture in internal/cli/release_tag_historical_test.go (commit 8715469, Task-Card trailer present) drives a zero-prior-tag historical-M scenario where the defer-liveness anchor supplement intentionally SKIPS and the ceremony completes, with a RED receipt via temporary guard-removal proving the supplement refusal fires when the PRIOR_TAG-empty guard is deleted — first releases can no longer be accidentally refused by the supplement.
+
+## defer-staged-draft-omitted-status-watch
+
+- source:review-defer (9a78dc0 cascade, 3 leaves — arm-3 infeasibility assessment)
+- re-derivation: operator-driven claim guard — fires only if normalizeCoordinationTaskRecord's coercion behavior is changed or if a behavioral-completeness claim about the omitted-status projection is made (no mechanical trigger; a path predicate on state-lib.js would self-fire)
+- studied:2026-11-16
+- decision-item: defer-staged-draft-omitted-status-watch#owner_notes[fnv1a:ccb98ea65f61d64f] (curated)
+- studied:2026-11-18
+- decision-item: defer-staged-draft-omitted-status-watch#owner_notes[fnv1a:d6b99e646561dfc1] (curated)
+- resolved-by-operator-ask:2026-11-18 (follow-up batch go)
+Watch pin landed: tests/scripts/task-repair-deadlock-restage.test.js (commit 8715469, Task-Card trailer present) now pins that a valid stored staged card never projects to draft on the load path — healthy and unrelated-degraded fixtures, green-from-birth by design — making the round-6 staged-to-draft guard's arm-3 infeasibility premise executable against normalizer coercion-set drift.
