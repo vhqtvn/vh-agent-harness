@@ -1,0 +1,18 @@
+# mcp.policy — the P8.2 promotion policy for the docker battery's mcp
+# scenario run (b). The mcp namespace is ASK-BY-DEFAULT on the daemon;
+# these [[allow]] rules are the client-side grants that answer the
+# asks. Exact names for localmock's echo, the degraded deadmock
+# sentinel, and garbagemock's echo; the UNDERSCORE PREFIX GLOB
+# "mcp_remotemock_*" for remotemock — the per-server allow shape added
+# in P8.2 (the twin of the colon glob, anchored at the underscore).
+[[allow]]
+tool = "mcp_localmock_echo"
+
+[[allow]]
+tool = "mcp_remotemock_*"
+
+[[allow]]
+tool = "mcp_deadmock"
+
+[[allow]]
+tool = "mcp_garbagemock_echo"

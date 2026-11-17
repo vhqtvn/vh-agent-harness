@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":14,"result":{"jobId":"shell-1","state":"running","chunk":"tick 1\ntick 2\n","offset":0,"nextOffset":14,"hasMore":false,"written":14,"evictedBytes":0}}

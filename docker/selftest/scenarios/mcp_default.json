@@ -1,0 +1,7 @@
+[
+  {"tool_calls":[
+    {"id":"mcpd1","name":"mcp_localmock_echo","args":{"text":"must-not-run-stdio"}},
+    {"id":"mcpd2","name":"mcp_remotemock_echo","args":{"text":"must-not-run-http"}}
+  ]},
+  {"text":"mcp default posture complete"}
+]

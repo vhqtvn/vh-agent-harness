@@ -1,0 +1,6 @@
+[
+  {"tool_calls":[
+    {"id":"mcpa1","name":"mcp_remotemock_echo","args":{"text":"auto-allowed-payload"}}
+  ]},
+  {"text":"mcp auto-allow complete"}
+]

@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":7,"result":{"sessionId":"sess-example","path":"/tmp/sessions/sess-example.jsonl","events":4,"messages":[{"role":"user","content":"continue this session"},{"role":"assistant","content":"resumed"}],"title":"continue this session","usage":{"promptTokens":12,"completionTokens":6,"totalTokens":18},"unsettledJobs":["background-2"]}}

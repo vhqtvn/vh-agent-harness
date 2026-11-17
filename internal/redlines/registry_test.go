@@ -589,10 +589,22 @@ subjects:
 	}
 }
 
-func TestLoad_UnreadableRegistry_FailsClosed(t *testing.T) {
+// requireNonRoot skips the test when running as root (euid 0): root's
+// DAC_OVERRIDE ignores file permission bits, so the chmod-0000
+// unreadable-registry injection cannot make the load's ReadFile fail
+// (the registry reads fine and the fail-closed assertion mis-fires).
+// Same canonical helper shape as internal/session, internal/renderstate,
+// internal/cli, and internal/substrate (package-local on purpose: Go test
+// packages cannot share helpers without an import).
+func requireNonRoot(t *testing.T) {
+	t.Helper()
 	if os.Geteuid() == 0 {
-		t.Skip("running as root; permission bits do not restrict root, skipping unreadable test")
+		t.Skip("running as root: DAC_OVERRIDE bypasses permission bits; cannot inject unreadable-registry failure")
 	}
+}
+
+func TestLoad_UnreadableRegistry_FailsClosed(t *testing.T) {
+	requireNonRoot(t)
 	if !modesAreMeaningful() {
 		t.Skip("platform without POSIX modes; cannot make file unreadable")
 	}

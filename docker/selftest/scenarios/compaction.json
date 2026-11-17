@@ -1,0 +1,5 @@
+[
+  {"tool_calls": [{"id": "call-cm-1", "name": "echo", "args": {"text": "tail-probe-one"}}, {"id": "call-cm-2", "name": "echo", "args": {"text": "tail-probe-two"}}]},
+  {"text": "condensed: the user issued a long working brief; two echo probes ran and returned small confirmations; work continues from the retained tail."},
+  {"text": "compaction e2e final: surface was shadowed and continued"}
+]

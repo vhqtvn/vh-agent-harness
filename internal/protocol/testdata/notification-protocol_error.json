@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"protocol/error","params":{"code":-32700,"message":"malformed line: invalid character 'o' in literal null"}}

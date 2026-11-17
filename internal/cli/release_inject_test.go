@@ -240,10 +240,22 @@ func TestReleaseInjectErrata_NoStagedCards(t *testing.T) {
 	}
 }
 
+// requireNonRoot skips the test when running as root (euid 0): root's
+// DAC_OVERRIDE ignores directory permission bits, so the chmod-0555
+// read-only-dir injection cannot make os.CreateTemp fail (the write
+// succeeds and the "expected error" assertion mis-fires).
+func requireNonRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: DAC_OVERRIDE bypasses permission bits; cannot inject CreateTemp failure")
+	}
+}
+
 // TestAtomicWriteFile_FailureLeavesOriginalIntact proves that when the write
 // fails (e.g. read-only destination directory), the original file content is
 // preserved byte-for-byte — the truncate-before-write hazard is eliminated.
 func TestAtomicWriteFile_FailureLeavesOriginalIntact(t *testing.T) {
+	requireNonRoot(t)
 	dir := t.TempDir()
 	noteDir := filepath.Join(dir, "notes")
 	if err := os.MkdirAll(noteDir, 0o755); err != nil {

@@ -1,0 +1,4 @@
+[
+  {"tool_calls": [{"id": "call-rr-1", "name": "echo", "args": {"text": "resume-restart-payload"}}]},
+  {"text": "run A final: session seeded"}
+]
