@@ -10,10 +10,13 @@ package cli
 // overlay.OpenPackFor falls through to the embedded FS (project-local absent).
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vhqtvn/vh-agent-harness/internal/overlay"
 )
 
 // runOverlayDocsIn runs `overlay docs <name>` with the given target and args,
@@ -146,11 +149,29 @@ func TestOverlayDocs_ProjectLocalShadowsEmbedded(t *testing.T) {
 	if !strings.Contains(out, sentinel) {
 		t.Fatalf("project-local README should contain sentinel %q\nout:\n%s", sentinel, out)
 	}
-	// The embedded README must NOT have won. "three-hook plugin" is a
+	// The embedded README must NOT have won. "two-hook plugin" is a
 	// distinctive phrase from the embedded README (line 3) that the minimal
 	// project-local README does not carry — its presence would mean the
 	// embedded FS was read instead of the project-local dir.
-	const embeddedOnly = "three-hook plugin"
+	const embeddedOnly = "two-hook plugin"
+	// Non-vacuous pin: the sentinel must actually EXIST in the embedded
+	// README bytes. This test once quoted "three-hook plugin", a phrase a
+	// later README rename (the dormant permission.ask reserve-hook deletion)
+	// had removed — the negative assertion then passed whichever FS won,
+	// a vacuous guard. Reading the embedded bytes here fails loudly if the
+	// README phrase drifts again, forcing this sentinel to track the real
+	// embedded text instead of silently going dead.
+	embeddedPack, err := overlay.OpenPack("auto-classifier-pilot")
+	if err != nil {
+		t.Fatalf("open embedded auto-classifier-pilot pack: %v", err)
+	}
+	embeddedREADME, err := fs.ReadFile(embeddedPack.FS, "README.md")
+	if err != nil {
+		t.Fatalf("read embedded README.md: %v", err)
+	}
+	if !strings.Contains(string(embeddedREADME), embeddedOnly) {
+		t.Fatalf("shadow sentinel %q not found in embedded README — the phrase drifted; update the sentinel to a current distinctive embedded-README phrase", embeddedOnly)
+	}
 	if strings.Contains(out, embeddedOnly) {
 		t.Fatalf("project-local README should shadow embedded; output still contains embedded-only string %q\nout:\n%s", embeddedOnly, out)
 	}
