@@ -323,3 +323,24 @@ Greenfield skip pin landed: the greenfield twin of the anchor-escape fixture in 
 - decision-item: defer-staged-draft-omitted-status-watch#owner_notes[fnv1a:d6b99e646561dfc1] (curated)
 - resolved-by-operator-ask:2026-11-18 (follow-up batch go)
 Watch pin landed: tests/scripts/task-repair-deadlock-restage.test.js (commit 8715469, Task-Card trailer present) now pins that a valid stored staged card never projects to draft on the load path — healthy and unrelated-degraded fixtures, green-from-birth by design — making the round-6 staged-to-draft guard's arm-3 infeasibility premise executable against normalizer coercion-set drift.
+
+## agents-md-compose-dryrun-blind-spot
+
+- studied:2026-11-18
+- decision-item: agents-md-compose-dryrun-blind-spot#owner_notes[fnv1a:d6b99e646561dfc1] (curated)
+- resolved-by-operator-ask:2026-11-18 (disposition debate ses_e107a98a2ffe; decline-and-close ratified)
+Declined-and-closed by operator ratification 2026-11-18 after disposition debate ses_e107a98a2ffe: inspection confirms that dry-run omits root AGENTS.md composition and live composition can overwrite root-only edits; the card also records a consumer loss report whose underlying circumstances were not independently verified in this review. We accept these limitations because the opted-in root is explicitly generated output, while the proposed refusal guard introduces attribution ambiguity and recovery friction, and the evidence does not establish a mandatory protection or complete-preview requirement. Evidence establishing such a requirement, or materially different loss consequences, would warrant a fresh assessment; this disposition creates no trigger, debt item, or future obligation. Recorded cheap-override for re-entry: refusal-only preflight (no flag) if the dry-run visibility expectation is later judged mandatory.
+- S2 design decision (operator-relevant): refuse-by-default with an explicit --accept-rendered-loss flag vs loud WARN + full diff listing. Refusal risks breaking consumers whose AGENTS.md legitimately diverges until they port or pass the flag; WARN-only repeats the incident class if unreviewed. Flag addition changes the CLI surface — README.agent.md must be updated in the same change (mission rule).
+- Should the doctor 3b WARN message name the drift direction (cheap rider on S1/S2 test work)?
+- Consumer-side (vh-solara): incident binary likely predates 4483896 (report's quoted dry-run tokens don't match current code) — operator should update the consumer's harness binary so doctor 3b is active; it would have flagged both drift directions pre-incident.
+
+## defer-repair-inlock-reauth
+
+- source:review-defer (84c1097 cascade leaf C-F1, major-deferred)
+- re-derivation: operator-driven claim guard — escalate to BLOCK only on a real interleaving repro; no mechanical trigger
+- studied:2026-11-16
+- decision-item: defer-repair-inlock-reauth#owner_notes[fnv1a:ccb98ea65f61d64f] (curated)
+- studied:2026-11-18
+- decision-item: defer-repair-inlock-reauth#owner_notes[fnv1a:d6b99e646561dfc1] (curated)
+- resolved-by-operator-ask:2026-11-18 (disposition debate ses_e107a98a2ffe; decline-and-close ratified)
+Declined-and-closed by operator ratification 2026-11-18 after disposition debate ses_e107a98a2ffe: repair and the Go errata injector can lose a logical update because the injector does not participate in the JS task-lock protocol; atomic replacement does not eliminate that race. We accept the residual risk for the supplied narrow concurrent-operator scenario, given idempotent reinjection and diagnostic resurfacing, rather than land a partial JS defense or introduce cross-runtime synchronization. Evidence of materially different consequences or an applicable mandatory concurrency guarantee would warrant fresh derivation from current state; no trigger, debt item, or future obligation remains. Recorded cheap-override for re-entry: Go-side sentinel adoption if completed-state integrity is later judged to deserve a mandatory serialization guarantee.
