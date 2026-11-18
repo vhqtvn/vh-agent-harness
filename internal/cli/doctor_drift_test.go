@@ -39,22 +39,30 @@ func writeOwnershipOverrides(t *testing.T, target string, raises map[string]stri
 // findLivePlatformManagedPath returns the repo-relative slash path of a corpus
 // platform_managed path that exists on disk under root. Used to pick a robust
 // fixture path that is independent of which files a given profile renders.
+// The pick is DETERMINISTIC: candidates are iterated in sorted order (a Go
+// map range order is randomized per iteration — see
+// findLiveAuthoredPlatformManagedPath for the flake that unsorted iteration
+// caused).
 func findLivePlatformManagedPath(t *testing.T, root string) string {
 	t.Helper()
 	def, err := corpus.CoreOwnershipDefaults()
 	if err != nil {
 		t.Fatalf("core ownership defaults: %v", err)
 	}
+	var candidates []string
 	for p, rule := range def {
 		if rule.Class != ownership.ClassPlatformManaged {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(p))); err == nil {
-			return p
+			candidates = append(candidates, p)
 		}
 	}
-	t.Fatalf("no live platform_managed path found under %s", root)
-	return ""
+	if len(candidates) == 0 {
+		t.Fatalf("no live platform_managed path found under %s", root)
+	}
+	sort.Strings(candidates)
+	return candidates[0]
 }
 
 // findLiveAuthoredPlatformManagedPath is like findLivePlatformManagedPath but
@@ -65,12 +73,28 @@ func findLivePlatformManagedPath(t *testing.T, root string) string {
 // apply. The base helper can return a regenerated path (allowed-commands.js IS
 // platform_managed in the corpus defaults), which would silently flip a test's
 // expected preserved-vs-genuine verdict; this variant removes that flake.
+//
+// DETERMINISM + cohort-graph exclusion (the 2026-11-19 flake fix): the pick
+// iterates SORTED candidate keys. The historical unsorted helper ranged over
+// the ownership-defaults map directly, and Go randomizes map range order per
+// iteration, so every test iteration stubbed a RANDOM platform path. When the
+// pick was a cohort-link hub (e.g. .opencode/scripts/coordination-hints-lib.js),
+// the consumer-edit stub parsed to a CLOSED EMPTY surface, its in-graph
+// importers were PROVEN broken, and the fail-closed cohort preflight correctly
+// refused the update — failing TestAcceptPlatform_LiveUpdateNamesStalls ~3/40
+// per -count batch (a test-fixture bug, not a gate bug: the gate's edges were
+// true for the stubbed tree). The pick also PREFERS a path OUTSIDE the cohort
+// link graph (the same isCohortScannedPath predicate the preflight uses), so a
+// consumer-edit stub can never alter link topology regardless of future corpus
+// evolution; cohort-scanned authored paths remain as the fallback when no
+// non-scanned authored path exists on disk.
 func findLiveAuthoredPlatformManagedPath(t *testing.T, root string) string {
 	t.Helper()
 	def, err := corpus.CoreOwnershipDefaults()
 	if err != nil {
 		t.Fatalf("core ownership defaults: %v", err)
 	}
+	var candidates []string
 	for p, rule := range def {
 		if rule.Class != ownership.ClassPlatformManaged {
 			continue
@@ -79,11 +103,44 @@ func findLiveAuthoredPlatformManagedPath(t *testing.T, root string) string {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(p))); err == nil {
+			candidates = append(candidates, p)
+		}
+	}
+	sort.Strings(candidates)
+	for _, p := range candidates {
+		if !isCohortScannedPath(p) {
 			return p
 		}
 	}
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
 	t.Fatalf("no live authored (non-regenerated) platform_managed path found under %s", root)
 	return ""
+}
+
+// TestFindLiveAuthoredPathPickDeterministic pins the 2026-11-19 flake fix: the
+// authored-path fixture pick must be a DETERMINISTIC function of the rendered
+// corpus (sorted iteration) and must land OUTSIDE the cohort link graph, so
+// consumer-edit stubbing can never alter link topology or trip the fail-closed
+// cohort preflight. Five picks exercise five fresh map ranges: under a sorted
+// implementation they are identical; under an unsorted one (the bug) they
+// diverge rapidly (~100 candidates ⇒ all-five collision probability ~1e-8).
+func TestFindLiveAuthoredPathPickDeterministic(t *testing.T) {
+	root := t.TempDir()
+	seamInstallInto(t, root)
+	picks := map[string]bool{}
+	for i := 0; i < 5; i++ {
+		picks[findLiveAuthoredPlatformManagedPath(t, root)] = true
+	}
+	if len(picks) != 1 {
+		t.Fatalf("authored-path pick must be deterministic across repeated calls; got %d distinct picks: %v", len(picks), picks)
+	}
+	for p := range picks {
+		if isCohortScannedPath(p) {
+			t.Fatalf("authored-path pick %s is inside the cohort link graph — a consumer-edit stub there can trip the fail-closed cohort preflight; the pick must prefer a non-scanned path", p)
+		}
+	}
 }
 
 // findLiveDefaultNonManagedPath returns the repo-relative slash path of a corpus

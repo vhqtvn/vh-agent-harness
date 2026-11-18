@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -781,7 +782,8 @@ func TestAcceptPlatform_All_BackwardCompatPerPath(t *testing.T) {
 // platform_managed in the corpus defaults AND exists on disk under root. It is
 // the plural form of findLivePlatformManagedPath (doctor_drift_test.go), used by
 // accept-platform tests that need to filter the live managed set (e.g. by .sh
-// suffix for the write-mode parity test).
+// suffix for the write-mode parity test). The result is sorted so callers see
+// a deterministic order (the underlying map range is randomized per call).
 func findLivePlatformManagedPaths(t *testing.T, root string) []string {
 	t.Helper()
 	def, err := corpus.CoreOwnershipDefaults()
@@ -797,6 +799,7 @@ func findLivePlatformManagedPaths(t *testing.T, root string) []string {
 			out = append(out, p)
 		}
 	}
+	sort.Strings(out)
 	return out
 }
 
