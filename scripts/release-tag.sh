@@ -864,6 +864,90 @@ fi
 # boundary — the wrapper is the sole tag-cutting surface and verifying
 # readiness at tag time is its job.
 
+# --- FAIL-preserving gate-output capture (v0.30.0 incident hardening) -------
+#
+# INCIDENT (v0.30.0 ceremony, first wrapper invocation): G0 go test ./...
+# exited red, but the refusal JSON inlined the ENTIRE gate output unbounded
+# ("<reason> (output: $G0_OUTPUT)"). Repeated warning spam from the test run
+# filled the caller's head-kept output budget, and the --- FAIL: identity at
+# the output TAIL was truncated away — an undiagnosable red (non-reproducing:
+# three green re-runs at the identical tree; the retained capture
+# tmp/release-g0-capture-v0.30.0.txt — local scratch under gitignored tmp/,
+# not in git — is the GREEN retry). Record:
+# docs/checkpoints/2026-11-19-release-g0-capture-hardening.md.
+#
+# Contract (pinned end-to-end by tests/scripts/release-tag-g0-capture.test.js):
+#   1. DURABLE FULL CAPTURE — on a red, the failing command's complete
+#      unfiltered TEXTUAL output (everything the wrapper itself saw — bash
+#      command substitution retains it all, modulo trailing-newline
+#      normalization) is written to
+#      <repo-root>/tmp/release-gate-capture-<version>-<label>-<utcstamp>-<pid>.txt.
+#      A GREEN run deliberately writes NOTHING: G0b's `git status --short`
+#      runs AFTER G0 in the classic flow, and an always-on capture file would
+#      false-refuse dirty in any repo that does not gitignore tmp/ (the same
+#      class the historical-flow G0b skip below guards against). The capture
+#      therefore exists exactly when it has diagnostic value: a red.
+#   2. FAIL IDENTITY INDEPENDENT OF DISPLAY BUDGET — the refusal extracts the
+#      failure-summary lines (go commands: ^--- FAIL: / ^FAIL; doctor:
+#      tier-FAIL lines) and places them BEFORE any excerpt, so no volume of
+#      preceding warning spam can displace the failing test's identity from
+#      the refusal.
+#   3. BOUNDED DISPLAY — the inline excerpt is first-40 + last-40 lines with
+#      an elision marker. The unbounded whole-output inline is gone.
+#   4. PATH DISCLOSURE — the refusal names the capture file.
+# Capture-write failure NEVER changes a gate verdict (a red already refuses;
+# a green never reaches this helper): the refusal then notes the capture
+# could not be written and still carries summary + bounded excerpt computed
+# from the in-memory output.
+G0_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || G0_REPO_ROOT="$PWD"
+g0_fail_reason() {
+  # $1 = gate label (go-test|go-vet|go-build|gofmt|g0c-doctor)
+  # $2 = base refusal reason (gate identity)
+  # $3 = the failing command's full textual output (complete command
+  #      substitution capture, modulo trailing-newline normalization)
+  # $4 = optional ERE selecting summary lines (default: go-test FAIL shapes)
+  local label="$1" reason="$2" output="$3"
+  local pattern="${4:-^(--- FAIL:|FAIL)}"
+  local capture="${G0_REPO_ROOT}/tmp/release-gate-capture-${VERSION}-${label}-$(date -u +%Y%m%dT%H%M%SZ)-$$.txt"
+  local capture_note="full unfiltered output captured at: ${capture}"
+  local elide_note="full output in the capture file"
+  mkdir -p "${G0_REPO_ROOT}/tmp" 2>/dev/null || true
+  if ! printf '%s\n' "$output" > "$capture" 2>/dev/null; then
+    capture_note="CAPTURE WRITE FAILED (${capture}) — summary and excerpt below are from the in-memory gate output"
+    elide_note="full output was NOT captured (write failed); the elided lines are in the refusal caller's scrollback only"
+  fi
+  local total=0
+  if [ -n "$output" ]; then
+    total="$(printf '%s\n' "$output" | wc -l)"
+  fi
+  local summary=""
+  if [ -n "$output" ]; then
+    summary="$(printf '%s\n' "$output" | grep -E "$pattern" | head -n 50 || true)"
+  fi
+  local summary_block=""
+  if [ -n "$summary" ]; then
+    summary_block="failure summary (extracted, independent of the excerpt budget):
+${summary}"
+  elif [ "$total" -le 50 ]; then
+    summary_block="failure summary (full output; no extraction pattern matched — non-test failure class):
+${output}"
+  else
+    summary_block="failure summary: no extraction-pattern lines matched (non-test failure class — inspect the capture file for compile/vet/tooling diagnostics)"
+  fi
+  local excerpt=""
+  if [ "$total" -le 82 ]; then
+    excerpt="(all ${total} lines):
+${output}"
+  else
+    excerpt="(first 40 + last 40 of ${total} lines):
+$(printf '%s\n' "$output" | head -n 40)
+[... $((total - 80)) lines elided — ${elide_note} ...]
+$(printf '%s\n' "$output" | tail -n 40)"
+  fi
+  printf '%s\n%s\n%s\ndisplayed excerpt %s' \
+    "$reason" "$summary_block" "$capture_note" "$excerpt"
+}
+
 # G0 — green tree. Run the four Go commands in order; capture the first
 # failing command's output for the refusal reason. `gofmt -l` is special:
 # it exits 0 even when it lists files, so we treat ANY non-empty stdout
@@ -879,24 +963,24 @@ G0_REASON=""
 G0_OUTPUT=""
 if [ "$HISTORICAL" = "1" ]; then
   if ! G0_OUTPUT=$( (cd "$X_DIR" && go test ./... 2>&1) ); then
-    G0_REASON="release-readiness-gate: G0 go test ./... failed at M (verification worktree)"
+    G0_REASON="$(g0_fail_reason go-test "release-readiness-gate: G0 go test ./... failed at M (verification worktree)" "$G0_OUTPUT")"
   elif ! G0_OUTPUT=$( (cd "$X_DIR" && go vet ./... 2>&1) ); then
-    G0_REASON="release-readiness-gate: G0 go vet ./... failed at M (verification worktree)"
+    G0_REASON="$(g0_fail_reason go-vet "release-readiness-gate: G0 go vet ./... failed at M (verification worktree)" "$G0_OUTPUT")"
   elif ! G0_OUTPUT=$( (cd "$X_DIR" && go build ./... 2>&1) ); then
-    G0_REASON="release-readiness-gate: G0 go build ./... failed at M (verification worktree)"
+    G0_REASON="$(g0_fail_reason go-build "release-readiness-gate: G0 go build ./... failed at M (verification worktree)" "$G0_OUTPUT")"
   else
     G0_OUTPUT=$( (cd "$X_DIR" && gofmt -l . 2>&1) ) || true
     if [ -n "$G0_OUTPUT" ]; then
-      G0_REASON="release-readiness-gate: G0 gofmt -l . reported unformatted files at M (verification worktree)"
+      G0_REASON="$(g0_fail_reason gofmt "release-readiness-gate: G0 gofmt -l . reported unformatted files at M (verification worktree)" "$G0_OUTPUT")"
     fi
   fi
 else
   if ! G0_OUTPUT=$(go test ./... 2>&1); then
-    G0_REASON="release-readiness-gate: G0 go test ./... failed"
+    G0_REASON="$(g0_fail_reason go-test "release-readiness-gate: G0 go test ./... failed" "$G0_OUTPUT")"
   elif ! G0_OUTPUT=$(go vet ./... 2>&1); then
-    G0_REASON="release-readiness-gate: G0 go vet ./... failed"
+    G0_REASON="$(g0_fail_reason go-vet "release-readiness-gate: G0 go vet ./... failed" "$G0_OUTPUT")"
   elif ! G0_OUTPUT=$(go build ./... 2>&1); then
-    G0_REASON="release-readiness-gate: G0 go build ./... failed"
+    G0_REASON="$(g0_fail_reason go-build "release-readiness-gate: G0 go build ./... failed" "$G0_OUTPUT")"
   else
     # gofmt -l exits 0 even when listing files; any non-empty stdout is a
     # formatting failure. (Parse errors exit nonzero and would have been
@@ -904,13 +988,17 @@ else
     # substitution under `set -e` regardless.)
     G0_OUTPUT=$(gofmt -l . 2>&1) || true
     if [ -n "$G0_OUTPUT" ]; then
-      G0_REASON="release-readiness-gate: G0 gofmt -l . reported unformatted files"
+      G0_REASON="$(g0_fail_reason gofmt "release-readiness-gate: G0 gofmt -l . reported unformatted files" "$G0_OUTPUT")"
     fi
   fi
 fi
 if [ -n "$G0_REASON" ]; then
+  # G0_REASON is composed by g0_fail_reason: gate identity + extracted FAIL
+  # summary + capture-file path + bounded excerpt (never the unbounded
+  # whole-output inline that made the v0.30.0 first-invocation red
+  # undiagnosable).
   emit false "$VERSION" "" false \
-    "${G0_REASON} (output: $G0_OUTPUT)" \
+    "$G0_REASON" \
     "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON" false "$([ "$HISTORICAL" = "1" ] && printf true || printf false)"
   exit 1
 fi
@@ -1064,8 +1152,17 @@ fi
 # via `git describe --tags --abbrev=0` when the env var is unset).
 if [ "$G0C_CONTROL" = "1" ]; then
   if ! G0C_OUTPUT=$(VH_HARNESS_DEFER_DIFF_SINCE="$PRIOR_TAG" "$HARNESS_BIN" doctor 2>&1); then
+    # Same FAIL-preserving capture contract as G0 (see g0_fail_reason): the
+    # doctor report can itself be voluminous, and the failing check identity
+    # must not fall to a display budget. Doctor's tier-FAIL lines carry the
+    # check name mid-line (name token + tier token), so the extraction
+    # pattern differs from the go-test ^--- FAIL:/^FAIL line shapes.
+    G0C_REASON="$(g0_fail_reason g0c-doctor \
+      "release-readiness-gate: G0c doctor not HEALTHY (a machine check FAILED — run \`$HARNESS_BIN doctor\` for the full report)" \
+      "$G0C_OUTPUT" \
+      '[[:space:]]FAIL([[:space:]]|$)')"
     emit false "$VERSION" "" false \
-      "release-readiness-gate: G0c doctor not HEALTHY (a machine check FAILED — run \`$HARNESS_BIN doctor\` for the full report). Doctor output: $G0C_OUTPUT" \
+      "$G0C_REASON" \
       "$DISCLOSURES_JSON" "$ACCEPTED_OVERRIDES_JSON" false "$([ "$HISTORICAL" = "1" ] && printf true || printf false)"
     exit 1
   fi

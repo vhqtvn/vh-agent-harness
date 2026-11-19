@@ -2697,6 +2697,25 @@ a structured JSON refusal and a non-zero exit. Refusals split into an
 **agent-resolvable class** (eligible historical M) and two **operator-only**
 failure modes.
 
+**Gate-red refusals are FAIL-preserving (v0.30.0 incident hardening).** When a
+deterministic gate COMMAND fails — G0 `go test`/`go vet`/`go build`/`gofmt`, or
+the G0c doctor control run — the wrapper writes the command's complete
+unfiltered textual output (everything the wrapper itself saw) to a durable
+capture file under the repo's `tmp/`
+(`tmp/release-gate-capture-<version>-<label>-<utcstamp>-<pid>.txt`) and
+composes the refusal `error` from bounded parts only: the gate identity, the
+extracted failure-summary lines (`--- FAIL:` / `FAIL` package lines for go
+commands; tier-FAIL lines for doctor) placed BEFORE any excerpt, and a
+first-40 + last-40-line excerpt; the capture path is named on its own line
+before the excerpt. A red preceded by voluminous warning spam therefore still
+names the failing test inside the refusal itself — during the v0.30.0 ceremony
+the first invocation lost exactly that identity to a caller's head-kept
+output budget (the old refusal inlined the entire gate output unbounded) —
+and the complete output stays on disk for diagnosis. Green runs write NO
+capture file (G0b's dirty-tree check never sees wrapper scratch); capture
+files are untracked `tmp/` scratch — retain them for diagnosis or delete them
+freely.
+
 **Eligible historical M — agent-only, no git recovery.** When a concurrent
 commit (an operator chore, a post-ceremony fixup) lands on first-parent AFTER
 a completed ceremony's manifest commit M, the wrapper DERIVES M from the
