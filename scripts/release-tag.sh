@@ -876,7 +876,13 @@ fi
 # not in git — is the GREEN retry). Record:
 # docs/checkpoints/2026-11-19-release-g0-capture-hardening.md.
 #
-# Contract (pinned end-to-end by tests/scripts/release-tag-g0-capture.test.js):
+# Contract (end-to-end pinned by tests/scripts/release-tag-g0-capture.test.js
+# for these surfaces: classic-flow go-test red (spam shape), classic-flow
+# go-vet red (small-output branch), classic-flow green (no capture written),
+# historical-flow go-test red, G0c control-run doctor red, and
+# capture-write-failure degradation. NOT end-to-end pinned: the go-build and
+# gofmt arms of this helper, and the historical G0c TARGET run (which does
+# not use this helper — it parses the doctor JSON envelope instead)):
 #   1. DURABLE FULL CAPTURE — on a red, the failing command's complete
 #      unfiltered TEXTUAL output (everything the wrapper itself saw — bash
 #      command substitution retains it all, modulo trailing-newline
@@ -914,7 +920,7 @@ g0_fail_reason() {
   mkdir -p "${G0_REPO_ROOT}/tmp" 2>/dev/null || true
   if ! printf '%s\n' "$output" > "$capture" 2>/dev/null; then
     capture_note="CAPTURE WRITE FAILED (${capture}) — summary and excerpt below are from the in-memory gate output"
-    elide_note="full output was NOT captured (write failed); the elided lines are in the refusal caller's scrollback only"
+    elide_note="full output was NOT captured (write failed); the elided lines are not preserved anywhere — re-run the failing gate to reproduce them"
   fi
   local total=0
   if [ -n "$output" ]; then
