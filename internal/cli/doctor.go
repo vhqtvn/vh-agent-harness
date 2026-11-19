@@ -68,7 +68,7 @@ var doctorCmd = &cobra.Command{
   skills          every rendered skill's SKILL.md frontmatter valid       FAIL if invalid
   subagent-depth  effective merged subagent_depth >= delegation minimum  WARN if unset/too low
   defer-liveness  open defer/errata cards contradict no released claim     FAIL if open card contradicts a present note
-  staged-errata-content staged errata correction present in release note   FAIL if staged card content missing from the about-to-release note
+  staged-errata-content staged errata correction present in release note   FAIL if staged card content missing from the about-to-release note; FAIL if a selected staged card is degraded/uncheckable (shape), or an errata card file is registry-undecodable (status unknown; clean the card or withdraw from staging); execution-era keys are accepted only at their canonical EMPTY state (the sanctioned restage output), and a whitespace-padded staged_path is refused
   behavioral-closure closeout declarations internally consistent  FAIL if verdict:proven claimed without a proven crux result; FAIL if interaction_touching:true receipt missing/incomplete/mechanism-as-proven
   dev-stale-embed binary's embedded corpus vs checkout's templates/core  WARN if differs (source checkout only; consumers see nothing)
   f1-envelope     committed f1-synthesis-envelope projections structurally consistent  FAIL if unknown enum / missing family / dangling cross-ref / digest mismatch

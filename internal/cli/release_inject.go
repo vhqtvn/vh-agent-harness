@@ -11,6 +11,27 @@ package cli
 // about-to-release note as a "## Errata for vX.Y.Z" section, and flips the card
 // status staged→completed — in the same slice, with zero human copy-paste.
 //
+// SHAPE-ALLOWLIST REFUSAL (defer-release-injector-degraded-eligibility,
+// disposal b′): before ANY write (and under --dry-run), the WHOLE selected
+// set is shape-verified via taskcard.CheckStagedErrataShape — the pure
+// staged-errata SHAPE VERIFIER (exact key allowlist enumerated from the real
+// staged cards, required creation/transport fields non-empty, narrow enums,
+// unpadded repo-relative staged_path, TOTAL unknown-key refusal, and the
+// round-5 restage producer contract: execution-era and canonical-default
+// keys admitted ONLY at their canonical EMPTY state). A single
+// shape-invalid or uncheckable staged card REFUSES the whole batch with a
+// nonzero exit: the note and every card stay byte-identical (no partial
+// injection of mixed batches). Recovery is explicit: clean the card (bring
+// it to the staged-errata shape) or withdraw it from staging through the
+// sanctioned operator path. Doctor check #13 refuses the same cards at the
+// gate, so a refused batch can never reach a tag.
+//
+// REGISTRY-DECODE FAILURES (C-F1) are refused identically: an errata card
+// file claims.Derive cannot decode (e.g. files_in_scope: {}) never reaches
+// the staged selection — the preflight joins reg.CardErrors and refuses on
+// errata-prefixed entries as status-unknown, so a mixed batch whose invalid
+// card fails via decode still injects NOTHING.
+//
 // After inject, check #13 sees no staged cards (they are now completed) and
 // passes; check #12 (defer-liveness) treats completed as closed and passes too.
 // If inject was forgotten, the card stays staged and #13 FAILs at the tag
@@ -70,7 +91,40 @@ var releaseInjectErrataCmd = &cobra.Command{
 	Long: `Inject each errata card whose status is "staged" into the about-to-release
 (untagged) migration note, then flip the card status staged→completed.
 
-For each staged errata card:
+Before ANY write (and under --dry-run), the WHOLE selected set is
+shape-verified against the staged-errata card shape: an exact key allowlist
+(the creation/transport fields real staged errata cards carry, plus the
+execution-era and canonical-default keys of the RESTAGE PRODUCER CONTRACT
+accepted ONLY at their canonical EMPTY state — null/absent, or an empty
+array for the alias/report/review path lists — exactly what the sanctioned
+restage op writes), required fields present and non-empty, narrow enums
+(task_type, coordination_mode, primary_lane, status=="staged",
+report_envelope), non-empty scope/criteria/validation lists, an UNPADDED
+repo-relative staged_path (absolute, drive-letter, UNC, parent-traversal,
+and whitespace-padded forms refused — the release surfaces consume the
+TrimSpace'd value, so the consumed representation must equal the stored
+one), and TOTAL unknown-key refusal. Any execution-era or canonical-default
+key with CONTENT (latest_report, last_review, review_paths, report_paths,
+measured_outcome, decision_record, session_aliases, active_session_alias,
+claimed_at, research_question, source_policy, source_allowlist,
+desired_artifact_type, target_artifact_path, ready_criteria, constraints,
+non_goals, backlog_id, dependencies, f3_design_readiness,
+predicted_impact), a non-null workstream_slug, or ANY unexpected key makes
+the card uncheckable. A single degraded/uncheckable (shape) staged errata
+card REFUSES the entire batch: the command exits nonzero, the note and every
+card remain byte-identical, and no partial injection of a mixed batch occurs.
+Registry-decode failures count as uncheckable too: an errata card file the
+claim registry cannot decode (e.g. files_in_scope holding an object) has an
+unknowable status and refuses the batch the same way. The refusal names each
+offending card and its offending fields. Recovery is explicit — either:
+  - clean the card (bring it to the staged-errata shape: remove
+    execution-era/unexpected content, fill the required creation/transport
+    fields), or
+  - withdraw the card from staging through the sanctioned operator path.
+Doctor check #13 (staged-errata-content) refuses the same cards at the gate,
+so a refused batch can never reach a release tag.
+
+For each staged errata card (after a shape-valid preflight):
   1. Read its staged_path erratum file.
   2. Extract the corrective body (everything after the title + status blockquote).
   3. Append a "## Errata for vX.Y.Z" section (version from the erratum title) to
@@ -138,8 +192,14 @@ func runReleaseInjectErrata(cmd *cobra.Command, _ []string) (err error) {
 	// No tasks transport dir → no staged cards possible → clean no-op. This must
 	// NOT be a hard error: a repo with no .local/coordinator/tasks/ state simply
 	// has nothing to inject, same as a repo with tasks but no staged errata.
+	// C-F1 carve-out: an errata card file the registry could not decode is a
+	// possibly-staged erratum INVISIBLE to stagedErrataCards (claims.Derive
+	// dropped it into reg.CardErrors instead of reg.Cards), so it must not
+	// fall through to this clean no-op — fail-closed continues to Phase 0,
+	// which refuses on it before any write.
 	staged := stagedErrataCards(reg.Cards)
-	if !reg.TasksPresent || len(staged) == 0 {
+	undecodable := errataCardDecodeFailures(reg.CardErrors)
+	if !reg.TasksPresent || (len(staged) == 0 && len(undecodable) == 0) {
 		fmt.Fprintf(out, "no staged errata cards — nothing to inject\n")
 		return nil
 	}
@@ -182,6 +242,36 @@ func runReleaseInjectErrata(cmd *cobra.Command, _ []string) (err error) {
 	}
 	noteText := string(noteBytes)
 	noteNorm := normalizeForContentMatch(noteText)
+
+	// PHASE 0 — WHOLE-SET SHAPE PREFLIGHT
+	// (defer-release-injector-degraded-eligibility, disposal b′). Before ANY
+	// write (and under --dry-run too), shape-verify every selected staged
+	// errata card via the same adapter doctor check #13 uses
+	// (preflightStagedErrataHealth → taskcard.CheckStagedErrataShape, the
+	// pure staged-errata SHAPE VERIFIER). ONE shape-invalid or uncheckable
+	// card refuses the WHOLE batch: appending to failErrs instead would let
+	// healthy cards in the same batch inject and flip (the mixed-batch
+	// partial-write defect this closes). The note and EVERY card remain
+	// byte-identical; the note-first/card-second write ordering below is
+	// preserved unchanged after a successful preflight.
+	//
+	// The preflight ALSO joins reg.CardErrors (C-F1): claims.Derive drops
+	// every card it cannot decode into CardErrors INSTEAD of reg.Cards, so a
+	// staged erratum whose card fails decode (e.g. files_in_scope: {}) never
+	// reaches the selection above — pre-fix, a mixed batch with such a card
+	// PARTIALLY INJECTED (the healthy cards passed the preflight, injected,
+	// and flipped while the undecodable card sat silently in CardErrors). The
+	// adapter refuses on errata-prefixed CardErrors entries as
+	// status-unknown, restoring the zero-partial-write invariant.
+	if failures := preflightStagedErrataHealth(staged, reg.CardErrors); len(failures) > 0 {
+		fmt.Fprintf(out, "REFUSED — %d card-shape refusal(s) over the staged-errata batch of %d selected card(s) (degraded/uncheckable (shape), or registry-undecodable); nothing was written:\n",
+			len(failures), len(staged))
+		for _, f := range failures {
+			fmt.Fprintf(out, "  - %s\n", f.line)
+		}
+		fmt.Fprintf(out, "recovery: clean the card (bring it to the staged-errata shape — remove execution-era/unexpected fields, fill the required creation/transport fields) or withdraw it from staging through the sanctioned operator path, then re-run. No erratum is injected and no card is flipped until every staged card carries exactly the staged-errata shape.\n")
+		return errSilent{}
+	}
 
 	// TWO-PHASE fail-closed ordering (commit-review tier1c-F1 fix):
 	//

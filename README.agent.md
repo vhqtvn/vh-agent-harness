@@ -2618,6 +2618,50 @@ When invoked, the releaser:
    `## Errata for v<version>` section and flip each card `staged → completed`
    (zero human copy-paste), and delegates a single-path commit to the
    committer (scope = that one path). N is HEAD after this step.
+    **Shape-allowlist refusal (degraded/uncheckable (shape)):** before ANY
+    write (and under `--dry-run`), the injector shape-verifies the WHOLE
+    selected staged set against the staged-errata card SHAPE
+    (`internal/taskcard/staged_validation.go`): staged errata cards are a
+    narrow, known shape — created directly into staging, never executed —
+    so the check is an exact KEY ALLOWLIST enumerated from the real staged
+    cards (creation/transport fields only, plus the restage producer
+    contract below), required fields present and non-empty under a
+    Go-native emptiness rule (U+FEFF/whitespace-only — including
+    space-wrapped BOM mixtures — is empty), narrow enums (`task_type`,
+    `coordination_mode`, `primary_lane`, `status=="staged"`,
+    `report_envelope`), non-empty scope/criteria/validation lists, an
+    UNPADDED repo-relative `staged_path` (POSIX-absolute, Windows
+    drive-letter, UNC, `..` traversal, and whitespace-padded forms refused
+    — the release surfaces consume the `TrimSpace`'d value, so the consumed
+    representation must equal the stored one), and TOTAL unknown-key
+    refusal. **Restage producer contract (round 5):** the sanctioned
+    restage op (`restageCoordinationTask`) writes through the canonical
+    coordination-task write, which merges `defaultCoordinationTaskPayload`
+    into the saved card — so the execution-era keys (`latest_report`,
+    `last_review`, `review_paths`, `report_paths`, `measured_outcome`,
+    `decision_record`, `session_aliases`, `active_session_alias`,
+    `claimed_at`) and the other canonical-default keys
+    (`research_question`, `source_policy`, `source_allowlist`,
+    `desired_artifact_type`, `target_artifact_path`, `ready_criteria`,
+    `constraints`, `non_goals`, `backlog_id`, `dependencies`,
+    `f3_design_readiness`, `predicted_impact`) are accepted ONLY at their
+    canonical EMPTY state — null/absent, or an empty array for the
+    alias/report/review path lists — exactly what the producer writes; any
+    content in one of them, a non-null `workstream_slug`, or ANY unexpected
+    key makes the card uncheckable — fail-closed by construction. A single
+    degraded/uncheckable (shape) staged card REFUSES the entire batch:
+    nonzero exit, the note and every card byte-identical, no partial
+    injection of a mixed batch, and the refusal names each offending card +
+    its offending fields. Registry-decode failures count as uncheckable
+    too: an errata card file the claim registry cannot decode (e.g.
+    `files_in_scope` holding an object) never reaches the staged selection —
+    its status is unknowable, and the preflight joins `reg.CardErrors` and
+    refuses on errata-prefixed entries as status-unknown, so a mixed batch
+    whose invalid card fails via decode still injects NOTHING. Doctor
+    check #13 refuses the same cards at G0c, so a
+    refused batch can never reach a tag. Recovery is explicit — either
+    clean the card (bring it to the staged-errata shape) or withdraw the
+    card from staging through the sanctioned operator path; then re-run.
 2. **Step 3.2 — readiness artifact commit R.** The parent orchestrator
    (`build` / `coordination` / `project-coordinator`) invokes
    `harness-release-readiness` against N; the readiness agent writes

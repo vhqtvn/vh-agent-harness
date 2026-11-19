@@ -67,6 +67,7 @@ import (
 	"strings"
 
 	"github.com/vhqtvn/vh-agent-harness/internal/memory/claims"
+	"github.com/vhqtvn/vh-agent-harness/internal/taskcard"
 )
 
 // deferLivenessContradiction is a single release-blocking finding: an open card
@@ -694,6 +695,37 @@ const stagedStatus = "staged"
 // heading), so the check passes deterministically after inject and fails when a
 // human wrote only a stub header.
 //
+// SHAPE-ALLOWLIST REFUSAL (defer-release-injector-degraded-eligibility,
+// disposal b′): before any content acceptance, every SELECTED staged errata
+// card is shape-verified (taskcard.CheckStagedErrataShape — the pure staged
+// errata SHAPE VERIFIER, deliberately narrower-and-stricter than general
+// card health: an exact key allowlist enumerated from the two real staged
+// errata cards, required creation/transport fields non-empty under a
+// Go-native emptiness rule, narrow enums, an UNPADDED repo-relative
+// staged_path (round-5 FIX 1: both consumers TrimSpace before
+// filepath.IsAbs/Join, so any staged_path whose TrimSpace form differs from
+// the raw value is refused — the consumed representation must equal the
+// stored one), the round-5 FIX 2 restage producer contract (execution-era
+// and canonical-default keys admitted ONLY at their canonical EMPTY state —
+// exactly what the sanctioned restage op writes), and TOTAL unknown-key
+// refusal — any execution-era/canonical-default key with content or any
+// unexpected field makes the card uncheckable, fail-closed by construction).
+// A shape-invalid or uncheckable card FAILS this check even when its
+// corrective body is present in the note: card shape and content presence
+// are independent, and an invalid staged card must be cleaned or withdrawn
+// from staging, never waved through by a healthy note. Scoped to the
+// selected staged errata set only — no schema requirement is imposed on any
+// other claim card.
+//
+// REGISTRY-DECODE FAILURES (C-F1) refuse identically: an errata card file
+// claims.Derive cannot decode lands in reg.CardErrors instead of reg.Cards,
+// so it is invisible to the staged selection — its status is unknowable, and
+// a decode-failing STAGED erratum would otherwise escape both this check and
+// the injector preflight. The preflight joins errata-prefixed CardErrors
+// entries and FAILs on them as status=unknown (clean the card or withdraw);
+// the empty-selection PASS below also requires zero such entries. Defer-card
+// decode failures remain check #12's fail-closed business.
+//
 // READ-ONLY: never mutates a card or note.
 func checkStagedErrataContent(target string) checkResult {
 	const name = "staged-errata-content"
@@ -727,13 +759,41 @@ func checkStagedErrataContent(target string) checkResult {
 	}
 
 	// 3. Only staged errata cards are in scope. A staged card whose staged_path
-	//    is empty cannot be content-checked → fail-closed (a staged card with no
-	//    staged erratum file is malformed). No staged errata cards at all →
-	//    nothing to verify → PASS (the common post-inject steady state).
+	// is empty cannot be content-checked → fail-closed (a staged card with no
+	// staged erratum file is malformed). No staged errata cards at all →
+	// nothing to verify → PASS (the common post-inject steady state) — UNLESS
+	// an errata card file failed registry decode (C-F1): claims.Derive drops
+	// undecodable cards into reg.CardErrors instead of reg.Cards, so a
+	// decode-failing STAGED erratum is invisible to the selection above. Its
+	// status is unknowable; fail-closed treats it as possibly-staged and
+	// refuses rather than PASSing on an incomplete selection.
 	staged := stagedErrataCards(reg.Cards)
-	if len(staged) == 0 {
+	undecodable := errataCardDecodeFailures(reg.CardErrors)
+	if len(staged) == 0 && len(undecodable) == 0 {
 		return checkResult{name: name, tier: tierPass,
 			detail: fmt.Sprintf("%d about-to-release note(s), no staged errata cards — nothing to verify", len(aboutToRelease))}
+	}
+
+	// 3.5 SHAPE-ALLOWLIST REFUSAL (defer-release-injector-degraded-
+	//    eligibility): shape-verify every SELECTED staged errata card BEFORE
+	//    any content acceptance — a shape-invalid card whose corrective body
+	//    happens to be present in the note must still FAIL (card shape and
+	//    content presence are independent). Scoped to the selected staged
+	//    errata set only: no schema requirement is imposed on any other
+	//    claim card, and the selection itself is UNCHANGED (filtering here
+	//    would hide staged intent — the card stays selected and the ceremony
+	//    stops instead). The preflight also joins reg.CardErrors (C-F1):
+	//    every errata card file the registry could not decode refuses here
+	//    too, for the reasons in step 3.
+	if failures := preflightStagedErrataHealth(staged, reg.CardErrors); len(failures) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d card-shape refusal(s) over the staged-errata batch of %d selected card(s) (degraded/uncheckable (shape), or registry-undecodable):", len(failures), len(staged))
+		for _, f := range failures {
+			b.WriteString("\n  - ")
+			b.WriteString(f.line)
+		}
+		b.WriteString("\nno shape-invalid staged card may pass a release gate: bring the card to the staged-errata shape (remove execution-era/unexpected fields, fill the required creation/transport fields) or withdraw it from staging through the sanctioned operator path, then re-run the ceremony.")
+		return checkResult{name: name, tier: tierFail, detail: b.String()}
 	}
 
 	// 4. Target ONLY the highest-version about-to-release note — the same note
@@ -833,6 +893,92 @@ func stagedErrataCards(cards []claims.DeferCard) []claims.DeferCard {
 		}
 	}
 	return out
+}
+
+// stagedErrataHealthFailure is one refused staged errata card from the shared
+// shape preflight: the card (for labeling), a ready-to-print line naming
+// the offending fields (or the uncheckable cause), or — for the registry
+// decode-failure class — no card at all (the card never decoded, so the line
+// is built from the offending file path).
+type stagedErrataHealthFailure struct {
+	card claims.DeferCard
+	line string
+}
+
+// errataCardDecodeFailures filters a claim-registry CardErrors set down to
+// ERRATA card files — the class both release surfaces must treat as
+// possibly-staged (C-F1). claims.Derive drops every card it cannot
+// read/decode/identity-validate into reg.CardErrors INSTEAD of reg.Cards, so
+// such a card is invisible to stagedErrataCards(reg.Cards): its status is
+// UNKNOWABLE, and a decode-failing card carrying status "staged" would
+// silently escape both the injector preflight and check #13. Keyed by file
+// path (CardError.Path, absolute under the tasks dir); errata membership is
+// derived from the FILENAME prefix exactly the way loadDeferCards selects
+// cards. Defer-card decode failures are deliberately NOT selected here —
+// they are check #12's fail-closed business, not the errata surfaces'.
+func errataCardDecodeFailures(cardErrs []claims.CardError) []claims.CardError {
+	var out []claims.CardError
+	for _, ce := range cardErrs {
+		base := filepath.Base(ce.Path)
+		if strings.HasPrefix(base, "errata-") && strings.HasSuffix(base, ".json") {
+			out = append(out, ce)
+		}
+	}
+	return out
+}
+
+// preflightStagedErrataHealth is the SHARED adapter both release surfaces use
+// to refuse staged errata cards that are not the known staged-errata shape
+// (defer-release-injector-degraded-eligibility, disposal b′). For each
+// SELECTED staged errata card it reads the RAW card bytes (c.Path — the shape
+// verifier never trusts the derived DeferCard fields) and runs
+// taskcard.CheckStagedErrataShape, the pure SHAPE VERIFIER: an exact key
+// allowlist (enumerated from the two real staged errata cards), required
+// creation/transport fields non-empty, narrow enums, repo-relative
+// staged_path, and TOTAL unknown-key refusal — any execution-era field or
+// unexpected key makes the card uncheckable, so a card the verifier does not
+// fully understand refuses the batch (fail-closed by construction; there is
+// no JS-parity surface to get wrong). Any shape-invalid or uncheckable
+// (unreadable / unparseable) card yields a failure line naming the card, the
+// offending fields, and the recovery path (clean the card or withdraw it
+// from staging). Read-only: it never mutates a card or note.
+//
+// REGISTRY DECODE FAILURES (C-F1): cardErrs is the SAME registry's CardErrors
+// set; every entry on an errata card file (errataCardDecodeFailures) also
+// yields a refusal line. Such a card never reached the staged selection —
+// claims.Derive could not decode it — so its status is unknowable and a
+// possibly-staged erratum must refuse the batch exactly like a shape-invalid
+// selected one. Without this join, a mixed batch whose invalid card fails
+// via decode (e.g. files_in_scope: {}) PARTIALLY INJECTS: the healthy cards
+// pass the preflight, inject, and flip while the undecodable card sits
+// silently in CardErrors — the zero-partial-write violation this closes.
+func preflightStagedErrataHealth(staged []claims.DeferCard, cardErrs []claims.CardError) []stagedErrataHealthFailure {
+	var failures []stagedErrataHealthFailure
+	for _, c := range staged {
+		raw, rerr := os.ReadFile(c.Path)
+		if rerr != nil {
+			failures = append(failures, stagedErrataHealthFailure{card: c,
+				line: fmt.Sprintf("%s [status=staged]: card shape could not be verified (unreadable: %v) — treat as degraded/uncheckable (shape); clean the card or withdraw it from staging",
+					cardLabel(c), rerr)})
+			continue
+		}
+		shape := taskcard.CheckStagedErrataShape(raw)
+		if !shape.Valid {
+			failures = append(failures, stagedErrataHealthFailure{card: c,
+				line: fmt.Sprintf("%s [status=staged]: staged errata card shape is INVALID (offending fields: %s) — %s; clean the card or withdraw it from staging",
+					cardLabel(c), strings.Join(shape.OffendingFields, ", "), strings.Join(shape.Problems, " | "))})
+		}
+	}
+	// Registry decode failures on errata card files: possibly-staged cards
+	// the selection above cannot see (they are absent from reg.Cards by
+	// construction). Fail-closed: one such file refuses the batch.
+	for _, ce := range errataCardDecodeFailures(cardErrs) {
+		id := strings.TrimSuffix(filepath.Base(ce.Path), ".json")
+		failures = append(failures, stagedErrataHealthFailure{
+			line: fmt.Sprintf("%s [status=unknown]: card shape could not be verified (claim registry could not decode the card: %v) — treat as degraded/uncheckable (shape); clean the card or withdraw it from staging",
+				id, ce.Err)})
+	}
+	return failures
 }
 
 // cardLabel renders a short human-readable label for a card (task_id or

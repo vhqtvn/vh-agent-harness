@@ -13,6 +13,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -237,6 +238,376 @@ func TestReleaseInjectErrata_NoStagedCards(t *testing.T) {
 	}
 	if !strings.Contains(out, "nothing to inject") {
 		t.Errorf("output should report no staged cards; got:\n%s", out)
+	}
+}
+
+// writeShapeInvalidStagedErrataCard writes a staged errata card that VIOLATES
+// the staged-errata SHAPE (internal/taskcard/staged_validation.go):
+// identical to the healthy writeStagedErrataCard shape except
+// success_criteria is EMPTY — a required list must be non-empty, so the
+// offending field set is exactly ["success_criteria"], deterministic for
+// assertions. The staged_path + erratum body are fully valid, so pre-fix
+// behavior injected these cards as if they were healthy (no shape concept at
+// all). (The OLD JS-normalizer port also degraded an empty success_criteria
+// at non-draft status — this arm keeps coverage but is not a red receipt.)
+func writeShapeInvalidStagedErrataCard(t *testing.T, dir, name, taskID, title, stagedPath string) {
+	t.Helper()
+	obj := map[string]any{
+		"schema_version":    1,
+		"task_id":           taskID,
+		"title":             title,
+		"status":            "staged",
+		"staged_path":       stagedPath,
+		"task_type":         "implementation",
+		"coordination_mode": "short",
+		"primary_lane":      "release",
+		"files_in_scope":    []string{stagedPath},
+		"rough_scope":       []string{"Staged erratum transport with an empty success_criteria list (shape-invalid)."},
+		"success_criteria":  []string{},
+		"validation_plan":   []string{"Release ceremony inject-errata step reads this card and injects the staged_path body into the next release note"},
+		"history": []any{map[string]any{
+			"at": "2026-11-07T06:38:29Z", "event": "erratum_staged",
+			"session_name": "erratum-stage", "status": "staged", "note": "n",
+		}},
+		"created_at": "2026-11-07T06:38:29Z",
+		"updated_at": "2026-11-07T06:38:29Z",
+	}
+	raw, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal card %s: %v", name, err)
+	}
+	writeTaskCard(t, dir, name, string(raw))
+}
+
+// snapshotTree captures every file under root as relpath → raw bytes, for
+// byte-identical (zero-write) assertions across a refused injector run.
+func snapshotTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	snap := map[string]string{}
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, rerr := filepath.Rel(root, p)
+		if rerr != nil {
+			return rerr
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		snap[filepath.ToSlash(rel)] = string(b)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", root, err)
+	}
+	return snap
+}
+
+// assertTreeUnchanged fails the test when any file under root differs from the
+// snapshot (byte-identical zero-write proof).
+func assertTreeUnchanged(t *testing.T, root string, before map[string]string) {
+	t.Helper()
+	after := snapshotTree(t, root)
+	for p, want := range before {
+		got, ok := after[p]
+		if !ok {
+			t.Errorf("file %s disappeared during a refused run (must be zero-write)", p)
+			continue
+		}
+		if got != want {
+			t.Errorf("file %s mutated during a refused run (must be byte-identical):\n--- before ---\n%s\n--- after ---\n%s", p, want, got)
+		}
+	}
+	for p := range after {
+		if _, ok := before[p]; !ok {
+			t.Errorf("file %s appeared during a refused run (must be zero-write)", p)
+		}
+	}
+}
+
+// runMixedBatchRefusal is the shared body of the mixed healthy+shape-invalid
+// batch arms: a healthy staged errata card and a SHAPE-INVALID staged errata
+// card (empty success_criteria) coexist; inject-errata must REFUSE the whole
+// batch (nonzero) BEFORE ANY write — note AND both cards byte-identical — and
+// name the offending card id + offending field. degradedFirst controls on-disk
+// ordering (cards iterate in filename order), so both orderings are proven.
+func runMixedBatchRefusal(t *testing.T, degradedFirst bool, extraArgs ...string) {
+	t.Helper()
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n\nRelease notes.\n")
+	writeErratumFile(t, dir, "docs/migration-errata/v0.12.0.md", "v0.12.0", sampleErratumBody)
+	writeErratumFile(t, dir, "docs/migration-errata/v0.13.0.md", "v0.13.0", sampleErratumBody)
+
+	healthyName, degradedName := "errata-b-healthy.json", "errata-a-degraded.json"
+	if degradedFirst {
+		healthyName, degradedName = "errata-a-healthy.json", "errata-b-degraded.json"
+	}
+	writeStagedErrataCard(t, dir, healthyName,
+		"errata-healthy", "Erratum: healthy staged claim", "docs/migration-errata/v0.12.0.md")
+	writeShapeInvalidStagedErrataCard(t, dir, degradedName,
+		"errata-degraded", "Erratum: degraded staged claim", "docs/migration-errata/v0.13.0.md")
+
+	before := snapshotTree(t, dir)
+	args := append([]string{"release", "inject-errata", "--target", dir}, extraArgs...)
+	out, err := executeCapture(t, args)
+
+	// REFUSAL: nonzero exit, offending card + field named.
+	if err == nil {
+		t.Fatalf("mixed healthy+shape-invalid batch must be REFUSED (nonzero); got success:\n%s", out)
+	}
+	if !strings.Contains(out, "errata-degraded") {
+		t.Errorf("refusal must name the offending card id errata-degraded; got:\n%s", out)
+	}
+	if !strings.Contains(out, "success_criteria") {
+		t.Errorf("refusal must name the offending field success_criteria; got:\n%s", out)
+	}
+	// ZERO-WRITE: the note and BOTH cards are byte-identical.
+	assertTreeUnchanged(t, dir, before)
+}
+
+// TestReleaseInjectErrata_MixedBatchShapeInvalidFirst_RefusesZeroWrite: a
+// shape-invalid staged card (filename-sorted first) + a healthy staged card →
+// whole-batch refusal before any write. Pre-fix receipt (RED): BOTH cards were
+// injected and flipped with exit 0 — the injector had no shape concept at all.
+func TestReleaseInjectErrata_MixedBatchShapeInvalidFirst_RefusesZeroWrite(t *testing.T) {
+	runMixedBatchRefusal(t, true)
+}
+
+// TestReleaseInjectErrata_MixedBatchHealthyFirst_RefusesZeroWrite: same
+// refusal with the healthy card sorted first — proving the preflight covers
+// the WHOLE selected set, not just a failing prefix.
+func TestReleaseInjectErrata_MixedBatchHealthyFirst_RefusesZeroWrite(t *testing.T) {
+	runMixedBatchRefusal(t, false)
+}
+
+// TestReleaseInjectErrata_ShapeInvalidRefusedWhenBodyAlreadyPresent: the
+// shape-invalid card's erratum body is ALREADY present in the target note —
+// content presence must NOT rescue a shape-invalid card (its card shape is
+// independent of the note). Still a whole-batch zero-write refusal.
+func TestReleaseInjectErrata_ShapeInvalidRefusedWhenBodyAlreadyPresent(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeErratumFile(t, dir, "docs/migration-errata/v0.13.0.md", "v0.13.0", sampleErratumBody)
+	writeShapeInvalidStagedErrataCard(t, dir, "errata-a-degraded.json",
+		"errata-degraded", "Erratum: degraded staged claim", "docs/migration-errata/v0.13.0.md")
+	// The note ALREADY contains the shape-invalid card's corrective body.
+	writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n\n## Errata for v0.13.0\n\n"+sampleErratumBody+"\n")
+
+	before := snapshotTree(t, dir)
+	out, err := executeCapture(t, []string{"release", "inject-errata", "--target", dir})
+	if err == nil {
+		t.Fatalf("shape-invalid card must be refused even when its body is already present; got success:\n%s", out)
+	}
+	if !strings.Contains(out, "errata-degraded") || !strings.Contains(out, "success_criteria") {
+		t.Errorf("refusal must name offending card + field; got:\n%s", out)
+	}
+	assertTreeUnchanged(t, dir, before)
+}
+
+// TestReleaseInjectErrata_ShapeInvalidRefusedUnderDryRun: --dry-run must refuse
+// a shape-invalid selection too — eligibility is a property of the batch, not
+// of the write, so the ceremony's preview path fails exactly like the real path.
+func TestReleaseInjectErrata_ShapeInvalidRefusedUnderDryRun(t *testing.T) {
+	runMixedBatchRefusal(t, true, "--dry-run")
+}
+
+// TestReleaseInjectErrata_MixedBatchWithUnreadableStagedPath_RefusesZeroWrite:
+// a shape-invalid card whose staged_path is ALSO unreadable + a healthy card.
+// This is the literal pre-fix PARTIAL-WRITE receipt: today the healthy card is
+// injected and flipped while the failing card merely lands in the trailing
+// error list — a mixed batch partially injects. Post-fix the whole batch is
+// refused before any write.
+func TestReleaseInjectErrata_MixedBatchWithUnreadableStagedPath_RefusesZeroWrite(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n\nRelease notes.\n")
+	writeErratumFile(t, dir, "docs/migration-errata/v0.12.0.md", "v0.12.0", sampleErratumBody)
+	writeStagedErrataCard(t, dir, "errata-b-healthy.json",
+		"errata-healthy", "Erratum: healthy staged claim", "docs/migration-errata/v0.12.0.md")
+	// Shape-invalid card whose staged_path points at a file that does not exist.
+	writeShapeInvalidStagedErrataCard(t, dir, "errata-a-degraded.json",
+		"errata-degraded", "Erratum: degraded staged claim", "docs/migration-errata/missing-v0.13.0.md")
+
+	before := snapshotTree(t, dir)
+	out, err := executeCapture(t, []string{"release", "inject-errata", "--target", dir})
+	if err == nil {
+		t.Fatalf("mixed batch with a shape-invalid+unreadable card must be REFUSED; got success:\n%s", out)
+	}
+	if !strings.Contains(out, "errata-degraded") {
+		t.Errorf("refusal must name the offending card; got:\n%s", out)
+	}
+	assertTreeUnchanged(t, dir, before)
+}
+
+// writeDecodeFailingStagedErrataCard writes a staged errata card the CLAIM
+// REGISTRY (claims.Derive → loadDeferCards) cannot decode: the JSON is
+// well-formed, but files_in_scope is an OBJECT where the DeferCard schema
+// wants a string array, so json.Unmarshal fails and the card lands in
+// reg.CardErrors instead of reg.Cards. The card is INTENDED to be a staged
+// erratum (status staged, staged_path set) — the C-F1 class: invisible to
+// stagedErrataCards(reg.Cards), so pre-fix neither the injector's Phase-0
+// preflight nor doctor check #13 ever shape-checks it, and a mixed batch
+// PARTIALLY INJECTS.
+func writeDecodeFailingStagedErrataCard(t *testing.T, dir, name, taskID, title, stagedPath string) {
+	t.Helper()
+	obj := map[string]any{
+		"schema_version":    1,
+		"task_id":           taskID,
+		"title":             title,
+		"status":            "staged",
+		"staged_path":       stagedPath,
+		"task_type":         "implementation",
+		"coordination_mode": "short",
+		"primary_lane":      "release",
+		"files_in_scope":    map[string]any{}, // registry decode failure: object, not array
+		"rough_scope":       []string{"Staged erratum transport whose card fails registry decode (files_in_scope is an object, not an array)."},
+		"success_criteria":  []string{"Next release note carries the staged corrective body"},
+		"validation_plan":   []string{"Release ceremony inject-errata step reads this card"},
+		"history": []any{map[string]any{
+			"at": "2026-11-07T06:38:29Z", "event": "erratum_staged",
+			"session_name": "erratum-stage", "status": "staged", "note": "n",
+		}},
+		"created_at": "2026-11-07T06:38:29Z",
+		"updated_at": "2026-11-07T06:38:29Z",
+	}
+	raw, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal card %s: %v", name, err)
+	}
+	writeTaskCard(t, dir, name, string(raw))
+}
+
+// runMixedBatchDecodeRefusal is the C-F1 body: a healthy staged errata card
+// and a staged errata card that fails CLAIM-REGISTRY DECODE (files_in_scope
+// object → reg.CardErrors, absent from reg.Cards) coexist. Pre-fix, the
+// decode-failing card is invisible to the whole-set shape preflight (it is
+// never in the selected staged set), so the healthy card PARTIALLY INJECTS
+// and flips with exit 0 — the exact zero-partial-write violation. Post-fix
+// the whole batch is refused before any write, the undecodable card file is
+// named, and the tree stays byte-identical. decodeFirst controls on-disk
+// ordering so both orderings are proven.
+func runMixedBatchDecodeRefusal(t *testing.T, decodeFailingFirst bool) {
+	t.Helper()
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n\nRelease notes.\n")
+	writeErratumFile(t, dir, "docs/migration-errata/v0.12.0.md", "v0.12.0", sampleErratumBody)
+	writeErratumFile(t, dir, "docs/migration-errata/v0.13.0.md", "v0.13.0", sampleErratumBody)
+
+	healthyName, undecodableName := "errata-b-healthy.json", "errata-a-degraded.json"
+	if decodeFailingFirst {
+		healthyName, undecodableName = "errata-a-healthy.json", "errata-b-degraded.json"
+	}
+	writeStagedErrataCard(t, dir, healthyName,
+		"errata-healthy", "Erratum: healthy staged claim", "docs/migration-errata/v0.12.0.md")
+	writeDecodeFailingStagedErrataCard(t, dir, undecodableName,
+		"errata-degraded", "Erratum: registry-undecodable staged claim", "docs/migration-errata/v0.13.0.md")
+
+	before := snapshotTree(t, dir)
+	out, err := executeCapture(t, []string{"release", "inject-errata", "--target", dir})
+
+	// REFUSAL: nonzero exit, undecodable card file named.
+	if err == nil {
+		t.Fatalf("mixed healthy+decode-failing batch must be REFUSED (nonzero); got success:\n%s", out)
+	}
+	if !strings.Contains(out, strings.TrimSuffix(undecodableName, ".json")) {
+		t.Errorf("refusal must name the registry-undecodable card %s; got:\n%s", undecodableName, out)
+	}
+	// ZERO-WRITE: the note and BOTH cards are byte-identical.
+	assertTreeUnchanged(t, dir, before)
+}
+
+// TestReleaseInjectErrata_MixedBatchDecodeFailureUndecodableFirst_RefusesZeroWrite
+// (C-F1 RED arm): decode-failing card filename-sorted first + healthy card →
+// whole-batch refusal before any write. Pre-fix receipt: BOTH cards were
+// processed as if the batch were healthy-only — the healthy card injected and
+// flipped with exit 0 while the undecodable card sat silently in
+// reg.CardErrors.
+func TestReleaseInjectErrata_MixedBatchDecodeFailureUndecodableFirst_RefusesZeroWrite(t *testing.T) {
+	runMixedBatchDecodeRefusal(t, true)
+}
+
+// TestReleaseInjectErrata_MixedBatchDecodeFailureHealthyFirst_RefusesZeroWrite
+// (C-F1): the healthy card sorted first — proves the registry-decode refusal
+// covers the WHOLE selected batch plus the CardErrors class, not just a
+// failing prefix.
+func TestReleaseInjectErrata_MixedBatchDecodeFailureHealthyFirst_RefusesZeroWrite(t *testing.T) {
+	runMixedBatchDecodeRefusal(t, false)
+}
+
+// TestReleaseInjectErrata_WhitespacePaddedStagedPathRefusedZeroWrite (round-5
+// FIX 1): the injector preflight refuses a staged card whose staged_path
+// TrimSpace form differs from its raw value — the injector itself TrimSpaces
+// before filepath.IsAbs/Join (release_inject.go:289-301), so a padded
+// " /outside/x.md" would be consumed as the ABSOLUTE /outside/x.md: an
+// out-of-repo read. All four padded forms (POSIX-absolute, traversal,
+// Windows drive-letter, UNC) refuse the batch with ZERO writes. RED receipt
+// (guard temporarily reverted): tmp/red-round5-fix1.txt — pre-fix the
+// preflight passed the raw relative-looking string and the injector went on
+// to read the TRIMMED out-of-repo path.
+func TestReleaseInjectErrata_WhitespacePaddedStagedPathRefusedZeroWrite(t *testing.T) {
+	for _, p := range []string{
+		" /outside/x.md",        // whitespace-prefixed POSIX-absolute
+		" ../outside.md",        // whitespace-prefixed parent traversal
+		"C:\\x.md ",             // whitespace-SUFFIXED Windows drive-letter
+		" \\\\srv\\share\\x.md", // whitespace-prefixed UNC
+	} {
+		t.Run(fmt.Sprintf("%q", p), func(t *testing.T) {
+			dir := t.TempDir()
+			gitInit(t, dir)
+			writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n\nRelease notes.\n")
+			writeStagedErrataCard(t, dir, "errata-v0120-padded.json",
+				"errata-v0120-padded", "Erratum: padded staged_path claim", p)
+
+			before := snapshotTree(t, dir)
+			out, err := executeCapture(t, []string{"release", "inject-errata", "--target", dir})
+			if err == nil {
+				t.Fatalf("whitespace-padded staged_path %q must be REFUSED; got success:\n%s", p, out)
+			}
+			for _, want := range []string{"errata-v0120-padded", "staged_path", "whitespace-padded", "consumed representation must equal the stored one"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("refusal must mention %q; got:\n%s", want, out)
+				}
+			}
+			assertTreeUnchanged(t, dir, before)
+		})
+	}
+}
+
+// TestReleaseInjectErrata_RestageProducedCardInjectsAndFlips (round-5 FIX 2):
+// a card produced by the REAL sanctioned restage op — canonical-empty
+// execution-era keys and all — is ACCEPTED end to end by the injector: the
+// section is injected into the about-to-release note and the card flips
+// staged→completed. Pre-FIX-2 the shape allowlist refused this exact card
+// (unexpected-field refusals over the canonical-empty keys), making
+// sanctioned-path staged cards structurally un-injectable.
+func TestReleaseInjectErrata_RestageProducedCardInjectsAndFlips(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeMigrationNoteBody(t, dir, "v0.31.0", "# v0.31.0\n\nRelease notes.\n")
+	writeErratumFile(t, dir, "docs/migration-errata/v0.30.0-restage-fixture.md", "v0.30.0", sampleErratumBody)
+	writeTaskCard(t, dir, "errata-v0300-restage-fixture.json", restageProducedCardFixture)
+	cardPath := filepath.Join(dir, ".local", "coordinator", "tasks", "errata-v0300-restage-fixture.json")
+
+	out, err := executeCapture(t, []string{"release", "inject-errata", "--target", dir})
+	if err != nil {
+		t.Fatalf("inject-errata should ACCEPT the real restage-produced card, got %v\n--- output ---\n%s", err, out)
+	}
+	noteBytes, nerr := os.ReadFile(filepath.Join(dir, "templates", "migrations", "v0.31.0.md"))
+	if nerr != nil {
+		t.Fatalf("read note: %v", nerr)
+	}
+	if !strings.Contains(string(noteBytes), "## Errata for v0.30.0") {
+		t.Errorf("note should contain the errata section; got:\n%s", string(noteBytes))
+	}
+	if status := readCardStatus(t, cardPath); status != "completed" {
+		t.Errorf("restage-produced card should flip to completed, got %q", status)
 	}
 }
 

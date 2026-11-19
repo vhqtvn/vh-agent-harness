@@ -625,19 +625,43 @@ func writeErratumFile(t *testing.T, dir, relPath, version, body string) {
 	}
 }
 
-// writeStagedErrataCard writes an errata card with status "staged" and a
-// staged_path pointing at relPath (repo-relative). Mirrors the real
-// errata-v0120 card shape but minimal (only fields the gate + inject read).
+// writeStagedErrataCard writes a GENUINELY HEALTHY staged errata card: status
+// "staged", a staged_path pointing at relPath (repo-relative), AND every core
+// field the card-validity semantics require (task_type, coordination_mode,
+// primary_lane, nonempty files_in_scope/rough_scope/success_criteria/
+// validation_plan). It mirrors the real errata-v0290-*.json card shape.
+//
+// History: this fixture once wrote files_in_scope/rough_scope as EMPTY lists
+// with no task_type/coordination_mode/primary_lane — under the staged-errata
+// health semantics (defer-release-injector-degraded-eligibility) those fixtures
+// are DEGRADED (a non-draft staged card needs nonempty DoR lists + core enum
+// fields), so every test that means "a healthy staged card" must use this
+// upgraded shape. Tests that mean "a degraded staged card" use
+// writeDegradedStagedErrataCard (release_inject_test.go).
 func writeStagedErrataCard(t *testing.T, dir, name, taskID, title, stagedPath string) {
 	t.Helper()
 	obj := map[string]any{
-		"schema_version": 1,
-		"task_id":        taskID,
-		"title":          title,
-		"status":         "staged",
-		"staged_path":    stagedPath,
-		"files_in_scope": []string{},
-		"rough_scope":    []string{},
+		"schema_version":    1,
+		"task_id":           taskID,
+		"title":             title,
+		"status":            "staged",
+		"staged_path":       stagedPath,
+		"task_type":         "implementation",
+		"coordination_mode": "short",
+		"primary_lane":      "release",
+		"files_in_scope":    []string{stagedPath},
+		"rough_scope":       []string{"Staged erratum transport: the release ceremony's inject-errata step reads this card, injects the staged_path body into the next release note, and flips this card staged→completed."},
+		"success_criteria":  []string{"Next release note carries an '## Errata' section with this staged corrective body injected"},
+		"validation_plan":   []string{"Release ceremony inject-errata step reads this card and injects the staged_path body into the next release note"},
+		"history": []any{map[string]any{
+			"at":           "2026-11-07T06:38:29Z",
+			"event":        "erratum_staged",
+			"session_name": "erratum-stage",
+			"status":       "staged",
+			"note":         "Staged by execution session (test fixture mirroring the canonical errata-card shape).",
+		}},
+		"created_at": "2026-11-07T06:38:29Z",
+		"updated_at": "2026-11-07T06:38:29Z",
 	}
 	raw, err := json.MarshalIndent(obj, "", "  ")
 	if err != nil {
@@ -813,6 +837,454 @@ func TestStagedErrataContent_FailWhenHighestNoteLacksContent(t *testing.T) {
 // variants) cover every logic branch; the live-state signal belongs to doctor
 // #13 at G0c, which can legitimately be red during the staged→inject window of
 // release-prep. `go test ./...` stays hermetic.
+
+// --- shape-invalid staged errata cards (defer-release-injector-degraded-eligibility, disposal b′) ---
+//
+// A staged errata card that does not carry EXACTLY the staged-errata shape
+// (the key allowlist enumerated from the two real staged cards — see
+// internal/taskcard/staged_validation.go) must FAIL check #13 BEFORE content
+// presence is accepted — even when its corrective body IS in the note. Card
+// shape and content presence are independent; the refusal names the
+// offending card, its offending fields, and the recovery path (clean the
+// card or sanctioned withdrawal from staging). writeShapeInvalidStagedErrataCard
+// (release_inject_test.go) is the canonical shape fixture: an
+// otherwise-complete staged card with an empty success_criteria list.
+
+// TestStagedErrataContent_FailOnShapeInvalidCard_BodyAbsent: a shape-invalid
+// staged card with its corrective body ABSENT from the note → FAIL naming the
+// offending card + offending field + recovery guidance (the shape refusal
+// fires before the content check would).
+func TestStagedErrataContent_FailOnShapeInvalidCard_BodyAbsent(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n\nNo errata here.\n")
+	writeErratumFile(t, dir, "docs/migration-errata/v0.12.0.md", "v0.12.0", sampleErratumBody)
+	writeShapeInvalidStagedErrataCard(t, dir, "errata-v0120-sample.json",
+		"errata-v0120-sample", "Erratum: sample false claim in v0.12.0", "docs/migration-errata/v0.12.0.md")
+
+	r := checkStagedErrataContent(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for shape-invalid staged card (body absent), got %s: %s", r.tier, r.detail)
+	}
+	for _, want := range []string{"errata-v0120-sample", "success_criteria", "INVALID", "clean the card", "withdraw"} {
+		if !strings.Contains(r.detail, want) {
+			t.Errorf("FAIL detail should mention %q; got %q", want, r.detail)
+		}
+	}
+}
+
+// TestStagedErrataContent_FailOnShapeInvalidCard_BodyPresent: a shape-invalid
+// staged card whose corrective body IS present in the note must STILL FAIL —
+// content presence cannot make a shape-invalid card eligible.
+func TestStagedErrataContent_FailOnShapeInvalidCard_BodyPresent(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeErratumFile(t, dir, "docs/migration-errata/v0.12.0.md", "v0.12.0", sampleErratumBody)
+	writeShapeInvalidStagedErrataCard(t, dir, "errata-v0120-sample.json",
+		"errata-v0120-sample", "Erratum: sample false claim in v0.12.0", "docs/migration-errata/v0.12.0.md")
+	noteBody := "# v0.15.0\n\n## Errata for v0.12.0\n\n" + sampleErratumBody + "\n"
+	writeMigrationNoteBody(t, dir, "v0.15.0", noteBody)
+
+	r := checkStagedErrataContent(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for shape-invalid staged card even with body present, got %s: %s", r.tier, r.detail)
+	}
+	if !strings.Contains(r.detail, "INVALID") || !strings.Contains(r.detail, "success_criteria") {
+		t.Errorf("FAIL should name the shape-invalid card + offending fields; got %q", r.detail)
+	}
+}
+
+// TestStagedErrataContent_HealthyBodyPresentPasses: after the fixture upgrade
+// (writeStagedErrataCard is now the full staged-errata shape), the healthy +
+// body-present case still PASSes — proving the shape gate does not
+// over-reject healthy staged cards. (Also covered by PassWhenContentPresent
+// above; this arm pins the pairing explicitly.)
+func TestStagedErrataContent_HealthyBodyPresentPasses(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeErratumFile(t, dir, "docs/migration-errata/v0.12.0.md", "v0.12.0", sampleErratumBody)
+	writeStagedErrataCard(t, dir, "errata-v0120-sample.json",
+		"errata-v0120-sample", "Erratum: sample false claim in v0.12.0", "docs/migration-errata/v0.12.0.md")
+	noteBody := "# v0.15.0\n\n## Errata for v0.12.0\n\n" + sampleErratumBody + "\n"
+	writeMigrationNoteBody(t, dir, "v0.15.0", noteBody)
+
+	r := checkStagedErrataContent(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for healthy staged card with body present, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// writeStagedErrataCardWithExecutionEraField writes the full staged-errata
+// card shape plus ONE execution-era field (last_review) — a benign, fully
+// valid review object. Under the shape contract even a VALID execution-era
+// value refuses: staged errata cards never execute, so execution-era state
+// has no business on one.
+func writeStagedErrataCardWithExecutionEraField(t *testing.T, dir, name, taskID, title, stagedPath string) {
+	t.Helper()
+	obj := map[string]any{
+		"schema_version":    1,
+		"task_id":           taskID,
+		"title":             title,
+		"status":            "staged",
+		"staged_path":       stagedPath,
+		"task_type":         "implementation",
+		"coordination_mode": "short",
+		"primary_lane":      "release",
+		"files_in_scope":    []string{stagedPath},
+		"rough_scope":       []string{"Staged erratum transport carrying a last_review block (execution-era state)."},
+		"success_criteria":  []string{"Next release note carries the staged corrective body"},
+		"validation_plan":   []string{"Release ceremony inject-errata step reads this card"},
+		"history": []any{map[string]any{
+			"at": "2026-11-07T06:38:29Z", "event": "erratum_staged",
+			"session_name": "erratum-stage", "status": "staged", "note": "n",
+		}},
+		"created_at": "2026-11-07T06:38:29Z",
+		"updated_at": "2026-11-07T06:38:29Z",
+		"last_review": map[string]any{
+			"path":        ".local/coordinator/reviews/fixture-review.md",
+			"reviewed_at": "2026-11-12T00:00:00Z",
+			"title":       "Coordinator review",
+			"status":      "reported",
+		},
+	}
+	raw, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal card %s: %v", name, err)
+	}
+	writeTaskCard(t, dir, name, string(raw))
+}
+
+// TestStagedErrataContent_ExecutionEraFieldRefused: the release-surface pin
+// for the fail-closed core. An otherwise-HEALTHY staged card carrying a
+// VALID last_review block (any execution-era field would do) is uncheckable
+// under the shape contract. Check #13 must FAIL naming last_review even with
+// the corrective body present, and the injector must REFUSE the batch with
+// zero writes. Against the OLD dirty implementation (the JS-normalizer
+// port) this card was verified HEALTHY (tmp/red-shape-probe.txt) — a
+// genuine RED receipt.
+func TestStagedErrataContent_ExecutionEraFieldRefused(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeErratumFile(t, dir, "docs/migration-errata/v0.12.0.md", "v0.12.0", sampleErratumBody)
+	writeStagedErrataCardWithExecutionEraField(t, dir, "errata-v0120-exec-era.json",
+		"errata-v0120-exec-era", "Erratum: sample false claim in v0.12.0",
+		"docs/migration-errata/v0.12.0.md")
+	writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n\n## Errata for v0.12.0\n\n"+sampleErratumBody+"\n")
+
+	// Check #13 FAILs on the execution-era field even though the corrective
+	// body is present in the note.
+	r := checkStagedErrataContent(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for execution-era field on a staged card, got %s: %s", r.tier, r.detail)
+	}
+	for _, want := range []string{"errata-v0120-exec-era", "last_review", "unexpected field"} {
+		if !strings.Contains(r.detail, want) {
+			t.Errorf("FAIL detail should mention %q; got %q", want, r.detail)
+		}
+	}
+
+	// The injector refuses the same card with ZERO writes.
+	before := snapshotTree(t, dir)
+	out, err := executeCapture(t, []string{"release", "inject-errata", "--target", dir})
+	if err == nil {
+		t.Fatalf("inject-errata must refuse the execution-era-field card; got success:\n%s", out)
+	}
+	if !strings.Contains(out, "errata-v0120-exec-era") || !strings.Contains(out, "last_review") {
+		t.Errorf("refusal must name the offending card + field; got:\n%s", out)
+	}
+	assertTreeUnchanged(t, dir, before)
+}
+
+// realErrataCardFixtures are byte-faithful COPIES of the two real staged
+// errata cards (.local/coordinator/tasks/errata-v0290-hub-token-
+// normalization.json and errata-v0290-preserved-file-skew.json) — the
+// verified template the shape allowlist was enumerated from. The values are
+// copied as FIXTURE DATA — tests never read .local at test time. This
+// proves the shape gate passes the exact card shapes the real release
+// ceremony will select.
+var realErrataCardFixtures = map[string]struct {
+	cardName  string
+	stagedPth string
+	body      string
+}{
+	"hub-token-normalization": {
+		cardName:  "errata-v0290-hub-token-normalization.json",
+		stagedPth: "docs/migration-errata/v0.29.0-hub-token-normalization.md",
+		body: `{
+  "schema_version": 1,
+  "task_id": "errata-v0290-hub-token-normalization",
+  "title": "Erratum: v0.29.0 — hub-token normalization in state-lib.js (migration notice for the next release)",
+  "status": "staged",
+  "staged_path": "docs/migration-errata/v0.29.0-hub-token-normalization.md",
+  "files_in_scope": [
+    "docs/migration-errata/v0.29.0-hub-token-normalization.md"
+  ],
+  "rough_scope": [
+    "Staged erratum transport for the committed hub-token-normalization migration notice (state-lib.js:5554 i++ → i += 1, commit 4469f3c; grammar-only intent, hub origin-hash advance at 0b56ab6, stale-preserve consequence, safeguard-first reconciliation, customization routes, link-integrity rider). The release ceremony's inject-errata step reads this card, injects the staged_path body into the next release note as an '## Errata for v0.29.0' section, and flips this card staged→completed."
+  ],
+  "history": [
+    {
+      "at": "2026-11-11T18:16:10Z",
+      "event": "erratum_staged",
+      "session_name": "erratum-stage-hub-token",
+      "status": "staged",
+      "note": "Staged by execution session for task-2026-11-11t18-10-20 (stage migration notice + erratum for state-lib.js hub-token normalization 4469f3c ahead of next release). staged_path points at the committed notice file per the canonical errata-card schema (internal/memory/claims DeferCard.staged_path; writeStagedErrataCard test helper mirrors this shape). Committed file left untouched; forward-notice framing (change landed post-v0.29.0 at 4469f3c, ships next release) carried in the file's status blockquote."
+    }
+  ],
+  "created_at": "2026-11-11T18:16:10Z",
+  "updated_at": "2026-11-11T18:16:10Z",
+  "task_type": "implementation",
+  "coordination_mode": "short",
+  "primary_lane": "release",
+  "success_criteria": [
+    "Next release note carries an '## Errata for v0.29.0' section with the staged hub-token-normalization corrective body injected",
+    "Card reaches completed state via the release ceremony's inject-errata step"
+  ],
+  "validation_plan": [
+    "Release ceremony inject-errata step reads this card and injects the staged_path body into the next release note",
+    "Operator confirms the errata section appears in the published release note"
+  ]
+}`,
+	},
+	"preserved-file-skew": {
+		cardName:  "errata-v0290-preserved-file-skew.json",
+		stagedPth: "docs/migration-errata/v0.29.0.md",
+		body: `{
+  "schema_version": 1,
+  "task_id": "errata-v0290-preserved-file-skew",
+  "title": "Erratum: v0.29.0 — preserved-file skew: update re-render and closeout-gate claims",
+  "status": "staged",
+  "staged_path": "docs/migration-errata/v0.29.0.md",
+  "files_in_scope": [
+    "docs/migration-errata/v0.29.0.md"
+  ],
+  "rough_scope": [
+    "Staged erratum transport for the committed v0.29.0 erratum (preserved-file skew: per-file update re-render and JS-only closeout-gate claims). The release ceremony's inject-errata step reads this card, injects the staged_path corrective body into the next release note as an '## Errata for v0.29.0' section, and flips this card staged→completed."
+  ],
+  "history": [
+    {
+      "at": "2026-11-07T06:38:29Z",
+      "event": "erratum_staged",
+      "session_name": "erratum-stage",
+      "status": "staged",
+      "note": "Staged by execution session for task-2026-11-07t04-39-27 (release-ceremony inject erratum into next release note). staged_path points at the committed erratum file per the canonical errata-card schema (internal/memory/claims DeferCard.staged_path; writeStagedErrataCard test helper mirrors this shape). Committed file left untouched."
+    }
+  ],
+  "created_at": "2026-11-07T06:38:29Z",
+  "updated_at": "2026-11-07T06:38:29Z",
+  "task_type": "implementation",
+  "coordination_mode": "short",
+  "primary_lane": "release",
+  "success_criteria": [
+    "Next release note carries an '## Errata for v0.29.0' section with the staged preserved-file-skew corrective body injected",
+    "Card reaches completed state via the release ceremony's inject-errata step"
+  ],
+  "validation_plan": [
+    "Release ceremony inject-errata step reads this card and injects the staged_path body into the next release note",
+    "Operator confirms the errata section appears in the published release note"
+  ]
+}`,
+	},
+}
+
+// TestStagedErrataContent_RealErrataCardShapePasses: the exact SHAPE of BOTH
+// real errata-v0290 cards (fixture values copied, never read from .local)
+// passes the shape gate — both at check #13 and through the injector — so
+// the next release ceremony is not blocked by this slice.
+func TestStagedErrataContent_RealErrataCardShapePasses(t *testing.T) {
+	for name, fx := range realErrataCardFixtures {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			gitInit(t, dir)
+			writeErratumFile(t, dir, fx.stagedPth, "v0.29.0", sampleErratumBody)
+			writeTaskCard(t, dir, fx.cardName, fx.body)
+			noteBody := "# v0.30.0\n\n## Errata for v0.29.0\n\n" + sampleErratumBody + "\n"
+			writeMigrationNoteBody(t, dir, "v0.30.0", noteBody)
+
+			// Check #13 passes with the body present.
+			r := checkStagedErrataContent(dir)
+			if r.tier != tierPass {
+				t.Fatalf("want PASS for the real errata card shape with body present, got %s: %s", r.tier, r.detail)
+			}
+
+			// The injector accepts the card too (idempotent flip path, body present).
+			out, err := executeCapture(t, []string{"release", "inject-errata", "--target", dir})
+			if err != nil {
+				t.Fatalf("inject-errata should accept the real errata card shape, got %v:\n%s", err, out)
+			}
+			if status := readCardStatus(t, filepath.Join(dir, ".local", "coordinator", "tasks", fx.cardName)); status != "completed" {
+				t.Errorf("real-shape card should flip to completed, got %q", status)
+			}
+		})
+	}
+}
+
+// restageProducedCardFixture is the byte-faithful output of the REAL
+// sanctioned producer (round-5 FIX 2): derived by actually running
+// restageCoordinationTask — the rendered .opencode/scripts/state-lib.js,
+// imported from a hermetic scratch under repo tmp/ (OPENCODE_LOCAL_COORDINATOR_
+// ROOT isolated; scratch deleted after the run) — over a healthy ready
+// errata-class card created through saveCoordinationTask. The canonical
+// write merges defaultCoordinationTaskPayload (state-lib.js:992) into every
+// saved card (state-lib.js:1757), so the output carries the nine
+// execution-era keys and the other canonical-default keys at their
+// canonical EMPTY states. Pre-FIX-2 the shape allowlist refused this card
+// as unexpected fields — sanctioned-path staged cards were structurally
+// un-injectable (RED receipt tmp/red-round5-fix2.txt). Twin of
+// internalRestageProducedCard (internal/taskcard/staged_validation_test.go).
+const restageProducedCardFixture = `{
+  "schema_version": 1,
+  "task_id": "errata-v0300-restage-fixture",
+  "title": "Erratum: v0.30.0 — restage-produced fixture erratum (round-5 shape contract)",
+  "task_type": "implementation",
+  "coordination_mode": "short",
+  "primary_lane": "release",
+  "research_question": "",
+  "source_policy": null,
+  "source_allowlist": [],
+  "desired_artifact_type": null,
+  "target_artifact_path": null,
+  "rough_scope": [
+    "Fixture erratum produced by the real restageCoordinationTask for the round-5 shape contract integration test."
+  ],
+  "open_questions": [],
+  "ready_criteria": [],
+  "files_in_scope": [
+    "docs/migration-errata/v0.30.0-restage-fixture.md"
+  ],
+  "constraints": [],
+  "non_goals": [],
+  "success_criteria": [
+    "Gate and injector accept the real restage-produced card shape",
+    "Canonical-empty execution-era keys pass; any content refuses"
+  ],
+  "validation_plan": [
+    "go test ./internal/taskcard/ -run TestCheckStagedErrataShape (restage-fixture PASS arm)",
+    "go test ./internal/cli/ -run 'TestStagedErrataContent|TestReleaseInjectErrata' (restage-fixture PASS arms)"
+  ],
+  "report_envelope": "minimal",
+  "backlog_id": null,
+  "workstream_slug": null,
+  "dependencies": [],
+  "owner_notes": [],
+  "status": "staged",
+  "session_aliases": [],
+  "active_session_alias": null,
+  "claimed_at": null,
+  "report_paths": [],
+  "review_paths": [],
+  "latest_report": null,
+  "f3_design_readiness": null,
+  "decision_record": null,
+  "next_action": "Awaiting release inject-errata: the release ceremony reads staged_path, injects the corrective body into the next release note, and flips this card to completed.",
+  "predicted_impact": null,
+  "measured_outcome": null,
+  "last_review": null,
+  "history": [
+    {
+      "at": "2026-11-19T06:54:44Z",
+      "event": "task_created",
+      "session_name": null,
+      "status": "ready",
+      "note": "Created local coordination task card."
+    },
+    {
+      "at": "2026-11-19T06:54:44Z",
+      "event": "task_restaged",
+      "session_name": null,
+      "status": "staged",
+      "note": "Round-5 fixture: real restage output pinned as the committed Go test fixture."
+    }
+  ],
+  "created_at": "2026-11-19T06:54:44Z",
+  "updated_at": "2026-11-19T06:54:44Z",
+  "staged_path": "docs/migration-errata/v0.30.0-restage-fixture.md"
+}
+`
+
+// TestStagedErrataContent_RestageProducedCardPasses (round-5 FIX 2): a card
+// produced by the REAL sanctioned restage op — canonical-empty execution-era
+// keys and all — is ACCEPTED by check #13 (shape PASS through the real
+// producer, not a hand-shaped exemplar). With its corrective body present in
+// the about-to-release note, the check PASSes end to end.
+func TestStagedErrataContent_RestageProducedCardPasses(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeErratumFile(t, dir, "docs/migration-errata/v0.30.0-restage-fixture.md", "v0.30.0", sampleErratumBody)
+	writeTaskCard(t, dir, "errata-v0300-restage-fixture.json", restageProducedCardFixture)
+	noteBody := "# v0.31.0\n\n## Errata for v0.30.0\n\n" + sampleErratumBody + "\n"
+	writeMigrationNoteBody(t, dir, "v0.31.0", noteBody)
+
+	r := checkStagedErrataContent(dir)
+	if r.tier != tierPass {
+		t.Fatalf("want PASS for the real restage-produced card with body present, got %s: %s", r.tier, r.detail)
+	}
+}
+
+// TestStagedErrataContent_WhitespacePaddedStagedPathRefused (round-5 FIX 1):
+// a staged_path whose TrimSpace form differs from the raw value is refused
+// by the shape preflight BEFORE check #13 accepts content — both release
+// consumers TrimSpace before filepath.IsAbs/Join, so " /outside/x.md" and
+// kin would become out-of-repo reads at consume time. All four padded forms
+// (POSIX-absolute, traversal, Windows drive-letter, UNC) FAIL the check with
+// the consumed-representation refusal. RED receipt (guard temporarily
+// reverted): tmp/red-round5-fix1.txt.
+func TestStagedErrataContent_WhitespacePaddedStagedPathRefused(t *testing.T) {
+	for _, p := range []string{
+		" /outside/x.md",        // whitespace-prefixed POSIX-absolute
+		" ../outside.md",        // whitespace-prefixed parent traversal
+		" C:/x.md",              // whitespace-prefixed Windows drive-letter
+		" \\\\srv\\share\\x.md", // whitespace-prefixed UNC
+	} {
+		t.Run(fmt.Sprintf("%q", p), func(t *testing.T) {
+			dir := t.TempDir()
+			gitInit(t, dir)
+			writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n\nNo errata here.\n")
+			writeStagedErrataCard(t, dir, "errata-v0120-padded.json",
+				"errata-v0120-padded", "Erratum: padded staged_path claim", p)
+
+			r := checkStagedErrataContent(dir)
+			if r.tier != tierFail {
+				t.Fatalf("want FAIL for whitespace-padded staged_path %q, got %s: %s", p, r.tier, r.detail)
+			}
+			for _, want := range []string{"errata-v0120-padded", "staged_path", "whitespace-padded", "consumed representation must equal the stored one"} {
+				if !strings.Contains(r.detail, want) {
+					t.Errorf("FAIL detail should mention %q; got %q", want, r.detail)
+				}
+			}
+		})
+	}
+}
+
+// TestStagedErrataContent_FailOnRegistryUndecodableErrataCard (C-F1 gate
+// arm): a staged errata card the CLAIM REGISTRY cannot decode
+// (files_in_scope object → reg.CardErrors, never in reg.Cards) coexists with
+// a healthy staged card whose corrective body IS present in the note.
+// Pre-fix, #13 selects only the healthy card and PASSes — the undecodable
+// possibly-staged card is invisible to both the selection and the health
+// preflight. Post-fix #13 FAILs naming the undecodable card file; content
+// presence of the OTHER card cannot rescue the batch.
+func TestStagedErrataContent_FailOnRegistryUndecodableErrataCard(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeErratumFile(t, dir, "docs/migration-errata/v0.12.0.md", "v0.12.0", sampleErratumBody)
+	writeStagedErrataCard(t, dir, "errata-b-healthy.json",
+		"errata-healthy", "Erratum: healthy staged claim", "docs/migration-errata/v0.12.0.md")
+	writeDecodeFailingStagedErrataCard(t, dir, "errata-a-degraded.json",
+		"errata-degraded", "Erratum: registry-undecodable staged claim", "docs/migration-errata/v0.13.0.md")
+	// The HEALTHY card's body IS present — must not rescue the batch.
+	writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n\n## Errata for v0.12.0\n\n"+sampleErratumBody+"\n")
+
+	r := checkStagedErrataContent(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for a registry-undecodable errata card in the batch, got %s: %s", r.tier, r.detail)
+	}
+	for _, want := range []string{"errata-a-degraded", "clean the card", "withdraw"} {
+		if !strings.Contains(r.detail, want) {
+			t.Errorf("FAIL detail should mention %q; got %q", want, r.detail)
+		}
+	}
+}
 
 // --- F4-C release-diff-recurrence predicate (doctor #12, second class) ---
 //
