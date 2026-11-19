@@ -34,7 +34,13 @@ const S2_EVAL = join(REPO_ROOT, "templates", "core", ".opencode", "scripts", "ch
 // G0; the wrapper needs bash). A missing toolchain is an environment gap, not a
 // regression — the crux is exercised whenever the toolchain is present.
 const GO = (() => { try { const r = spawnSync("go", ["version"]); return r.status === 0; } catch (_) { return false; } })();
-const BASH = (() => { try { const r = spawnSync("bash", ["-c", "true"]); return r.status === 0; } catch (_) { return false; } })();
+// bash is probed in SCRIPT mode (`bash <file>`) — the exact invocation shape
+// every arm uses via runReleaseTag (spawnSync("bash", [RELEASE_TAG, ...])).
+// A bare `bash -c <word>` probe can hang ~40s and then die (observed SIGSEGV
+// for grandchild `bash -c` under sandboxed exec supervision, 2026-11-19)
+// even though script-mode bash is unaffected — probe the real shape, not an
+// artificial one. (Mirrors release-tag-g0-capture.test.js, landed 017330b.)
+const BASH = (() => { try { const r = spawnSync("bash", ["/dev/null"]); return r.status === 0; } catch (_) { return false; } })();
 const RUN = GO && BASH;
 
 // --- scratch-repo helpers ---------------------------------------------------
