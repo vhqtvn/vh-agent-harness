@@ -878,11 +878,12 @@ fi
 #
 # Contract (end-to-end pinned by tests/scripts/release-tag-g0-capture.test.js
 # for these surfaces: classic-flow go-test red (spam shape), classic-flow
-# go-vet red (small-output branch), classic-flow green (no capture written),
-# historical-flow go-test red, G0c control-run doctor red, and
-# capture-write-failure degradation. NOT end-to-end pinned: the go-build and
-# gofmt arms of this helper, and the historical G0c TARGET run (which does
-# not use this helper — it parses the doctor JSON envelope instead)):
+# go-vet red (small-output branch), classic-flow go-build red (non-test
+# failure class), classic-flow gofmt red (gofmt -l label refusal),
+# classic-flow green (no capture written), historical-flow go-test red, G0c
+# control-run doctor red, and capture-write-failure degradation. NOT
+# end-to-end pinned: the historical G0c TARGET run (which does not use this
+# helper — it parses the doctor JSON envelope instead)):
 #   1. DURABLE FULL CAPTURE — on a red, the failing command's complete
 #      unfiltered TEXTUAL output (everything the wrapper itself saw — bash
 #      command substitution retains it all, modulo trailing-newline

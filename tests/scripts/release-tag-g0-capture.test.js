@@ -24,6 +24,14 @@
 //   6. capture-write-failure degradation — an unwritable capture
 //      destination preserves the original gate verdict + exit code, keeps
 //      the refusal JSON parseable, and notes CAPTURE WRITE FAILED
+//   7. classic-flow go-build red — a broken main package with NO test files
+//      (go test green: a `? [no test files]` package is not compiled; go vet
+//      green: vet has no main-package check) pins the go-build arm of
+//      g0_fail_reason and its non-test failure-class summary branch
+//   8. classic-flow gofmt red — green tests/vet/build plus one unformatted
+//      .go file pins the gofmt-label refusal (gofmt -l exits 0 with
+//      non-empty stdout; the wrapper treats any non-empty output as failure)
+//      and its capture
 //
 // Incident record: docs/checkpoints/2026-11-19-release-g0-capture-hardening.md
 // (v0.30.0 first invocation: the G0 red's FAIL identity was truncated away by
@@ -52,7 +60,13 @@ const S2_EVAL = join(REPO_ROOT, "templates", "core", ".opencode", "scripts", "ch
 // G0; the wrapper needs bash). A missing toolchain is an environment gap, not
 // a regression — the crux is exercised whenever the toolchain is present.
 const GO = (() => { try { const r = spawnSync("go", ["version"]); return r.status === 0; } catch (_) { return false; } })();
-const BASH = (() => { try { const r = spawnSync("bash", ["-c", "true"]); return r.status === 0; } catch (_) { return false; } })();
+// bash is probed in SCRIPT mode (`bash <file>`) — the exact invocation shape
+// every arm uses via runReleaseTag (spawnSync("bash", [RELEASE_TAG, ...])).
+// A bare `bash -c <word>` probe can hang ~40s and then die (observed SIGSEGV
+// for grandchild `bash -c` under sandboxed exec supervision, 2026-11-19)
+// even though script-mode bash is unaffected — probe the real shape, not an
+// artificial one.
+const BASH = (() => { try { const r = spawnSync("bash", ["/dev/null"]); return r.status === 0; } catch (_) { return false; } })();
 const RUN = GO && BASH;
 
 // --- scratch-repo helpers (mirror release-tag-s2-gate.test.js) --------------
@@ -264,6 +278,36 @@ type Locked struct {
 }
 
 func CopyLock(l Locked) {}
+`;
+
+// A main package WITHOUT func main and with NO test files — the minimal
+// defect whose FIRST red in the G0 chain is `go build ./...`:
+//   - `go test ./...` exits GREEN: a no-test-files package is reported
+//     `? [no test files]` — loaded and type-checked but not compiled to
+//     objects — and missing-main is a compile/link-stage error;
+//   - `go vet ./...` exits GREEN: vet's analysis has no main-package check;
+//   - `go build ./...` REDS: full compilation reports
+//     "function main is undeclared in the main package".
+// (Discriminator verified against go1.25.0: a plain type error reds
+// `go test` first — go test type-checks even `?` packages — and a
+// //go:embed-pattern error reds at load/setup, so neither defect reaches
+// the build arm. Layout note: the green pkg/ package keeps `go build ./...`
+// multi-package, which discards binaries — no output-name conflict with the
+// broken/ source directory.)
+const BUILD_RED_MAIN_GO = `package main
+
+func Run() {}
+`;
+
+// A compilable, vet-clean, buildable file that is simply NOT gofmt-formatted
+// (4-space indents): every earlier arm of the G0 chain stays green, and
+// `gofmt -l .` EXITS 0 while LISTING the file — the wrapper treats any
+// non-empty stdout as a formatting failure.
+const UNFORMATTED_GO = `package pkg
+
+func Unformatted() bool {
+    return true
+}
 `;
 
 // A test that reds only at the DERIVED manifest commit M (the historical-flow
@@ -582,5 +626,69 @@ date() {
             const leftovers = readdirSync(tmpDir).filter((f) => f.startsWith("release-gate-capture-"));
             assert.equal(leftovers.length, 0, `no capture files may be materialized (found: ${leftovers.join(", ")})`);
         }
+    } finally { dispose(root); }
+});
+
+test("go-build red: refusal names the build gate + capture (non-test failure-class summary branch)", { skip: RUN ? false : "go/bash unavailable" }, () => {
+    // FIXTURE DESIGN: the broken main package (BUILD_RED_MAIN_GO) has NO test
+    // files, so `go test ./...` exits green (`? [no test files]` packages are
+    // not compiled) and `go vet ./...` exits green (no main-package check) —
+    // `go build ./...` is the FIRST red in the chain, isolating the go-build
+    // arm of g0_fail_reason (a plain type error would red go test first; an
+    // embed error reds at setup — see the fixture comment).
+    const { root, repo, msgFile } = setupCeremony({ "pkg/pkg.go": "package pkg\n", "broken/main.go": BUILD_RED_MAIN_GO });
+    try {
+        const { status, stdout } = runReleaseTag(repo, msgFile);
+        assert.notEqual(status, 0, "release-tag.sh must exit nonzero on a G0 build red");
+        const emitted = parseEmit(stdout);
+        assert.ok(emitted, "wrapper must emit a JSON line");
+        assert.equal(emitted.ok, false);
+        // GATE IDENTITY: the build arm of the chain — and NOT the earlier
+        // arms, which proves the no-test-files fixture really let go test and
+        // go vet pass.
+        assert.ok(emitted.error.includes("G0 go build ./... failed"), "the refusal names the failing gate (build arm of the chain)");
+        assert.ok(!emitted.error.includes("G0 go test"), "go test must have been green");
+        assert.ok(!emitted.error.includes("G0 go vet"), "go vet must have been green");
+        // Compile diagnostics match no FAIL extraction pattern: the
+        // small-output summary branch for a NON-TEST failure class carries
+        // the full build output as the failure summary.
+        assert.match(emitted.error, /no extraction pattern matched/, "non-test failure-class summary branch used");
+        assert.match(emitted.error, /function main is undeclared in the main package/, "the compile diagnostic (failing identity for the build gate) survives in the refusal");
+        const capPath = capturePathFromError(emitted.error);
+        assert.ok(capPath, "refusal must name the capture file path");
+        assert.ok(existsSync(capPath), `capture file must exist at ${capPath}`);
+        assert.match(readFileSync(capPath, "utf8"), /function main is undeclared in the main package/, "capture keeps the full build output");
+        assert.equal(tagExists(repo, "v0.1.0"), false, "no tag may be cut on a red");
+    } finally { dispose(root); }
+});
+
+test("gofmt red: gofmt -l lists the file (exit 0, non-empty stdout) — refusal + capture name it", { skip: RUN ? false : "go/bash unavailable" }, () => {
+    // FIXTURE DESIGN: tests/vet/build are all green on the compilable
+    // package; exactly one file is merely unformatted. `gofmt -l .` EXITS 0
+    // while LISTING the file — the wrapper treats any non-empty stdout as a
+    // formatting failure (the gofmt-label refusal), the fourth and last arm
+    // of the G0 chain.
+    const { root, repo, msgFile } = setupCeremony({ "pkg/pkg.go": "package pkg\n", "pkg/unformatted.go": UNFORMATTED_GO });
+    try {
+        const { status, stdout } = runReleaseTag(repo, msgFile);
+        assert.notEqual(status, 0, "release-tag.sh must exit nonzero on a G0 gofmt red");
+        const emitted = parseEmit(stdout);
+        assert.ok(emitted, "wrapper must emit a JSON line");
+        assert.equal(emitted.ok, false);
+        // GATE IDENTITY: the gofmt-label refusal — and NOT the earlier arms,
+        // which proves tests/vet/build really passed first.
+        assert.ok(emitted.error.includes("G0 gofmt -l . reported unformatted files"), "the refusal names the gofmt gate (gofmt -l label refusal)");
+        assert.ok(!emitted.error.includes("G0 go test"), "go test must have been green");
+        assert.ok(!emitted.error.includes("G0 go vet"), "go vet must have been green");
+        assert.ok(!emitted.error.includes("G0 go build"), "go build must have been green");
+        // The listed file IS the failure identity; file-list lines match no
+        // FAIL extraction pattern → non-test failure-class summary branch.
+        assert.match(emitted.error, /no extraction pattern matched/, "non-test failure-class summary branch used");
+        assert.match(emitted.error, /pkg\/unformatted\.go/, "the offending file is named in the refusal");
+        const capPath = capturePathFromError(emitted.error);
+        assert.ok(capPath, "refusal must name the capture file path");
+        assert.ok(existsSync(capPath), `capture file must exist at ${capPath}`);
+        assert.match(readFileSync(capPath, "utf8"), /pkg\/unformatted\.go/, "capture keeps the gofmt -l listing");
+        assert.equal(tagExists(repo, "v0.1.0"), false, "no tag may be cut on a red");
     } finally { dispose(root); }
 });
