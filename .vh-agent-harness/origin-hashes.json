@@ -58,7 +58,7 @@
     ".opencode/commands/task-list.md": "sha256:8ca4a8448036e1cccabe7582e286baeac7829e6e413ce0ca77e277873553673c",
     ".opencode/commands/task-open.md": "sha256:ec111bcdf73829a83ddca3818f0dbe78e98068ccd8018a21cee60e5659438dea",
     ".opencode/commands/task-ready.md": "sha256:29491f890faf7980cb409fb53655e2f4b364a652aaa798b0ab558e6d8c96fe3a",
-    ".opencode/commands/task-repair.md": "sha256:cc40422120b9fada6c37710865d74fded43e747efb65c7344f3941e87dd95d78",
+    ".opencode/commands/task-repair.md": "sha256:3969c6a129bb2d3766c450a270083c3a7d2975048f91ea50405cfebf5be82221",
     ".opencode/commands/task-review.md": "sha256:bed13d372b47af1c27af8a3c8230f2eb9cab83750acd9d39c2be218de69657b0",
     ".opencode/commands/task-update.md": "sha256:782975b64b2ec967fa8cc00a1293fff57065754528a580dbc9ed5b8411dfff92",
     ".opencode/commands/workstream-clear.md": "sha256:82bdf724746a7d9bf0c8595fea50108fdfeac74ef29ca4c02f7881e6dd23bf9c",
