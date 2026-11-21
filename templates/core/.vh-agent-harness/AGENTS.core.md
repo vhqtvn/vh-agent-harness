@@ -484,7 +484,7 @@ When making changes:
   - `/research` to prepare research tasks with explicit source policy, artifact targets, and long-run workstream setup
   - `/task-ready` to promote a refined draft into executable `ready` state
   - `/task-update` to adjust task metadata without changing lifecycle state, subject to lifecycle-aware mutability guards
-  - `/task-repair` to repair incomplete research-task contract fields without changing lifecycle state
+  - `/task-repair` to repair incomplete research-task contract fields (lifecycle state preserved), restore a degraded card's enum core fields with guarded draft/ready/staged status restoration, or restage one healthy errata-class card for release staging
   - `/task-list` to open the control-room inbox for draft, open, reported, and blocked local tasks
   - `/resume-task <id>` to bootstrap an execution session from that card
   - `/task-closeout <id>` to persist a local closeout report

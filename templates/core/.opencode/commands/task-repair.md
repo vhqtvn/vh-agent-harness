@@ -30,7 +30,8 @@ Workflow:
     - `task_id: $ARGUMENTS`
     - `staged_path`: the repo-relative staged release-note fragment path for the erratum
     - `note`: optional history-note text recorded on the restage history entry
-- stop if the resulting task still fails its research contract or still loads degraded; report the remaining offenders instead of widening the payload
+- on the two repair paths, stop if the resulting task still fails its research contract or still loads degraded; report the remaining offenders instead of widening the payload
+- on the restage path, if the operation is refused (degraded card, non-errata task id, wrong source status, or a missing / non-repo-relative `staged_path`), report the refusal message verbatim instead of widening the arguments or rerouting to `repair_coordination_task`
 
 Return:
 - task id and resulting status
