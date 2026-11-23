@@ -1286,6 +1286,46 @@ func TestStagedErrataContent_FailOnRegistryUndecodableErrataCard(t *testing.T) {
 	}
 }
 
+// TestStagedErrataContent_FailOnSoloRegistryUndecodableErrataCard
+// (defer-release-gate-decode-arm): the SOLO complement to the mixed-batch arm
+// above — an about-to-release note, NO healthy staged card, and a single
+// staged-intent errata card the CLAIM REGISTRY cannot decode (files_in_scope
+// object → reg.CardErrors, never in reg.Cards). This shape exercises the other
+// half of the C-F1 wiring the mixed arm cannot reach: the empty-selection PASS
+// guard's undecodable term (staged empty + undecodable non-empty must NOT take
+// the "nothing to verify" early PASS) plus the shared adapter's CardErrors
+// join, which is the only thing standing between this fixture and the naive
+// "0 staged errata card(s) verified" content-acceptance PASS. Post-fix #13
+// FAILs naming the undecodable card file with the shared-adapter decode
+// wording ([status=unknown]; "claim registry could not decode the card") —
+// the same refusal lines the injector surfaces. RED receipts (temporary
+// working-tree mutations, restored byte-exact after each): commenting the
+// adapter's CardErrors join loop fails BOTH decode arms; emptying the guard's
+// undecodable term fails ONLY this arm (the mixed arm's healthy card makes
+// the staged set non-empty and bypasses the guard entirely).
+func TestStagedErrataContent_FailOnSoloRegistryUndecodableErrataCard(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeErratumFile(t, dir, "docs/migration-errata/v0.13.0.md", "v0.13.0", sampleErratumBody)
+	writeDecodeFailingStagedErrataCard(t, dir, "errata-a-degraded.json",
+		"errata-degraded", "Erratum: registry-undecodable staged claim", "docs/migration-errata/v0.13.0.md")
+	// An about-to-release note with no errata content: without the CardErrors
+	// join this fixture ends at the terminal content-acceptance PASS
+	// ("0 staged errata card(s) verified injected") the decode refusal must
+	// prevent.
+	writeMigrationNoteBody(t, dir, "v0.15.0", "# v0.15.0\n\nNo errata here.\n")
+
+	r := checkStagedErrataContent(dir)
+	if r.tier != tierFail {
+		t.Fatalf("want FAIL for a solo registry-undecodable errata card (no healthy card to rescue or blame), got %s: %s", r.tier, r.detail)
+	}
+	for _, want := range []string{"errata-a-degraded", "[status=unknown]", "claim registry could not decode the card", "clean the card", "withdraw"} {
+		if !strings.Contains(r.detail, want) {
+			t.Errorf("FAIL detail should mention %q; got %q", want, r.detail)
+		}
+	}
+}
+
 // --- F4-C release-diff-recurrence predicate (doctor #12, second class) ---
 //
 // These tests prove the F1-D1 gap fix: an OPEN liveness card whose
