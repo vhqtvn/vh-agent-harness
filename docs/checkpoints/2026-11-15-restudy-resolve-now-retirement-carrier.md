@@ -501,3 +501,39 @@ Live dispatch receipt retained at tmp/pause-live-receipt/RECEIPT.md, bound to op
 - The logic-level test proves the handler refuses; it does NOT prove OpenCode's plugin loader invokes the handler at the right lifecycle point for these two hooks. A live validation (engage the sentinel, attempt /implement or /research, confirm refusal + no child work started; attempt @subagent, confirm refusal + no child session) closes that gap.
 - Is the cheapest live-validation feasible in this repo's test harness, or does it require a manual operator step against a running OpenCode?
 Both plugin hooks validated live with selectivity control at opencode 1.19.6, HEAD 282f98bb103aa832daf535aab174c52d6940a95a (receipt tmp/pause-live-receipt/RECEIPT.md): the command seam ADMITS non-blocklisted /task-list while refusing blocklisted /deep-research at the same --command form, and the admitted /task-list's attempted subagent dispatch is refused by the tool.execute.before TaskTool seam via SessionPrompt.handleSubagent (pause-new-work.js:72:27; command-hook throw at :88:27 via SessionPrompt.command; both carry the verbatim ENGAGED refusal template); sentinel engage/disengage exercised only through the sanctioned vh-agent-harness pause-new-work verbs with state verified each way and the sentinel file confirmed absent after disengage; git status --porcelain empty before and after with HEAD unchanged; completed-turn control observed (an ordinary model turn — grep/ls/read + final answer — ran fully while engaged); post-resume admission source-evidenced only, as the receipt permits.
+
+## Addendum 2026-11-23 — orphan-transport disposition (four cards)
+
+Batch: owner-session convention-phase2-coordination wind-down casualties (three cards created 2026-11-16) plus one later addition (defer-task-repair-parity-premise-set, created 2026-11-21, studied 2026-11-22); dispositions ratified by operator 2026-11-23 after solution brief tmp/agent-runs/orphan-transport-disposition-20261123/brief.md. Observed at HEAD c791eaacc368b6bd1e0b183d3865e4a32d85c422; execution-time re-read confirmed all four cards still status draft (no drift).
+
+## draft-panel-roster-runtime-receipt-20261116
+
+- owner_notes empty; rough_scope quoted verbatim as the item of record:
+- `.opencode/agents/commit-reviewer.md`
+- `.opencode/sys-scripts/tier_cascade.py`
+- `.opencode/config/review-tiers.json`
+- `.opencode/repo-configs/review-tiers.json (temporary, local-only)`
+Declined-and-closed by operator ratification 2026-11-23 after the orphan-transport solution brief: the card requests real-orchestrator receipts (five attributable tier1_a..tier1_e leaves activating via a .opencode/repo-configs/review-tiers.json override, preflight hard-refusal on a missing/0-byte active-leaf .local/config/agent-model file, override-changed role/lens reaching the real seat_routing payload, and the live M>=2 de-branded warning) — the landed tests exercise the real Python loader and simulated leaves only (example_review_tiers_recipe_test.go, tier_cascade_test.py), so commissioning the supplemental live matrix is declined and satisfaction is NOT claimed: existing loader/simulation coverage is not a substitute, and no mandatory acceptance requirement is asserted fulfilled or waived; no matching live matrix was found in the bounded records searched, which is not proof none exists. Re-entry: discovery of a real binding acceptance commitment — re-adjudicate with live receipts before any retirement.
+
+## draft-gate-scratch-sweep-20261116
+
+- owner_notes empty; rough_scope quoted verbatim as the item of record:
+- `.opencode/scripts/commit-gate.sh`
+- `tmp/commit-gate-message/`
+- `.git/commit-gate.lock/ session metadata`
+Resolved by source refutation by operator ratification 2026-11-23 after the orphan-transport solution brief: the card's ready criteria explicitly permit refutation from gate code reading, and the alleged unconditional sweep of foreign FRESH sessions' message files and scratch does not exist at inspected HEAD c791eaac — the success-path cleanup reclaims the committing session's OWN message-file/private-index scratch while foreign protected/fresh scratch is distinguished and reclaimed only as expired/orphaned (fixes 3daca70/268e1c1 plus commit_gate_msgcleanup_test.go own-reclaim, fresh/concurrent protection, heartbeat and orphan reclamation arms); explicitly NOT a fresh execution claim and NOT a universal cross-session liveness or isolation guarantee — the inspected paths do not prove every liveness case safe.
+
+## draft-gate-acquire-from-tree-20261116
+
+- owner_notes empty; rough_scope quoted verbatim as the item of record:
+- `.opencode/scripts/commit-gate.sh (cmd_acquire ~L1007-1053, cmd_commit tree pinning, arg surface)`
+Declined-and-closed by operator ratification 2026-11-23 after the orphan-transport solution brief: the limitation is real and accepted — cmd_acquire stages working-tree paths via git add (commit-gate.sh ~L1006-1023) with no tree-source acquisition argument, and success resynchronizes the shared index (zero working-tree mutation would not be zero index mutation) — and commissioning the extension is declined absent a demonstrated current need; the limitation is NOT called implemented, impossible, or proven unnecessary in all workflows. Re-entry: a concrete blocked slice that actually needs tree-sourced acquire.
+
+## defer-task-repair-parity-premise-set
+
+- whitelist-tag: pure-future-watch (no-now-work asserted: both known mutation ops already pinned by the parity suite)
+- trigger: path_touched(templates/core/.opencode/commands/task-repair.md)
+- source: review-defer (committer-relayed DEFER on f935c1d, convergent with worker inspection ses_e00ac9734ffeLnmVVG5OF3GOwG)
+- studied: 2026-11-22
+- decision-item: defer-task-repair-parity-premise-set#owner_notes[fnv1a:fccbbe7f9aeac470] (curated)
+Declined-and-closed by operator ratification 2026-11-23 after the orphan-transport solution brief: three semantic repair paths (task-repair.md command routes) map to two mutation operations, so a mechanical path touch does not establish a new operation; the checker's READY on the explicit v0.30.0-to-HEAD task-repair.md touch was self-fire on a landed origin commit, not semantic new-route/changed-shape readiness (the checker's automatically selected base was never established). HONESTY RIDER: the optional note parameter is not explicitly asserted by the inspected parity arms (tests/scripts/task-repair-command-route-parity.test.js operations and argument-shape pins), so this closure does NOT claim exhaustive parity coverage; future route or invocation-surface changes update the parity tests in the changing slice.
